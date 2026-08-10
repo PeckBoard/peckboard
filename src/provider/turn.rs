@@ -1027,13 +1027,42 @@ mod tests {
         // busy loop has no such gap: bash checks for a pending trap after
         // every simple command, so `on_int` runs within microseconds of
         // the signal, same as a real CLI's async signal handler would.
-        let script = "stop=0\non_int() { printf '{\"text\":\"post-sigint\"}\\n'; stop=1; }\ntrap on_int INT\nwhile [ \"$stop\" = 0 ]; do :; done\nexit 0\n";
-        let args = vec!["-c".to_string(), script.to_string()];
+        //
+        // The child touches `ready` once its trap is installed, and the
+        // canceller waits for that file rather than for a fixed delay: a
+        // SIGINT that arrives before `trap` runs takes SIGINT's default
+        // action and kills bash outright, so a timing assumption here makes
+        // the test fail on a loaded machine for a reason the code under
+        // test has nothing to do with.
+        // The name stays in the shell-safe charset (digits and dashes) so it
+        // can go into the script unquoted.
+        let ready = std::env::temp_dir().join(format!(
+            "peckboard-sigint-ready-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_file(&ready);
+        let script = format!(
+            "stop=0\non_int() {{ printf '{{\"text\":\"post-sigint\"}}\\n'; stop=1; }}\ntrap on_int INT\n: > {ready}\nwhile [ \"$stop\" = 0 ]; do :; done\nexit 0\n",
+            ready = ready.display(),
+        );
+        let args = vec!["-c".to_string(), script];
         let mut stream = EchoStream::default();
         let cancel = Arc::new(Notify::new());
         let notifier = cancel.clone();
+        let ready_path = ready.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            // Cap the wait so a child that never starts fails the assertions
+            // below rather than hanging the test.
+            for _ in 0..1000 {
+                if ready_path.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             notifier.notify_one();
         });
 
@@ -1042,8 +1071,9 @@ mod tests {
             &mut stream,
         )
         .await;
-
+        let _ = std::fs::remove_file(&ready);
         assert!(!result.completed);
+        assert_eq!(stream.seen, vec!["post-sigint".to_string()]);
         assert_eq!(stream.seen, vec!["post-sigint".to_string()]);
         let kinds: Vec<String> = db
             .events_tail("s1", 100)

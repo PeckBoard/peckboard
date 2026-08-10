@@ -390,6 +390,12 @@ function App() {
     const r = parseRoute()
     return r.view === 'pluginPage' ? r.activeId : null
   })
+  // Query string (no leading `?`) the open plugin page was deep-linked with —
+  // seeded from the URL so a bookmark keeps it, replaced when one plugin page
+  // hands off to another, and cleared by a plain rail click.
+  const [pluginPageQuery, setPluginPageQuery] = useState<string>(() =>
+    parseRoute().view === 'pluginPage' ? window.location.search.replace(/^\?/, '') : '',
+  )
   // Id of the plan open in the full-page viewer. Held in state (not read
   // from parseRoute() during render) so back/forward between two plans
   // actually re-renders: the view stays 'plan', so only this changing can
@@ -525,6 +531,8 @@ function App() {
         setActiveFolderId(route.activeId)
       } else if (route.view === 'pluginPage') {
         setActivePluginPageId(route.activeId)
+        // Back/forward must restore the deep-link query too, not just the page.
+        setPluginPageQuery(window.location.search.replace(/^\?/, ''))
       } else if (route.view === 'plan') {
         setActivePlanId(route.activeId)
       } else if (route.view === 'docReview') {
@@ -881,6 +889,35 @@ function App() {
     window.addEventListener('peckboard:open-session', onOpenSession)
     return () => window.removeEventListener('peckboard:open-session', onOpenSession)
   }, [authenticated, fetchSessions, setActiveSession, navigate])
+
+  // One plugin page handing off to another, optionally with a query —
+  // graphify's "Install from App Manager" button (PluginFullPage validates
+  // the message). This is a navigation, not a popup: a `target=_blank` tab
+  // opened from a plugin iframe inherits its sandbox, and the opaque origin
+  // that results gets the app's own assets 403'd by `origin_check`.
+  useEffect(() => {
+    if (!authenticated) return
+    const onOpenPluginPage = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        plugin?: string
+        item?: string
+        query?: string
+      }
+      if (!d?.plugin || !d?.item) return
+      const query = d.query ?? ''
+      setActivePluginPageId(`${d.plugin}:${d.item}`)
+      setPluginPageQuery(query)
+      navigate('pluginPage', `${d.plugin}:${d.item}`)
+      // navigate() builds a path without a query; put the deep link back on
+      // the URL so a reload or a copied link lands on the same request.
+      const path = `/plugin-page/${d.plugin}/${d.item}${query ? `?${query}` : ''}`
+      if (window.location.pathname + window.location.search !== path) {
+        history.replaceState(null, '', path)
+      }
+    }
+    window.addEventListener('peckboard:open-plugin-page', onOpenPluginPage)
+    return () => window.removeEventListener('peckboard:open-plugin-page', onOpenPluginPage)
+  }, [authenticated, navigate])
   const lastOpenedProjectTab = useRef<string | null>(null)
   useEffect(() => {
     if (!authenticated) return
@@ -1264,6 +1301,9 @@ function App() {
               data-testid={`plugin-sidebar-${item.plugin}-${item.id}`}
               onClick={() => {
                 setActivePluginPageId(`${item.plugin}:${item.id}`)
+                // A plain rail click is not a deep link — drop any query a
+                // previous handoff put on the page.
+                setPluginPageQuery('')
                 navigate('pluginPage', `${item.plugin}:${item.id}`)
               }}
               title={item.label}
@@ -1715,6 +1755,7 @@ function App() {
                     plugin={item.plugin}
                     path={item.path}
                     scope={{}}
+                    search={pluginPageQuery}
                     onBack={() => navigate('sessions', null)}
                   />
                 ) : pluginsLoaded ? (

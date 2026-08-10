@@ -14,6 +14,10 @@ interface Props {
    *  in the folder itself for a Folders-page item. Most specific wins on the
    *  server: session, then project, then folder. */
   scope: { projectId?: string; sessionId?: string; folderId?: string }
+  /** Query string (no leading `?`) to hand the page, overriding the app
+   *  URL's own. Set when another plugin page deep-linked here, so the
+   *  target reloads with the new query even though the route didn't change. */
+  search?: string
   /** Return to the chat/board view. */
   onBack: () => void
 }
@@ -32,16 +36,16 @@ const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
  * project/session/folder id as a request header so core can resolve the plugin's
  * `/api/plugin-ui/*` requests, which the parent performs on its behalf.
  */
-export default function PluginFullPage({ title, plugin, path, scope, onBack }: Props) {
+export default function PluginFullPage({ title, plugin, path, scope, search, onBack }: Props) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
   // Forward the app URL's query string into the iframe so deep links (e.g.
   // the chat's replay links: /plugin-page/…?run=<id>) reach the plugin page,
   // which reads its own location.search. Plugins ignore params they don't
-  // know, so forwarding everything is safe.
-  const search = window.location.search
-  const src = withPluginTheme(
-    search ? `${path}${path.includes('?') ? '&' : '?'}${search.slice(1)}` : path,
-  )
+  // know, so forwarding everything is safe. A `search` prop wins: it carries
+  // the query from a plugin-to-plugin deep link, which App put on the URL
+  // too but which must also survive a same-route navigation.
+  const query = search ?? window.location.search.replace(/^\?/, '')
+  const src = withPluginTheme(query ? `${path}${path.includes('?') ? '&' : '?'}${query}` : path)
   // Keep the latest scope in a ref so the long-lived message listener always
   // injects the current id without being torn down on every scope change.
   const scopeRef = useRef(scope)
@@ -67,6 +71,40 @@ export default function PluginFullPage({ title, plugin, path, scope, onBack }: P
       ) {
         window.dispatchEvent(
           new CustomEvent('peckboard:open-session', { detail: { session_id: msg.sessionId } }),
+        )
+        return
+      }
+      // A plugin page handing the user off to ANOTHER plugin's page, with an
+      // optional query (graphify's "Install from App Manager" button). It has
+      // to be an in-app navigation: these iframes are sandboxed without
+      // `allow-same-origin`, a `target=_blank` tab INHERITS that sandbox, and
+      // the resulting opaque origin makes the app's own asset requests carry
+      // `Origin: null` — which `origin_check` (src/security.rs) answers with a
+      // 403, so the popup renders blank.
+      //
+      // Scoped to plugin pages on purpose: this navigates the user's app, so
+      // the narrowest useful power is a page another plugin already contributes
+      // (App resolves it against the sidebar-item catalog and shows its own
+      // "no longer available" state when there's no such item).
+      if (msg.type === 'plugin-ui-open-page') {
+        const slug = /^[a-z0-9_-]{1,64}$/
+        const query = typeof msg.query === 'string' ? msg.query : ''
+        if (
+          typeof msg.plugin !== 'string' ||
+          typeof msg.item !== 'string' ||
+          !slug.test(msg.plugin) ||
+          !slug.test(msg.item) ||
+          query.length > 512 ||
+          // Query-string charset only: no whitespace, no control characters,
+          // nothing that could break out of the URL it is spliced into.
+          !/^[A-Za-z0-9._~%!$&'()*+,;=:@/?-]*$/.test(query)
+        ) {
+          return
+        }
+        window.dispatchEvent(
+          new CustomEvent('peckboard:open-plugin-page', {
+            detail: { plugin: msg.plugin, item: msg.item, query },
+          }),
         )
         return
       }
