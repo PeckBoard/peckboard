@@ -71,10 +71,12 @@ const HIDDEN_PROVIDERS_KEY: &str = "hidden_providers";
 /// terminal-session events, report files). See [`RetentionSettings`].
 pub const RETENTION_KEY: &str = "retention";
 
-/// Plugin-store key for the Claude permission-bypass escape hatch
+/// Plugin-store key for the agent permission-bypass escape hatch
 /// (`{"bypass": bool}`; missing ⇒ false = enforced). See
-/// `claude_bypass_permissions_for_db`.
-const CLAUDE_BYPASS_KEY: &str = "claude_bypass_permissions";
+/// `bypass_permissions_for_db`. The stored key keeps its original
+/// `claude_`-prefixed name so existing installs don't silently reset to
+/// enforced when they upgrade — the setting itself is provider-agnostic.
+const BYPASS_KEY: &str = "claude_bypass_permissions";
 
 /// Plugin-store key for first-run setup wizard completion
 /// (`{"completed": bool}`). Missing ⇒ treated as `true` — fail safe, so an
@@ -89,9 +91,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
-/// Settings that read or mutate **host-wide** state: the Claude permission
-/// gate (`--dangerously-skip-permissions` for every project and every user on
-/// this host), the persistent `run_command` approval list, the global MCP
+/// Settings that read or mutate **host-wide** state: the agent permission
+/// gate (`--dangerously-skip-permissions` plus the `run_command` approval
+/// prompt, for every project and every user on this host), the persistent
+/// `run_command` approval list, the global MCP
 /// server list — whose probe/check-command routes spawn a program named in the
 /// request body — and the TLS routes, which read and replace the key material
 /// the whole host is served with.
@@ -109,8 +112,14 @@ fn admin_router() -> Router<Arc<AppState>> {
             delete(delete_approved),
         )
         .route(
+            "/api/settings/tool-permissions",
+            get(get_tool_permissions).put(set_tool_permissions),
+        )
+        // Deprecated alias for the pre-rename path, kept so a cached web
+        // bundle from an older release keeps working. Same admin gate.
+        .route(
             "/api/settings/claude-permissions",
-            get(get_claude_permissions).put(set_claude_permissions),
+            get(get_tool_permissions).put(set_tool_permissions),
         )
         .route(
             "/api/settings/mcp-servers",
@@ -212,13 +221,14 @@ async fn set_caveman(
     }
 }
 
-/// Whether the Claude permission-bypass escape hatch is on (default off =
+/// Whether the agent permission-bypass escape hatch is on (default off =
 /// enforced). Read at dispatch time by
 /// `SessionManager::send_message_locked` for spawns that leave
-/// `SpawnConfig::permission_mode` unset.
-pub(crate) async fn claude_bypass_permissions_for_db(db: Db) -> bool {
+/// `SpawnConfig::permission_mode` unset, and by the `run_command` MCP tool
+/// before it asks the user to approve a command.
+pub(crate) async fn bypass_permissions_for_db(db: Db) -> bool {
     let raw = tokio::task::spawn_blocking(move || {
-        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, CLAUDE_BYPASS_KEY)
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, BYPASS_KEY)
     })
     .await;
     match raw {
@@ -230,34 +240,37 @@ pub(crate) async fn claude_bypass_permissions_for_db(db: Db) -> bool {
     }
 }
 
-/// GET /api/settings/claude-permissions → `{"bypass": bool}` (default false).
+/// GET /api/settings/tool-permissions → `{"bypass": bool}` (default false).
 ///
 /// `bypass = false` (enforced, the default): Claude CLI spawns run with the
 /// stdio permission tool, so every tool call not pre-approved via
 /// `--allowedTools` round-trips through Peckboard's sandbox gate
-/// (project-folder containment + terminal-tool deny). `bypass = true`
-/// restores the legacy `--dangerously-skip-permissions` behavior host-wide.
-async fn get_claude_permissions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let bypass = claude_bypass_permissions_for_db(state.db.clone()).await;
+/// (project-folder containment + terminal-tool deny), and `run_command` asks
+/// the user before running anything not already approved. `bypass = true`
+/// restores the legacy `--dangerously-skip-permissions` behavior and drops
+/// the `run_command` prompt, host-wide, for every provider.
+async fn get_tool_permissions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let bypass = bypass_permissions_for_db(state.db.clone()).await;
     Json(serde_json::json!({ "bypass": bypass }))
 }
 
 #[derive(serde::Deserialize)]
-struct ClaudePermissionsBody {
+struct ToolPermissionsBody {
     bypass: bool,
 }
 
-/// PUT /api/settings/claude-permissions `{"bypass": bool}` → 204. Takes
+/// PUT /api/settings/tool-permissions `{"bypass": bool}` → 204. Takes
 /// effect on each session's next dispatched spawn — a running CLI child
-/// keeps its spawn-time mode until it exits and respawns.
-async fn set_claude_permissions(
+/// keeps its spawn-time mode until it exits and respawns. The `run_command`
+/// approval gate reads it per call, so that half takes effect immediately.
+async fn set_tool_permissions(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<ClaudePermissionsBody>,
+    Json(body): Json<ToolPermissionsBody>,
 ) -> impl IntoResponse {
     let db = state.db.clone();
     let value = serde_json::json!({ "bypass": body.bypass }).to_string();
     let res = tokio::task::spawn_blocking(move || {
-        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, CLAUDE_BYPASS_KEY, &value)
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, BYPASS_KEY, &value)
     })
     .await;
     match res {

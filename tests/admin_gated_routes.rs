@@ -179,14 +179,14 @@ async fn call(
 }
 
 #[tokio::test]
-async fn non_admin_cannot_flip_the_claude_permission_mode() {
+async fn non_admin_cannot_flip_the_agent_permission_mode() {
     let f = build_fixture().await;
 
     let (status, body) = call(
         f.state.clone(),
         Some(&f.user_token),
         Method::PUT,
-        "/api/settings/claude-permissions",
+        "/api/settings/tool-permissions",
         Some(serde_json::json!({ "bypass": true })),
     )
     .await;
@@ -202,7 +202,7 @@ async fn non_admin_cannot_flip_the_claude_permission_mode() {
         f.state.clone(),
         Some(&f.user_token),
         Method::GET,
-        "/api/settings/claude-permissions",
+        "/api/settings/tool-permissions",
         None,
     )
     .await;
@@ -212,7 +212,7 @@ async fn non_admin_cannot_flip_the_claude_permission_mode() {
         f.state.clone(),
         Some(&f.admin_token),
         Method::GET,
-        "/api/settings/claude-permissions",
+        "/api/settings/tool-permissions",
         None,
     )
     .await;
@@ -224,14 +224,14 @@ async fn non_admin_cannot_flip_the_claude_permission_mode() {
 }
 
 #[tokio::test]
-async fn admin_can_still_set_the_claude_permission_mode() {
+async fn admin_can_still_set_the_agent_permission_mode() {
     let f = build_fixture().await;
 
     let (status, _) = call(
         f.state.clone(),
         Some(&f.admin_token),
         Method::PUT,
-        "/api/settings/claude-permissions",
+        "/api/settings/tool-permissions",
         Some(serde_json::json!({ "bypass": true })),
     )
     .await;
@@ -244,11 +244,38 @@ async fn admin_can_still_set_the_claude_permission_mode() {
         f.state.clone(),
         Some(&f.admin_token),
         Method::GET,
-        "/api/settings/claude-permissions",
+        "/api/settings/tool-permissions",
         None,
     )
     .await;
     assert_eq!(body["bypass"], true);
+
+    // The pre-rename path is still served (a cached web bundle may use it)
+    // and still admin-gated — same handler, same store key.
+    let (alias_status, alias_body) = call(
+        f.state.clone(),
+        Some(&f.admin_token),
+        Method::GET,
+        "/api/settings/claude-permissions",
+        None,
+    )
+    .await;
+    assert_eq!(alias_status, StatusCode::OK);
+    assert_eq!(alias_body["bypass"], true, "alias reads the same setting");
+
+    let (alias_forbidden, _) = call(
+        f.state.clone(),
+        Some(&f.user_token),
+        Method::PUT,
+        "/api/settings/claude-permissions",
+        Some(serde_json::json!({ "bypass": false })),
+    )
+    .await;
+    assert_eq!(
+        alias_forbidden,
+        StatusCode::FORBIDDEN,
+        "the deprecated alias must keep the admin gate"
+    );
 }
 
 #[tokio::test]

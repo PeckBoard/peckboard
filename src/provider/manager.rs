@@ -512,11 +512,16 @@ impl SessionManager {
         // construction sites leave `permission_mode` unset (host default =
         // enforced — the Claude provider answers `can_use_tool` control
         // requests through its sandbox gate). The app-level escape hatch
-        // (Settings → Claude Permissions) restores the legacy
+        // (Settings → Agent Tool Permissions) restores the legacy
         // `--dangerously-skip-permissions` behavior host-wide. Explicitly
         // set modes pass through untouched.
+        //
+        // The mode only reaches providers that front a CLI with its own
+        // permission gate (Claude today); the same setting is read again by
+        // the `run_command` MCP tool, which every provider shares, so the
+        // escape hatch applies host-wide regardless of backend.
         if final_config.permission_mode.is_none()
-            && crate::routes::settings::claude_bypass_permissions_for_db(db.clone()).await
+            && crate::routes::settings::bypass_permissions_for_db(db.clone()).await
         {
             final_config.permission_mode = Some("bypass".into());
         }

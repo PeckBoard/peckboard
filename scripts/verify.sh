@@ -6,12 +6,13 @@
 #   3. cargo test                 — unit + integration tests
 #   4. web lint                   — eslint clean
 #   5. web format:check           — prettier clean
-#   6. cargo build --release      — binary the e2e suite boots
-#   7. web e2e                    — Playwright suite
+#   6. web build                  — the bundle rust-embed compiles in
+#   7. cargo build --release      — binary the e2e suite boots
+#   8. web e2e                    — Playwright suite
 #
 # Every step runs even if an earlier one fails, so one invocation reports
 # the whole picture; the exit code is non-zero if ANY step failed. Pass
-# --fast to skip the release build + Playwright suite (steps 6-7).
+# --fast to skip the web/release builds + Playwright suite (steps 6-8).
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,6 +49,10 @@ run_step "web lint" npm run lint
 run_step "web format:check" npm run format:check
 
 if [[ "$FAST" -eq 0 ]]; then
+  # rust-embed bakes web/dist into the release binary at compile time, so a
+  # stale bundle means the e2e suite drives the PREVIOUS UI. Build the web
+  # assets before the binary that embeds them.
+  run_step "web build" npm run build
   cd "$ROOT"
   # The Playwright webServer boots target/release/peckboard, so the
   # release binary must be rebuilt or the suite tests stale code.
@@ -56,7 +61,7 @@ if [[ "$FAST" -eq 0 ]]; then
   run_step "web e2e" npm run e2e
 else
   echo ""
-  echo "(--fast: skipping release build + Playwright e2e)"
+  echo "(--fast: skipping web/release builds + Playwright e2e)"
 fi
 
 echo ""

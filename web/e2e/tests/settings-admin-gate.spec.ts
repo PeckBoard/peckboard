@@ -74,14 +74,18 @@ test('a non-admin is refused by every host-wide settings API', async ({ request 
   const { auth } = await createNonAdmin(request, adminAuth, 'api')
 
   // The reported bug: flipping the host-wide permission gate.
-  const bypass = await request.put('/api/settings/claude-permissions', {
+  const bypass = await request.put('/api/settings/tool-permissions', {
     headers: auth,
     data: { bypass: true },
   })
-  expect(bypass.status(), 'non-admin PUT claude-permissions').toBe(403)
+  expect(bypass.status(), 'non-admin PUT tool-permissions').toBe(403)
 
-  const readMode = await request.get('/api/settings/claude-permissions', { headers: auth })
-  expect(readMode.status(), 'non-admin GET claude-permissions').toBe(403)
+  const readMode = await request.get('/api/settings/tool-permissions', { headers: auth })
+  expect(readMode.status(), 'non-admin GET tool-permissions').toBe(403)
+
+  // The pre-rename alias is gated the same way.
+  const legacyMode = await request.get('/api/settings/claude-permissions', { headers: auth })
+  expect(legacyMode.status(), 'non-admin GET claude-permissions alias').toBe(403)
 
   // Upgrade & restart — replaces the binary and re-execs the server.
   const check = await request.get('/api/update/check', { headers: auth })
@@ -141,15 +145,15 @@ test('a non-admin is refused by every host-wide settings API', async ({ request 
 
   // The gate is role-driven, not a blanket denial: the admin still works,
   // and the rejected write above never landed.
-  const adminRead = await request.get('/api/settings/claude-permissions', { headers: adminAuth })
-  expect(adminRead.status(), 'admin GET claude-permissions').toBe(200)
+  const adminRead = await request.get('/api/settings/tool-permissions', { headers: adminAuth })
+  expect(adminRead.status(), 'admin GET tool-permissions').toBe(200)
   expect((await adminRead.json()).bypass, 'non-admin PUT must not have persisted').toBe(false)
 
-  const adminWrite = await request.put('/api/settings/claude-permissions', {
+  const adminWrite = await request.put('/api/settings/tool-permissions', {
     headers: adminAuth,
     data: { bypass: false },
   })
-  expect(adminWrite.ok(), 'admin PUT claude-permissions').toBeTruthy()
+  expect(adminWrite.ok(), 'admin PUT tool-permissions').toBeTruthy()
 })
 
 test('the Settings nav hides admin-only pages from a non-admin', async ({ request, page }) => {
@@ -188,7 +192,7 @@ test('an admin still sees Server and MCP Servers in the Settings hub', async ({
   // And the Security sub-page opens with the permission control that
   // used to live on Server.
   await settings.getByTestId('settings-nav-security').click()
-  await expect(settings.getByTestId('claude-permissions-section')).toBeVisible()
+  await expect(settings.getByTestId('tool-permissions-section')).toBeVisible()
 })
 
 test('a non-admin is refused by plugin, account, var, and prompt write APIs', async ({

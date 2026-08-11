@@ -367,9 +367,9 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
   },
   {
     page: 'security',
-    section: 'Claude Tool Permissions',
-    anchor: 'claude-permissions',
-    keywords: 'bypass gate dangerously skip enforced',
+    section: 'Agent Tool Permissions',
+    anchor: 'agent-permissions',
+    keywords: 'bypass gate dangerously skip enforced approval command claude agent',
   },
   {
     page: 'security',
@@ -628,7 +628,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const setSkipBacklogConfirm = useUiStore((s) => s.setSkipBacklogConfirm)
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
   const [caveman, setCaveman] = useState<string>('off')
-  const [claudeBypass, setClaudeBypass] = useState<boolean>(false)
+  const [bypassPermissions, setBypassPermissions] = useState<boolean>(false)
   // Enforced → Bypass is a host-wide loosening of the permission gate, so it
   // goes through a confirm. The other direction (back to Enforced) is safe
   // and stays a single click.
@@ -668,10 +668,10 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
     // only consumer is the Server sub-page plus its nav badge — both hidden
     // from non-admins.
     if (!isAdmin) return
-    authedFetch('/api/settings/claude-permissions')
+    authedFetch('/api/settings/tool-permissions')
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { bypass?: boolean } | null) => {
-        if (typeof data?.bypass === 'boolean') setClaudeBypass(data.bypass)
+        if (typeof data?.bypass === 'boolean') setBypassPermissions(data.bypass)
       })
       .catch(() => {})
   }, [isAdmin])
@@ -747,17 +747,17 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
     )
   }
 
-  const changeClaudeBypass = (bypass: boolean) => {
-    const prev = claudeBypass
-    setClaudeBypass(bypass)
+  const changeBypassPermissions = (bypass: boolean) => {
+    const prev = bypassPermissions
+    setBypassPermissions(bypass)
     setSaveError(null)
     void putSetting(
-      '/api/settings/claude-permissions',
+      '/api/settings/tool-permissions',
       { bypass },
       'Could not save permission mode',
     ).catch((e: Error) => {
-      setClaudeBypass(prev)
-      setSaveError({ scope: 'claude-permissions', message: e.message })
+      setBypassPermissions(prev)
+      setSaveError({ scope: 'tool-permissions', message: e.message })
     })
   }
 
@@ -1301,38 +1301,41 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           <>
             <section
               className="settings-section"
-              data-testid="claude-permissions-section"
-              data-settings-anchor="claude-permissions"
+              data-testid="tool-permissions-section"
+              data-settings-anchor="agent-permissions"
             >
-              <h3>Claude Tool Permissions</h3>
+              <h3>Agent Tool Permissions</h3>
               <p className="form-hint">
-                Enforced (default) runs Claude CLI sessions under PeckBoard&apos;s permission gate:
-                every tool call is checked server-side, file access outside the project folder is
-                denied, and the terminal tool stays blocked. Bypass restores the legacy
-                --dangerously-skip-permissions behavior for this host. Applies to newly spawned
-                agent processes.
+                Enforced (default) runs agent sessions under PeckBoard&apos;s permission gate: tool
+                calls are checked server-side, file access outside the project folder is denied, the
+                terminal tool stays blocked, and running a command in a chat session asks you first.
+                Bypass drops all of that host-wide, for every provider — Claude CLI sessions get
+                --dangerously-skip-permissions, and run_command stops asking. The command gate takes
+                effect immediately; the CLI gate applies to newly spawned agent processes.
               </p>
               <div className="theme-toggle">
                 <button
-                  className={`theme-btn ${!claudeBypass ? 'active' : ''}`}
-                  onClick={() => changeClaudeBypass(false)}
-                  data-testid="claude-permissions-enforced"
+                  className={`theme-btn ${!bypassPermissions ? 'active' : ''}`}
+                  onClick={() => changeBypassPermissions(false)}
+                  data-testid="tool-permissions-enforced"
                 >
                   Enforced
                 </button>
                 <button
-                  className={`theme-btn ${claudeBypass ? 'active' : ''}`}
-                  onClick={() => (claudeBypass ? changeClaudeBypass(true) : setConfirmBypass(true))}
-                  data-testid="claude-permissions-bypass"
+                  className={`theme-btn ${bypassPermissions ? 'active' : ''}`}
+                  onClick={() =>
+                    bypassPermissions ? changeBypassPermissions(true) : setConfirmBypass(true)
+                  }
+                  data-testid="tool-permissions-bypass"
                 >
                   Bypass
                 </button>
               </div>
-              {saveError?.scope === 'claude-permissions' && (
+              {saveError?.scope === 'tool-permissions' && (
                 <p
                   className="form-error"
                   role="alert"
-                  data-testid="settings-error-claude-permissions"
+                  data-testid="settings-error-tool-permissions"
                 >
                   {saveError.message}
                 </p>
@@ -1341,15 +1344,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
             {confirmBypass && (
               <ConfirmDialog
-                testId="claude-bypass-confirm"
+                testId="tool-permissions-bypass-confirm"
                 danger
                 title="Turn off the permission gate for this host?"
-                message="Newly spawned Claude agents run with --dangerously-skip-permissions: tool calls are no longer checked server-side, file reads and writes outside the project folder are allowed, and the terminal tool is unblocked. It applies to every project and every user on this host until someone sets it back to Enforced."
+                message="Every chat session runs commands without asking you first, and newly spawned Claude agents run with --dangerously-skip-permissions: tool calls are no longer checked server-side, file reads and writes outside the project folder are allowed, and the terminal tool is unblocked. It applies to every provider, every project, and every user on this host until someone sets it back to Enforced."
                 confirmLabel="Bypass permissions"
                 cancelLabel="Keep enforced"
                 onConfirm={() => {
                   setConfirmBypass(false)
-                  changeClaudeBypass(true)
+                  changeBypassPermissions(true)
                 }}
                 onCancel={() => setConfirmBypass(false)}
               />
@@ -1482,7 +1485,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                   </span>
                   <span className="settings-nav-title">
                     {p.title}
-                    {p.id === 'security' && claudeBypass && (
+                    {p.id === 'security' && bypassPermissions && (
                       <span className="settings-nav-badge" data-testid="settings-bypass-badge">
                         Tool permissions bypassed
                       </span>

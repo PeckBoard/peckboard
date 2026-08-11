@@ -83,7 +83,7 @@ test('sub-page navigation is URL-synced and survives back/forward/reload', async
   // A direct deep link opens an admin sub-page.
   await page.goto('/settings/security')
   await expect(page.getByTestId('settings-page')).toHaveAttribute('data-sub', 'security')
-  await expect(page.getByTestId('claude-permissions-section')).toBeVisible()
+  await expect(page.getByTestId('tool-permissions-section')).toBeVisible()
 })
 
 test('legacy /plugins and /users URLs redirect into Settings and canonicalize', async ({

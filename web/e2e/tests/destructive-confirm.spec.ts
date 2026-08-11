@@ -259,14 +259,14 @@ test('"Upgrade & restart" only POSTs the apply after the confirmation', async ({
   expect(applyCalls).toBe(1)
 })
 
-test('bypassing Claude tool permissions is confirmed and then badged on the settings nav', async ({
+test('bypassing agent tool permissions is confirmed and then badged on the settings nav', async ({
   request,
   page,
 }) => {
   const { token, auth } = await authenticate(request)
 
   const bypassState = async () => {
-    const res = await request.get('/api/settings/claude-permissions', { headers: auth })
+    const res = await request.get('/api/settings/tool-permissions', { headers: auth })
     expect(res.ok(), `read permission mode failed: ${await res.text()}`).toBeTruthy()
     return ((await res.json()) as { bypass: boolean }).bypass
   }
@@ -274,15 +274,16 @@ test('bypassing Claude tool permissions is confirmed and then badged on the sett
   try {
     await loadAt(page, token, '/settings')
     await page.locator('[data-testid="settings-nav-security"]').click()
-    const bypassBtn = page.locator('[data-testid="claude-permissions-bypass"]')
+    const bypassBtn = page.locator('[data-testid="tool-permissions-bypass"]')
     await expect(bypassBtn).toBeVisible({ timeout: 10_000 })
 
-    const dialog = page.locator('[data-testid="claude-bypass-confirm"]')
+    const dialog = page.locator('[data-testid="tool-permissions-bypass-confirm"]')
 
     // Cancel → the host stays enforced.
     await bypassBtn.click()
     await expect(dialog).toBeVisible()
     await expect(dialog).toContainText('dangerously-skip-permissions')
+    await expect(dialog).toContainText('without asking you first')
     await dialog.locator('[data-testid="confirm-dialog-cancel"]').click()
     await expect(dialog).toHaveCount(0)
     expect(await bypassState()).toBe(false)
@@ -298,7 +299,7 @@ test('bypassing Claude tool permissions is confirmed and then badged on the sett
     await expect(page.locator('[data-testid="settings-bypass-badge"]')).toBeVisible()
   } finally {
     // Host-wide setting — never leave it loosened for the rest of the suite.
-    await request.put('/api/settings/claude-permissions', {
+    await request.put('/api/settings/tool-permissions', {
       headers: auth,
       data: { bypass: false },
     })

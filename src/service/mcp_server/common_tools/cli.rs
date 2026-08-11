@@ -14,11 +14,14 @@
 //!    answer and runs the command, refuses it, or (for *always*) records a
 //!    persisted grant keyed by program name.
 //!
-//! **Worker sessions skip the prompt entirely** (`auto_approve`): their
-//! commands run immediately. The scoping that makes this acceptable lives in
+//! **Some callers skip the prompt entirely** (`auto_approve`): worker
+//! sessions, and every session when the host-wide bypass escape hatch
+//! (Settings → Agent Tool Permissions) is on. Their commands run
+//! immediately. The scoping that makes the worker case acceptable lives in
 //! `exec_impl` — cwd is pinned to the caller's own folder, the command is a
 //! bare executable name, and args are an argv array (no shell) — so a worker
-//! only ever runs programs against its own project folder.
+//! only ever runs programs against its own project folder. The bypass case is
+//! a deliberate admin-set escape hatch: the gate is off host-wide.
 //!
 //! The pending request is correlated across the two calls by a key derived
 //! from the caller's session + the exact command, so a re-call with the same
@@ -62,10 +65,31 @@ pub enum Decision {
     StillWaiting(String),
 }
 
+/// Why a command may skip the interactive prompt. Absent (`None`) ⇒ ask the
+/// user. The variant also names the `approved_via` field on the result, so a
+/// transcript says which rule let the command through.
+#[derive(Clone, Copy)]
+pub enum AutoApprove {
+    /// Worker session — exec is already pinned to its own project folder.
+    Worker,
+    /// Host-wide permission bypass (Settings → Agent Tool Permissions).
+    Bypass,
+}
+
+impl AutoApprove {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Bypass => "bypass",
+        }
+    }
+}
+
 /// The synchronous core of `run_command`, safe to run inside `spawn_blocking`.
 /// Ports the plugin's two-step approval flow, minus the operator allowlist.
-/// `auto_approve` (worker sessions) bypasses the user prompt entirely: the
-/// command runs immediately under the same folder-pinned exec.
+/// `auto_approve` (worker sessions, or the host-wide bypass setting) skips the
+/// user prompt entirely: the command runs immediately under the same
+/// folder-pinned exec.
 pub fn decide(
     db: &Db,
     inv: &InvocationContext,
@@ -73,12 +97,17 @@ pub fn decide(
     command: &str,
     argv: &[String],
     timeout: Option<u64>,
-    auto_approve: bool,
+    auto_approve: Option<AutoApprove>,
 ) -> Result<Decision, String> {
-    // 0. Worker auto-approval — no prompt, straight to the folder-pinned exec.
-    if auto_approve {
+    // 0. Auto-approval — no prompt, straight to the folder-pinned exec.
+    if let Some(via) = auto_approve {
         return Ok(Decision::Ran(run_now(
-            db, inv, command, argv, timeout, "worker",
+            db,
+            inv,
+            command,
+            argv,
+            timeout,
+            via.label(),
         )?));
     }
     // 1. Persisted "always" approval → run now (unrestricted exec).

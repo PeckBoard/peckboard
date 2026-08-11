@@ -78,9 +78,11 @@ impl McpToolRegistry {
         });
     }
 
-    /// `run_command` — approval-gated arbitrary command execution. Worker
-    /// sessions bypass the prompt: exec is already pinned to the session's
-    /// own folder, so their commands run immediately.
+    /// `run_command` — approval-gated arbitrary command execution. Two ways
+    /// to skip the prompt: worker sessions (exec is already pinned to the
+    /// session's own folder, and a human answer would stall the pipeline),
+    /// and the host-wide bypass escape hatch (Settings → Agent Tool
+    /// Permissions), which applies to every provider.
     pub(crate) async fn handle_run_command(
         &self,
         args: Value,
@@ -121,7 +123,10 @@ impl McpToolRegistry {
 
         // Workers run without prompting — their exec is already scoped to the
         // session's own folder, and a human answer would stall the pipeline.
-        let auto_approve = ctx
+        // The host-wide bypass setting does the same for chat sessions: an
+        // admin turned the permission gate off, so asking again would make
+        // the setting a lie.
+        let is_worker = ctx
             .db
             .get_session(&ctx.session_id)
             .await
@@ -129,6 +134,13 @@ impl McpToolRegistry {
             .flatten()
             .map(|s| s.is_worker)
             .unwrap_or(false);
+        let auto_approve = if is_worker {
+            Some(cli::AutoApprove::Worker)
+        } else if crate::routes::settings::bypass_permissions_for_db((*ctx.db).clone()).await {
+            Some(cli::AutoApprove::Bypass)
+        } else {
+            None
+        };
         let db = ctx.db.clone();
         let inv = common_tools::inv_from_ctx(ctx);
         let session_id = ctx.session_id.clone();
@@ -368,6 +380,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["status"], "awaiting_approval", "got: {out}");
+    }
+
+    /// The host-wide bypass escape hatch (Settings → Agent Tool Permissions)
+    /// drops the approval prompt for chat sessions too — that's what makes it
+    /// provider-agnostic: every provider reaches `run_command` through the
+    /// same MCP tool.
+    #[tokio::test]
+    async fn run_command_chat_session_runs_when_permissions_bypassed() {
+        let (ctx, _dir) = ctx_with_folder(false).await;
+        let db = ctx.db.clone();
+        tokio::task::spawn_blocking(move || {
+            db.plugin_store_put_blocking(
+                crate::routes::settings::SETTINGS_NS,
+                crate::routes::settings::SETTINGS_COLLECTION,
+                "claude_bypass_permissions",
+                r#"{"bypass":true}"#,
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let reg = McpToolRegistry::new();
+        let out = reg
+            .handle_run_command(
+                serde_json::json!({ "command": "echo", "args": ["bypassed"] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["approved_via"], "bypass", "got: {out}");
+        assert_eq!(out["exit_code"], 0, "got: {out}");
+        assert!(
+            out["stdout"].as_str().unwrap().contains("bypassed"),
+            "got: {out}"
+        );
     }
 
     #[tokio::test]
