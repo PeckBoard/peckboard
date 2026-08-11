@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installHost } from "./hostShim";
 import { dispatch } from "../src/lib";
 import { appStatus } from "../src/tools";
+import { buildCustomApp, getCustomApp, putCustomApp } from "../src/customApps";
 import { buildRecord, putTarget } from "../src/targets";
 
 function parse(json: string): any {
@@ -135,5 +136,63 @@ describe("target selection: local vs remote go through different host functions"
     expect(res.installed).toBe(true);
     expect(sshExec).toHaveBeenCalled();
     expect(execAny).not.toHaveBeenCalled();
+  });
+
+  // The only write an agent has into this plugin's records. It exists because a
+  // plugin cannot read a session transcript — and it is deliberately narrow.
+  describe("app_record_details: how a session's findings get back", () => {
+    function invoke(args: any) {
+      return parse(
+        dispatch("mcp.tool.invoke", {
+          tool: "app_record_details",
+          arguments: args,
+        }),
+      );
+    }
+
+    it("refuses a catalog app: its details are authored, not agent-written", () => {
+      installHost({});
+      const v = invoke({ app: "git", notes: "version control" });
+      expect(v.payload.error).toMatch(/catalog app/);
+    });
+
+    it("refuses an unknown app", () => {
+      installHost({});
+      expect(invoke({ app: "nope" }).payload.error).toMatch(/unknown app/);
+      expect(invoke({}).payload.error).toMatch(/app is required/);
+    });
+
+    it("fills the blanks, parks the command, and names all three outcomes", () => {
+      installHost({});
+      putCustomApp(buildCustomApp({ name: "Zellij", notes: "mine" }));
+
+      const v = invoke({
+        app: "zellij",
+        notes: "theirs",
+        homepage: "https://zellij.dev",
+        install_command: "cargo install zellij",
+      });
+      expect(v.verdict).toBe("allow");
+      expect(v.payload.applied).toEqual(["official website"]);
+      expect(v.payload.suggested).toEqual(["install command"]);
+      expect(v.payload.skipped).toEqual(["notes"]);
+      expect(v.payload.still_missing).toContain("remove command");
+      expect(v.payload.note).toContain("suggestion");
+
+      const rec = getCustomApp("zellij")!;
+      expect(rec.notes).toBe("mine");
+      expect(rec.homepage).toBe("https://zellij.dev");
+      // The command is NOT live — only a person accepting it makes it so.
+      expect(rec.install_command).toBeUndefined();
+      expect(rec.suggested_install_command).toBe("cargo install zellij");
+    });
+
+    it("returns a bad value as a tool error, leaving the record untouched", () => {
+      installHost({});
+      putCustomApp(buildCustomApp({ name: "Zellij" }));
+      const v = invoke({ app: "zellij", binary: "zellij; rm -rf /" });
+      expect(v.payload.error).toMatch(/valid command name/);
+      expect(getCustomApp("zellij")?.binary).toBe("zellij");
+    });
   });
 });

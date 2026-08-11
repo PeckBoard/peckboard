@@ -9,13 +9,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { installHost } from "./hostShim";
 import {
+  acceptSuggestion,
   allApps,
+  applyResearchDetails,
   buildCustomApp,
+  customAppView,
   describeCustomApp,
+  discardSuggestion,
   findAnyApp,
   forgetCustomApp,
   getCustomApp,
   listCustomApps,
+  missingDetails,
   putCustomApp,
   slugify,
   toCatalogApp,
@@ -178,5 +183,166 @@ describe("the store and the combined app set", () => {
     const ids = allApps().map((a) => a.id);
     expect(ids.filter((id) => id === "git")).toHaveLength(1);
     expect(findAnyApp("git")?.custom).toBeUndefined();
+  });
+});
+
+// The rules that keep an AI session from writing over someone's own entry,
+// or from arming shell this plugin would later run verbatim on a target.
+describe("filling the blanks in from a session's findings", () => {
+  beforeEach(() => installHost({}));
+
+  it("fills blank notes, website and derived binary", () => {
+    const rec = buildCustomApp({ name: "Zellij" });
+    const out = applyResearchDetails(rec, {
+      notes: "terminal multiplexer",
+      homepage: "https://zellij.dev",
+      binary: "zellij-bin",
+    });
+    expect(out.rec.notes).toBe("terminal multiplexer");
+    expect(out.rec.homepage).toBe("https://zellij.dev");
+    expect(out.rec.binary).toBe("zellij-bin");
+    // No longer a guess off the id, so it is not offered for filling again.
+    expect(out.rec.binary_derived).toBeUndefined();
+    expect(out.applied).toEqual([
+      "notes",
+      "official website",
+      "detect command",
+    ]);
+    expect(out.rec.filled_fields).toEqual(out.applied);
+    expect(out.skipped).toEqual([]);
+  });
+
+  it("never overwrites what the person typed, and says which values it dropped", () => {
+    const rec = buildCustomApp({
+      name: "Zellij",
+      binary: "zellij",
+      notes: "mine",
+      homepage: "https://example.com",
+      install_command: "cargo install zellij",
+    });
+    const out = applyResearchDetails(rec, {
+      notes: "theirs",
+      homepage: "https://zellij.dev",
+      binary: "something-else",
+      install_command: "sudo -A apt-get install -y zellij",
+    });
+    expect(out.rec.notes).toBe("mine");
+    expect(out.rec.homepage).toBe("https://example.com");
+    expect(out.rec.binary).toBe("zellij");
+    expect(out.rec.install_command).toBe("cargo install zellij");
+    expect(out.rec.suggested_install_command).toBeUndefined();
+    expect(out.applied).toEqual([]);
+    expect(out.skipped).toEqual([
+      "notes",
+      "official website",
+      "detect command",
+      "install command",
+    ]);
+  });
+
+  it("parks a proposed command as a suggestion, never as a runnable recipe", () => {
+    const rec = buildCustomApp({ name: "Zellij" });
+    const out = applyResearchDetails(rec, {
+      install_command: "sudo -A apt-get install -y zellij",
+      remove_command: "sudo -A apt-get remove -y zellij",
+    });
+    expect(out.rec.install_command).toBeUndefined();
+    expect(out.rec.remove_command).toBeUndefined();
+    expect(out.rec.suggested_install_command).toBe(
+      "sudo -A apt-get install -y zellij",
+    );
+    expect(out.suggested).toEqual(["install command", "remove command"]);
+    // The projection the jobs run from must not see a pending suggestion.
+    const app = toCatalogApp(out.rec);
+    expect(app.install).toEqual({});
+    expect(app.remove).toEqual({});
+  });
+
+  it("applies the same validation to a session's values as to a person's", () => {
+    const rec = buildCustomApp({ name: "Zellij" });
+    expect(() =>
+      applyResearchDetails(rec, { binary: "zellij; rm -rf /" }),
+    ).toThrow(/valid command name/);
+    expect(() =>
+      applyResearchDetails(rec, { homepage: "http://zellij.dev" }),
+    ).toThrow(/https/);
+    expect(() =>
+      applyResearchDetails(rec, { install_command: "a\nb" }),
+    ).toThrow(/single line/);
+  });
+
+  it("makes a suggestion runnable only on accept, and drops it on discard", () => {
+    const rec = applyResearchDetails(buildCustomApp({ name: "Zellij" }), {
+      install_command: "cargo install zellij",
+      remove_command: "rm -f ~/.cargo/bin/zellij",
+    }).rec;
+
+    const accepted = acceptSuggestion(rec, "install");
+    expect(accepted.install_command).toBe("cargo install zellij");
+    expect(accepted.suggested_install_command).toBeUndefined();
+    expect(toCatalogApp(accepted).install.vendor).toBe("cargo install zellij");
+
+    const discarded = discardSuggestion(accepted, "remove");
+    expect(discarded.remove_command).toBeUndefined();
+    expect(discarded.suggested_remove_command).toBeUndefined();
+    expect(() => discardSuggestion(discarded, "remove")).toThrow(
+      /no suggested remove command/,
+    );
+    expect(() => acceptSuggestion(discarded, "remove")).toThrow(
+      /no suggested remove command/,
+    );
+  });
+
+  it("keeps an unanswered suggestion across an edit that didn't answer it", () => {
+    const rec = applyResearchDetails(buildCustomApp({ name: "Zellij" }), {
+      install_command: "cargo install zellij",
+    }).rec;
+    const edited = buildCustomApp({ notes: "terminal multiplexer" }, rec);
+    expect(edited.suggested_install_command).toBe("cargo install zellij");
+    // ...but typing the command yourself answers it.
+    const typed = buildCustomApp({ install_command: "my own" }, rec);
+    expect(typed.install_command).toBe("my own");
+    expect(typed.suggested_install_command).toBeUndefined();
+  });
+
+  it("reports what is still blank, counting a pending suggestion as answered", () => {
+    const bare = buildCustomApp({ name: "Zellij" });
+    expect(missingDetails(bare)).toEqual([
+      "notes",
+      "official website",
+      "detect command",
+      "install command",
+      "remove command",
+    ]);
+    const filled = applyResearchDetails(bare, {
+      notes: "terminal multiplexer",
+      homepage: "https://zellij.dev",
+      binary: "zellij",
+      install_command: "cargo install zellij",
+    }).rec;
+    expect(missingDetails(filled)).toEqual(["remove command"]);
+
+    const view = customAppView(filled);
+    expect(view.missing).toEqual(["remove command"]);
+    expect(view.suggestions).toEqual([
+      {
+        field: "install",
+        label: "install command",
+        command: "cargo install zellij",
+      },
+    ]);
+  });
+
+  it("treats a binary typed by hand as the person's, even from an older record", () => {
+    // Saved before `binary_derived` existed: no flag, so it counts as typed.
+    const legacy = {
+      id: "zellij",
+      name: "Zellij",
+      binary: "zellij",
+      notes: "",
+    };
+    const out = applyResearchDetails(legacy, { binary: "other" });
+    expect(out.rec.binary).toBe("zellij");
+    expect(out.skipped).toEqual(["detect command"]);
   });
 });

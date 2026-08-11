@@ -8,8 +8,11 @@ pip, tracked as their own clearly-labelled namespace.
 
 Apps outside the catalog can be **added by hand** in the dashboard: on the
 local host an AI install session identifies the software — searching the web
-when it doesn't know it — and installs it from an official source only. See
-"Adding an App by Hand".
+when it doesn't know it — and installs it from an official source only. The
+entries such a row is missing (what it is, its official site, its install and
+remove commands) are filled in by an AI session too, with any command it
+proposes held as a suggestion until you accept it. See "Adding an App by
+Hand".
 
 It ships both an MCP tool surface (catalog, target abstraction, `app_*`
 tools) and an **App Manager dashboard page** reachable from the sidebar.
@@ -34,11 +37,12 @@ tools) and an **App Manager dashboard page** reachable from the sidebar.
 - `models_read` — the install picker's account+model catalog. Metadata only
   (ids, display names, tiers, account ids), already filtered server-side to
   thinking-capable models; never credentials or tokens.
-- `session_write` — create the temporary AI install session (`is_temp`, in
-  the shared `~/peckboard-installs/app-manager` folder core registers).
-- `session_dispatch` — dispatch the install prompt at that session.
+- `session_write` — create the temporary AI install session, and the research
+  session that fills a hand-added app's blanks in (`is_temp`, in the shared
+  `~/peckboard-installs/app-manager` folder core registers).
+- `session_dispatch` — dispatch the install or research prompt at it.
 - `session_read` — poll the session's slim event tail (`{seq, kind, name}`,
-  never payloads) to render install progress.
+  never payloads) to render progress.
 
 **Upgrading from 0.4.0 (or earlier) re-triggers the approval prompt.** The
 permission set grew again (`models_read`, `session_write`,
@@ -49,6 +53,9 @@ Plugins.
 manual app's install session does is the session agent's own tool, not
 something this plugin can do. It does widen what `process_exec_any` runs in
 practice: see "Adding an App by Hand" below.
+**0.8.0 (filling those rows' blank entries in) asks for none either**, and
+narrows nothing: a command an AI session proposes is stored as a suggestion
+and only becomes runnable when you accept it in the dashboard.
 
 ## Dashboard Page
 
@@ -221,7 +228,51 @@ Other edges, deliberately visible:
   catalog entry.
 - **No MCP tool adds or forgets one** — that is the dashboard's job, the same
   as remote targets. `app_install`, `app_status`, `app_list` and `app_deps`
-  all accept a manual app's id.
+  all accept a manual app's id, and `app_record_details` fills a row's blank
+  entries in (below) without being able to add, forget or arm anything.
+
+Most rows added by hand start as a name and little else. Those entries are
+filled in for you, by an AI session that reports back through this plugin's
+own `app_record_details` tool (`src/researchSession.ts`, `src/tools.ts`).
+
+- **On save**, a new app with blanks starts a temporary **research session**
+  on the model the dashboard last installed with. It identifies the software
+  under the same official-source rules as an install, **installs nothing**,
+  and ends by calling `app_record_details`. With no model chosen yet nothing
+  starts, the save still succeeds, and the toast says why; the row's **Fill
+  in details** button runs it later with a model you pick.
+- **After an install**, a manual app's install session is asked to record
+  what it now knows as fact — the real binary, the project's own site, and
+  the command that actually worked.
+
+The tool is the only way findings get back, because a plugin cannot read a
+session's transcript: `peckboard_session_events` is slim by design ({seq,
+kind, name}, never payloads). The event tail is used for one thing here —
+knowing whether the run is still going. What it recorded is read from the
+record itself, so a run that ended without calling the tool is reported as
+having recorded nothing, not as a success.
+
+Two rules bound what a session may write (`applyResearchDetails` in
+`src/customApps.ts`):
+
+1. **Blanks only.** Anything a person typed is kept, and the tool's reply
+   names the values it dropped so the agent isn't left guessing. The detect
+   binary counts as blank only while it is still the id-derived guess
+   (`binary_derived`); a record saved before that flag existed counts as
+   typed.
+2. **A proposed command is not a command.** `install_command` /
+   `remove_command` land in `suggested_install_command` /
+   `suggested_remove_command`, which `toCatalogApp` deliberately does not
+   project into a recipe — nothing can run them. The row says a suggestion is
+   waiting; the edit dialog shows it verbatim with **Use this command** /
+   **Discard**. Accepting it, on an authenticated dashboard route, is what
+   makes it real — and it is still shown back verbatim before it first runs.
+
+That second rule is the point of the whole design: this plugin runs a manual
+app's command verbatim on the chosen target, so an agent must not be able to
+arm one on its own say-so. Everything an agent writes is validated exactly as
+a person's input is — an invalid binary or a non-https site comes back as a
+tool error and the record is untouched.
 
 ## Installs Are Detached Jobs — and Local Installs Run in an AI Session
 

@@ -17,7 +17,8 @@ describe("manifestJson", () => {
       `GET ${API}/apps-custom`,
       `POST ${API}/apps-custom`,
       `POST ${API}/apps-custom-remove`,
-      `POST ${API}/install`,
+      `POST ${API}/apps-custom-research`,
+      `POST ${API}/apps-custom-suggestion`,
       `POST ${API}/remove`,
     ]) {
       expect(m.ui_routes).toContain(route);
@@ -32,7 +33,15 @@ describe("manifestJson", () => {
       "app_install",
       "app_remove",
       "app_deps",
+      "app_record_details",
     ]);
+    // The detail-filling tool must say what it will not do: an agent's
+    // command is a suggestion, not something the plugin arms.
+    const details = m.mcp_tools.find(
+      (t: any) => t.name === "app_record_details",
+    );
+    expect(details.description).toContain("SUGGESTION");
+    expect(details.input_schema.required).toEqual(["app"]);
     // Web search happens inside the install session, using the agent's own
     // tools — the plugin gains no new permission for it.
     expect(m.permissions).not.toContain("web");

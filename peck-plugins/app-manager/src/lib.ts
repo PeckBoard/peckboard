@@ -8,6 +8,7 @@ import {
   appDeps,
   appInstall,
   appList,
+  appRecordDetails,
   appRemove,
   appStatus,
   appTargets,
@@ -22,6 +23,9 @@ const TOOLS: Record<string, (args: any) => any> = {
   app_install: appInstall,
   app_remove: appRemove,
   app_deps: appDeps,
+  // How an install/research session reports back what it found out about an
+  // app someone added by hand — the plugin can't read a session transcript.
+  app_record_details: appRecordDetails,
 };
 
 function handleInvoke(payload: any): string {

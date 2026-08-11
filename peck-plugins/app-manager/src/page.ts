@@ -138,6 +138,25 @@ export const PAGE = `<!doctype html>
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: nowrap;
   }
+  /* manually added apps: what's still blank, and what a session filled in */
+  .approw .fill {
+    margin-top: 4px; font-size: 11px; color: var(--muted); line-height: 1.7;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .approw .fill button { font-size: 11px; padding: 1px 8px; }
+  .approw .fill.pending { color: var(--warn); }
+  /* a command an AI session proposed — shown verbatim, runs nothing yet */
+  .sugg {
+    border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 6px;
+    padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .sugg .lead { font-size: 11px; color: var(--warn); }
+  .sugg .cmd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    word-break: break-all; color: var(--fg);
+  }
+  .sugg .row { display: flex; gap: 6px; }
+  .sugg button { font-size: 11px; padding: 2px 8px; }
   /* dependency graph */
   .depsbar {
     padding: 6px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
@@ -362,11 +381,13 @@ export const PAGE = `<!doctype html>
         <input id="f_app_notes" placeholder="terminal multiplexer, Rust" />
         <span class="hint">Anything that pins down which project you mean — handed to the install session as context.</span>
       </div>
+      <div id="suggInstall" hidden></div>
       <div class="field">
         <label for="f_app_install">Install command (required for remote targets)</label>
         <input id="f_app_install" placeholder="sudo -A apt-get install -y zellij" />
         <span class="hint">Remote targets have no AI session available, so they run this command verbatim over SSH. On this host it is only a suggestion the session checks first. Leave blank to install here only.</span>
       </div>
+      <div id="suggRemove" hidden></div>
       <div class="field">
         <label for="f_app_remove">Remove command (optional)</label>
         <input id="f_app_remove" placeholder="sudo -A apt-get remove -y zellij" />
@@ -404,7 +425,7 @@ export const PAGE = `<!doctype html>
       <div class="field">
         <label for="f_model">Account and model *</label>
         <select id="f_model"></select>
-        <span class="hint">The install runs in a temporary AI session on this account and model. Only thinking-capable models are offered; the choice is saved as the default for next time.</span>
+        <span class="hint" id="modelHint">The install runs in a temporary AI session on this account and model. Only thinking-capable models are offered; the choice is saved as the default for next time.</span>
       </div>
       <p class="formerr" id="installErr"></p>
     </div>
@@ -469,7 +490,10 @@ export const PAGE = `<!doctype html>
     deps: null, libs: {},
     keys: [],
     editing: null, editingApp: null, logApp: null, timer: null,
-    lastFocus: null, confirmAction: null, installApp: null, sessionId: null
+    lastFocus: null, confirmAction: null, installApp: null, sessionId: null,
+    // Manually added apps, by id: the stored record plus what's still blank
+    // and what an AI session has proposed (GET /apps-custom).
+    custom: {}, customTimer: null, pickerMode: "install"
   };
 
   // What a deep link asked us to install, parsed server-side and baked in
@@ -533,6 +557,7 @@ export const PAGE = `<!doctype html>
       renderBanner(d.distro);
       renderGrid(d.apps || []);
       renderRequest();
+      loadCustomApps();
       loadDeps();
     }).catch(function (e) {
       if (state.current !== target) return;
@@ -656,6 +681,13 @@ export const PAGE = `<!doctype html>
       });
       body.appendChild(deps);
     }
+    // Manually added apps carry a line about the entries that are still
+    // blank, the session filling them in, and any command it has proposed.
+    var fill = null;
+    if (a.custom) {
+      fill = el("div", "fill");
+      body.appendChild(fill);
+    }
     row.appendChild(body);
 
     var acts = el("div", "acts");
@@ -685,10 +717,109 @@ export const PAGE = `<!doctype html>
     acts.appendChild(why);
     row.appendChild(acts);
 
-    state.rows[a.id] = { app: a, row: row, badge: badge, ver: ver, btn: btn, why: why, logLink: logLink };
+    state.rows[a.id] = {
+      app: a, row: row, badge: badge, ver: ver, btn: btn, why: why,
+      logLink: logLink, fill: fill
+    };
+    if (a.custom) renderFill(a.id);
     if (a.job) applyJob(a.id, a.job);
     return row;
   }
+  // ── filling a manually added app's blanks in ───────────────────────
+  // A row added by hand starts as a name and little else. A temporary AI
+  // session works the rest out and reports back through the plugin's own MCP
+  // tool (the page never sees the session's transcript). What it proposes as
+  // an install or remove command is NOT live: it arrives as a suggestion and
+  // becomes runnable only when someone accepts it here, with the command
+  // shown verbatim first — the same rule as a command typed by hand.
+  function loadCustomApps() {
+    return getJSON(API + "/apps-custom").then(function (d) {
+      state.custom = {};
+      (d.apps || []).forEach(function (rec) { state.custom[rec.id] = rec; });
+      Object.keys(state.rows).forEach(function (id) { renderFill(id); });
+      scheduleCustomPoll();
+    }).catch(function (_e) { /* the grid stands without it — retry on the next load */ });
+  }
+
+  // Poll only while a research session is actually running.
+  function scheduleCustomPoll() {
+    if (state.customTimer) { clearTimeout(state.customTimer); state.customTimer = null; }
+    var running = false;
+    Object.keys(state.custom).forEach(function (id) {
+      var rec = state.custom[id];
+      if (rec.research && rec.research.status === "running") running = true;
+    });
+    if (running) state.customTimer = setTimeout(loadCustomApps, POLL_MS);
+  }
+
+  function renderFill(appId) {
+    var r = state.rows[appId];
+    if (!r || !r.fill) return;
+    var fill = r.fill;
+    clear(fill);
+    fill.className = "fill";
+    var rec = state.custom[appId];
+    if (!rec) return; // the list hasn't loaded yet
+    var research = rec.research || null;
+    var pending = rec.suggestions || [];
+    var missing = rec.missing || [];
+
+    if (research && research.status === "running") {
+      fill.appendChild(el("span", "badge busy", "Filling in details…"));
+      fill.appendChild(document.createTextNode(
+        "A temporary AI session is working out what " + rec.name + " is. It installs nothing."));
+      if (research.session_id) {
+        var open = el("button", null, "Open session");
+        open.setAttribute("aria-label", "Open the research session for " + rec.name);
+        open.onclick = function () { openSession(research.session_id); };
+        fill.appendChild(open);
+      }
+      return;
+    }
+
+    if (pending.length) {
+      fill.className = "fill pending";
+      fill.appendChild(document.createTextNode(pending.length === 1
+        ? "A command was suggested for " + rec.name + " and is waiting for you to review it."
+        : pending.length + " commands were suggested for " + rec.name + " and are waiting for you to review them."));
+      var review = el("button", null, pending.length === 1 ? "Review suggestion" : "Review suggestions");
+      review.setAttribute("aria-label", "Review the suggested commands for " + rec.name);
+      review.onclick = function () { openAppModal(appId); };
+      fill.appendChild(review);
+      return;
+    }
+
+    // How the last run ended, in its own words — including "recorded
+    // nothing", which is the outcome a lookup most needs to admit to.
+    if (research && research.message) {
+      fill.appendChild(document.createTextNode(research.message));
+    } else if (rec.filled_fields && rec.filled_fields.length) {
+      fill.appendChild(document.createTextNode(
+        "Filled in by an AI session: " + rec.filled_fields.join(", ") + "."));
+    }
+    if (!missing.length) return;
+    fill.appendChild(document.createTextNode("Still blank: " + missing.join(", ") + "."));
+    var btn = el("button", null, "Fill in details");
+    btn.setAttribute("aria-label", "Fill in the missing details for " + rec.name);
+    btn.onclick = function () { openModelPicker("research", rec); };
+    fill.appendChild(btn);
+  }
+
+  // Accept = the moment a suggested command becomes runnable, so it is shown
+  // verbatim and confirmed first. Discard just drops it; nothing ever ran it.
+  function answerSuggestion(rec, s, action) {
+    return postJSON(API + "/apps-custom-suggestion", { id: rec.id, field: s.field, action: action })
+      .then(function (d) {
+        if (d.app) state.custom[d.app.id] = d.app;
+        toast(action === "accept"
+          ? "Saved the " + s.label + " for " + rec.name + ". It runs only when you press " +
+            (s.field === "install" ? "Install" : "Remove") + "."
+          : "Discarded the suggested " + s.label + " for " + rec.name + ".");
+        return loadApps();
+      })
+      .catch(function (e) { toast(e.message, true); });
+  }
+
 
   function targetLabel() {
     var t = state.byId[state.current];
@@ -783,10 +914,26 @@ export const PAGE = `<!doctype html>
     }
   }
 
-  function openInstallPicker(a) {
+  // The same picker serves both AI sessions this page starts: the install,
+  // and the research run that fills a hand-added row's blanks in. Mode is
+  // explicit in the title, the intro and the button — a research session
+  // installs nothing, and must never read as if it might.
+  function openInstallPicker(a) { openModelPicker("install", a); }
+
+  function openModelPicker(mode, a) {
+    state.pickerMode = mode;
     state.installApp = a;
-    $("installModalTitle").textContent = "Install " + a.name;
-    $("installIntro").textContent = a.custom
+    var research = mode === "research";
+    $("installModalTitle").textContent = research
+      ? "Fill in details for " + a.name
+      : "Install " + a.name;
+    $("installIntro").textContent = research
+      ? "“" + a.name + "” was added by hand, so its entry is missing: " +
+        ((a.missing || []).join(", ") || "nothing") + ". A temporary AI session identifies the " +
+        "software — searching the web if it doesn't know it — and records what it finds here. " +
+        "IT INSTALLS NOTHING. Any install or remove command it works out is stored as a suggestion " +
+        "for you to review; nothing runs it until you accept it."
+      : a.custom
       ? "“" + a.name + "” was added by hand, so a temporary AI session works out how to install it " +
         "on " + targetLabel() + ": it identifies the software — searching the web if it doesn't know it — " +
         "and downloads only from the project's own official source, its official registry entry, or this " +
@@ -796,6 +943,10 @@ export const PAGE = `<!doctype html>
       : "A temporary AI session performs this install on " + targetLabel() +
         ". Steps that need root use sudo with Peckboard's masked password dialog. " +
         "You can watch or stop the session from its tab at any time.";
+    $("modelHint").textContent = research
+      ? "The lookup runs in a temporary AI session on this account and model. Only thinking-capable models are offered."
+      : "The install runs in a temporary AI session on this account and model. Only thinking-capable models are offered; the choice is saved as the default for next time.";
+    $("installStart").textContent = research ? "Start research session" : "Start install session";
     $("installErr").textContent = "";
     var sel = $("f_model");
     clear(sel);
@@ -814,15 +965,32 @@ export const PAGE = `<!doctype html>
     }).catch(function (e) { $("installErr").textContent = e.message; });
   }
 
-  function startInstallSession() {
+  function startSessionFromPicker() {
     var a = state.installApp;
     if (!a) return;
+    var research = state.pickerMode === "research";
     var model = $("f_model").value;
     if (!model) {
-      $("installErr").textContent = "Pick the account and model for the install session.";
+      $("installErr").textContent = "Pick the account and model for the " +
+        (research ? "research" : "install") + " session.";
       return;
     }
     $("installStart").disabled = true;
+    if (research) {
+      postJSON(API + "/apps-custom-research", { id: a.id, model: model })
+        .then(function (d) {
+          closeDialog("installBackdrop");
+          if (d.app) state.custom[d.app.id] = d.app;
+          renderFill(a.id);
+          scheduleCustomPoll();
+          toast("Looking up " + a.name + ". Nothing is installed by this session.");
+        })
+        .catch(function (e) {
+          $("installStart").disabled = false;
+          $("installErr").textContent = e.message;
+        });
+      return;
+    }
     postJSON(API + "/install", { target: state.current, app: a.id, model: model })
       .then(function () {
         closeDialog("installBackdrop");
@@ -1364,6 +1532,8 @@ export const PAGE = `<!doctype html>
     $("appCmdWarn").textContent = "";
     ["f_app_name", "f_app_binary", "f_app_home", "f_app_notes", "f_app_install", "f_app_remove"]
       .forEach(function (f) { $(f).value = ""; });
+    clearSuggestion("install");
+    clearSuggestion("remove");
     $("f_app_name").disabled = !!id;
     openDialog("appBackdrop", id ? "f_app_binary" : "f_app_name");
     if (!id) return;
@@ -1372,15 +1542,61 @@ export const PAGE = `<!doctype html>
       var rec = null;
       (d.apps || []).forEach(function (r) { if (r.id === id) rec = r; });
       if (!rec) { $("appErr").textContent = "That app is no longer in the list."; return; }
+      state.custom[rec.id] = rec;
       $("f_app_name").value = rec.name || "";
       $("f_app_binary").value = rec.binary || "";
       $("f_app_home").value = rec.homepage || "";
       $("f_app_notes").value = rec.notes || "";
       $("f_app_install").value = rec.install_command || "";
       $("f_app_remove").value = rec.remove_command || "";
+      renderSuggestion("install", rec);
+      renderSuggestion("remove", rec);
     }).catch(function (e) {
       $("appErr").textContent = e.message;
     }).then(function () { $("appSave").disabled = false; });
+  }
+
+  function clearSuggestion(field) {
+    var box = $(field === "install" ? "suggInstall" : "suggRemove");
+    clear(box);
+    box.hidden = true;
+  }
+
+  // A command an AI session proposed, shown verbatim above the field it would
+  // fill. It is inert until “Use this command” — that click, on this
+  // authenticated page, is what makes it the command the row runs.
+  function renderSuggestion(field, rec) {
+    clearSuggestion(field);
+    var box = $(field === "install" ? "suggInstall" : "suggRemove");
+    var s = null;
+    (rec.suggestions || []).forEach(function (x) { if (x.field === field) s = x; });
+    if (!s) return;
+    box.hidden = false;
+    var wrap = el("div", "sugg");
+    wrap.appendChild(el("div", "lead",
+      "An AI session suggested this " + s.label + ". Nothing has run it. Use it and it becomes the " +
+      "command this row runs — shown back to you again before it does."));
+    wrap.appendChild(el("div", "cmd", s.command));
+    var actions = el("div", "row");
+    var use = el("button", "primary", "Use this command");
+    use.onclick = function () {
+      use.disabled = true;
+      answerSuggestion(rec, s, "accept").then(function () {
+        $(field === "install" ? "f_app_install" : "f_app_remove").value = s.command;
+        renderSuggestion(field, state.custom[rec.id] || rec);
+      });
+    };
+    var drop = el("button", null, "Discard");
+    drop.onclick = function () {
+      drop.disabled = true;
+      answerSuggestion(rec, s, "discard").then(function () {
+        renderSuggestion(field, state.custom[rec.id] || rec);
+      });
+    };
+    actions.appendChild(use);
+    actions.appendChild(drop);
+    wrap.appendChild(actions);
+    box.appendChild(wrap);
   }
 
   function saveApp() {
@@ -1398,7 +1614,10 @@ export const PAGE = `<!doctype html>
     postJSON(API + "/apps-custom", body).then(function (d) {
       closeDialog("appBackdrop");
       state.editingApp = null;
-      toast("Saved " + (d.app ? d.app.name : "app") + ". Nothing is installed until you press Install.");
+      // The save note says whether the blanks are being looked up, and why
+      // not when they aren't — never implies a lookup that didn't start.
+      toast("Saved " + (d.app ? d.app.name : "app") + ". Nothing is installed until you press Install."
+        + (d.research_note ? " " + d.research_note : ""));
       loadApps();
     }).catch(function (e) {
       $("appErr").textContent = e.message;
@@ -1475,18 +1694,19 @@ export const PAGE = `<!doctype html>
   $("targetBackdrop").addEventListener("mousedown", function (e) {
     if (e.target === $("targetBackdrop")) closeDialog("targetBackdrop");
   });
-  $("installCancel").onclick = function () { closeDialog("installBackdrop"); };
-  $("installStart").onclick = startInstallSession;
-  $("openSessionBtn").onclick = function () {
-    if (!state.sessionId) return;
-    // Handled by the host page (PluginFullPage): dispatches the same
-    // peckboard:open-session event the core install flow uses, so the
-    // session tab opens in the main app.
+  // Handled by the host page (PluginFullPage): dispatches the same
+  // peckboard:open-session event the core install flow uses, so the session
+  // tab opens in the main app.
+  function openSession(sessionId) {
+    if (!sessionId) return;
     window.parent.postMessage(
-      { type: "plugin-ui-open-session", sessionId: state.sessionId },
+      { type: "plugin-ui-open-session", sessionId: sessionId },
       "*"
     );
-  };
+  }
+  $("installCancel").onclick = function () { closeDialog("installBackdrop"); };
+  $("installStart").onclick = startSessionFromPicker;
+  $("openSessionBtn").onclick = function () { openSession(state.sessionId); };
   $("installBackdrop").addEventListener("mousedown", function (e) {
     if (e.target === $("installBackdrop")) closeDialog("installBackdrop");
   });

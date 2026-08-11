@@ -24,9 +24,14 @@ const DESCRIPTION =
   "install session identifies the software (searching the web when it does not know it) " +
   "and downloads only from official sources; on a remote target it runs the install " +
   "command the person typed for that app — user-authored shell run verbatim on the " +
-  "target, the one thing this plugin runs that is not a static catalog recipe.";
+  "target, the one thing this plugin runs that is not a static catalog recipe. An app " +
+  "added with blanks has them FILLED IN by a temporary research session (and by the " +
+  "install session on its way out), which reports what it found through the " +
+  "app_record_details tool: blank entries only, never overwriting what a person typed, " +
+  "and any install/remove command it proposes is stored as a SUGGESTION that only " +
+  "becomes runnable when someone accepts it in the dashboard.";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.
@@ -160,6 +165,57 @@ const MCP_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "app_record_details",
+    description:
+      "Record what an app ADDED BY HAND in the App Manager dashboard actually is, filling in the " +
+      "entries its row is missing. Call this after working the software out — it is the only way " +
+      "findings reach the dashboard, which cannot read a session's transcript. Two rules the tool " +
+      "enforces and reports back on: it only fills BLANK entries (anything the person typed is kept, " +
+      "and comes back in 'skipped'), and an install_command/remove_command is stored as a SUGGESTION " +
+      "for a person to review and accept in the dashboard — nothing runs a command because an agent " +
+      "proposed it. Refuses catalog apps, whose details are authored in the catalog. State only what " +
+      "you established from the project's own official sources; leave a field out rather than guess.",
+    input_schema: {
+      type: "object",
+      properties: {
+        app: {
+          type: "string",
+          description:
+            "The id of an app added by hand in the App Manager dashboard (catalog ids are refused).",
+        },
+        binary: {
+          type: "string",
+          description:
+            "The executable that proves the app is installed, as a bare command name (letters, digits " +
+            "and . _ + - only). Used with 'command -v'. Ignored if the person typed one themselves.",
+        },
+        homepage: {
+          type: "string",
+          description: "The project's own official site, https:// only.",
+        },
+        notes: {
+          type: "string",
+          description:
+            "One short line on what the software is (max 400 characters) — shown as the row's description.",
+        },
+        install_command: {
+          type: "string",
+          description:
+            "Single-line shell that installs it on a Linux host (max 500 characters), using 'sudo -A' for " +
+            "any step needing root. Stored as a suggestion pending a person's approval, never run on your say-so.",
+        },
+        remove_command: {
+          type: "string",
+          description:
+            "Single-line shell that uninstalls it (max 500 characters). Stored as a suggestion pending a " +
+            "person's approval.",
+        },
+      },
+      required: ["app"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export function manifestJson(): string {
@@ -213,6 +269,8 @@ export function manifestJson(): string {
       "GET /api/plugin-ui/app-manager/apps-custom",
       "POST /api/plugin-ui/app-manager/apps-custom",
       "POST /api/plugin-ui/app-manager/apps-custom-remove",
+      "POST /api/plugin-ui/app-manager/apps-custom-research",
+      "POST /api/plugin-ui/app-manager/apps-custom-suggestion",
       "POST /api/plugin-ui/app-manager/deps-refresh",
     ],
     mcp_tools: MCP_TOOLS,

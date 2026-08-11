@@ -203,8 +203,23 @@ export function buildInstallPrompt(
     `- If a step needs root, run it as \`sudo -A <cmd>\`. The \`-A\` flag routes sudo's password prompt to a masked dialog in the Peckboard UI. Plain \`sudo\` will fail here (no TTY). Never put the password on a command line and never echo it.\n` +
     `- Do not install anything unrelated, and do not remove existing packages.\n` +
     `- Finish by verifying the install: run \`${app.version.replace(/`/g, "'")}\` (or the closest equivalent) and report the installed version.\n` +
+    (custom ? writeBackRule(app.id) : "") +
     `- This session was started by the App Manager dashboard; it verifies the result itself, so end the conversation once the verification command has run.`
   );
+}
+
+/** The MCP tool a session reports an app's details back through. A plugin
+ * cannot read a session transcript (slim events only), so this tool call is
+ * the ONLY way what the agent learned reaches the row. Defined here so the
+ * install prompt and researchSession.ts can't drift apart. */
+export const DETAILS_TOOL = "app_record_details";
+
+/** Manual apps only: the row was a name someone typed, so the session that
+ * just worked the install out is the best-placed thing to fill the blanks in.
+ * The commands it reports are stored as SUGGESTIONS a person accepts in the
+ * dashboard — never armed on the agent's say-so. */
+function writeBackRule(appId: string): string {
+  return `- Then record what you learned: call the \`${DETAILS_TOOL}\` tool with \`app\` set to \`${appId}\` and the fields you can now state as fact — \`binary\` (the executable that proves it is installed), \`homepage\` (the project's own site), \`notes\` (one short line on what the software is), \`install_command\` (the single-line command that actually worked here) and \`remove_command\` (the matching removal). Anything the person already filled in is kept, not replaced, and the two commands are stored as suggestions for someone to review — nothing runs them because you proposed them.\n`;
 }
 
 // --- slim-event folding (pure) ----------------------------------------------

@@ -5,8 +5,20 @@
 // (local) or the install/remove command the person typed for it (remote) —
 // stored verbatim, never assembled from other fields.
 
-import { CatalogApp, installRecipeFor, removeRecipeFor } from "./catalog";
-import { allApps, findAnyApp } from "./customApps";
+import {
+  CatalogApp,
+  findApp,
+  installRecipeFor,
+  removeRecipeFor,
+} from "./catalog";
+import {
+  allApps,
+  applyResearchDetails,
+  findAnyApp,
+  getCustomApp,
+  missingDetails,
+  putCustomApp,
+} from "./customApps";
 import {
   OS_RELEASE_PROBE,
   PackageManager,
@@ -375,6 +387,60 @@ export function appRemove(args: any): any {
     );
   }
   return startJob(target, app, "remove", recipe);
+}
+// --- app_record_details -----------------------------------------------------
+
+/**
+ * The way an AI session's findings get back into a manually added app's row.
+ * A plugin cannot read a session's transcript (core's event tail is slim by
+ * design), so the research session — and the install session on its way out —
+ * report what they learned by CALLING this tool.
+ *
+ * What it will and won't do lives in customApps.ts's `applyResearchDetails`:
+ * blanks only, never an overwrite, and an install/remove command lands as a
+ * suggestion a person accepts in the dashboard rather than as runnable shell.
+ * The reply names all three outcomes so the agent is told plainly which of
+ * its values were used.
+ */
+export function appRecordDetails(args: any): any {
+  const id = reqStr(args?.app, "app");
+  const rec = getCustomApp(id);
+  if (!rec) {
+    throw new Error(
+      findApp(id)
+        ? `'${id}' is a catalog app: its details are authored in App Manager's catalog and are not editable here. This tool only fills in apps added by hand in the dashboard.`
+        : `unknown app '${id}': not one of the apps added by hand in the App Manager dashboard`,
+    );
+  }
+
+  const outcome = applyResearchDetails(rec, args ?? {});
+  putCustomApp(outcome.rec);
+
+  const notes: string[] = [];
+  if (outcome.applied.length) {
+    notes.push(`Filled in: ${outcome.applied.join(", ")}.`);
+  }
+  if (outcome.suggested.length) {
+    notes.push(
+      `Stored as a suggestion for a person to review and accept: ${outcome.suggested.join(", ")}. ` +
+        `Nothing runs a command because you proposed it.`,
+    );
+  }
+  if (outcome.skipped.length) {
+    notes.push(
+      `Left as they were (already filled in by the person who added the app): ${outcome.skipped.join(", ")}.`,
+    );
+  }
+  if (!notes.length) notes.push("Nothing was recorded: no new details given.");
+
+  return {
+    app: rec.id,
+    applied: outcome.applied,
+    suggested: outcome.suggested,
+    skipped: outcome.skipped,
+    still_missing: missingDetails(outcome.rec),
+    note: notes.join(" "),
+  };
 }
 
 // --- UI surface (see http.ts / page.ts) -------------------------------------

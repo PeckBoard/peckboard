@@ -244,4 +244,70 @@ test.describe('app-manager page', () => {
       timeout: 20_000,
     })
   })
+
+  test("fills a hand-added app's blank entries in from a research session", async ({
+    request,
+    page,
+  }) => {
+    const token = await authenticate(request)
+    await loadApp(page, token)
+    test.skip(!(await pluginPresent(page)), 'app-manager wasm not built')
+
+    const f = await openAppManager(page)
+    await expect(f.locator('.approw').first()).toBeVisible({ timeout: 60_000 })
+
+    // Add an app with nothing but a name — the case every entry is missing.
+    const name = `E2E Blank ${Date.now()}`
+    await f.locator('#addAppBtn').click()
+    await expect(f.locator('#appBackdrop')).toHaveClass(/open/)
+    await f.locator('#f_app_name').fill(name)
+    await f.locator('#appSave').click()
+    await expect(f.locator('#appBackdrop')).not.toHaveClass(/open/)
+
+    const row = f.locator('.approw').filter({ hasText: name })
+    await expect(row).toHaveCount(1, { timeout: 60_000 })
+    await expect(row.locator('.badge.manual')).toHaveText('added by hand')
+    // The row names what is blank rather than showing empty fields.
+    await expect(row.locator('.fill')).toContainText('Still blank:', { timeout: 30_000 })
+    await expect(row.locator('.fill')).toContainText('install command')
+
+    // "Fill in details" opens the same account+model picker as an install,
+    // in a mode that says plainly it installs nothing.
+    await row.locator('.fill button', { hasText: 'Fill in details' }).click()
+    await expect(f.locator('#installBackdrop')).toHaveClass(/open/)
+    await expect(f.locator('#installModalTitle')).toHaveText(`Fill in details for ${name}`)
+    await expect(f.locator('#installIntro')).toContainText('IT INSTALLS NOTHING')
+    await expect(f.locator('#installIntro')).toContainText('stored as a suggestion')
+    await expect(f.locator('#installStart')).toHaveText('Start research session')
+
+    const modelSel = f.locator('select#f_model')
+    await expect(modelSel.locator('option[value="mock:plan-review"]')).toHaveCount(1, {
+      timeout: 20_000,
+    })
+    await modelSel.selectOption('mock:plan-review')
+    await f.locator('#installStart').click()
+    await expect(f.locator('#installBackdrop')).not.toHaveClass(/open/)
+
+    // While it runs the row says so; the mock scenario never calls
+    // app_record_details, so the settled state admits it recorded nothing
+    // instead of claiming a result — and the entries stay blank.
+    await expect(row.locator('.fill')).toContainText(
+      /Filling in details…|without recording any details/,
+      { timeout: 30_000 },
+    )
+    await expect(row.locator('.fill')).toContainText('without recording any details', {
+      timeout: 60_000,
+    })
+    await expect(row.locator('.fill')).toContainText('Still blank:')
+
+    // Nothing was installed by any of this.
+    await expect(row.locator('.badge').first()).toHaveText('Not installed')
+
+    // Forget cleans the row up again (and uninstalls nothing).
+    await row.locator('.acts button', { hasText: 'Forget' }).click()
+    await f.locator('#confirmOk').click()
+    await expect(f.locator('.approw').filter({ hasText: name })).toHaveCount(0, {
+      timeout: 60_000,
+    })
+  })
 })

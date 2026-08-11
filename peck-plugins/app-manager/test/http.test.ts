@@ -362,6 +362,106 @@ describe("manually added apps (owned by the page, like remote targets)", () => {
     expect(catalog.status).toBe(400);
     expect(catalog.body.error).toContain("not a manually added app");
   });
+  it("tells the page what is still blank, and why nothing was looked up", () => {
+    const created = post(`${API}/apps-custom`, { name: "Zellij" });
+    expect(created.body.app.missing).toContain("install command");
+    // No model chosen yet: the save still succeeds and says so plainly.
+    expect(created.body.research_note).toContain("No model has been chosen");
+    expect(created.body.app.research).toBeUndefined();
+  });
+
+  it("accepts a suggested command only on an explicit request, then runs it", () => {
+    installHost(
+      {
+        custom_apps: {
+          zellij: {
+            id: "zellij",
+            name: "Zellij",
+            binary: "zellij",
+            notes: "",
+            suggested_install_command: "cargo install zellij",
+          },
+        },
+      },
+      { execAny: localExec() },
+    );
+
+    // Until it is accepted, the row has no install command to show back.
+    const before = get(`${API}/apps`, "target=local").body.apps.find(
+      (a: any) => a.id === "zellij",
+    );
+    expect(before.action_command).toBeNull();
+    expect(get(`${API}/apps-custom`).body.apps[0].suggestions).toEqual([
+      {
+        field: "install",
+        label: "install command",
+        command: "cargo install zellij",
+      },
+    ]);
+
+    const accepted = post(`${API}/apps-custom-suggestion`, {
+      id: "zellij",
+      field: "install",
+      action: "accept",
+    });
+    expect(accepted.body.app.install_command).toBe("cargo install zellij");
+    expect(accepted.body.app.suggestions).toEqual([]);
+    const after = get(`${API}/apps`, "target=local").body.apps.find(
+      (a: any) => a.id === "zellij",
+    );
+    expect(after.action_command).toBe("cargo install zellij");
+  });
+
+  it("discards a suggestion, and refuses a nonsense answer in prose", () => {
+    installHost(
+      {
+        custom_apps: {
+          zellij: {
+            id: "zellij",
+            name: "Zellij",
+            binary: "zellij",
+            notes: "",
+            suggested_remove_command: "rm -rf ~/.cargo/bin/zellij",
+          },
+        },
+      },
+      { execAny: localExec() },
+    );
+    expect(
+      post(`${API}/apps-custom-suggestion`, {
+        id: "zellij",
+        field: "remove",
+        action: "discard",
+      }).body.app.remove_command,
+    ).toBeUndefined();
+
+    const bad = post(`${API}/apps-custom-suggestion`, {
+      id: "zellij",
+      field: "sudo",
+      action: "accept",
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toContain("install");
+
+    const gone = post(`${API}/apps-custom-suggestion`, {
+      id: "zellij",
+      field: "remove",
+      action: "accept",
+    });
+    expect(gone.status).toBe(400);
+    expect(gone.body.error).toContain("no suggested remove command");
+  });
+
+  it("refuses an on-demand lookup with no model to run it on", () => {
+    post(`${API}/apps-custom`, { name: "Zellij" });
+    const r = post(`${API}/apps-custom-research`, { id: "zellij" });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toContain("Pick the account and model");
+
+    const unknown = post(`${API}/apps-custom-research`, { id: "git" });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.error).toContain("not a manually added app");
+  });
 });
 describe("queryParam", () => {
   it("decodes a value and ignores other keys", () => {

@@ -11,7 +11,10 @@
 import { PAGE } from "./page";
 import { injectRequest, parseInstallRequest } from "./deeplink";
 import {
+  acceptSuggestion,
   buildCustomApp,
+  customAppView,
+  discardSuggestion,
   forgetCustomApp,
   getCustomApp,
   listCustomApps,
@@ -19,6 +22,11 @@ import {
 } from "./customApps";
 import { listModels, sshKeyList } from "./host";
 import { getDefaultInstallModel, thinkingModelChoices } from "./installSession";
+import {
+  maybeStartResearch,
+  pollResearch,
+  startResearch,
+} from "./researchSession";
 import {
   appDeps,
   appInstall,
@@ -148,8 +156,14 @@ export function serveAuthed(payload: any): string {
     // CRUD (no MCP tool adds one). The install/remove commands stored here are
     // user-authored shell — the page shows them back verbatim before a run,
     // and only an authenticated dashboard request can create them.
+    //
+    // A GET settles any research session that has finished since the last
+    // poll: the findings themselves arrive by MCP tool call, so this only
+    // moves the record's own running/done state along.
     if (method === "GET" && path === `${API}/apps-custom`) {
-      return jsonResponse(200, { apps: listCustomApps() });
+      return jsonResponse(200, {
+        apps: listCustomApps().map((r) => customAppView(pollResearch(r))),
+      });
     }
     if (method === "POST" && path === `${API}/apps-custom`) {
       const b = parseBody(body);
@@ -158,7 +172,50 @@ export function serveAuthed(payload: any): string {
         : null;
       const rec = buildCustomApp(b, existing);
       putCustomApp(rec);
-      return jsonResponse(200, { app: rec });
+      // A NEW app with blanks gets them looked up straight away, on the model
+      // the dashboard last installed with. Best-effort: never fails the save,
+      // and `note` says plainly whether anything started.
+      const research = existing ? { rec, note: null } : maybeStartResearch(rec);
+      return jsonResponse(200, {
+        app: customAppView(research.rec),
+        research_note: research.note,
+      });
+    }
+    // Look the missing entries up on demand — the row's "Fill in details",
+    // and the only path when no model has been chosen yet.
+    if (method === "POST" && path === `${API}/apps-custom-research`) {
+      const b = parseBody(body);
+      const rec = requireCustomApp(str(b?.id).trim());
+      const model = str(b?.model).trim() || getDefaultInstallModel();
+      if (!model) {
+        throw new Error(
+          "pick the account and model the research session should run on",
+        );
+      }
+      return jsonResponse(200, {
+        app: customAppView(startResearch(rec, model)),
+      });
+    }
+    // Answer a command an AI session suggested. Accepting is what makes it
+    // runnable — deliberately a person's click on an authenticated route,
+    // never something the session that proposed it can do for itself.
+    if (method === "POST" && path === `${API}/apps-custom-suggestion`) {
+      const b = parseBody(body);
+      const rec = requireCustomApp(str(b?.id).trim());
+      const field = str(b?.field).trim();
+      if (field !== "install" && field !== "remove") {
+        throw new Error("field must be 'install' or 'remove'");
+      }
+      const action = str(b?.action).trim();
+      if (action !== "accept" && action !== "discard") {
+        throw new Error("action must be 'accept' or 'discard'");
+      }
+      const updated =
+        action === "accept"
+          ? acceptSuggestion(rec, field)
+          : discardSuggestion(rec, field);
+      putCustomApp(updated);
+      return jsonResponse(200, { app: customAppView(updated) });
     }
     // Forget — drops the entry from this list. Uninstalls nothing; the page's
     // confirmation says so.
@@ -177,6 +234,13 @@ export function serveAuthed(payload: any): string {
     return jsonResponse(400, { error: friendlyError(errMsg(e)) });
   }
   return jsonResponse(404, { error: "Not found." });
+}
+
+/// Resolve a manually added app for a dashboard route, or refuse by name.
+function requireCustomApp(id: string) {
+  const rec = id ? getCustomApp(id) : null;
+  if (!rec) throw new Error(`'${id}' is not a manually added app`);
+  return rec;
 }
 
 /// Create or update a remote target. `id` present = edit; the record is

@@ -160,6 +160,28 @@ describe("session request + prompt construction", () => {
     expect(prompt).toContain("cargo install zellij");
   });
 
+  it("asks a manual app's install session to record what it learned, as suggestions", () => {
+    const prompt = buildInstallPrompt(
+      {
+        id: "zellij",
+        name: "Zellij",
+        version: "'zellij' --version",
+        custom: true,
+        description: "",
+      },
+      null,
+    );
+    expect(prompt).toContain("app_record_details");
+    expect(prompt).toContain(
+      "the single-line command that actually worked here",
+    );
+    expect(prompt).toContain("stored as suggestions");
+    // The writeback comes AFTER the verification step, not instead of it.
+    expect(prompt.indexOf("report the installed version")).toBeLessThan(
+      prompt.indexOf("app_record_details"),
+    );
+  });
+
   it("leaves a catalog app's prompt free of the research rules", () => {
     const prompt = buildInstallPrompt(
       findApp("git")!,
@@ -167,6 +189,7 @@ describe("session request + prompt construction", () => {
     );
     expect(prompt).not.toContain("search the web");
     expect(prompt).not.toContain("OFFICIAL SOURCES ONLY");
+    expect(prompt).not.toContain("app_record_details");
   });
 });
 

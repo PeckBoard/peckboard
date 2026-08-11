@@ -18,6 +18,19 @@
 //     built from a validated `binary` token and shell-quoted anyway, so a
 //     stored record can never smuggle a command into a probe.
 //
+// A record that arrives with blanks gets them filled in by an AI session (a
+// research session on save, and the install session on its way out — see
+// researchSession.ts). Two rules keep that honest, both enforced in
+// `applyResearchDetails` below:
+//
+//   - It only ever fills a BLANK. Anything the person typed is left alone;
+//     what a session filled in is listed in `filled_fields`.
+//   - An install/remove command from a session is NOT a command. It lands in
+//     `suggested_*`, which nothing runs, and becomes real only when someone
+//     accepts it in the dashboard — the same verbatim preview a typed command
+//     already gets. An agent must not be able to arm shell that later runs on
+//     a remote target.
+//
 // The record is projected into the CatalogApp shape (`toCatalogApp`) so rows,
 // jobs, probes and provenance need no special casing downstream.
 
@@ -35,6 +48,21 @@ const MAX_COMMAND = 500;
 const BINARY_RE = /^[A-Za-z0-9._+-]+$/;
 const ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
+/** The state of the AI session filling this app's blanks in. Driven by
+ * researchSession.ts; stored on the record so the row can say what's
+ * happening without a second collection to keep in sync. */
+export interface ResearchState {
+  status: "running" | "done" | "failed";
+  session_id?: string;
+  model?: string;
+  started_at: string;
+  finished_at?: string;
+  /** One sentence for the page: how it ended, or what it recorded. */
+  message?: string;
+  /** Slim-event cursor — see installSession.ts's folding. */
+  last_seq?: number;
+}
+
 export interface CustomAppRecord {
   id: string;
   name: string;
@@ -51,6 +79,17 @@ export interface CustomAppRecord {
   /** User-authored shell, run verbatim to uninstall. Absent = the row offers
    * Forget only; this plugin never guesses a removal command. */
   remove_command?: string;
+  /** True when `binary` was derived from the id instead of typed. The one
+   * field a session may correct — a record saved before this flag existed
+   * counts as typed, so an upgrade never overwrites someone's own value. */
+  binary_derived?: boolean;
+  /** Shell an AI session proposed. Deliberately NOT `install_command`:
+   * nothing runs this until a person accepts it in the dashboard. */
+  suggested_install_command?: string;
+  suggested_remove_command?: string;
+  /** Field labels an AI session filled in, for the row's note. */
+  filled_fields?: string[];
+  research?: ResearchState;
   created_at?: string;
 }
 
@@ -76,6 +115,31 @@ function optionalCommand(v: unknown, field: string): string | undefined {
     throw new Error(`${field} must be a single line`);
   }
   return s;
+}
+
+function checkBinary(binary: string): string {
+  if (!BINARY_RE.test(binary)) {
+    throw new Error(
+      `'${binary}' is not a valid command name (letters, digits and . _ + - only)`,
+    );
+  }
+  return binary;
+}
+
+function checkNotes(notes: string): string {
+  if (notes.length > MAX_DESCRIPTION) {
+    throw new Error(`notes are too long (max ${MAX_DESCRIPTION} characters)`);
+  }
+  return notes;
+}
+
+function checkHomepage(homepage: string): string {
+  if (homepage && !/^https:\/\/[^\s"'<>]+$/.test(homepage)) {
+    throw new Error(
+      "the official website must be an https:// URL (leave it blank if you don't know it)",
+    );
+  }
+  return homepage;
 }
 
 /**
@@ -106,26 +170,29 @@ export function buildCustomApp(
     );
   }
 
-  const binary = String(input?.binary ?? existing?.binary ?? id).trim() || id;
-  if (!BINARY_RE.test(binary)) {
-    throw new Error(
-      `'${binary}' is not a valid command name (letters, digits and . _ + - only)`,
-    );
+  // A typed binary is theirs; a blank one is derived from the id and stays
+  // fair game for a research session to correct.
+  const typedBinary = String(input?.binary ?? "").trim();
+  let binary: string;
+  let binaryDerived: boolean;
+  if (typedBinary) {
+    binary = typedBinary;
+    binaryDerived = false;
+  } else if (input?.binary === undefined && existing?.binary) {
+    binary = existing.binary;
+    binaryDerived = existing.binary_derived === true;
+  } else {
+    binary = id;
+    binaryDerived = true;
   }
+  checkBinary(binary);
 
-  const notes = String(input?.notes ?? existing?.notes ?? "").trim();
-  if (notes.length > MAX_DESCRIPTION) {
-    throw new Error(`notes are too long (max ${MAX_DESCRIPTION} characters)`);
-  }
-
-  const homepageRaw = String(
-    input?.homepage ?? existing?.homepage ?? "",
-  ).trim();
-  if (homepageRaw && !/^https:\/\/[^\s"'<>]+$/.test(homepageRaw)) {
-    throw new Error(
-      "the official website must be an https:// URL (leave it blank if you don't know it)",
-    );
-  }
+  const notes = checkNotes(
+    String(input?.notes ?? existing?.notes ?? "").trim(),
+  );
+  const homepageRaw = checkHomepage(
+    String(input?.homepage ?? existing?.homepage ?? "").trim(),
+  );
 
   const installCommand =
     input?.install_command === undefined
@@ -141,10 +208,250 @@ export function buildCustomApp(
     name,
     binary,
     notes,
+    ...(binaryDerived ? { binary_derived: true } : {}),
     ...(homepageRaw ? { homepage: homepageRaw } : {}),
     ...(installCommand ? { install_command: installCommand } : {}),
     ...(removeCommand ? { remove_command: removeCommand } : {}),
+    // A suggestion the person hasn't answered yet survives an edit, unless
+    // this edit typed the very command it was suggesting.
+    ...(existing?.suggested_install_command && !installCommand
+      ? { suggested_install_command: existing.suggested_install_command }
+      : {}),
+    ...(existing?.suggested_remove_command && !removeCommand
+      ? { suggested_remove_command: existing.suggested_remove_command }
+      : {}),
+    ...(existing?.filled_fields?.length
+      ? { filled_fields: existing.filled_fields }
+      : {}),
+    ...(existing?.research ? { research: existing.research } : {}),
     created_at: existing?.created_at ?? new Date().toISOString(),
+  };
+}
+
+// --- filling the blanks in --------------------------------------------------
+
+/** What a research or install session reports back through the
+ * `app_record_details` MCP tool. Every field optional: an agent records only
+ * what it actually established. */
+export interface DetailFindings {
+  binary?: unknown;
+  homepage?: unknown;
+  notes?: unknown;
+  install_command?: unknown;
+  remove_command?: unknown;
+}
+
+export interface DetailOutcome {
+  rec: CustomAppRecord;
+  /** Blank fields now filled in. */
+  applied: string[];
+  /** Commands parked for a person to accept — nothing runs them yet. */
+  suggested: string[];
+  /** Fields left exactly as they were, and why-by-label. */
+  skipped: string[];
+}
+
+/** The human labels used in `filled_fields`, the tool's reply and the row. */
+const LABEL = {
+  binary: "detect command",
+  homepage: "official website",
+  notes: "notes",
+  install_command: "install command",
+  remove_command: "remove command",
+};
+
+/**
+ * Merge an AI session's findings into a stored record.
+ *
+ * Two invariants, and they are the whole point of this function:
+ *
+ *   1. It only fills BLANKS. A field the person typed is never overwritten —
+ *      it comes back in `skipped` instead, so the agent is told plainly that
+ *      its value was not used.
+ *   2. An install/remove command NEVER lands live. It goes to `suggested_*`,
+ *      which no code path runs, pending someone accepting it in the dashboard
+ *      (`acceptSuggestion`). This plugin runs user-authored shell verbatim on
+ *      remote targets; an agent must not be able to author that on its own.
+ *
+ * Invalid input throws the same user-facing sentences `buildCustomApp` uses —
+ * the agent sees the message as its tool result and can correct itself.
+ */
+export function applyResearchDetails(
+  rec: CustomAppRecord,
+  findings: DetailFindings,
+): DetailOutcome {
+  const out: CustomAppRecord = { ...rec };
+  const applied: string[] = [];
+  const suggested: string[] = [];
+  const skipped: string[] = [];
+
+  const notes = String(findings.notes ?? "").trim();
+  if (notes) {
+    if (out.notes) skipped.push(LABEL.notes);
+    else {
+      out.notes = checkNotes(notes);
+      applied.push(LABEL.notes);
+    }
+  }
+
+  const homepage = String(findings.homepage ?? "").trim();
+  if (homepage) {
+    checkHomepage(homepage);
+    if (out.homepage) skipped.push(LABEL.homepage);
+    else {
+      out.homepage = homepage;
+      applied.push(LABEL.homepage);
+    }
+  }
+
+  const binary = String(findings.binary ?? "").trim();
+  if (binary) {
+    checkBinary(binary);
+    if (out.binary_derived !== true) skipped.push(LABEL.binary);
+    else if (binary === out.binary) {
+      // Already what the probe uses — nothing to report as a change, but it
+      // is now a checked value rather than a guess off the id.
+      delete out.binary_derived;
+    } else {
+      out.binary = binary;
+      delete out.binary_derived;
+      applied.push(LABEL.binary);
+    }
+  }
+
+  const install = optionalCommand(
+    findings.install_command,
+    "the install command",
+  );
+  if (install) {
+    if (out.install_command) skipped.push(LABEL.install_command);
+    else {
+      out.suggested_install_command = install;
+      suggested.push(LABEL.install_command);
+    }
+  }
+
+  const remove = optionalCommand(findings.remove_command, "the remove command");
+  if (remove) {
+    if (out.remove_command) skipped.push(LABEL.remove_command);
+    else {
+      out.suggested_remove_command = remove;
+      suggested.push(LABEL.remove_command);
+    }
+  }
+
+  if (applied.length) {
+    const merged = (out.filled_fields ?? []).slice();
+    applied.forEach((f) => {
+      if (merged.indexOf(f) < 0) merged.push(f);
+    });
+    out.filled_fields = merged;
+  }
+
+  return { rec: out, applied, suggested, skipped };
+}
+
+export type SuggestionField = "install" | "remove";
+
+function suggestionKey(
+  field: SuggestionField,
+): "suggested_install_command" | "suggested_remove_command" {
+  return field === "install"
+    ? "suggested_install_command"
+    : "suggested_remove_command";
+}
+
+/** The suggested commands still awaiting an answer. */
+export function pendingSuggestions(
+  rec: CustomAppRecord,
+): Array<{ field: SuggestionField; label: string; command: string }> {
+  const out: Array<{
+    field: SuggestionField;
+    label: string;
+    command: string;
+  }> = [];
+  if (rec.suggested_install_command) {
+    out.push({
+      field: "install",
+      label: LABEL.install_command,
+      command: rec.suggested_install_command,
+    });
+  }
+  if (rec.suggested_remove_command) {
+    out.push({
+      field: "remove",
+      label: LABEL.remove_command,
+      command: rec.suggested_remove_command,
+    });
+  }
+  return out;
+}
+
+/** Accept a suggested command: THIS is the step that makes it runnable, and
+ * it only happens from an authenticated dashboard request. */
+export function acceptSuggestion(
+  rec: CustomAppRecord,
+  field: SuggestionField,
+): CustomAppRecord {
+  const key = suggestionKey(field);
+  const command = rec[key];
+  if (!command) {
+    throw new Error(
+      `there is no suggested ${field} command for '${rec.id}' to accept`,
+    );
+  }
+  const out: CustomAppRecord = { ...rec };
+  if (field === "install") out.install_command = command;
+  else out.remove_command = command;
+  delete out[key];
+  const label =
+    field === "install" ? LABEL.install_command : LABEL.remove_command;
+  const merged = (out.filled_fields ?? []).slice();
+  if (merged.indexOf(label) < 0) merged.push(label);
+  out.filled_fields = merged;
+  return out;
+}
+
+/** Discard a suggested command. The field stays blank — it was never live. */
+export function discardSuggestion(
+  rec: CustomAppRecord,
+  field: SuggestionField,
+): CustomAppRecord {
+  const key = suggestionKey(field);
+  if (!rec[key]) {
+    throw new Error(
+      `there is no suggested ${field} command for '${rec.id}' to discard`,
+    );
+  }
+  const out: CustomAppRecord = { ...rec };
+  delete out[key];
+  return out;
+}
+
+/** Which entries are still blank, by label — what a research session is for.
+ * The detect command counts only while it's a guess off the id. */
+export function missingDetails(rec: CustomAppRecord): string[] {
+  const missing: string[] = [];
+  if (!rec.notes) missing.push(LABEL.notes);
+  if (!rec.homepage) missing.push(LABEL.homepage);
+  if (rec.binary_derived === true) missing.push(LABEL.binary);
+  if (!rec.install_command && !rec.suggested_install_command) {
+    missing.push(LABEL.install_command);
+  }
+  if (!rec.remove_command && !rec.suggested_remove_command) {
+    missing.push(LABEL.remove_command);
+  }
+  return missing;
+}
+
+/** The record as the dashboard sees it: the stored fields, plus what is still
+ * blank and which commands are waiting on an answer. Computed here so the
+ * page never re-derives either rule and drifts from it. */
+export function customAppView(rec: CustomAppRecord): any {
+  return {
+    ...rec,
+    missing: missingDetails(rec),
+    suggestions: pendingSuggestions(rec),
   };
 }
 
@@ -162,8 +469,10 @@ export function describeCustomApp(rec: CustomAppRecord): string {
 /**
  * Project a stored record into the CatalogApp shape. The probes are built from
  * the validated `binary` token and shell-quoted; the install/remove recipes
- * are the user's own commands, present only when they typed them (a `vendor`
- * recipe, since a manual app has no per-package-manager form).
+ * are the user's own commands, present only when they typed them or accepted
+ * a suggestion (a `vendor` recipe, since a manual app has no
+ * per-package-manager form). A pending `suggested_*` is deliberately NOT
+ * projected: an unanswered suggestion must never become a runnable recipe.
  */
 export function toCatalogApp(rec: CustomAppRecord): CatalogApp {
   const q = shQuote(rec.binary);
