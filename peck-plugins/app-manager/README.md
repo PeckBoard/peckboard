@@ -56,6 +56,8 @@ practice: see "Adding an App by Hand" below.
 **0.8.0 (filling those rows' blank entries in) asks for none either**, and
 narrows nothing: a command an AI session proposes is stored as a suggestion
 and only becomes runnable when you accept it in the dashboard.
+**0.8.1 is the dashboard on a phone** — layout only, no permission, route or
+behaviour change.
 
 ## Dashboard Page
 

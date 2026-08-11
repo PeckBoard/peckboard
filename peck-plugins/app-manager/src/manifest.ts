@@ -31,7 +31,7 @@ const DESCRIPTION =
   "and any install/remove command it proposes is stored as a SUGGESTION that only " +
   "becomes runnable when someone accepts it in the dashboard.";
 
-const VERSION = "0.8.0";
+const VERSION = "0.8.1";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.

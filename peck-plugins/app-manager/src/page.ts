@@ -63,7 +63,7 @@ export const PAGE = `<!doctype html>
   body {
     background: var(--bg); color: var(--fg);
     font: 13px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    display: flex; flex-direction: column; height: 100vh;
+    display: flex; flex-direction: column; height: 100dvh;
   }
   header {
     display: flex; align-items: center; gap: 10px; padding: 10px 16px;
@@ -256,15 +256,103 @@ export const PAGE = `<!doctype html>
   .toast.open { display: block; }
   .toast.bad { border-color: var(--err-line); background: var(--err-bg); }
 
+  /* Header overflow menu: the secondary actions sit inline on a wide screen
+     and behind "More" on a phone, where five buttons wrapped into three
+     ragged rows of chrome above the list they act on. */
+  .headacts { display: flex; align-items: center; gap: 8px; }
+  #moreBtn { display: none; }
+  /* The dependency block collapses. It is fixed-height chrome, and on a phone
+     it (plus the banner and the header) left the app grid nothing to sit in. */
+  .depswrap {
+    border-bottom: 1px solid var(--line); background: var(--panel); flex: 0 0 auto;
+  }
+  .depswrap > summary {
+    padding: 6px 16px; cursor: pointer; font-size: 12px; color: var(--muted);
+  }
+  .depswrap > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .depswrap .depsbar, .depswrap .libpanel { border-bottom: none; }
+  .pipdet > summary { cursor: pointer; padding: 2px 0; }
+
   @media (max-width: 860px) {
-    header { flex-wrap: wrap; }
-    .pick { flex: 1 1 100%; }
+    /* One document scroll. The bars are all flex: 0 0 auto inside a 100dvh
+       body, so on a phone they consumed the viewport and main — the app
+       list, the point of the page — collapsed to a sliver. */
+    html, body { height: auto; }
+    body { display: block; min-height: 100dvh; }
+    .layout { display: block; }
+    main { overflow: visible; }
+    header {
+      position: sticky; top: 0; z-index: 30; flex-wrap: wrap; gap: 8px; padding: 8px 12px;
+    }
+    /* Title, Refresh and More share one row; the target picker and its
+       detail line take the next two. Source order would give each its own
+       row and spend 45px of a phone screen on nothing. */
+    header h1 { flex: 1 1 auto; order: 1; }
+    header .spacer { order: 2; }
+    #refreshBtn { order: 3; }
+    #moreBtn { order: 4; display: inline-flex; }
+    .pick { flex: 1 1 100%; order: 5; }
     .pick select { flex: 1; }
-    .layout { flex-direction: column; }
-    aside.log { width: auto; flex: 0 0 auto; max-height: 45vh; border-left: none; border-top: 1px solid var(--line); }
+    #targetDetail { flex: 1 1 100%; order: 6; }
+    .headacts {
+      display: none; position: absolute; right: 12px; top: 100%; z-index: 40;
+      flex-direction: column; align-items: stretch; gap: 6px; min-width: 220px;
+      padding: 8px; background: var(--panel); border: 1px solid var(--line);
+      border-radius: 8px; box-shadow: var(--shadow);
+    }
+    header.menuopen .headacts { display: flex; }
+    .headacts button { text-align: left; }
+    .banner, .reqbar, .depswrap > summary { padding-left: 12px; padding-right: 12px; }
+    .depsbar { padding: 8px 12px; }
+    .depsbar .spacer { display: none; }
+    .depsbar select, .depsbar button { width: 100%; max-width: none; min-width: 0; }
+    .libpanel { padding-left: 12px; padding-right: 12px; }
     input, select { font-size: 16px; } /* keep iOS from zooming on focus */
-    .approw { flex-wrap: wrap; }
-    .approw .why { text-align: left; max-width: none; }
+    .approw { flex-direction: column; align-items: stretch; padding: 12px; }
+    .approw .acts { flex-direction: row; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+    .approw .acts button { flex: 1 1 140px; }
+    /* A narrow screen is a touched screen: every action a thumb size. */
+    header button, .depsbar button, .approw .acts button, .modal .foot button {
+      min-height: 40px; padding: 8px 12px; font-size: 13px;
+    }
+    .approw .why { flex: 1 1 100%; text-align: left; max-width: none; }
+    .depnode .kids { margin-left: 14px; }
+    .depbins { margin-left: 16px; }
+    /* The log becomes a bottom sheet: below the fold it read as nothing
+       having happened when a job started. */
+    aside.log {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 45;
+      width: auto; flex: 0 0 auto; height: 70dvh; max-height: 70dvh;
+      border-left: none; border-top: 1px solid var(--line); box-shadow: var(--shadow);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    body.logopen main { padding-bottom: 72dvh; }
+    /* Dialogs become sheets with the primary button pinned under a thumb —
+       the add-app form is long enough that Save used to scroll away. */
+    .backdrop { align-items: flex-end; padding: 0; }
+    .modal {
+      width: 100%; max-width: 100%; max-height: 92dvh; overflow: hidden;
+      border-radius: 12px 12px 0 0; display: flex; flex-direction: column;
+    }
+    .modal .form { overflow: auto; }
+    .modal .foot {
+      position: sticky; bottom: 0; background: var(--panel);
+      padding-bottom: calc(12px + env(safe-area-inset-bottom));
+    }
+    .modal .foot button { flex: 1; }
+    .row2 { flex-direction: column; }
+    .toast {
+      left: 12px; right: 12px; max-width: none;
+      bottom: calc(12px + env(safe-area-inset-bottom));
+    }
+  }
+  /* Touch: controls a thumb can actually hit. */
+  @media (pointer: coarse) {
+    body { font-size: 14px; }
+    button { min-height: 40px; padding: 8px 12px; font-size: 13px; }
+    input, select { min-height: 40px; }
+    .depnode .twist { min-height: 0; padding: 0; } /* keeps the tree aligned */
+    .approw .fill button, .sugg button, .depstoggle { min-height: 32px; }
   }
 </style>
 </head>
@@ -277,25 +365,30 @@ export const PAGE = `<!doctype html>
   </div>
   <span class="sub" id="targetDetail"></span>
   <div class="spacer"></div>
-  <button id="addAppBtn">+ Add app</button>
-  <button id="addTargetBtn">+ Add remote target</button>
-  <button id="editTargetBtn">Edit target</button>
-  <button id="removeTargetBtn" class="danger">Remove target</button>
+  <div class="headacts" id="headActions">
+    <button id="addAppBtn">+ Add app</button>
+    <button id="addTargetBtn">+ Add remote target</button>
+    <button id="editTargetBtn">Edit target</button>
+    <button id="removeTargetBtn" class="danger">Remove target</button>
+  </div>
   <button id="refreshBtn" class="primary">Refresh</button>
+  <button id="moreBtn" aria-haspopup="true" aria-expanded="false" aria-controls="headActions">More</button>
 </header>
 
 <div class="banner" id="banner" role="status" aria-live="polite"><span id="bannerText">Loading…</span></div>
 <div class="reqbar" id="reqBar" role="status" hidden></div>
-<div class="depsbar" id="depsBar">
-  <span class="info" id="depsInfo">Dependencies: not resolved yet.</span>
-  <span class="spacer"></span>
-  <label class="sub" for="libSel">Reverse view</label>
-  <select id="libSel" aria-label="Select a dependency to see which apps require it"></select>
-  <button id="libSysBtn" title="Ask the target's package manager which installed packages require the selected dependency, system-wide">System-wide</button>
-  <button id="depsRefreshBtn">Refresh dependencies</button>
-</div>
-<div class="libpanel" id="libPanel" hidden></div>
-<div class="libpanel" id="pipPanel" hidden></div>
+<details class="depswrap" id="depsWrap" open>
+  <summary><span class="info" id="depsInfo">Dependencies: not resolved yet.</span></summary>
+  <div class="depsbar" id="depsBar">
+    <span class="spacer"></span>
+    <label class="sub" for="libSel">Reverse view</label>
+    <select id="libSel" aria-label="Select a dependency to see which apps require it"></select>
+    <button id="libSysBtn" title="Ask the target's package manager which installed packages require the selected dependency, system-wide">System-wide</button>
+    <button id="depsRefreshBtn">Refresh dependencies</button>
+  </div>
+  <div class="libpanel" id="libPanel" hidden></div>
+  <div class="libpanel" id="pipPanel" hidden></div>
+</details>
 
 <div class="layout">
   <main>
@@ -1100,7 +1193,7 @@ export const PAGE = `<!doctype html>
   // ── log panel ──────────────────────────────────────────────────────
   function openLog(appId, title) {
     state.logApp = appId;
-    $("logPanel").hidden = false;
+    setLogOpen(true);
     $("logTitle").textContent = title;
     $("logStatus").textContent = "Starting…";
     $("logStatus").className = "badge busy";
@@ -1263,11 +1356,15 @@ export const PAGE = `<!doctype html>
     var pkgs = state.deps && state.deps.pip_packages ? state.deps.pip_packages : [];
     if (!pkgs.length) { panel.hidden = true; return; }
     panel.hidden = false;
-    var head = el("div", null, "");
-    head.appendChild(el("b", null, "Python packages (pip)"));
-    head.appendChild(document.createTextNode(
-      " — pip's own namespace, separate from the system packages above."));
-    panel.appendChild(head);
+    var det = el("details", "pipdet");
+    det.open = !narrow();
+    var sum = el("summary", null, "");
+    sum.appendChild(el("b", null, "Python packages (pip)"));
+    sum.appendChild(document.createTextNode(
+      " — " + pkgs.length + (pkgs.length === 1 ? " package" : " packages")));
+    det.appendChild(sum);
+    det.appendChild(el("div", null,
+      "pip's own namespace, separate from the system packages above."));
     pkgs.forEach(function (p) {
       var line = el("div", null, "");
       line.appendChild(el("span", "mono", p.name + (p.version ? " " + p.version : "")));
@@ -1277,8 +1374,9 @@ export const PAGE = `<!doctype html>
       if (p.required_by && p.required_by.length) bits.push("required by: " + p.required_by.join(", "));
       line.appendChild(document.createTextNode(
         bits.length ? " — " + bits.join("; ") : " — no pip dependencies reported"));
-      panel.appendChild(line);
+      det.appendChild(line);
     });
+    panel.appendChild(det);
   }
   function sysRdeps() {
     var name = $("libSel").value;
@@ -1398,7 +1496,8 @@ export const PAGE = `<!doctype html>
   }
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
-    if ($("targetBackdrop").classList.contains("open")) closeDialog("targetBackdrop");
+    if (menuOpen()) setMenu(false);
+    else if ($("targetBackdrop").classList.contains("open")) closeDialog("targetBackdrop");
     else if ($("appBackdrop").classList.contains("open")) closeDialog("appBackdrop");
     else if ($("installBackdrop").classList.contains("open")) closeDialog("installBackdrop");
     else if ($("confirmBackdrop").classList.contains("open")) closeDialog("confirmBackdrop");
@@ -1656,6 +1755,32 @@ export const PAGE = `<!doctype html>
     toast(msg, true);
   }
 
+  // ── mobile chrome ──────────────────────────────────────────────────
+  // Under 860px the header's secondary actions live behind "More" and the
+  // dependency block starts collapsed. Both are fixed-height chrome, and a
+  // phone-sized viewport spent all of it on chrome before this: the app grid
+  // — the point of the page — was pushed off the bottom.
+  function narrow() { return window.matchMedia("(max-width: 860px)").matches; }
+  function menuOpen() {
+    return document.querySelector("header").classList.contains("menuopen");
+  }
+  function setMenu(open) {
+    document.querySelector("header").classList.toggle("menuopen", open);
+    $("moreBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  // The log is a bottom sheet on a phone, so the grid needs room under it.
+  function setLogOpen(open) {
+    $("logPanel").hidden = !open;
+    document.body.classList.toggle("logopen", open);
+  }
+  $("moreBtn").onclick = function (e) { e.stopPropagation(); setMenu(!menuOpen()); };
+  $("headActions").addEventListener("click", function () { setMenu(false); });
+  document.addEventListener("click", function (e) {
+    if (menuOpen() && !$("headActions").contains(e.target) && e.target !== $("moreBtn")) {
+      setMenu(false);
+    }
+  });
+
   // ── wire up ────────────────────────────────────────────────────────
   $("targetSel").onchange = function () {
     state.current = $("targetSel").value;
@@ -1664,7 +1789,7 @@ export const PAGE = `<!doctype html>
     state.libs = {};
     renderDeps();
     state.logApp = null;
-    $("logPanel").hidden = true;
+    setLogOpen(false);
     renderTargetPicker();
     loadApps();
   };
@@ -1690,7 +1815,7 @@ export const PAGE = `<!doctype html>
     closeDialog("confirmBackdrop");
     if (fn) fn();
   };
-  $("logClose").onclick = function () { state.logApp = null; $("logPanel").hidden = true; };
+  $("logClose").onclick = function () { state.logApp = null; setLogOpen(false); };
   $("targetBackdrop").addEventListener("mousedown", function (e) {
     if (e.target === $("targetBackdrop")) closeDialog("targetBackdrop");
   });
@@ -1714,6 +1839,7 @@ export const PAGE = `<!doctype html>
     if (e.target === $("confirmBackdrop")) closeDialog("confirmBackdrop");
   });
 
+  if (narrow()) $("depsWrap").open = false;
   loadTargets();
 })();
 </script>

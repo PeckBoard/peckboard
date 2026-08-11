@@ -310,4 +310,68 @@ test.describe('app-manager page', () => {
       timeout: 60_000,
     })
   })
+
+  test('on a phone viewport the app list gets the screen, not the chrome', async ({
+    request,
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    const token = await authenticate(request)
+    await loadApp(page, token)
+    test.skip(!(await pluginPresent(page)), 'app-manager wasm not built')
+
+    const f = await openAppManager(page)
+    const rows = f.locator('.approw')
+    await expect(rows.first()).toBeVisible({ timeout: 60_000 })
+
+    // The regression: header + banner + deps bar + pip panel are all fixed
+    // height, so on a phone they used to consume the viewport and leave main
+    // — the app list — collapsed to a sliver.
+    const mainHeight = await f.locator('main').evaluate((el) => el.clientHeight)
+    expect(mainHeight).toBeGreaterThan(300)
+
+    // The dependency graph starts collapsed here; it is a screenful of chrome.
+    expect(await f.locator('#depsWrap').evaluate((el: HTMLDetailsElement) => el.open)).toBe(false)
+
+    // Nothing scrolls sideways.
+    const overflow = await f
+      .locator('body')
+      .evaluate((el) => el.ownerDocument.documentElement.scrollWidth - el.clientWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+
+    // The header's secondary actions moved behind "More" instead of wrapping
+    // into three rows of buttons.
+    await expect(f.locator('#addAppBtn')).toBeHidden()
+    await expect(f.locator('#refreshBtn')).toBeVisible()
+    await f.locator('#moreBtn').click()
+    await expect(f.locator('#addAppBtn')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(f.locator('#addAppBtn')).toBeHidden()
+
+    // Row actions are thumb-sized.
+    const btn = rows.first().locator('.acts button').first()
+    const btnBox = await btn.boundingBox()
+    expect(btnBox?.height ?? 0).toBeGreaterThanOrEqual(36)
+
+    // The screenful that caused this: with the graph resolved, the deps bar,
+    // the reverse-view panel and a pip listing of every package on the box
+    // used to stack above the grid and push it off the bottom. Resolve it for
+    // real, then check the first row is still near the top of the page.
+    const banner = (await f.locator('#bannerText').textContent()) ?? ''
+    if (/apt|dnf|pacman|zypper/i.test(banner)) {
+      await f.locator('#depsWrap > summary').click()
+      await f.locator('#depsRefreshBtn').click()
+      await expect(f.locator('#depsInfo')).toContainText('Dependencies resolved', {
+        timeout: 120_000,
+      })
+      await f.locator('#depsWrap > summary').click()
+      // pip packages get their own collapsed block, not a wall of text.
+      const pipDetails = f.locator('#pipPanel details')
+      if ((await pipDetails.count()) > 0) {
+        expect(await pipDetails.evaluate((el: HTMLDetailsElement) => el.open)).toBe(false)
+      }
+    }
+    const rowBox = await rows.first().boundingBox()
+    expect(rowBox?.y ?? Number.MAX_SAFE_INTEGER).toBeLessThan(400)
+  })
 })
