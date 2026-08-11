@@ -4,7 +4,7 @@
 // the error prose that replaces raw stderr / JSON.
 
 import { describe, expect, it } from "vitest";
-import { findApp } from "../src/catalog";
+import { CatalogApp, findApp } from "../src/catalog";
 import { JobRecord } from "../src/jobs";
 import { InstallRecord } from "../src/provenance";
 import { LOCAL_TARGET } from "../src/targets";
@@ -132,6 +132,118 @@ describe("appRowView", () => {
       job({ status: "running" }),
     );
     expect(r.job?.tone).toBe("busy");
+  });
+  describe("appRowView for a manually added app", () => {
+    // Built the same way customApps.toCatalogApp does, without touching a host.
+    const manual: CatalogApp = {
+      id: "zellij",
+      name: "Zellij",
+      description: "Manually added — terminal multiplexer.",
+      custom: true,
+      binary: "zellij",
+      homepage: "https://zellij.dev",
+      detect: "command -v 'zellij'",
+      version: "'zellij' --version",
+      install: {},
+      remove: {},
+    };
+    const withCommands: CatalogApp = {
+      ...manual,
+      install: { vendor: "sudo -A apt-get install -y zellij" },
+      remove: { vendor: "sudo -A apt-get remove -y zellij" },
+    };
+
+    it("is installable on the local host with no command at all (the session works it out)", () => {
+      const r = appRowView(
+        manual,
+        { installed: false, version: null },
+        "apt",
+        null,
+        null,
+        "local",
+      );
+      expect(r.custom).toBe(true);
+      expect(r.homepage).toBe("https://zellij.dev");
+      expect(r.actionable).toBe(true);
+      expect(r.blocked_reason).toBeNull();
+      expect(r.action_command).toBeNull();
+      expect(r.forgettable).toBe(true);
+      expect(r.deps_note).toContain("aren't resolved");
+    });
+
+    it("is blocked on a remote target until it has an install command, and says why", () => {
+      const r = appRowView(
+        manual,
+        { installed: false, version: null },
+        "apt",
+        null,
+        null,
+        "remote",
+      );
+      expect(r.actionable).toBe(false);
+      expect(r.blocked_reason).toContain("only runs on the local host");
+      const armed = appRowView(
+        withCommands,
+        { installed: false, version: null },
+        "apt",
+        null,
+        null,
+        "remote",
+      );
+      expect(armed.actionable).toBe(true);
+      expect(armed.action_command).toBe("sudo -A apt-get install -y zellij");
+    });
+
+    it("offers no removal without a remove command, and points at Forget", () => {
+      const r = appRowView(
+        manual,
+        { installed: true, version: "0.40.1" },
+        "apt",
+        null,
+        null,
+        "local",
+      );
+      expect(r.action).toBe("remove");
+      expect(r.actionable).toBe(false);
+      expect(r.blocked_reason).toContain("never guesses");
+      expect(r.blocked_reason).toContain("Forget");
+      expect(r.forgettable).toBe(true);
+
+      const armed = appRowView(
+        withCommands,
+        { installed: true, version: "0.40.1" },
+        "apt",
+        null,
+        null,
+        "local",
+      );
+      expect(armed.actionable).toBe(true);
+      expect(armed.action_command).toBe("sudo -A apt-get remove -y zellij");
+    });
+
+    it("never claims a vendor script installed it — it reports what the package DB saw", () => {
+      const r = appRowView(
+        manual,
+        { installed: true, version: "0.40.1" },
+        "apt",
+        null,
+        {
+          job_id: "j9",
+          target_id: "local",
+          app_id: "zellij",
+          installed_at: "2026-08-11T00:00:00.000Z",
+          method: "vendor",
+          tracking: "tracked",
+          primary: null,
+          added: [{ name: "zellij", version: "0.40.1" }],
+          changed: [],
+        },
+        "local",
+      );
+      expect(r.provenance_note).toContain("Manually added app");
+      expect(r.provenance_note).not.toContain("vendor script");
+      expect(r.added_packages).toHaveLength(1);
+    });
   });
 });
 

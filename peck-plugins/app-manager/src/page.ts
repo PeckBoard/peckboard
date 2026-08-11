@@ -100,6 +100,16 @@ export const PAGE = `<!doctype html>
   .banner.bad { background: var(--err-bg); border-bottom-color: var(--err-line); }
   .banner.warn { background: var(--warn-bg); border-bottom-color: var(--warn-line); }
   .banner .pm { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  /* deep-link request bar (see deeplink.ts) */
+  .reqbar {
+    padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--badge-bg);
+    display: flex; align-items: center; gap: 12px; flex: 0 0 auto; font-size: 12px;
+    flex-wrap: wrap;
+  }
+  .reqbar .lead { font-weight: 600; }
+  .reqbar .item { display: inline-flex; align-items: center; gap: 6px; }
+  .reqbar .note { color: var(--muted); }
+  .approw.req { background: var(--badge-bg); }
   .layout { flex: 1; display: flex; min-height: 0; }
   main { flex: 1; overflow: auto; min-width: 0; }
   .grid { display: flex; flex-direction: column; }
@@ -173,6 +183,7 @@ export const PAGE = `<!doctype html>
   .badge.busy { background: var(--badge-bg); border-color: var(--badge-line); color: var(--accent); }
   .badge.bad { background: var(--err-bg); border-color: var(--err-line); color: var(--err); }
   .badge.pip { background: var(--badge-bg); border-color: var(--badge-line); color: var(--accent); }
+  .badge.manual { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn); }
   .empty { padding: 32px 16px; color: var(--muted); text-align: center; }
   aside.log {
     width: 420px; flex: 0 0 420px; border-left: 1px solid var(--line); background: var(--panel);
@@ -247,6 +258,7 @@ export const PAGE = `<!doctype html>
   </div>
   <span class="sub" id="targetDetail"></span>
   <div class="spacer"></div>
+  <button id="addAppBtn">+ Add app</button>
   <button id="addTargetBtn">+ Add remote target</button>
   <button id="editTargetBtn">Edit target</button>
   <button id="removeTargetBtn" class="danger">Remove target</button>
@@ -254,6 +266,7 @@ export const PAGE = `<!doctype html>
 </header>
 
 <div class="banner" id="banner" role="status" aria-live="polite"><span id="bannerText">Loading…</span></div>
+<div class="reqbar" id="reqBar" role="status" hidden></div>
 <div class="depsbar" id="depsBar">
   <span class="info" id="depsInfo">Dependencies: not resolved yet.</span>
   <span class="spacer"></span>
@@ -320,6 +333,51 @@ export const PAGE = `<!doctype html>
     <div class="foot">
       <button id="targetCancel">Cancel</button>
       <button id="targetSave" class="primary">Save target</button>
+    </div>
+  </div>
+</div>
+
+<div class="backdrop" id="appBackdrop">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="appModalTitle">
+    <h2 id="appModalTitle">Add an app</h2>
+    <div class="form">
+      <p style="margin:0" class="sub">Adding an app only creates the row. Nothing is installed until you press Install on it.</p>
+      <div class="field">
+        <label for="f_app_name">App name *</label>
+        <input id="f_app_name" placeholder="Zellij" />
+        <span class="hint">What the software is called. On this host, the install session looks it up — searching the web if it doesn't know it — and installs it from an official source only.</span>
+      </div>
+      <div class="field">
+        <label for="f_app_binary">Command that proves it is installed</label>
+        <input id="f_app_binary" placeholder="zellij" />
+        <span class="hint">The executable checked with <code>command -v</code>. Defaults to the app name in lowercase. This probe, not the agent's report, decides whether an install succeeded.</span>
+      </div>
+      <div class="field">
+        <label for="f_app_home">Official website (optional)</label>
+        <input id="f_app_home" placeholder="https://zellij.dev" />
+        <span class="hint">https only. Treated as a claim to verify, not as a source of truth.</span>
+      </div>
+      <div class="field">
+        <label for="f_app_notes">Notes (optional)</label>
+        <input id="f_app_notes" placeholder="terminal multiplexer, Rust" />
+        <span class="hint">Anything that pins down which project you mean — handed to the install session as context.</span>
+      </div>
+      <div class="field">
+        <label for="f_app_install">Install command (required for remote targets)</label>
+        <input id="f_app_install" placeholder="sudo -A apt-get install -y zellij" />
+        <span class="hint">Remote targets have no AI session available, so they run this command verbatim over SSH. On this host it is only a suggestion the session checks first. Leave blank to install here only.</span>
+      </div>
+      <div class="field">
+        <label for="f_app_remove">Remove command (optional)</label>
+        <input id="f_app_remove" placeholder="sudo -A apt-get remove -y zellij" />
+        <span class="hint">Run verbatim when you press Remove. Without one, the row offers Forget instead — App Manager never guesses how to uninstall something.</span>
+      </div>
+      <p class="warnbox" id="appCmdWarn" hidden></p>
+      <p class="formerr" id="appErr"></p>
+    </div>
+    <div class="foot">
+      <button id="appCancel">Cancel</button>
+      <button id="appSave" class="primary">Save app</button>
     </div>
   </div>
 </div>
@@ -410,9 +468,21 @@ export const PAGE = `<!doctype html>
     overview: null, rows: {}, watching: {},
     deps: null, libs: {},
     keys: [],
-    editing: null, logApp: null, timer: null,
+    editing: null, editingApp: null, logApp: null, timer: null,
     lastFocus: null, confirmAction: null, installApp: null, sessionId: null
   };
+
+  // What a deep link asked us to install, parsed server-side and baked in
+  // (deeplink.ts). null when the page was opened normally. It PREFILLS ONLY:
+  // the request bar names the apps and every install still goes through the
+  // same button, the same account+model picker, and the same confirmation.
+  var REQ = __APP_MANAGER_REQUEST__;
+  // The requested target is honoured once, on the first load.
+  var reqTargetPending = !!(REQ && REQ.target);
+
+  function requested(appId) {
+    return !!REQ && REQ.apps.indexOf(appId) >= 0;
+  }
 
   // ── targets ────────────────────────────────────────────────────────
   function loadTargets() {
@@ -420,6 +490,10 @@ export const PAGE = `<!doctype html>
       state.targets = d.targets || [];
       state.byId = {};
       state.targets.forEach(function (t) { state.byId[t.id] = t; });
+      if (reqTargetPending) {
+        reqTargetPending = false;
+        if (state.byId[REQ.target]) state.current = REQ.target;
+      }
       if (!state.current || !state.byId[state.current]) {
         state.current = state.targets.length ? state.targets[0].id : null;
       }
@@ -458,11 +532,13 @@ export const PAGE = `<!doctype html>
       state.overview = d;
       renderBanner(d.distro);
       renderGrid(d.apps || []);
+      renderRequest();
       loadDeps();
     }).catch(function (e) {
       if (state.current !== target) return;
       setBanner(e.message, "bad");
       clear($("grid"));
+      renderRequest();
       $("gridEmpty").textContent = "No applications could be listed for this target.";
       $("gridEmpty").style.display = "block";
     });
@@ -494,8 +570,59 @@ export const PAGE = `<!doctype html>
     apps.forEach(function (a) { grid.appendChild(buildRow(a)); });
   }
 
+  // ── deep-link request bar ──────────────────────────────────────────
+  // Names what the linking page asked for and offers each missing app's own
+  // Install button — the SAME button the row has, so a local install still
+  // opens the account+model picker and a removal is never offered here.
+  function renderRequest() {
+    var bar = $("reqBar");
+    clear(bar);
+    if (!REQ || !REQ.apps.length) { bar.hidden = true; return; }
+    bar.hidden = false;
+
+    var known = {};
+    ((state.overview && state.overview.apps) || []).forEach(function (a) {
+      known[a.id] = a;
+    });
+    bar.appendChild(el("span", "lead",
+      (REQ.from ? REQ.from + " asked for these on " : "Requested on ") + targetLabel() + ":"));
+
+    var unknown = [];
+    REQ.apps.forEach(function (id) {
+      var a = known[id];
+      if (!a) { unknown.push(id); return; }
+      var item = el("span", "item");
+      item.appendChild(document.createTextNode(a.name));
+      if (a.installed) {
+        item.appendChild(el("span", "badge ok", a.state_label));
+        item.appendChild(el("span", "note", "already installed"));
+      } else {
+        var btn = el("button", "primary", a.action_label);
+        btn.setAttribute("aria-label", a.action_label + " " + a.name + " on " + targetLabel());
+        if (!a.actionable) {
+          btn.disabled = true;
+          item.appendChild(el("span", "note", a.blocked_reason || ""));
+        }
+        btn.onclick = function () { focusRow(a.id); startInstall(a); };
+        item.appendChild(btn);
+      }
+      bar.appendChild(item);
+    });
+
+    if (unknown.length) {
+      bar.appendChild(el("span", "note",
+        "Not in the catalog for this target: " + unknown.join(", ") + "."));
+    }
+  }
+
+  function focusRow(appId) {
+    var r = state.rows[appId];
+    if (r && r.row && r.row.scrollIntoView) r.row.scrollIntoView({ block: "center" });
+  }
+
   function buildRow(a) {
-    var row = el("div", "approw " + (a.installed ? "installed" : "missing"));
+    var row = el("div", "approw " + (a.installed ? "installed" : "missing")
+      + (requested(a.id) ? " req" : ""));
     var body = el("div", "body");
     var name = el("div", "name");
     name.appendChild(document.createTextNode(a.name));
@@ -506,6 +633,10 @@ export const PAGE = `<!doctype html>
       // Distinct namespace marker: a pip package is not a system package.
       name.appendChild(el("span", "badge pip", "pip"));
     }
+    if (a.custom) {
+      // Manually added, not a vetted catalog entry — say so on the row.
+      name.appendChild(el("span", "badge manual", "added by hand"));
+    }
     body.appendChild(name);
     body.appendChild(el("div", "desc", a.description));
     var ver = el("div", "ver", a.version || "");
@@ -515,6 +646,7 @@ export const PAGE = `<!doctype html>
     }
     body.appendChild(ver);
     if (a.provenance_note) body.appendChild(el("div", "prov", a.provenance_note));
+    if (a.deps_note) body.appendChild(el("div", "prov", a.deps_note));
     if (a.added_packages && a.added_packages.length) {
       var deps = el("div", "deps");
       deps.appendChild(document.createTextNode((a.added_label || "Also installed") + ": "));
@@ -540,6 +672,16 @@ export const PAGE = `<!doctype html>
     logLink.onclick = function () { showLog(a.id); };
     acts.appendChild(btn);
     acts.appendChild(logLink);
+    if (a.custom) {
+      var editBtn = el("button", null, "Edit");
+      editBtn.setAttribute("aria-label", "Edit " + a.name);
+      editBtn.onclick = function () { openAppModal(a.id); };
+      acts.appendChild(editBtn);
+      var forgetBtn = el("button", null, "Forget");
+      forgetBtn.setAttribute("aria-label", "Forget " + a.name);
+      forgetBtn.onclick = function () { askForget(a); };
+      acts.appendChild(forgetBtn);
+    }
     acts.appendChild(why);
     row.appendChild(acts);
 
@@ -588,6 +730,23 @@ export const PAGE = `<!doctype html>
     // session runs on the Peckboard host and has no path to a remote
     // target's SSH credentials).
     if (t && t.kind === "local") { openInstallPicker(a); return; }
+    // A manually added app's remote install runs the command the person typed
+    // for it, verbatim — so show it back before running it.
+    if (a.custom && a.action_command) {
+      confirmDialog(
+        "Install " + a.name + " on " + targetLabel() + "?",
+        "This runs the install command stored with " + a.name + " on " + targetLabel() +
+          ", exactly as written. No AI session is involved on a remote target.",
+        a.action_command,
+        "Run install command",
+        function () { runInstall(a); }
+      );
+      return;
+    }
+    runInstall(a);
+  }
+
+  function runInstall(a) {
     var target = state.current;
     var r = state.rows[a.id];
     if (r) r.btn.disabled = true;
@@ -627,10 +786,16 @@ export const PAGE = `<!doctype html>
   function openInstallPicker(a) {
     state.installApp = a;
     $("installModalTitle").textContent = "Install " + a.name;
-    $("installIntro").textContent =
-      "A temporary AI session performs this install on " + targetLabel() +
-      ". Steps that need root use sudo with Peckboard's masked password dialog. " +
-      "You can watch or stop the session from its tab at any time.";
+    $("installIntro").textContent = a.custom
+      ? "“" + a.name + "” was added by hand, so a temporary AI session works out how to install it " +
+        "on " + targetLabel() + ": it identifies the software — searching the web if it doesn't know it — " +
+        "and downloads only from the project's own official source, its official registry entry, or this " +
+        "distribution's repositories. If it can't confirm an official source it stops instead of installing. " +
+        "Steps that need root use sudo with Peckboard's masked password dialog, and you can watch or stop " +
+        "the session from its tab at any time."
+      : "A temporary AI session performs this install on " + targetLabel() +
+        ". Steps that need root use sudo with Peckboard's masked password dialog. " +
+        "You can watch or stop the session from its tab at any time.";
     $("installErr").textContent = "";
     var sel = $("f_model");
     clear(sel);
@@ -674,9 +839,11 @@ export const PAGE = `<!doctype html>
 
   function askRemove(a) {
     var entry = depEntryFor(a.id);
-    var warn =
-      "This runs a package-manager removal command AS ROOT (via sudo) on the target. " +
-      "Anything that depends on " + a.name + " may stop working.";
+    var warn = a.custom
+      ? "This runs the remove command stored with " + a.name + " on the target, exactly as written: " +
+        (a.action_command || "")
+      : "This runs a package-manager removal command AS ROOT (via sudo) on the target. " +
+        "Anything that depends on " + a.name + " may stop working.";
     // Autoremove-accurate impact from the dependency graph: what genuinely
     // becomes unneeded, and which shared dependencies stay (see deps.ts).
     if (entry && entry.removal_note) warn += " " + entry.removal_note;
@@ -1064,6 +1231,7 @@ export const PAGE = `<!doctype html>
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
     if ($("targetBackdrop").classList.contains("open")) closeDialog("targetBackdrop");
+    else if ($("appBackdrop").classList.contains("open")) closeDialog("appBackdrop");
     else if ($("installBackdrop").classList.contains("open")) closeDialog("installBackdrop");
     else if ($("confirmBackdrop").classList.contains("open")) closeDialog("confirmBackdrop");
   });
@@ -1181,6 +1349,80 @@ export const PAGE = `<!doctype html>
     );
   }
 
+  // ── add / edit / forget a manually added app ───────────────────────
+  // Free text is right here: an app's name and its install command are the
+  // person's own words, not a choice from a known set. What the plugin
+  // derives from them (the detect/version probes) is built from a validated
+  // token server-side and shell-quoted; the commands are stored verbatim and
+  // shown back verbatim before they run.
+  function openAppModal(id) {
+    state.editingApp = id || null;
+    $("appModalTitle").textContent = id ? "Edit app" : "Add an app";
+    $("appSave").textContent = id ? "Save changes" : "Save app";
+    $("appErr").textContent = "";
+    $("appCmdWarn").hidden = true;
+    $("appCmdWarn").textContent = "";
+    ["f_app_name", "f_app_binary", "f_app_home", "f_app_notes", "f_app_install", "f_app_remove"]
+      .forEach(function (f) { $(f).value = ""; });
+    $("f_app_name").disabled = !!id;
+    openDialog("appBackdrop", id ? "f_app_binary" : "f_app_name");
+    if (!id) return;
+    $("appSave").disabled = true;
+    getJSON(API + "/apps-custom").then(function (d) {
+      var rec = null;
+      (d.apps || []).forEach(function (r) { if (r.id === id) rec = r; });
+      if (!rec) { $("appErr").textContent = "That app is no longer in the list."; return; }
+      $("f_app_name").value = rec.name || "";
+      $("f_app_binary").value = rec.binary || "";
+      $("f_app_home").value = rec.homepage || "";
+      $("f_app_notes").value = rec.notes || "";
+      $("f_app_install").value = rec.install_command || "";
+      $("f_app_remove").value = rec.remove_command || "";
+    }).catch(function (e) {
+      $("appErr").textContent = e.message;
+    }).then(function () { $("appSave").disabled = false; });
+  }
+
+  function saveApp() {
+    var body = {
+      name: $("f_app_name").value,
+      binary: $("f_app_binary").value,
+      homepage: $("f_app_home").value,
+      notes: $("f_app_notes").value,
+      install_command: $("f_app_install").value,
+      remove_command: $("f_app_remove").value
+    };
+    if (state.editingApp) body.id = state.editingApp;
+    var btn = $("appSave");
+    btn.disabled = true;
+    postJSON(API + "/apps-custom", body).then(function (d) {
+      closeDialog("appBackdrop");
+      state.editingApp = null;
+      toast("Saved " + (d.app ? d.app.name : "app") + ". Nothing is installed until you press Install.");
+      loadApps();
+    }).catch(function (e) {
+      $("appErr").textContent = e.message;
+    }).then(function () { btn.disabled = false; });
+  }
+
+  // Forget is not an uninstall, and the confirmation says exactly that.
+  function askForget(a) {
+    confirmDialog(
+      "Forget " + a.name + "?",
+      a.name + " is removed from App Manager's list of apps.",
+      "Nothing is uninstalled. If " + a.name + " is installed on " + targetLabel() +
+        ", it stays installed — this only deletes the entry here.",
+      "Forget " + a.name,
+      function () {
+        postJSON(API + "/apps-custom-remove", { id: a.id }).then(function () {
+          toast("Forgot " + a.name + ". Nothing was uninstalled.");
+          loadApps();
+        }).catch(function (e) { toast(e.message, true); });
+      }
+    );
+  }
+
+
   // ── toast ──────────────────────────────────────────────────────────
   var toastTimer = null;
   function toast(msg, bad) {
@@ -1212,6 +1454,12 @@ export const PAGE = `<!doctype html>
   $("libSel").onchange = renderLibPanel;
   $("libSysBtn").onclick = sysRdeps;
   $("addTargetBtn").onclick = function () { openTargetModal(null); };
+  $("addAppBtn").onclick = function () { openAppModal(null); };
+  $("appCancel").onclick = function () { closeDialog("appBackdrop"); };
+  $("appSave").onclick = saveApp;
+  $("appBackdrop").addEventListener("mousedown", function (e) {
+    if (e.target === $("appBackdrop")) closeDialog("appBackdrop");
+  });
   $("editTargetBtn").onclick = function () { openTargetModal(state.byId[state.current]); };
   $("removeTargetBtn").onclick = removeTarget;
   $("targetCancel").onclick = function () { closeDialog("targetBackdrop"); };

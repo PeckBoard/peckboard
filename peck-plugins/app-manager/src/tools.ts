@@ -1,15 +1,12 @@
-// MCP tool handlers. Every handler validates its app/target arguments
-// against the catalog and target registry BEFORE building any shell script —
-// nothing here ever interpolates free-form user text into a command; only
-// the catalog's own static recipes (see catalog.ts) run on a target.
+// MCP tool handlers. Every handler validates its app/target arguments against
+// the catalog, the manually added apps (customApps.ts) and the target registry
+// BEFORE building any shell script. A catalog app only ever runs its own
+// static recipe; a manually added app runs either the AI install session
+// (local) or the install/remove command the person typed for it (remote) —
+// stored verbatim, never assembled from other fields.
 
-import {
-  APPS,
-  CatalogApp,
-  findApp,
-  installRecipeFor,
-  removeRecipeFor,
-} from "./catalog";
+import { CatalogApp, installRecipeFor, removeRecipeFor } from "./catalog";
+import { allApps, findAnyApp } from "./customApps";
 import {
   OS_RELEASE_PROBE,
   PackageManager,
@@ -52,9 +49,14 @@ function reqStr(v: unknown, name: string): string {
   return v.trim();
 }
 
-function resolveCatalogApp(id: string): CatalogApp {
-  const app = findApp(id);
-  if (!app) throw new Error(`unknown app '${id}'; not in the catalog`);
+/** Resolve an app id against the catalog, then the manually added apps. */
+function resolveApp(id: string): CatalogApp {
+  const app = findAnyApp(id);
+  if (!app) {
+    throw new Error(
+      `unknown app '${id}'; not in the catalog and not one of the manually added apps`,
+    );
+  }
   return app;
 }
 
@@ -128,8 +130,8 @@ export function appList(args: any): any {
       : listTargets();
   const apps =
     Array.isArray(args?.apps) && args.apps.length
-      ? args.apps.map((id: unknown) => resolveCatalogApp(String(id)))
-      : APPS;
+      ? args.apps.map((id: unknown) => resolveApp(String(id)))
+      : allApps();
 
   const results = targets.map((target: TargetRecord) => {
     let packageManager: PackageManager | null = null;
@@ -150,6 +152,9 @@ export function appList(args: any): any {
         id: app.id,
         name: app.name,
         namespace: app.namespace ?? "system",
+        // Manually added apps are named as such on the tool surface too: an
+        // agent reading this must not mistake one for a vetted catalog entry.
+        ...(app.custom ? { source: "manual" } : { source: "catalog" }),
         ...probeApp(target, app),
         ...(record?.primary ? { package_version: record.primary.version } : {}),
         ...(record ? { package_tracking: trackingState(record) } : {}),
@@ -215,7 +220,7 @@ function appState(
 
 export function appStatus(args: any): any {
   const target = resolveTarget(reqStr(args?.target, "target"));
-  const app = resolveCatalogApp(reqStr(args?.app, "app"));
+  const app = resolveApp(reqStr(args?.app, "app"));
   const { probe, job, tail } = appState(target, app);
 
   return {
@@ -293,14 +298,22 @@ function startJob(
 
 export function appInstall(args: any): any {
   const target = resolveTarget(reqStr(args?.target, "target"));
-  const app = resolveCatalogApp(reqStr(args?.app, "app"));
+  const app = resolveApp(reqStr(args?.app, "app"));
   const distro = probeDistro(target);
   const recipe = installRecipeFor(app, distro.pm);
-  if (!recipe) {
+  // A manually added app has no authored recipe. On the local host that's
+  // fine — the AI session works the method out (and is held to official
+  // sources, see installSession.ts). On a remote target there is no session
+  // to do that, so the person's own install command is the only way in.
+  if (!recipe && !(app.custom && target.kind === "local")) {
     throw new Error(
-      `no install method for '${app.id}' on target '${target.id}': unsupported/unrecognised Linux ` +
-        `distribution ${distroDescription(distro)} (supported: debian/ubuntu, fedora/rhel, arch, suse) ` +
-        `and no vendor script configured for this app`,
+      app.custom
+        ? `no install command for '${app.id}' on target '${target.id}': manually added apps are worked out by ` +
+            `an AI install session, and that session only runs on the local Peckboard host. Either give this app an ` +
+            `install command in the App Manager dashboard, or install it on the local host.`
+        : `no install method for '${app.id}' on target '${target.id}': unsupported/unrecognised Linux ` +
+            `distribution ${distroDescription(distro)} (supported: debian/ubuntu, fedora/rhel, arch, suse) ` +
+            `and no vendor script configured for this app`,
     );
   }
 
@@ -323,6 +336,14 @@ export function appInstall(args: any): any {
     return startSessionInstall(target, app, model, distro.pm);
   }
 
+  // Only a manually added app on the local target reaches here without a
+  // recipe, and that returned above through the session path.
+  if (!recipe) {
+    throw new Error(
+      `no install command for '${app.id}' on target '${target.id}'`,
+    );
+  }
+
   // pip-namespace installs run without the package-DB snapshot bracket
   // (pm: null): pip's packages are invisible to it, and an unrelated
   // background distro change must not get attributed to the pip app.
@@ -339,14 +360,18 @@ export function appInstall(args: any): any {
 
 export function appRemove(args: any): any {
   const target = resolveTarget(reqStr(args?.target, "target"));
-  const app = resolveCatalogApp(reqStr(args?.app, "app"));
+  const app = resolveApp(reqStr(args?.app, "app"));
   const distro = probeDistro(target);
   const recipe = removeRecipeFor(app, distro.pm);
   if (!recipe) {
     throw new Error(
-      `no remove method for '${app.id}' on target '${target.id}': unsupported/unrecognised Linux ` +
-        `distribution ${distroDescription(distro)} (supported: debian/ubuntu, fedora/rhel, arch, suse) ` +
-        `and no vendor script configured for this app`,
+      app.custom
+        ? `no remove command for '${app.id}': App Manager never guesses how to uninstall a manually added ` +
+            `app. Give this app a remove command in the dashboard, or use Forget to drop it from the list ` +
+            `(which uninstalls nothing).`
+        : `no remove method for '${app.id}' on target '${target.id}': unsupported/unrecognised Linux ` +
+            `distribution ${distroDescription(distro)} (supported: debian/ubuntu, fedora/rhel, arch, suse) ` +
+            `and no vendor script configured for this app`,
     );
   }
   return startJob(target, app, "remove", recipe);
@@ -357,9 +382,10 @@ export function appRemove(args: any): any {
 /**
  * Everything the dashboard needs for ONE target in a single round trip: the
  * target itself, its distro/package-manager banner (or the refusal when it
- * isn't a usable Linux target), and one row per catalog app with its installed
- * state plus any job attached to it. Job records come from the data store, so
- * this costs no extra exec beyond the per-app probes.
+ * isn't a usable Linux target), and one row per app — catalog first, then the
+ * manually added ones — with its installed state plus any job attached to it.
+ * Job records come from the data store, so this costs no extra exec beyond
+ * the per-app probes.
  */
 export function targetOverview(targetRef: unknown): any {
   const target = resolveTarget(targetRef);
@@ -372,13 +398,14 @@ export function targetOverview(targetRef: unknown): any {
   }
   const distro = distroView(probe, probeError);
   const apps = distro.supported
-    ? APPS.map((app) =>
+    ? allApps().map((app) =>
         appRowView(
           app,
           probeApp(target, app),
           probe ? probe.pm : null,
           currentJobFor(target.id, app.id),
           getInstallRecord(target.id, app.id),
+          target.kind,
         ),
       )
     : [];
@@ -394,7 +421,7 @@ export function targetOverview(targetRef: unknown): any {
  */
 export function appProgress(targetRef: unknown, appRef: unknown): any {
   const target = resolveTarget(targetRef);
-  const app = resolveCatalogApp(reqStr(appRef, "app"));
+  const app = resolveApp(reqStr(appRef, "app"));
   let pm: PackageManager | null = null;
   try {
     pm = probeDistro(target).pm;
@@ -405,7 +432,14 @@ export function appProgress(targetRef: unknown, appRef: unknown): any {
   return {
     app: app.id,
     target: target.id,
-    row: appRowView(app, probe, pm, job, getInstallRecord(target.id, app.id)),
+    row: appRowView(
+      app,
+      probe,
+      pm,
+      job,
+      getInstallRecord(target.id, app.id),
+      target.kind,
+    ),
     job: job ? jobView(job, tail) : null,
   };
 }

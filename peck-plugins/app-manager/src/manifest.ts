@@ -11,17 +11,22 @@ const DESCRIPTION =
   "commands (apt/dnf/pacman/zypper), vendor installer scripts, or pip AS THE PECKBOARD " +
   "HOST USER on the chosen target, using sudo -A for steps that need root. This plugin " +
   "can run any bare command on the local host via the process_exec_any permission — it " +
-  "is restricted in code to the app catalog's own static recipes, but the permission " +
-  "grant itself is broad. Ships an App Manager dashboard page (sidebar entry) for " +
+  "is restricted in code to the app catalog's own static recipes plus whatever install/" +
+  "remove command you type for an app you add by hand, but the permission " +
   "picking a target, seeing what is installed, watching install progress live, and " +
   "browsing each app's dependency graph as resolved from the target's package manager " +
   "(pip packages get their own pip-probed section). Installs on the LOCAL host run " +
   "through a TEMPORARY AI SESSION on a user-picked account + model (thinking-capable " +
   "models only): the plugin creates the temp session, dispatches the install prompt, " +
   "shows tool-level session activity, and still records provenance itself via " +
-  "package-DB snapshots taken around the session — removal stays script-based.";
+  "package-DB snapshots taken around the session — removal stays script-based. Apps " +
+  "outside the catalog can be ADDED BY HAND in the dashboard: on the local host that " +
+  "install session identifies the software (searching the web when it does not know it) " +
+  "and downloads only from official sources; on a remote target it runs the install " +
+  "command the person typed for that app — user-authored shell run verbatim on the " +
+  "target, the one thing this plugin runs that is not a static catalog recipe.";
 
-const VERSION = "0.5.0";
+const VERSION = "0.7.0";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.
@@ -35,8 +40,8 @@ const ICON =
 const TARGET_DESC =
   "Target id from app_targets (e.g. 'local', or a configured remote target's id).";
 const APP_DESC =
-  "Catalog app id from app_list (e.g. 'git', 'ollama', 'ripgrep').";
-
+  "App id from app_list (a catalog id such as 'git', 'ollama', 'ripgrep', or the id of an " +
+  "app added by hand in the App Manager dashboard).";
 const MCP_TOOLS = [
   {
     name: "app_targets",
@@ -51,11 +56,12 @@ const MCP_TOOLS = [
   {
     name: "app_list",
     description:
-      "List the app catalog with per-target installed state and version, plus the packages each " +
-      "recorded install genuinely added (snapshot-bracket provenance: name + package-DB version, " +
-      "labelled with the app that pulled them in; vendor-script installs are explicitly untracked " +
-      "by the package manager). Optionally scope to a subset of targets and/or apps; defaults to " +
-      "every configured target and every catalog app.",
+      "List the app catalog plus any apps added by hand in the dashboard (each entry carries " +
+      "source: 'catalog' or 'manual'), with per-target installed state and version, plus the " +
+      "packages each recorded install genuinely added (snapshot-bracket provenance: name + " +
+      "package-DB version, labelled with the app that pulled them in; vendor-script installs are " +
+      "explicitly untracked by the package manager). Optionally scope to a subset of targets " +
+      "and/or apps; defaults to every configured target and every app.",
     input_schema: {
       type: "object",
       properties: {
@@ -67,7 +73,8 @@ const MCP_TOOLS = [
         apps: {
           type: "array",
           items: { type: "string" },
-          description: "Catalog app ids to check (default: the whole catalog).",
+          description:
+            "App ids to check (default: the catalog plus every manually added app).",
         },
       },
       required: [],
@@ -97,7 +104,9 @@ const MCP_TOOLS = [
       "temporary AI session on a thinking-capable model: pass 'model' (an id from the dashboard's " +
       "picker, account-qualified) or rely on the dashboard's stored default; without either the " +
       "call is refused. Remote targets install via the deterministic scripted recipe and take no " +
-      "model.",
+      "model. A manually added app has no catalog recipe: on the local host the session works out " +
+      "how to install it (identifying the software from official sources), and on a remote target " +
+      "it needs the install command stored with that app in the dashboard, or the call is refused.",
     input_schema: {
       type: "object",
       properties: {
@@ -119,7 +128,9 @@ const MCP_TOOLS = [
     name: "app_remove",
     description:
       "Start removing an app from a target. Returns immediately with a job id — poll app_status with " +
-      "the same app/target to follow progress. Only apps in the catalog can be removed.",
+      "the same app/target to follow progress. Removal is always a deterministic scripted command: a " +
+      "catalog app's own remove recipe, or the remove command stored with a manually added app — " +
+      "never a guess, so an app with neither cannot be removed here.",
     input_schema: {
       type: "object",
       properties: {
@@ -199,6 +210,9 @@ export function manifestJson(): string {
       "POST /api/plugin-ui/app-manager/target-remove",
       "POST /api/plugin-ui/app-manager/install",
       "POST /api/plugin-ui/app-manager/remove",
+      "GET /api/plugin-ui/app-manager/apps-custom",
+      "POST /api/plugin-ui/app-manager/apps-custom",
+      "POST /api/plugin-ui/app-manager/apps-custom-remove",
       "POST /api/plugin-ui/app-manager/deps-refresh",
     ],
     mcp_tools: MCP_TOOLS,

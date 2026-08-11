@@ -45,6 +45,16 @@ export interface CatalogApp {
    * itself (`pip list --format=freeze` / `pip show`) — never through the
    * distro package database. */
   pip_package?: string;
+  /** True for a MANUALLY ADDED app (see customApps.ts): not in this table,
+   * projected into this shape from a user-created record. Its recipes, when
+   * present, are commands the person typed rather than authored recipes, and
+   * the local install is worked out by the AI session instead. */
+  custom?: true;
+  /** Manual apps: the executable the detect/version probes look for. */
+  binary?: string;
+  /** Manual apps: the official project URL the person supplied, if any — a
+   * claim the install session verifies, never a source of truth. */
+  homepage?: string;
 }
 
 function aptInstall(pkg: string): string {

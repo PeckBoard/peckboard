@@ -6,6 +6,11 @@ configured remote SSH hosts — via MCP tools. System apps come from the
 distro package manager (or a vendor script); Python packages come from
 pip, tracked as their own clearly-labelled namespace.
 
+Apps outside the catalog can be **added by hand** in the dashboard: on the
+local host an AI install session identifies the software — searching the web
+when it doesn't know it — and installs it from an official source only. See
+"Adding an App by Hand".
+
 It ships both an MCP tool surface (catalog, target abstraction, `app_*`
 tools) and an **App Manager dashboard page** reachable from the sidebar.
 
@@ -40,6 +45,10 @@ permission set grew again (`models_read`, `session_write`,
 `session_dispatch`, `session_read` for AI-session installs), so Peckboard
 loads the new version inert until you approve it again in Settings →
 Plugins.
+**0.7.0 (apps added by hand) asks for no new permission** — the web search a
+manual app's install session does is the session agent's own tool, not
+something this plugin can do. It does widen what `process_exec_any` runs in
+practice: see "Adding an App by Hand" below.
 
 ## Dashboard Page
 
@@ -48,18 +57,21 @@ this plugin and framed in a sandboxed iframe (no `allow-same-origin`). It
 talks only to its own authenticated routes, through the host's
 postMessage fetch bridge:
 
-| Route                                  | Purpose                                          |
-| -------------------------------------- | ------------------------------------------------ |
-| `GET /targets`                         | the target dropdown (local + configured remotes) |
-| `GET /ssh-keys`                        | vault key metadata for the key dropdown          |
-| `GET /apps?target=`                    | distro banner + one grid row per catalog app     |
-| `GET /status?target=&app=`             | one app's live state + job progress              |
-| `GET /install-options`                 | account+model picker options + stored default    |
-| `POST /targets`, `POST /target-remove` | remote-target CRUD                               |
-| `POST /install`, `POST /remove`        | start an install (session/script) / remove job   |
-| `GET /deps?target=`                    | cached dependency graph, trees + reverse view    |
-| `POST /deps-refresh`                   | re-resolve the graph from the package manager    |
-| `GET /rdeps?target=&pkg=`              | system-wide reverse deps of one graph package    |
+| Route                                  | Purpose                                            |
+| -------------------------------------- | -------------------------------------------------- |
+| `GET /targets`                         | the target dropdown (local + configured remotes)   |
+| `GET /ssh-keys`                        | vault key metadata for the key dropdown            |
+| `GET /apps?target=`                    | distro banner + one grid row per app               |
+| `GET /status?target=&app=`             | one app's live state + job progress                |
+| `GET /install-options`                 | account+model picker options + stored default      |
+| `POST /targets`, `POST /target-remove` | remote-target CRUD                                 |
+| `POST /install`, `POST /remove`        | start an install (session/script) / remove job     |
+| `GET /apps-custom`                     | the manually added app records (for the edit form) |
+| `POST /apps-custom`                    | add or edit a manually added app                   |
+| `POST /apps-custom-remove`             | forget one (uninstalls nothing)                    |
+| `GET /deps?target=`                    | cached dependency graph, trees + reverse view      |
+| `POST /deps-refresh`                   | re-resolve the graph from the package manager      |
+| `GET /rdeps?target=&pkg=`              | system-wide reverse deps of one graph package      |
 
 (all under `/api/plugin-ui/app-manager`.)
 
@@ -81,6 +93,32 @@ Notes on the shape of it:
   package-manager command as root on the target.
 - A target that isn't a usable Linux host renders as a refusal instead of an
   app grid; every error is a sentence, never raw JSON.
+
+### Deep Link: `?install=`
+
+Another plugin's page can point a person here with what it needs installed.
+Graphify's install handoff opens:
+
+```
+/plugin-page/app-manager/app-manager?install=python3,pip,graphifyy&from=graphify
+```
+
+| Param     | Meaning                                                            |
+| --------- | ------------------------------------------------------------------ |
+| `install` | comma-separated catalog ids; unknown ids are named, never acted on |
+| `from`    | optional label for the request bar ("graphify asked for these")    |
+| `target`  | optional target id, honoured once on first load                    |
+
+The page renders a request bar above the grid listing each app with its state
+and, for the missing ones, that app's own Install button.
+
+**The link only prefills.** It cannot start an install: the buttons are the
+same ones the rows carry, so a local install still opens the account+model
+picker and nothing runs until a person clicks. The query is parsed server-side
+in `src/deeplink.ts` (ids must be catalog slugs, the list is capped, `from` is
+stripped to plain words) and injected into the page as a JSON literal, so a
+crafted URL can neither smuggle markup into the page nor name something the
+catalog doesn't have.
 
 ### Local Target and Folder Scope
 
@@ -118,6 +156,72 @@ Distro detection reads `/etc/os-release` on the target and maps
 `ID`/`ID_LIKE` to one of `apt` (debian/ubuntu), `dnf` (fedora/rhel), `pacman`
 (arch), `zypper` (suse). An unrecognised or non-Linux target is refused with
 a clear message — never a guessed command.
+
+## Adding an App by Hand
+
+The catalog can't have everything. **+ Add app** in the dashboard creates a
+row for software the catalog doesn't know (`src/customApps.ts`, stored in
+this plugin's own `data_store` under `custom_apps`). The form takes the app's
+name, the command that proves it is installed, and — optionally — an official
+site, a note, an install command, and a remove command. Adding an app
+installs nothing; it only creates the row.
+
+**On the local host, the AI install session works out how.** The same
+temporary session catalog apps use gets an extra set of rules for a manual
+app (`officialSourceRules` in `src/installSession.ts`):
+
+- **Identify the software first** — if the agent doesn't already know it, it
+  searches the web for what the project is and how its own authors say to
+  install it. If several projects share the name, it asks in the session
+  rather than guessing.
+- **Official sources only**: the project's own site or repository, this
+  distribution's official repositories, or the project's own entry in an
+  official registry (PyPI, npm, crates.io) or its own releases page. Never a
+  third-party mirror, a re-upload, an unofficial PPA/COPR, a fork, or a
+  binary linked from a blog or a search result.
+- **Check the checksum or signature** when the project publishes one.
+- **If no official source can be confirmed, stop and say so** — never install
+  a lookalike.
+
+Whatever the person typed (site, note, suggested command) goes in as a claim
+to verify, never as truth. Success is still decided by re-running the app's
+detect probe, exactly as for a catalog app — never by the agent's own account
+— and the package-DB snapshot bracket still records what genuinely arrived.
+
+**On a remote target it runs the install command you typed, verbatim.** An AI
+session runs on the Peckboard host and has no path to a target's SSH
+credentials, so there is nothing to work the method out remotely. Without a
+stored install command the row is blocked there, and says why. This is worth
+stating plainly:
+
+> Every other command this plugin runs is a static recipe from
+> `src/catalog.ts`. A manual app's `install_command` / `remove_command` are
+> **user-authored shell**, run as the Peckboard host user (or over SSH on the
+> chosen target). They can only be created from the authenticated dashboard,
+> they are stored verbatim, and the page shows them back verbatim in a
+> confirmation before the first run — but they are not catalog-restricted.
+
+Everything the plugin _derives_ stays safe by construction: the id is a
+validated slug, the probe binary must match `^[A-Za-z0-9._+-]+$` and is
+shell-quoted into `command -v` anyway, and the homepage must be an `https://`
+URL. A command is never assembled from those fields.
+
+Other edges, deliberately visible:
+
+- **Removal is never guessed.** With no `remove_command`, the row's only
+  disposal action is **Forget**, which drops the entry from App Manager's
+  list and uninstalls nothing — the confirmation says exactly that.
+- **No dependency tree.** The graph is resolved from the catalog's own
+  packages, so a manual app's row says dependencies aren't resolved for it
+  rather than rendering an empty tree that would read as "no dependencies".
+  Its provenance delta (what the package manager recorded during the install)
+  is real and still shown.
+- **Rows are badged "added by hand"**, and `app_list` marks them
+  `source: "manual"`, so neither a person nor an agent reads one as a vetted
+  catalog entry.
+- **No MCP tool adds or forgets one** — that is the dashboard's job, the same
+  as remote targets. `app_install`, `app_status`, `app_list` and `app_deps`
+  all accept a manual app's id.
 
 ## Installs Are Detached Jobs — and Local Installs Run in an AI Session
 

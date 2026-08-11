@@ -62,6 +62,25 @@ describe("the page route", () => {
     expect(v.payload.body).toContain("App Manager");
   });
 
+  it("leaves the deep-link request null on a normal load", () => {
+    const v = JSON.parse(serveHttp({ method: "GET", path: PAGE_PATH }));
+    expect(v.payload.body).toContain("var REQ = null;");
+    expect(v.payload.body).not.toContain("__APP_MANAGER_REQUEST__");
+  });
+
+  it("bakes a ?install= deep link into the page", () => {
+    const v = JSON.parse(
+      serveHttp({
+        method: "GET",
+        path: PAGE_PATH,
+        query: "install=python3,pip&from=graphify&theme=dark",
+      }),
+    );
+    expect(v.payload.body).toContain(
+      'var REQ = {"apps":["python3","pip"],"from":"graphify","target":""};',
+    );
+  });
+
   it("404s any other path", () => {
     const v = JSON.parse(
       serveHttp({ method: "GET", path: "/plugin-api/v1/nope" }),
@@ -237,6 +256,113 @@ describe("the app grid payload", () => {
   });
 });
 
+describe("manually added apps (owned by the page, like remote targets)", () => {
+  beforeEach(() => installHost({}, { execAny: localExec() }));
+
+  it("adds one, lists it, and shows it as a grid row on the local target", () => {
+    const created = post(`${API}/apps-custom`, {
+      name: "Zellij",
+      notes: "terminal multiplexer",
+      homepage: "https://zellij.dev",
+    });
+    expect(created.status).toBe(200);
+    expect(created.body.app.id).toBe("zellij");
+
+    expect(get(`${API}/apps-custom`).body.apps.map((a: any) => a.id)).toEqual([
+      "zellij",
+    ]);
+
+    const rows = get(`${API}/apps`, "target=local").body.apps;
+    const row = rows.find((a: any) => a.id === "zellij");
+    expect(row).toMatchObject({
+      custom: true,
+      installed: false,
+      action: "install",
+      // No install command, yet installable here: the AI session works it out.
+      actionable: true,
+      forgettable: true,
+    });
+    expect(rows.some((a: any) => a.id === "git" && a.custom === false)).toBe(
+      true,
+    );
+  });
+
+  it("rejects a bad probe command or a non-https site, in prose", () => {
+    const badBinary = post(`${API}/apps-custom`, {
+      name: "Zellij",
+      binary: "zellij; rm -rf /",
+    });
+    expect(badBinary.status).toBe(400);
+    expect(badBinary.body.error).toContain("valid command name");
+    expect(badBinary.body.error).not.toContain("{");
+
+    const badSite = post(`${API}/apps-custom`, {
+      name: "Zellij",
+      homepage: "http://zellij.dev",
+    });
+    expect(badSite.status).toBe(400);
+    expect(badSite.body.error).toContain("https");
+  });
+
+  it("refuses to install one on a remote target until it has an install command", () => {
+    post(`${API}/apps-custom`, { name: "Zellij" });
+    const target = post(`${API}/targets`, {
+      hostname: "10.0.0.5",
+      username: "ubuntu",
+      key_id: "k1",
+    }).body.target.id;
+
+    installHost(
+      {
+        targets: {
+          [target]: {
+            id: target,
+            kind: "remote",
+            label: "10.0.0.5",
+            hostname: "10.0.0.5",
+            port: 22,
+            username: "ubuntu",
+            key_id: "k1",
+          },
+        },
+        custom_apps: {
+          zellij: { id: "zellij", name: "Zellij", binary: "zellij", notes: "" },
+        },
+      },
+      {
+        sshExec: () => ({
+          ok: true,
+          exit_code: 0,
+          stdout: "ID=ubuntu\n",
+          stderr: "",
+          stdout_truncated: false,
+          stderr_truncated: false,
+          timed_out: false,
+          server_fingerprint: "",
+          started_at: "",
+          finished_at: "",
+          duration_ms: 1,
+        }),
+      },
+    );
+
+    const r = post(`${API}/install`, { target, app: "zellij" });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toContain("only runs on the local Peckboard host");
+  });
+
+  it("forgets one without uninstalling, and refuses to forget a catalog app", () => {
+    post(`${API}/apps-custom`, { name: "Zellij" });
+    expect(
+      post(`${API}/apps-custom-remove`, { id: "zellij" }).body.forgotten,
+    ).toBe("zellij");
+    expect(get(`${API}/apps-custom`).body.apps).toEqual([]);
+
+    const catalog = post(`${API}/apps-custom-remove`, { id: "git" });
+    expect(catalog.status).toBe(400);
+    expect(catalog.body.error).toContain("not a manually added app");
+  });
+});
 describe("queryParam", () => {
   it("decodes a value and ignores other keys", () => {
     expect(queryParam("target=local&app=git", "app")).toBe("git");

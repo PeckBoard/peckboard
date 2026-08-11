@@ -9,6 +9,14 @@
 // gets metadata only, and a target stores nothing but the vault key's id.
 
 import { PAGE } from "./page";
+import { injectRequest, parseInstallRequest } from "./deeplink";
+import {
+  buildCustomApp,
+  forgetCustomApp,
+  getCustomApp,
+  listCustomApps,
+  putCustomApp,
+} from "./customApps";
 import { listModels, sshKeyList } from "./host";
 import { getDefaultInstallModel, thinkingModelChoices } from "./installSession";
 import {
@@ -28,6 +36,7 @@ import {
   resolveTarget,
 } from "./targets";
 import { errMsg, htmlResponse, jsonResponse } from "./verdict";
+import { queryParam } from "./query";
 import { friendlyError, targetView } from "./view";
 
 const PAGE_PATH = "/plugin-api/v1/app-manager";
@@ -49,9 +58,15 @@ function parseBody(body: string): any {
 }
 
 /// Serve the dashboard page (the sidebar item opens this).
+///
+/// `?install=…` is a deep-link prefill — see deeplink.ts. It only names apps
+/// in a request bar; installing still takes a click here.
 export function serveHttp(payload: any): string {
   if (up(payload?.method) === "GET" && str(payload?.path) === PAGE_PATH) {
-    return htmlResponse(200, PAGE);
+    return htmlResponse(
+      200,
+      injectRequest(PAGE, parseInstallRequest(str(payload?.query))),
+    );
   }
   return htmlResponse(
     404,
@@ -129,6 +144,31 @@ export function serveAuthed(payload: any): string {
         appInstall({ target: b?.target, app: b?.app, model: b?.model }),
       );
     }
+    // Manually added apps: the dashboard's own CRUD, mirroring remote-target
+    // CRUD (no MCP tool adds one). The install/remove commands stored here are
+    // user-authored shell — the page shows them back verbatim before a run,
+    // and only an authenticated dashboard request can create them.
+    if (method === "GET" && path === `${API}/apps-custom`) {
+      return jsonResponse(200, { apps: listCustomApps() });
+    }
+    if (method === "POST" && path === `${API}/apps-custom`) {
+      const b = parseBody(body);
+      const existing = str(b?.id).trim()
+        ? getCustomApp(str(b.id).trim())
+        : null;
+      const rec = buildCustomApp(b, existing);
+      putCustomApp(rec);
+      return jsonResponse(200, { app: rec });
+    }
+    // Forget — drops the entry from this list. Uninstalls nothing; the page's
+    // confirmation says so.
+    if (method === "POST" && path === `${API}/apps-custom-remove`) {
+      const id = str(parseBody(body)?.id).trim();
+      if (!forgetCustomApp(id)) {
+        throw new Error(`'${id}' is not a manually added app`);
+      }
+      return jsonResponse(200, { forgotten: id });
+    }
     if (method === "POST" && path === `${API}/remove`) {
       const b = parseBody(body);
       return jsonResponse(200, appRemove({ target: b?.target, app: b?.app }));
@@ -155,18 +195,5 @@ function saveTarget(input: any): any {
   return targetView(rec);
 }
 
-/// Extract and URL-decode `name`'s value from a `&`-separated query string.
-export function queryParam(query: string, name: string): string | undefined {
-  for (const pair of query.split("&")) {
-    const idx = pair.indexOf("=");
-    if (idx < 0) continue;
-    if (pair.slice(0, idx) !== name) continue;
-    const v = pair.slice(idx + 1);
-    try {
-      return decodeURIComponent(v.replace(/\+/g, "%20"));
-    } catch (_e) {
-      return v;
-    }
-  }
-  return undefined;
-}
+// Re-exported for callers (and tests) that have always imported it from here.
+export { queryParam };

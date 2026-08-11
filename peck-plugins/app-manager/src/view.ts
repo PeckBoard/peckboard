@@ -10,7 +10,7 @@ import { CatalogApp, installRecipeFor, removeRecipeFor } from "./catalog";
 import { PackageManager } from "./distro";
 import { JobRecord } from "./jobs";
 import { InstallRecord, PkgRef } from "./provenance";
-import { TargetRecord } from "./targets";
+import { TargetKind, TargetRecord } from "./targets";
 
 // --- targets ----------------------------------------------------------------
 
@@ -107,13 +107,15 @@ export function distroView(
     refusal: null,
   };
 }
-
-// --- app rows ---------------------------------------------------------------
-
 export interface AppRowView {
   id: string;
   name: string;
   description: string;
+  /** True for a MANUALLY ADDED app (customApps.ts) — badged distinctly so it
+   * is never read as a vetted catalog entry. */
+  custom: boolean;
+  /** Manual apps: the official URL the person supplied, if any. */
+  homepage: string | null;
   /** "pip" = Python package in pip's namespace, not a system package —
    * rendered as a distinct badge so the two can't be confused. */
   namespace: "system" | "pip";
@@ -124,10 +126,18 @@ export interface AppRowView {
   /** The one action offered for this row. */
   action: "install" | "remove";
   action_label: string;
-  /** False when no recipe exists for this target's package manager. */
+  /** False when there is no way to run this action on this target. */
   actionable: boolean;
   /** Why `actionable` is false, in prose. */
   blocked_reason: string | null;
+  /** Manual apps only: offer Forget, which drops the entry from App Manager's
+   * list and uninstalls nothing. */
+  forgettable: boolean;
+  /** Manual apps only: the exact command stored for this row's action, shown
+   * back verbatim before it runs (on a remote target it IS what runs; on the
+   * local host the install session treats it as a suggestion to check).
+   * null for catalog apps — their recipes are authored, not user-typed. */
+  action_command: string | null;
   /** The package-DB version of the app's own package from the last
    * recorded install, when it maps to one — authoritative for the package,
    * noted alongside the binary's probed version. */
@@ -137,6 +147,9 @@ export interface AppRowView {
    * is tracked in pip's namespace, never the distro package DB. Rendered
    * explicitly — never as an empty package list. */
   provenance_note: string | null;
+  /** Why this row has no dependency tree, when it has none by design (manual
+   * apps aren't resolved against the package manager). */
+  deps_note: string | null;
   /** "Installed with <app>" — the label over `added_packages`. */
   added_label: string | null;
   /** Packages recorded as arriving during this app's install job, each
@@ -152,8 +165,10 @@ export function appRowView(
   pm: PackageManager | null,
   job: JobRecord | null,
   record: InstallRecord | null = null,
+  targetKind: TargetKind = "local",
 ): AppRowView {
   const action = probe.installed ? "remove" : "install";
+  const custom = app.custom === true;
   // A record for an app that's no longer installed (removed outside this
   // plugin) would present stale provenance as current — suppress it.
   const rec = probe.installed ? record : null;
@@ -165,6 +180,12 @@ export function appRowView(
         "Python package installed via pip — tracked in pip's namespace, not the distro package database.";
     } else if (rec.tracking === "unknown") {
       provenanceNote = rec.note ?? "What this install added is unknown.";
+    } else if (custom) {
+      // A manual install has no authored method, so "vendor script" would be
+      // a guess. Say only what the snapshot bracket actually knows.
+      provenanceNote =
+        "Manually added app — what the package manager recorded during the install is listed below; " +
+        "anything installed outside the package manager isn't tracked.";
     } else if (rec.method === "vendor") {
       provenanceNote =
         "Installed by a vendor script — not tracked by the package manager.";
@@ -174,22 +195,47 @@ export function appRowView(
   const recipe = probe.installed
     ? removeRecipeFor(app, pm)
     : installRecipeFor(app, pm);
+  // A manual app with no install command is still installable on the LOCAL
+  // host: the AI session works the method out there (installSession.ts).
+  // Nothing equivalent exists for a remote target.
+  const sessionInstall = custom && !probe.installed && targetKind === "local";
+  const actionable = recipe !== null || sessionInstall;
+  let blockedReason: string | null = null;
+  if (!actionable) {
+    if (custom && action === "install") {
+      blockedReason =
+        `${app.name} was added by hand and has no install command. Manually added apps are worked out by ` +
+        `an AI install session, which only runs on the local host — give this app an install command to ` +
+        `install it on a remote target.`;
+    } else if (custom) {
+      blockedReason =
+        `${app.name} was added by hand and has no remove command. App Manager never guesses how to ` +
+        `uninstall an app — use Forget to drop it from this list, which uninstalls nothing.`;
+    } else {
+      blockedReason = `No ${action} recipe for ${app.name} on this distribution.`;
+    }
+  }
   return {
     id: app.id,
     name: app.name,
     description: app.description,
+    custom,
+    homepage: app.homepage ?? null,
     namespace: app.namespace ?? "system",
     installed: probe.installed,
     version: probe.version,
     state_label: probe.installed ? "Installed" : "Not installed",
     action,
     action_label: probe.installed ? "Remove" : "Install",
-    actionable: recipe !== null,
-    blocked_reason: recipe
-      ? null
-      : `No ${action} recipe for ${app.name} on this distribution.`,
+    actionable,
+    blocked_reason: blockedReason,
+    forgettable: custom,
+    action_command: custom ? recipe : null,
     package_version: rec?.primary?.version ?? null,
     provenance_note: provenanceNote,
+    deps_note: custom
+      ? "Dependencies aren't resolved for manually added apps — the graph is built from the catalog's own packages."
+      : null,
     added_label: added.length ? `Installed with ${app.name}` : null,
     added_packages: added,
     job: job ? jobView(job, "") : null,

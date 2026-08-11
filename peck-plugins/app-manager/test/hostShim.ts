@@ -5,7 +5,6 @@
 // data_store, and jobs/tools also touch exec).
 
 export type Store = Record<string, Record<string, any>>;
-export type Store = Record<string, Record<string, any>>;
 
 export interface HostMocks {
   execAny?: (input: {

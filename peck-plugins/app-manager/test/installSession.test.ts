@@ -118,6 +118,56 @@ describe("session request + prompt construction", () => {
     expect(prompt).toContain("sudo -A apt-get install -y git");
     expect(prompt).toContain("report the installed version");
   });
+
+  it("tells a manually added app's session to research it and stay on official sources", () => {
+    const prompt = buildInstallPrompt(
+      {
+        id: "zellij",
+        name: "Zellij",
+        version: "'zellij' --version",
+        custom: true,
+        homepage: "https://zellij.dev",
+        description: "terminal multiplexer",
+      },
+      null,
+    );
+    expect(prompt).toContain("search the web");
+    expect(prompt).toContain("OFFICIAL SOURCES ONLY");
+    expect(prompt).toContain("Never a third-party mirror");
+    expect(prompt).toContain("checksum or signature");
+    expect(prompt).toContain("STOP and say so");
+    expect(prompt).toContain("ask in this session");
+    // What the person supplied is context to verify, never taken as true.
+    expect(prompt).toContain("https://zellij.dev");
+    expect(prompt).toContain("confirm it really is the project's own");
+    expect(prompt).toContain("terminal multiplexer");
+    // And the standing rules still apply.
+    expect(prompt).toContain("sudo -A <cmd>");
+  });
+
+  it("frames a person's own install command as a suggestion to check, not an instruction", () => {
+    const prompt = buildInstallPrompt(
+      {
+        id: "zellij",
+        name: "Zellij",
+        version: "'zellij' --version",
+        custom: true,
+        description: "",
+      },
+      "cargo install zellij",
+    );
+    expect(prompt).toContain("suggestion to check, not an instruction");
+    expect(prompt).toContain("cargo install zellij");
+  });
+
+  it("leaves a catalog app's prompt free of the research rules", () => {
+    const prompt = buildInstallPrompt(
+      findApp("git")!,
+      "sudo -A apt-get install -y git",
+    );
+    expect(prompt).not.toContain("search the web");
+    expect(prompt).not.toContain("OFFICIAL SOURCES ONLY");
+  });
 });
 
 describe("slim-event folding", () => {
