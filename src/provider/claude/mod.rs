@@ -146,6 +146,50 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
     models
 }
 
+/// Models PeckBoard offers even when the CLI's `initialize` catalog leaves
+/// them out.
+///
+/// The catalog the CLI advertises is its own alias set — today `default`,
+/// `opus[1m]`, `sonnet`, `haiku` — so a model that is newer than the
+/// installed CLI, or gated to some accounts, is simply absent from it while
+/// `--model=<id>` still accepts the id. Discovery REPLACES the static seed
+/// (see `ClaudeProvider::account_scoped_models`), so without this merge such
+/// a model silently vanishes from the picker on any machine with a real
+/// `claude` binary: that is exactly how `claude-fable-5` went missing.
+pub(crate) fn always_offered_models() -> Vec<ModelInfo> {
+    vec![ModelInfo {
+        id: "claude-fable-5".into(),
+        display_name: "Claude Fable 5".into(),
+        capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
+        tier: 4,
+    }]
+}
+
+/// The model family an id belongs to, or `None` for ids that name no known
+/// family (Bedrock ARNs, say). Used to compare a CLI alias (`opus[1m]`)
+/// against a pinned id (`claude-opus-4-8`) — string equality never matches
+/// those, family does.
+fn model_family(id: &str) -> Option<&'static str> {
+    const FAMILIES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+    let id = id.to_ascii_lowercase();
+    FAMILIES.into_iter().find(|f| id.contains(f))
+}
+
+/// Append every [`always_offered_models`] entry the probed catalog doesn't
+/// already carry. Matched by id AND by family, so the day the CLI starts
+/// advertising its own `fable` alias the picker gets that one entry, not two.
+pub(crate) fn merge_always_offered(models: &mut Vec<ModelInfo>) {
+    for extra in always_offered_models() {
+        let family = model_family(&extra.id);
+        let known = models
+            .iter()
+            .any(|m| m.id == extra.id || (family.is_some() && model_family(&m.id) == family));
+        if !known {
+            models.push(extra);
+        }
+    }
+}
+
 /// How long one CLI model-discovery result (success or failure alike) is
 /// reused before the CLI is probed again. The probe spawns a full `claude`
 /// process (~2-4s), so the TTL is generous compared to the other providers'
@@ -652,6 +696,57 @@ mod tests {
         assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
         assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
         assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
+    }
+    /// A CLI that advertises no Fable alias (the real 2.1.x catalog: default,
+    /// `opus[1m]`, `sonnet`, `haiku`) must not cost the picker the model —
+    /// discovery replaces the seed, so the merge is what keeps it selectable.
+    #[test]
+    fn merge_always_offered_restores_a_model_the_cli_omits() {
+        let mut probed = vec![
+            ModelInfo {
+                id: "opus[1m]".into(),
+                display_name: "Opus 5 with 1M context".into(),
+                capabilities: vec!["code".into()],
+                tier: 3,
+            },
+            ModelInfo {
+                id: "sonnet".into(),
+                display_name: "Sonnet 5".into(),
+                capabilities: vec!["code".into()],
+                tier: 2,
+            },
+        ];
+
+        merge_always_offered(&mut probed);
+
+        let ids: Vec<&str> = probed.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opus[1m]", "sonnet", "claude-fable-5"]);
+        assert_eq!(probed[2].tier, 4);
+    }
+
+    /// Once the CLI does advertise the family — under any alias — the merge
+    /// steps aside, so the picker never shows two Fable entries.
+    #[test]
+    fn merge_always_offered_skips_a_family_the_cli_already_lists() {
+        let mut probed = parse_initialize_models(&initialize_fixture("rid-1"), "rid-1").unwrap();
+        let before = probed.len();
+
+        merge_always_offered(&mut probed);
+
+        assert_eq!(probed.len(), before);
+        assert_eq!(probed.iter().filter(|m| m.id.contains("fable")).count(), 1);
+    }
+
+    /// The static seed already carries every always-offered model; merging
+    /// into it changes nothing.
+    #[test]
+    fn merge_always_offered_is_a_noop_on_the_static_seed() {
+        let mut seed = discover_models();
+        let before = seed.clone();
+
+        merge_always_offered(&mut seed);
+
+        assert_eq!(seed.len(), before.len());
     }
 
     /// Trimmed real capture from `claude` 2.1.195's initialize response.

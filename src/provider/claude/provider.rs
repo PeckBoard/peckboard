@@ -224,11 +224,17 @@ impl ClaudeProvider {
     /// labelled variant per stored account (`<model>@<account_id>`, shown as
     /// `[Account] Model`). Returns just the base list when there are no
     /// accounts or no DB handle.
+    ///
+    /// A probed catalog is topped up with
+    /// [`always_offered_models`](super::always_offered_models) first: the CLI
+    /// omits ids it has no alias for, and dropping them here would hide a
+    /// model the user can still run.
     async fn account_scoped_models(&self) -> Vec<crate::provider::stream::ModelInfo> {
-        let base = match self.discovered_models().await {
+        let mut base = match self.discovered_models().await {
             Some(models) if !models.is_empty() => models,
             _ => super::discover_models(),
         };
+        super::merge_always_offered(&mut base);
         let Some(db) = &self.db else {
             return base;
         };
@@ -1052,6 +1058,38 @@ mod tests {
             queued[0].user_event_appended,
             "the dispatcher already wrote the transcript entry; the drain must not add a second"
         );
+    }
+
+    /// End of the wiring the picker actually walks: a probed catalog (here
+    /// pre-seeded into the discovery cache, so no CLI is spawned) reaches
+    /// `dynamic_models` topped up with the always-offered ids the CLI has no
+    /// alias for. Without the merge this list is Opus/Sonnet only and
+    /// `claude-fable-5` is unreachable from the model picker.
+    #[tokio::test]
+    async fn dynamic_models_tops_up_a_probed_catalog_that_omits_fable() {
+        let provider = ClaudeProvider::new();
+        *provider.discovery_cache.lock().await = Some(DiscoveryCache {
+            fetched_at: std::time::Instant::now(),
+            models: Some(vec![
+                crate::provider::stream::ModelInfo {
+                    id: "opus[1m]".into(),
+                    display_name: "Opus 5 with 1M context".into(),
+                    capabilities: vec!["code".into()],
+                    tier: 3,
+                },
+                crate::provider::stream::ModelInfo {
+                    id: "sonnet".into(),
+                    display_name: "Sonnet 5".into(),
+                    capabilities: vec!["code".into()],
+                    tier: 2,
+                },
+            ]),
+        });
+
+        let models = provider.dynamic_models().await.unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+
+        assert_eq!(ids, ["opus[1m]", "sonnet", "claude-fable-5"]);
     }
 }
 
