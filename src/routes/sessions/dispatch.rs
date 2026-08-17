@@ -718,6 +718,29 @@ pub(super) async fn terminate_agent(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
+/// POST /api/sessions/:id/retry-auth -- replay the turn this session parked
+/// when it failed to authenticate.
+///
+/// The park normally lifts by itself (once automatically, and again
+/// whenever the account's credential changes), so this is the escape hatch
+/// for a fix Peckboard can't observe: a host-level login, a proxy, a clock
+/// fixed. Returns 204 on a release, 409 when nothing is parked — better
+/// than a silent 204 that looks like it retried something.
+pub(super) async fn retry_auth(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Manual auth retry requested");
+    if crate::provider::auth_recovery::retry_now(&state, &id).await {
+        Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "session has no turn parked on an expired login" })),
+        ))
+    }
+}
+
 /// POST /api/sessions/:id/prehatch-cancel -- cancel the pre-hatch parked on
 /// this chat session: kill the temp research session's agent, dismiss the
 /// pending question cards, and make sure the parked original message still

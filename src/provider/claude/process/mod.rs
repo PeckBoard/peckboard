@@ -970,6 +970,26 @@ pub async fn stream_events(
             // otherwise only complete on the ~30-minute idle reap.
             // Interactive sessions are never auto-compacted (the UI prompts
             // the user instead) and keep running to --resume normally.
+            // An auth failure is terminal for THIS child: the CLI read its
+            // credential from the env at spawn, so writing the next turn
+            // into the same process presents the same revoked token and
+            // 401s again. Winding down here does two things — it frees the
+            // next dispatch to spawn under a current credential, and it
+            // turns the failure into a real `ProcessCompletion` (an
+            // ordinary failed turn produces none, because the child keeps
+            // running), which is what lets `provider::auth_recovery` see it
+            // at all instead of waiting on the ~30-minute idle reap.
+            if !shutdown_after_turn
+                && last_result_error
+                    .as_deref()
+                    .is_some_and(|e| CrashKind::classify(e) == CrashKind::AuthExpired)
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "Turn failed to authenticate; recycling the child so the next dispatch re-reads the credential"
+                );
+                shutdown_after_turn = true;
+            }
             if !shutdown_after_turn {
                 let row = db.get_session(&session_id).await.ok().flatten();
                 let is_subagent = row.as_ref().is_some_and(|s| s.parent_session_id.is_some());
@@ -1953,6 +1973,22 @@ mod tests {
         .to_string()
     }
 
+    /// Synthetic error `result` frame for a failure the child can RECOVER
+    /// from — a tool blew up, not a credential problem. Distinct from
+    /// [`fake_error_result_frame`] because an auth-classified error now
+    /// winds the child down (see `auth_error_result_winds_the_child_down`),
+    /// so tests about surviving an errored turn must not use a 401.
+    fn fake_generic_error_result_frame(conv_id: &str) -> String {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "session_id": conv_id,
+            "result": "the model reported an error while executing a tool",
+        })
+        .to_string()
+    }
+
     #[tokio::test]
     async fn error_result_reports_not_completed_on_graceful_shutdown() {
         // The compaction-401 regression: begin_handover dispatches the doc
@@ -1991,11 +2027,11 @@ mod tests {
 
     #[tokio::test]
     async fn new_turn_clears_previous_turns_result_error() {
-        // Turn N settles with an is_error result (transient 401); turn N+1
-        // is cancelled mid-flight. The outcome must report *this* exit's
-        // interrupt, not turn N's stale auth error — otherwise
-        // maybe_auto_pause_after_crash sees login-expired and trips the
-        // crash-pause ladder for a failure that did not happen here.
+        // Turn N settles with an is_error result; turn N+1 is cancelled
+        // mid-flight. The outcome must report *this* exit's interrupt, not
+        // turn N's stale error — otherwise maybe_auto_pause_after_crash
+        // sees the old failure and trips the crash-pause ladder for
+        // something that did not happen here.
         let session = "loop-stale-result-error";
         let (_db, tx, cancel, turn_active, handle) = spawn_cat_loop(session).await;
 
@@ -2003,9 +2039,11 @@ mod tests {
             .await
             .unwrap();
         wait_for_turn_active(&turn_active, true, 2_000).await;
-        tx.send(StdinMsg::RawLine(fake_error_result_frame("conv-stale")))
-            .await
-            .unwrap();
+        tx.send(StdinMsg::RawLine(fake_generic_error_result_frame(
+            "conv-stale",
+        )))
+        .await
+        .unwrap();
         wait_for_turn_active(&turn_active, false, 2_000).await;
 
         tx.send(StdinMsg::UserTurn(UserMessage::from_text("second")))
@@ -2026,6 +2064,35 @@ mod tests {
             "cancelled turn must report the interrupt, not the previous turn's error"
         );
         assert_eq!(outcome.error_kind, Some(CrashKind::Interrupted));
+    }
+
+    #[tokio::test]
+    async fn auth_error_result_winds_the_child_down() {
+        // The CLI reads its credential from the env once, at spawn, so a
+        // turn that 401s means THIS child can never succeed again — the
+        // loop must exit rather than accept another turn into a process
+        // holding a revoked token. Exiting is also what turns the failure
+        // into a `ProcessCompletion` for `provider::auth_recovery` to act
+        // on: an ordinary failed turn produces none.
+        let session = "loop-auth-error-recycle";
+        let (_db, tx, _cancel, turn_active, handle) = spawn_cat_loop(session).await;
+
+        tx.send(StdinMsg::UserTurn(UserMessage::from_text("hello")))
+            .await
+            .unwrap();
+        wait_for_turn_active(&turn_active, true, 2_000).await;
+        tx.send(StdinMsg::RawLine(fake_error_result_frame("conv-auth")))
+            .await
+            .unwrap();
+
+        // No cancel: the 401 alone has to wind the child down.
+        let outcome = timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("an auth failure must wind the child down without a cancel")
+            .expect("task must not panic");
+
+        assert!(!outcome.completed);
+        assert_eq!(outcome.error_kind, Some(CrashKind::AuthExpired));
     }
 
     #[tokio::test]
@@ -2380,7 +2447,7 @@ mod tests {
         // cat echoes the control_request frame back to the loop, which
         // must ignore it (not a can_use_tool request). Simulate the
         // CLI's observed settling result (error_during_execution).
-        tx.send(StdinMsg::RawLine(fake_error_result_frame("conv-i")))
+        tx.send(StdinMsg::RawLine(fake_generic_error_result_frame("conv-i")))
             .await
             .unwrap();
         wait_for_turn_active(&turn_active, false, 2_000).await;

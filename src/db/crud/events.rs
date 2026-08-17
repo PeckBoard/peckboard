@@ -15,6 +15,31 @@ impl Db {
         })
         .await
     }
+    /// Newest event for `session_id` whose kind is one of `kinds`, if any.
+    ///
+    /// Auth recovery reads a session's park state — whichever of
+    /// `auth-parked` / `auth-resumed` came last — with this instead of
+    /// loading the transcript. Walks the existing `(session_id, seq)`
+    /// index backwards and stops at the first hit.
+    pub async fn latest_event_of_kinds(
+        &self,
+        session_id: &str,
+        kinds: &[&str],
+    ) -> anyhow::Result<Option<Event>> {
+        let session_id = session_id.to_string();
+        let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+        self.with_conn(move |conn| {
+            events::table
+                .filter(events::session_id.eq(&session_id))
+                .filter(events::kind.eq_any(&kinds))
+                .select(Event::as_select())
+                .order(events::seq.desc())
+                .first(conn)
+                .optional()
+                .map_err(Into::into)
+        })
+        .await
+    }
 
     pub async fn list_events_by_session(
         &self,

@@ -445,6 +445,55 @@ interface ModelInfo {
 }
 
 /**
+ * Remediation shown under a turn that failed to authenticate.
+ *
+ * The turn itself is already parked server-side and replays on its own the
+ * moment the account's credential changes, so the primary instruction is
+ * "go fix the account". The button is the escape hatch for a fix Peckboard
+ * can't observe — a host-level login, a proxy, a corrected clock — and a
+ * 409 from it just means there was nothing left parked.
+ */
+function AuthFailureRemedy({ sessionId }: { sessionId: string }) {
+  const retryAuth = useSessionsStore((s) => s.retryAuth)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const retry = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await retryAuth(sessionId)
+    } catch (e) {
+      setError(describeActionError(e, 'Failed to retry'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="chat-handover-failed" role="alert" data-testid="chat-crash-auth-remedy">
+      <span>
+        The account&apos;s login expired.{' '}
+        <a href="/settings/providers">
+          Add or refresh an account in Settings → Providers &amp; Accounts
+        </a>
+        . The turn is held and runs again on its own once you do.
+      </span>
+      <button
+        type="button"
+        className="btn-secondary btn-sm"
+        onClick={() => void retry()}
+        disabled={busy}
+        data-testid="chat-crash-auth-retry"
+      >
+        {busy ? 'Retrying…' : 'Retry now'}
+      </button>
+      {error && <span className="chat-handover-failed-reason">{error}</span>}
+    </div>
+  )
+}
+
+/**
  * One feed row. Memoized: the incremental fold keeps item identity stable
  * for untouched history, so a streamed token chunk re-renders only the
  * growing bubble instead of every mounted row.
@@ -588,21 +637,7 @@ const ChatRow = memo(function ChatRow({
                 <pre className="tool-pre tool-pre-stderr">{item.stderr}</pre>
               </details>
             )}
-            {authFailure && (
-              <div
-                className="chat-handover-failed"
-                role="alert"
-                data-testid="chat-crash-auth-remedy"
-              >
-                <span>
-                  The account&apos;s login expired.{' '}
-                  <a href="/settings/providers">
-                    Add or refresh an account in Settings → Providers &amp; Accounts
-                  </a>
-                  , then retry.
-                </span>
-              </div>
-            )}
+            {authFailure && <AuthFailureRemedy sessionId={sessionId} />}
           </div>
         </div>
       )

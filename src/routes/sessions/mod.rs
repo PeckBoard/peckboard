@@ -127,6 +127,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/sessions/{id}/terminate",
             post(dispatch::terminate_agent),
         )
+        .route("/api/sessions/{id}/retry-auth", post(dispatch::retry_auth))
         .route(
             "/api/sessions/{id}/prehatch-cancel",
             post(dispatch::cancel_pre_hatch),

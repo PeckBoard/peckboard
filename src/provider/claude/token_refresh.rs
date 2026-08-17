@@ -7,10 +7,13 @@
 //! token when it is about to lapse. Legacy long-lived setup tokens (no
 //! refresh token / no expiry on the row) pass through untouched.
 //!
-//! Known limitation: the token is injected into the spawned CLI's env at
-//! process start, so a single claude process that lives past the token's
-//! expiry keeps the stale value until its next respawn. Refreshes renew
-//! the DB row, not a running process.
+//! A refresh renews the DB row, not a running process: the token is
+//! injected into the spawned CLI's env at process start, so a child that
+//! outlives its token keeps the stale value. The dispatcher closes that
+//! gap — it fingerprints the credential each turn resolves and recycles a
+//! child whose fingerprint no longer matches (see
+//! `ClaudeRun::credential_fingerprint`), so the next turn spawns under the
+//! renewed token instead of 401ing against the old one.
 
 use std::time::Duration;
 

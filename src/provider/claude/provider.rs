@@ -32,16 +32,25 @@ struct ClaudeRun {
     /// stdin). Used by the idle reaper to decide whether to recycle
     /// a quiet child.
     last_activity: Arc<AtomicU64>,
-    /// Which stored Claude account (`@<account_id>` model suffix) this
-    /// child authenticated as; `None` is the Default/host account.
-    /// Checked on reuse in `send_message` so a turn is never written
-    /// into a child billing a different account.
     /// Id of the LAST turn dispatched into this child. One child serves many
     /// turns, so the completion emitted when it exits must report the turn it
     /// last carried — not the one that spawned it — for the handover listener
     /// to tell a doc-generation turn from an older run's completion.
     last_run_id: Arc<AtomicU64>,
+    /// Which stored Claude account (`@<account_id>` model suffix) this
+    /// child authenticated as; `None` is the Default/host account.
+    /// Checked on reuse in `send_message` so a turn is never written
+    /// into a child billing a different account.
     account_id: Option<String>,
+    /// [`credential_fingerprint`] of the secret this child was spawned
+    /// with. `account_id` alone is not enough: a re-login or a silent
+    /// token refresh replaces the secret while the id stays the same, and
+    /// the CLI only reads its token from the env once, at spawn — so a
+    /// long-lived child keeps presenting the revoked token and every turn
+    /// 401s until the idle reaper happens to recycle it. Compared on reuse
+    /// in `send_message`; a mismatch recycles the child so the next turn
+    /// spawns under the current credential.
+    credential_fingerprint: Option<String>,
 }
 
 /// TTL cache for the CLI model-discovery probe. Success and failure are
@@ -155,35 +164,42 @@ impl ClaudeProvider {
     /// account id that no longer exists (deleted out from under a live
     /// session) is a hard error rather than a silent fall back to the
     /// Default/host credentials — a turn must never bill the wrong account.
+    ///
+    /// Returns the [`credential_fingerprint`] of the secret it injected so
+    /// the caller can tell a live child spawned under a superseded secret
+    /// from one that is still current. `None` when there is no DB handle
+    /// (test registrations) and nothing was injected.
     async fn inject_account_env(
         &self,
         account_id: &str,
         env: &mut HashMap<String, String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         let Some(db) = &self.db else {
-            return Ok(());
+            return Ok(None);
         };
         let account = db
             .get_claude_account(account_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("claude account not found: {account_id}"))?;
-        match account.kind.as_str() {
+        let secret = match account.kind.as_str() {
             "api_key" => {
                 env.insert("ANTHROPIC_API_KEY".into(), account.credential.clone());
+                account.credential.clone()
             }
             "oauth_token" => {
                 // Short-lived browser-login tokens are renewed here so the
                 // spawned CLI never starts with an expired credential.
                 let token = super::token_refresh::fresh_credential(db, &account).await?;
-                env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), token);
+                env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), token.clone());
+                token
             }
             other => return Err(anyhow::anyhow!("unknown claude account kind: {other}")),
-        }
+        };
         if let Some(dir) = &account.config_dir {
             std::fs::create_dir_all(dir).ok();
             env.insert("CLAUDE_CONFIG_DIR".into(), dir.clone());
         }
-        Ok(())
+        Ok(Some(credential_fingerprint(&secret)))
     }
 
     /// CLI-probed base catalog through the TTL cache. `None` when discovery
@@ -330,9 +346,13 @@ impl AgentProvider for ClaudeProvider {
         let base_model = base_model.to_string();
 
         let mut env = config.env.clone();
-        if let Some(account_id) = account_id {
-            self.inject_account_env(account_id, &mut env).await?;
-        }
+        // Fingerprint of the credential THIS dispatch resolved — compared
+        // against the live child's below so one spawned under a superseded
+        // secret is recycled instead of reused.
+        let credential_fingerprint = match account_id {
+            Some(account_id) => self.inject_account_env(account_id, &mut env).await?,
+            None => None,
+        };
 
         // Kept before `config` is consumed below: the full model id
         // (prefix + `@account` suffix intact) and effort a re-queued turn
@@ -348,30 +368,50 @@ impl AgentProvider for ClaudeProvider {
         };
 
         // Never reuse a live child that authenticated as a DIFFERENT
-        // account. Normally the handover machinery recycles the child
-        // before the account flips, but two paths bypass it: the
+        // account, or under a credential that has since been replaced.
+        //
+        // Account: normally the handover machinery recycles the child
+        // before the account flips, but two paths bypass it — the
         // begin_handover failure fallback (direct model write), and a
         // cross-account switch on a session with no history yet. Writing
-        // this turn into the old child would bill the previous account —
-        // wind it down and spawn fresh under the right credentials.
-        let account_mismatch = {
+        // this turn into the old child would bill the previous account.
+        //
+        // Credential: the CLI reads its token from the env once, at spawn.
+        // A re-login or a silent refresh swaps the secret while the account
+        // id stays put, so without this check the child keeps presenting
+        // the revoked token — the session 401s on every turn no matter how
+        // many times the user updates the account.
+        let recycle_reason = {
             let runs = self.runs.lock().await;
-            runs.get(&session_id)
-                .is_some_and(|r| r.account_id.as_deref() != account_id)
+            runs.get(&session_id).and_then(|r| {
+                recycle_reason(
+                    r.account_id.as_deref(),
+                    r.credential_fingerprint.as_deref(),
+                    account_id,
+                    credential_fingerprint.as_deref(),
+                )
+            })
         };
-        let conversation_id = if account_mismatch {
+        let conversation_id = if let Some(reason) = recycle_reason {
             tracing::warn!(
                 session_id = %session_id,
                 account = account_id.unwrap_or("default"),
-                "Live claude child belongs to a different account; recycling before dispatch"
+                reason,
+                "Live claude child no longer matches this dispatch; recycling before it"
             );
             self.cancel(&session_id).await;
             self.wait_for_termination(&session_id).await;
-            // The old conversation lives under the previous account's
-            // CLAUDE_CONFIG_DIR — `--resume` under the new credentials
-            // would fail the spawn outright. Start a fresh conversation;
-            // the next agent-start records the new id on the session row.
-            None
+            // An account switch also invalidates the conversation: it lives
+            // under the previous account's CLAUDE_CONFIG_DIR, so `--resume`
+            // under the new credentials would fail the spawn outright. Start
+            // fresh; the next agent-start records the new id on the session
+            // row. A credential swap on the SAME account keeps its config
+            // dir, so that conversation resumes normally.
+            if reason == "account" {
+                None
+            } else {
+                conversation_id
+            }
         } else {
             conversation_id
         };
@@ -417,6 +457,7 @@ impl AgentProvider for ClaudeProvider {
                         last_run_id: last_run_id.clone(),
                         last_activity: last_activity.clone(),
                         account_id: account_id.map(str::to_string),
+                        credential_fingerprint: credential_fingerprint.clone(),
                     };
                     runs.insert(session_id.clone(), run);
 
@@ -727,6 +768,39 @@ fn now_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
+
+/// Short, non-reversible stamp for a resolved account credential.
+///
+/// Only ever compared for equality — it says *which* secret a child was
+/// spawned with without keeping the secret itself in the run map (or in a
+/// log line, if one is ever added there).
+fn credential_fingerprint(secret: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(secret.as_bytes()))[..16].to_string()
+}
+
+/// Why a live child can't take this dispatch, if it can't.
+///
+/// `"account"` — it authenticated as a different account, so reusing it
+/// would bill the wrong one and resume a conversation that lives under the
+/// other account's config dir. `"credential"` — same account, different
+/// secret: the CLI only reads its token at spawn, so the running child is
+/// still presenting the superseded one and every turn written into it
+/// 401s. `None` — reuse is safe.
+fn recycle_reason(
+    run_account: Option<&str>,
+    run_fingerprint: Option<&str>,
+    account: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Option<&'static str> {
+    if run_account != account {
+        return Some("account");
+    }
+    if run_fingerprint != fingerprint {
+        return Some("credential");
+    }
+    None
+}
 /// Park user turns the stream loop handed back (see
 /// [`process::StreamOutcome::undelivered`]) in the durable
 /// `queued_messages` FIFO.
@@ -809,6 +883,7 @@ mod tests {
             last_run_id: Arc::new(AtomicU64::new(0)),
             last_activity: Arc::new(AtomicU64::new(now_ms())),
             account_id: None,
+            credential_fingerprint: None,
         };
         provider
             .runs
@@ -952,6 +1027,7 @@ mod tests {
             last_run_id: Arc::new(AtomicU64::new(0)),
             last_activity: Arc::new(AtomicU64::new(now_ms())),
             account_id: None,
+            credential_fingerprint: None,
         };
         provider.runs.lock().await.insert("s2".into(), run);
 
@@ -1090,6 +1166,48 @@ mod tests {
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
 
         assert_eq!(ids, ["opus[1m]", "sonnet", "claude-fable-5"]);
+    }
+
+    #[test]
+    fn recycle_reason_flags_a_replaced_credential_on_the_same_account() {
+        let a = credential_fingerprint("tok-a");
+        let b = credential_fingerprint("tok-b");
+
+        // Same account, same secret — reuse is safe.
+        assert_eq!(
+            recycle_reason(Some("acc_1"), Some(&a), Some("acc_1"), Some(&a)),
+            None
+        );
+        // Same account, replaced secret (re-login or a silent refresh).
+        // This is the case that used to slip through: the live child still
+        // holds the revoked token and every turn written into it 401s.
+        assert_eq!(
+            recycle_reason(Some("acc_1"), Some(&a), Some("acc_1"), Some(&b)),
+            Some("credential")
+        );
+        // A different account outranks it — the conversation lives under
+        // the other account's config dir, so `--resume` can't carry over.
+        assert_eq!(
+            recycle_reason(Some("acc_1"), Some(&a), Some("acc_2"), Some(&b)),
+            Some("account")
+        );
+        // Default/host account on both sides: nothing stored to compare.
+        assert_eq!(recycle_reason(None, None, None, None), None);
+        // Moving from the Default account to a stored one still recycles.
+        assert_eq!(
+            recycle_reason(None, None, Some("acc_1"), Some(&a)),
+            Some("account")
+        );
+    }
+
+    #[test]
+    fn credential_fingerprint_is_stable_and_hides_the_secret() {
+        let secret = "sk-ant-oat01-not-a-real-token";
+        let fp = credential_fingerprint(secret);
+        assert_eq!(fp, credential_fingerprint(secret));
+        assert_ne!(fp, credential_fingerprint("sk-ant-oat01-a-different-token"));
+        assert!(!fp.contains(secret));
+        assert_eq!(fp.len(), 16);
     }
 }
 

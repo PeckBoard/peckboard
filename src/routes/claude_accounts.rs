@@ -506,6 +506,9 @@ async fn update_account(
         }
     };
 
+    // A replaced secret is the signal auth recovery waits on: everything
+    // parked on this account gets one more go under the new credential.
+    let credential_changed = credential.is_some();
     let changes = ClaudeAccountChanges {
         name: Some(name),
         credential,
@@ -520,10 +523,15 @@ async fn update_account(
     };
 
     match state.db.update_claude_account(&id, changes).await {
-        Ok(Some(acct)) => match to_view(&state, acct).await {
-            Ok(v) => Ok(Json(v)),
-            Err(e) => Err(server_error(e)),
-        },
+        Ok(Some(acct)) => {
+            if credential_changed {
+                crate::provider::auth_recovery::release_for_account(&state, "claude", &id).await;
+            }
+            match to_view(&state, acct).await {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err(server_error(e)),
+            }
+        }
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "account not found" })),

@@ -165,4 +165,20 @@ impl Db {
         })
         .await
     }
+
+    /// Distinct session ids that currently hold at least one queued
+    /// message. Small by construction — a row only exists while a message
+    /// is undelivered — so this is much cheaper than walking every
+    /// session. Auth recovery uses it to find the turns parked waiting on
+    /// a working login (see [`crate::provider::auth_recovery`]).
+    pub async fn sessions_with_queued_messages(&self) -> anyhow::Result<Vec<String>> {
+        self.with_conn(move |conn| {
+            queued_messages::table
+                .select(queued_messages::session_id)
+                .distinct()
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
 }

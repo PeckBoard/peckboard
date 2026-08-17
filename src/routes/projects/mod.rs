@@ -556,11 +556,18 @@ async fn pause_project(
         )),
     }
 }
-/// POST /api/projects/:id/resume
-async fn resume_project(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+/// Flip a project back to `active`: clears `pause_reason`, appends the
+/// crash-counter reset sentinel to every card, and broadcasts the update.
+/// Returns `Ok(None)` when the project doesn't exist.
+///
+/// Shared by the `/resume` route and [`crate::provider::auth_recovery`],
+/// which resumes a project that auto-paused on expired credentials as soon
+/// as a working login lands.
+pub(crate) async fn resume_project_inner(
+    state: &Arc<AppState>,
+    id: &str,
+) -> anyhow::Result<Option<crate::db::models::Project>> {
+    // Clearing `pause_reason` is deliberately not left to the auto-pause
     // path: it only fires when `project.status == "active"`, so a stale
     // reason left behind from an earlier auto-pause would still show in
     // the UI even after the user resumed.
@@ -575,31 +582,37 @@ async fn resume_project(
     // about to retry. Without this, the next crash hits the threshold
     // immediately (the old crash events are still on disk) and the
     // user's manual retry budget collapses to one attempt.
-    if let Err(e) = crate::worker::orchestrator::mark_project_resumed(&state.db, &id).await {
+    if let Err(e) = crate::worker::orchestrator::mark_project_resumed(&state.db, id).await {
         tracing::warn!(project_id = %id, "Failed to mark resume sentinel: {e}");
     }
 
-    let project = state.db.update_project(&id, update).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
+    let Some(project) = state.db.update_project(id, update).await? else {
+        return Ok(None);
+    };
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "project-update".into(),
+            session_id: id.to_string(),
+            data: serde_json::json!({ "project": &project }),
+        });
+    Ok(Some(project))
+}
 
-    match project {
-        Some(p) => {
-            state
-                .broadcaster
-                .broadcast(crate::ws::broadcaster::WsEvent {
-                    event_type: "project-update".into(),
-                    session_id: id,
-                    data: serde_json::json!({ "project": &p }),
-                });
-            Ok(Json(serde_json::json!(p)))
-        }
-        None => Err((
+/// POST /api/projects/:id/resume
+async fn resume_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match resume_project_inner(&state, &id).await {
+        Ok(Some(p)) => Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(p))),
+        Ok(None) => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "project not found" })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
         )),
     }
 }

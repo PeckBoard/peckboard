@@ -773,6 +773,32 @@ function foldEvent(st: FoldState, ev: Event): void {
       }
       break
     }
+    case 'auth-parked': {
+      // The turn is held in the durable queue until a working credential
+      // shows up. Rendered as a plain notice under the failure row that
+      // caused it; the remediation link and the Retry now button live on
+      // that row.
+      flushAssistant(st)
+      items.push({
+        type: 'system',
+        text: 'Turn paused, waiting for a working login. It runs again on its own once the account is updated.',
+        key: ev.id,
+        ts: ev.ts,
+      })
+      break
+    }
+    case 'auth-resumed': {
+      flushAssistant(st)
+      const trigger = (ev.data.trigger as string) ?? ''
+      const text =
+        trigger === 'account-updated'
+          ? 'Account updated. Retrying the paused turn.'
+          : trigger === 'manual'
+            ? 'Retrying the paused turn.'
+            : 'Retrying the turn under a fresh agent process.'
+      items.push({ type: 'system', text, key: ev.id, ts: ev.ts })
+      break
+    }
     case 'interrupt': {
       flushAssistant(st)
       closeOpenTools(items, st.openTools, 'interrupted', ev.ts)

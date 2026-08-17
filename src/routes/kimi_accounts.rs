@@ -464,6 +464,12 @@ async fn update_account(
             {
                 return Err(server_error(format!("failed to write account config: {e}")));
             }
+            // A replaced secret is the signal auth recovery waits on:
+            // everything parked on this account gets one more go under the
+            // new credential.
+            if credential.is_some() {
+                crate::provider::auth_recovery::release_for_account(&state, "kimi", &id).await;
+            }
             match to_view(&state, acct).await {
                 Ok(v) => Ok(Json(v)),
                 Err(e) => Err(server_error(e)),

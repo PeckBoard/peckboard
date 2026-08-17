@@ -577,6 +577,19 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await;
 
+                    // 1.7 Auth recovery. A turn that failed to authenticate
+                    // parks its message and — once per credential version —
+                    // releases it again immediately, so the drain below
+                    // replays it into a freshly spawned child. Ordered
+                    // before the drain deliberately: the release has to be
+                    // in place by the time the drain looks. Every other
+                    // outcome just drops the replay snapshot.
+                    peckboard::provider::auth_recovery::handle_completion(
+                        &orchestrator_state,
+                        &completion,
+                    )
+                    .await;
+
                     // 2. Drain any queued message — runs for every session
                     // (worker or interactive) and every completion outcome.
                     // drain_queue_for_session takes the per-session lock

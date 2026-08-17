@@ -72,14 +72,16 @@ test('an errored turn shows a red failed row + remediation, not the green ready 
   })
   expect(send.ok(), `send failed: ${await send.text()}`).toBeTruthy()
 
-  // The failed-turn row, in error styling, with the error text.
-  await expect(page.getByText('Agent failed')).toBeVisible({ timeout: 15_000 })
+  // The failed-turn row, in error styling, with the error text. `.first()`
+  // throughout: auth recovery replays the turn once automatically, so a
+  // scenario that fails every time produces two failed rows, not one.
+  await expect(page.getByText('Agent failed').first()).toBeVisible({ timeout: 15_000 })
   await expect(
-    page.getByText('OAuth session expired and could not be refreshed', { exact: false }),
+    page.getByText('OAuth session expired and could not be refreshed', { exact: false }).first(),
   ).toBeVisible()
 
   // Auth failures link the user to Settings → Providers & Accounts.
-  const remedy = page.getByTestId('chat-crash-auth-remedy')
+  const remedy = page.getByTestId('chat-crash-auth-remedy').first()
   await expect(remedy).toBeVisible()
   await expect(remedy.getByRole('link')).toHaveAttribute('href', '/settings/providers')
 
@@ -90,19 +92,21 @@ test('an errored turn shows a red failed row + remediation, not the green ready 
   // No green "all good" line under an error.
   await expect(page.getByText('Ready for your next message.')).toHaveCount(0)
 })
-
 test('an agent-start after a failed turn is annotated "retry 1"', async ({ request, page }) => {
   const { token, auth } = await authenticate(request)
   const { sessionId } = await seedSession(request, auth)
 
+  // `mock:crash` rather than an auth failure: an auth failure is replayed
+  // automatically (see auth-recovery.spec.ts), which would put a second
+  // failed turn on the streak before the injected start below.
   const send = await request.post(`/api/sessions/${sessionId}/message`, {
     headers: auth,
-    data: { text: 'fail auth please', model: 'mock:auth-error' },
+    data: { text: 'crash please', model: 'mock:crash' },
   })
   expect(send.ok(), `send failed: ${await send.text()}`).toBeTruthy()
 
   await loadAppAt(page, token, `/sessions/${sessionId}`)
-  await expect(page.getByText('Agent failed')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('Agent crashed')).toBeVisible({ timeout: 15_000 })
 
   // The respawn attempt: an agent-start following the errored agent-end.
   const injected = await request.post(`/api/sessions/${sessionId}/events`, {

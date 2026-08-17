@@ -34,6 +34,12 @@ use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, ToolImage};
 /// * `system-blob` — Started → raw `system` event with no `text`/`message` →
 ///   Completed
 /// * `crash` — Started → Text → Crashed
+/// * `auth-error` — a turn that FAILS without the process crashing: a
+///   Completed whose result-meta carries `error` + `errorKind:
+///   auth_expired`, the shape an expired login produces
+/// * `auth-error-once` — the same failure on the session's first turn
+///   only, succeeding on every turn after; drives the automatic replay in
+///   [`crate::provider::auth_recovery`]
 /// * `doc-review` — the document-review loop, driven through the REAL MCP
 ///   tools (`get_review_doc` / `submit_review_revision` / `ask_user`) via
 ///   [`call_mcp_tool`]. Branch chosen by a marker in the turn text:
@@ -163,13 +169,26 @@ impl AgentProvider for MockProvider {
                 map.remove(&sid);
             }
 
+            // A scenario that failed reports WHY. Real providers classify
+            // the turn's own result; the mock's scripted `Completed` /
+            // `Crashed` event IS that result, so reading it back keeps one
+            // source of truth and spares every scenario from threading an
+            // error tuple out of `run_scenario`. Without this the
+            // completion carries no `error_kind` and listeners that branch
+            // on it — auth recovery, above all — can't be driven from e2e.
+            let (error, error_kind) = if completed {
+                (None, None)
+            } else {
+                last_turn_error(&db, &sid).await
+            };
+
             let _ = completion_tx
                 .send(ProcessCompletion {
                     session_id: sid.clone(),
                     completed,
-                    error: None,
+                    error,
                     run_id,
-                    error_kind: None,
+                    error_kind,
                     turn_end_only: false,
                 })
                 .await;
@@ -266,6 +285,50 @@ impl AgentProvider for MockProvider {
             run.handle.abort();
         }
     }
+}
+
+/// Error text + classification of the newest `agent-end` on a session,
+/// when that turn FAILED.
+///
+/// The mock's failing scenarios write that event themselves, so this reads
+/// back what they scripted rather than duplicating it — see the call site
+/// in `send_message` for why the completion needs it.
+///
+/// Scoped to `status: "complete"` carrying an `error` — the shape a failed
+/// turn takes (the real providers' is_error result, e.g. an expired
+/// login's 401). A crashed or interrupted run is deliberately excluded: a
+/// non-null `ProcessCompletion::error` is what makes an aborted handover
+/// read as "Model switch failed" rather than "Switch cancelled", and a
+/// user pressing Cancel is not a failure.
+async fn last_turn_error(
+    db: &crate::db::Db,
+    session_id: &str,
+) -> (Option<String>, Option<CrashKind>) {
+    let Ok(events) = db.list_events_by_session_before(session_id, None, 50).await else {
+        return (None, None);
+    };
+    let Some(data) = events
+        .iter()
+        .rev()
+        .find(|e| e.kind == "agent-end")
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+    else {
+        return (None, None);
+    };
+    if data.get("status").and_then(|v| v.as_str()) != Some("complete") {
+        return (None, None);
+    }
+    let error = data
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    if error.is_none() {
+        return (None, None);
+    }
+    let error_kind = data
+        .get("errorKind")
+        .and_then(|v| serde_json::from_value::<CrashKind>(v.clone()).ok());
+    (error, error_kind)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1002,6 +1065,47 @@ async fn run_scenario(
             )
             .await;
             return false;
+        }
+        "auth-error-once" => {
+            // Fails to authenticate on the session's FIRST turn and works on
+            // every turn after — the shape auth recovery is built for, where
+            // the stored credential was fine all along and only the live
+            // child was stale. Lets an e2e watch the automatic replay heal a
+            // session with no user action.
+            //
+            // The turn number comes from the transcript rather than
+            // in-memory state on purpose: an auth failure now recycles the
+            // child, so anything held in the run would be gone by the retry.
+            let already_failed = db
+                .list_events_by_session_before(session_id, None, 200)
+                .await
+                .map(|events| events.iter().any(|e| e.kind == "agent-end"))
+                .unwrap_or(false);
+            if !already_failed {
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Completed {
+                        conversation_id: Some(conv_id),
+                        result_meta: serde_json::json!({
+                            "error": "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+                            "errorKind": "auth_expired",
+                        }),
+                    },
+                )
+                .await;
+                return false;
+            }
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Authenticated on the retry.".into(),
+                },
+            )
+            .await;
         }
         "markdown" => {
             // A single assistant text chunk containing markdown features the

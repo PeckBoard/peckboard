@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod auth_recovery;
 pub mod claude;
 pub mod cursor;
 pub mod grok;

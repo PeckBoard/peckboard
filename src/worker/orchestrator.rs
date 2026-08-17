@@ -1442,6 +1442,20 @@ pub async fn drain_queue_for_session(
         return Ok(());
     }
 
+    // Auth-parked: the session's last turn failed to authenticate and the
+    // message is being held until a working credential shows up. Delivering
+    // it now would spawn a run that 401s within seconds, re-park, and drain
+    // again — a tight loop against a dead token. The row stays queued (the
+    // user can still see, force or delete it) and
+    // `provider::auth_recovery` drains it once the park lifts.
+    if crate::provider::auth_recovery::is_parked(&state.db, session_id).await {
+        tracing::debug!(
+            session_id = %session_id,
+            "drain_queue_for_session: holding a turn parked on an expired credential"
+        );
+        return Ok(());
+    }
+
     // Peek at the next queued message so we can use the model/effort the
     // user picked when they enqueued, if any. Falls back to the session →
     // card → project chain. The drain helper itself re-checks the queue

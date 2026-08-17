@@ -65,6 +65,23 @@ impl SessionLock {
     }
 }
 
+/// A user turn handed to a provider, kept only until that turn settles.
+///
+/// Auth recovery replays it: by the time a 401 comes back the CLI has
+/// already consumed the message, so nothing else in the system knows what
+/// to re-send. Bytes are deliberately NOT kept — only the attachment ids,
+/// re-resolved from the attachments dir at delivery, exactly as the
+/// durable queue does.
+#[derive(Debug, Clone)]
+pub struct DispatchedTurn {
+    pub text: String,
+    pub attachment_ids: Vec<String>,
+    /// Full model id, provider prefix and `@account` suffix intact — a
+    /// replay must land on the same account the turn was billed to.
+    pub model: String,
+    pub effort: Option<String>,
+}
+
 /// Provider-agnostic dispatcher that owns the registry and routes session
 /// operations to the right `AgentProvider` based on the model id.
 ///
@@ -102,6 +119,13 @@ pub struct SessionManager {
     /// aborts every still-parked handover at startup before any completion
     /// is processed.
     handover_doc_dispatched: Arc<Mutex<HashSet<String>>>,
+    /// The user turn most recently dispatched into each session, dropped
+    /// once that turn settles. Read by [`crate::provider::auth_recovery`]
+    /// to rebuild a turn the provider consumed before failing to
+    /// authenticate. In-memory: it only has to survive from dispatch to
+    /// completion, and anything that must outlive a restart is written to
+    /// `queued_messages` by the recovery path itself.
+    last_dispatched: Arc<Mutex<HashMap<String, DispatchedTurn>>>,
 }
 
 impl SessionManager {
@@ -116,6 +140,7 @@ impl SessionManager {
             askpass: None,
             env_unlock: None,
             handover_doc_dispatched: Arc::new(Mutex::new(HashSet::new())),
+            last_dispatched: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     /// A second handle onto `other`'s **per-session lock map**, for observers
@@ -142,6 +167,7 @@ impl SessionManager {
             askpass: None,
             env_unlock: None,
             handover_doc_dispatched: Arc::new(Mutex::new(HashSet::new())),
+            last_dispatched: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -203,6 +229,18 @@ impl SessionManager {
             .lock()
             .await
             .contains(session_id)
+    }
+    /// The user turn last dispatched into `session_id`, if it hasn't been
+    /// forgotten yet. See [`DispatchedTurn`].
+    pub async fn last_dispatched_turn(&self, session_id: &str) -> Option<DispatchedTurn> {
+        self.last_dispatched.lock().await.get(session_id).cloned()
+    }
+
+    /// Drop the replay snapshot for `session_id`. Called for every
+    /// settled turn that isn't being replayed, so the map holds at most
+    /// one entry per session with a turn in flight.
+    pub async fn forget_dispatched_turn(&self, session_id: &str) {
+        self.last_dispatched.lock().await.remove(session_id);
     }
 
     /// Take the completion receiver. Called once at startup to set up the
@@ -587,6 +625,14 @@ impl SessionManager {
                 .insert("PECKBOARD_ASKPASS_TOKEN".into(), token);
         }
 
+        // Snapshot for auth-failure replay, taken before `message` and
+        // `final_config` are consumed below. See [`DispatchedTurn`].
+        let replay = DispatchedTurn {
+            text: message.text.clone(),
+            attachment_ids: message.attachment_ids.clone(),
+            model: final_config.model.clone(),
+            effort: final_config.effort.clone(),
+        };
         let ctx = SendMessageContext {
             session_id: session_id.to_string(),
             message,
@@ -611,6 +657,10 @@ impl SessionManager {
         // account, spawn error) leaves the handover doc, the plan review and
         // the doc review parked for the user's retry.
         if result.is_ok() {
+            self.last_dispatched
+                .lock()
+                .await
+                .insert(session_id.to_string(), replay);
             crate::handover::clear_pending_injections(db, session_id, &pending_used).await;
         }
         result
@@ -1340,6 +1390,28 @@ pub async fn shutdown_after_turn_via_registry(registry: &ProviderRegistry, sessi
     for info in registry.list_providers().await {
         if let Some(p) = registry.get_provider(&info.id).await {
             p.shutdown_after_turn(session_id).await;
+        }
+    }
+}
+
+/// Wind `session_id`'s child down and wait for it to actually be gone.
+///
+/// Graceful (`shutdown_after_turn`) rather than [`cancel_via_registry`]:
+/// callers use this once a turn has already settled, and closing stdin lets
+/// the CLI exit on EOF with no synthetic crash event — the path the idle
+/// reaper takes. A `cancel` here would post an "agent crashed" row into the
+/// transcript and feed the worker crash-loop counter for a child that isn't
+/// running anything.
+///
+/// The wait is the point: the reason to terminate is that the NEXT dispatch
+/// must spawn a fresh process (a new credential is only read at spawn).
+/// `wait_for_termination` returns once the run has left the provider's map,
+/// so the next `send_message` can no longer reuse it.
+pub async fn terminate_after_turn_via_registry(registry: &ProviderRegistry, session_id: &str) {
+    for info in registry.list_providers().await {
+        if let Some(p) = registry.get_provider(&info.id).await {
+            p.shutdown_after_turn(session_id).await;
+            p.wait_for_termination(session_id).await;
         }
     }
 }
