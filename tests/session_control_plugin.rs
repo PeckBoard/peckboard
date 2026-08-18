@@ -52,7 +52,7 @@ impl LiveHost for ControlRecorder {
 
 fn plugin_wasm() -> Option<PathBuf> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../peck-plugins/session-control/target/wasm32-unknown-unknown/release/\
+        "peck-plugins/session-control/target/wasm32-unknown-unknown/release/\
          peckboard_session_control_plugin.wasm",
     );
     p.exists().then_some(p)
@@ -84,8 +84,16 @@ async fn session_control_plugin_drives_tools_end_to_end() {
     })
     .await
     .unwrap();
-    // Caller and target are plain chat sessions; the control plugin has NO
-    // folder boundary, but here they share a folder anyway.
+    // Same-folder caller/target; plus a second folder with a foreign target
+    // used to assert the cross-folder gate.
+    db.create_folder(NewFolder {
+        id: "f2".into(),
+        name: "F2".into(),
+        path: "/tmp/sc2".into(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
     for sid in ["caller-1", "target-1"] {
         db.create_session(NewSession {
             id: sid.into(),
@@ -98,6 +106,16 @@ async fn session_control_plugin_drives_tools_end_to_end() {
         .await
         .unwrap();
     }
+    db.create_session(NewSession {
+        id: "foreign-1".into(),
+        name: "foreign-1".into(),
+        folder_id: "f2".into(),
+        created_at: ts.clone(),
+        last_activity: ts.clone(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
 
     let plugins = PluginManager::new(data_dir, db.clone());
     plugins.load_all().await.unwrap();
@@ -173,7 +191,7 @@ async fn session_control_plugin_drives_tools_end_to_end() {
     // query it returns every session; a query narrows by substring.
     let all = invoke(&plugins, "find_session", json!({}), &ctx).await;
     let sessions = all["sessions"].as_array().expect("sessions array");
-    assert_eq!(sessions.len(), 2, "both sessions listed: {all}");
+    assert_eq!(sessions.len(), 3, "all sessions listed: {all}");
     let filtered = invoke(&plugins, "find_session", json!({ "query": "target" }), &ctx).await;
     let hits = filtered["sessions"].as_array().expect("sessions array");
     assert_eq!(hits.len(), 1, "query narrows: {filtered}");
@@ -193,6 +211,41 @@ async fn session_control_plugin_drives_tools_end_to_end() {
         recorder.interrupts.lock().unwrap().len(),
         1,
         "no extra interrupt recorded"
+    );
+
+    // Cross-folder without a grant: plugin asks (awaiting_approval) rather
+    // than dispatching. Host would also refuse if the plugin skipped the ask.
+    let pending = invoke(
+        &plugins,
+        "interrupt_session",
+        json!({ "session_id": "foreign-1" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        pending["status"],
+        json!("awaiting_approval"),
+        "cross-folder must ask: {pending}"
+    );
+    assert_eq!(
+        recorder.interrupts.lock().unwrap().len(),
+        1,
+        "no cross-folder interrupt without grant"
+    );
+
+    // Always grant → cross-folder interrupt reaches LiveHost.
+    peckboard::plugin::session_control_auth::grant_always(&db, PLUGIN_ID, "caller-1").unwrap();
+    let xf = invoke(
+        &plugins,
+        "interrupt_session",
+        json!({ "session_id": "foreign-1" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(xf["ok"], json!(true), "cross-folder after Always: {xf}");
+    assert_eq!(
+        recorder.interrupts.lock().unwrap().as_slice(),
+        ["target-1", "foreign-1"]
     );
 }
 

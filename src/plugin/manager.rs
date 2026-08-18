@@ -133,7 +133,7 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file — connect to remote SSH hosts, run commands, transfer files
     "ssh_keys", // peckboard_ssh_key_list, and Auth::KeyRef in peckboard_ssh_* — list vault-key METADATA and use a vault key by id; never exposes private key material, ciphertext, nonce, or passphrase
     "session_dispatch", // peckboard_dispatch_capture / resume_session
-    "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — full cross-folder control of any session
+    "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — same-folder free; cross-folder needs Always/Once
     "session_read",    // peckboard_get_session / list_sessions
     "session_write",   // peckboard_create_session / update_session
     "session_prompt_write", // peckboard_set_session_system_prompt — set/clear a visible session's standing instructions

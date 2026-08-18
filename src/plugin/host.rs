@@ -1801,10 +1801,9 @@ pub(crate) fn deliver_message_impl(
 
 // ── Session control (gated: `session_control`) ────────────────────────
 //
-// Full control of ANY session by id (no folder/project boundary — the
-// operator grants this by approving the plugin). Every action is
-// fire-and-forget via the LiveHost; the host fn only validates the request
-// and that the target session exists.
+// Control another session by id. Same-folder targets are free; cross-folder
+// targets require an Always / Once grant in the plugin document store (see
+// `session_control_auth`). Every action is fire-and-forget via the LiveHost.
 
 /// Largest single attachment a session-control `send_message` accepts,
 /// matching the HTTP attachment upload cap.
@@ -1839,9 +1838,9 @@ struct SendAttachment {
     data_base64: String,
 }
 
-/// Look up a session by id with NO visibility boundary (session-control is
-/// deliberately cross-folder). Returns a uniform "not found" so a bad id is
-/// a clean error rather than a panic.
+/// Look up a session by id with NO visibility boundary (discovery + grant
+/// checks decide whether the caller may act). Returns a uniform "not found"
+/// so a bad id is a clean error rather than a panic.
 fn require_session(db: &Db, session_id: &str) -> Result<crate::db::models::Session, String> {
     let id = session_id.trim();
     if id.is_empty() {
@@ -1945,6 +1944,8 @@ pub(crate) fn list_sessions_brief_impl(db: &Db) -> String {
 
 fn control_session(
     db: &Db,
+    plugin_id: &str,
+    inv: &InvocationContext,
     input: &str,
     live: Option<Arc<dyn LiveHost>>,
     action_name: &str,
@@ -1954,10 +1955,14 @@ fn control_session(
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
-    let sid = match require_session(db, &req.session_id) {
-        Ok(s) => s.id,
+    let target = match require_session(db, &req.session_id) {
+        Ok(s) => s,
         Err(e) => return error_json(e),
     };
+    if let Err(e) = crate::plugin::session_control_auth::authorize(db, plugin_id, inv, &target) {
+        return error_json(e);
+    }
+    let sid = target.id;
     let Some(live) = live else {
         return error_json("live control unavailable");
     };
@@ -1967,43 +1972,64 @@ fn control_session(
 
 pub(crate) fn interrupt_session_impl(
     db: &Db,
+    plugin_id: &str,
+    inv: &InvocationContext,
     input: &str,
     live: Option<Arc<dyn LiveHost>>,
 ) -> String {
-    control_session(db, input, live, "interrupt", |live, sid| {
+    control_session(db, plugin_id, inv, input, live, "interrupt", |live, sid| {
         live.interrupt_session(sid)
     })
 }
 
 pub(crate) fn terminate_agent_impl(
     db: &Db,
+    plugin_id: &str,
+    inv: &InvocationContext,
     input: &str,
     live: Option<Arc<dyn LiveHost>>,
 ) -> String {
-    control_session(db, input, live, "terminate", |live, sid| {
+    control_session(db, plugin_id, inv, input, live, "terminate", |live, sid| {
         live.terminate_agent(sid)
     })
 }
 
-pub(crate) fn clear_session_impl(db: &Db, input: &str, live: Option<Arc<dyn LiveHost>>) -> String {
-    control_session(db, input, live, "clear", |live, sid| {
+pub(crate) fn clear_session_impl(
+    db: &Db,
+    plugin_id: &str,
+    inv: &InvocationContext,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    control_session(db, plugin_id, inv, input, live, "clear", |live, sid| {
         live.clear_session(sid)
     })
 }
 
 /// `peckboard_send_message` — deliver a message (with optional base64 image /
-/// file attachments) to any session and resume it.
-pub(crate) fn send_message_impl(db: &Db, input: &str, live: Option<Arc<dyn LiveHost>>) -> String {
+/// file attachments) to a session and resume it (same-folder free; cross-
+/// folder needs Always/Once — see `session_control_auth`).
+pub(crate) fn send_message_impl(
+    db: &Db,
+    plugin_id: &str,
+    inv: &InvocationContext,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
     use base64::Engine as _;
 
     let req: SendMessageRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
-    let sid = match require_session(db, &req.session_id) {
-        Ok(s) => s.id,
+    let target = match require_session(db, &req.session_id) {
+        Ok(s) => s,
         Err(e) => return error_json(e),
     };
+    if let Err(e) = crate::plugin::session_control_auth::authorize(db, plugin_id, inv, &target) {
+        return error_json(e);
+    }
+    let sid = target.id;
     if req.text.trim().is_empty() && req.attachments.is_empty() {
         return error_json("send_message requires non-empty text or at least one attachment");
     }
@@ -3419,31 +3445,34 @@ host_fn!(peckboard_deliver_message(user_data: HostState; input: String) -> Strin
     Ok(deliver_message_impl(&db, &input, &inv, live))
 });
 
-// Session control: full cross-folder control of any session. Gated on the
-// `session_control` permission; no invocation-context boundary (the operator
-// grants this by approving the plugin).
+// Session control: same-folder free; cross-folder needs Always/Once grant.
+// Gated on `session_control`; caller context is required for the folder check.
 host_fn!(peckboard_interrupt_session(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    let (db, plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
-    Ok(interrupt_session_impl(&db, &input, live))
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_interrupt_session is only callable during a tool invocation")); };
+    Ok(interrupt_session_impl(&db, &plugin_id, &inv, &input, live))
 });
 
 host_fn!(peckboard_terminate_agent(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    let (db, plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
-    Ok(terminate_agent_impl(&db, &input, live))
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_terminate_agent is only callable during a tool invocation")); };
+    Ok(terminate_agent_impl(&db, &plugin_id, &inv, &input, live))
 });
 
 host_fn!(peckboard_clear_session(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    let (db, plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
-    Ok(clear_session_impl(&db, &input, live))
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_clear_session is only callable during a tool invocation")); };
+    Ok(clear_session_impl(&db, &plugin_id, &inv, &input, live))
 });
 
 host_fn!(peckboard_send_message(user_data: HostState; input: String) -> String {
-    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    let (db, plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
-    Ok(send_message_impl(&db, &input, live))
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_send_message is only callable during a tool invocation")); };
+    Ok(send_message_impl(&db, &plugin_id, &inv, &input, live))
 });
 
 host_fn!(peckboard_list_all_sessions(user_data: HostState; input: String) -> String {
@@ -4362,10 +4391,38 @@ mod tests {
         })
         .await
         .unwrap();
+        db.create_folder(NewFolder {
+            id: "f2".into(),
+            name: "f2".into(),
+            path: "/tmp/f2".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "caller".into(),
+            name: "caller".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
         db.create_session(crate::db::models::NewSession {
             id: "s1".into(),
             name: "s1".into(),
             folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "other".into(),
+            name: "other".into(),
+            folder_id: "f2".into(),
             created_at: ts.clone(),
             last_activity: ts,
             ..Default::default()
@@ -4373,21 +4430,40 @@ mod tests {
         .await
         .unwrap();
 
+        let inv = InvocationContext {
+            session_id: Some("caller".into()),
+            project_id: None,
+            folder_id: Some("f1".into()),
+            authority: false,
+        };
+        let pid = "session-control";
+
         // Unknown target id → "not found" (no boundary check, just existence).
-        let nf = interrupt_session_impl(&db, r#"{"session_id":"nope"}"#, None);
+        let nf = interrupt_session_impl(&db, pid, &inv, r#"{"session_id":"nope"}"#, None);
         assert!(nf.contains("not found"), "{nf}");
 
-        // Known session, but no live host wired → reports unavailable, not a panic.
-        let nl = clear_session_impl(&db, r#"{"session_id":"s1"}"#, None);
+        // Same-folder known session, but no live host → unavailable.
+        let nl = clear_session_impl(&db, pid, &inv, r#"{"session_id":"s1"}"#, None);
         assert!(nl.contains("live control unavailable"), "{nl}");
 
+        // Cross-folder without grant is refused before live dispatch.
+        let xf = interrupt_session_impl(&db, pid, &inv, r#"{"session_id":"other"}"#, None);
+        assert!(xf.contains("user approval"), "{xf}");
+
+        // Always grant unlocks cross-folder (still needs live host).
+        crate::plugin::session_control_auth::grant_always(&db, pid, "caller").unwrap();
+        let nl2 = interrupt_session_impl(&db, pid, &inv, r#"{"session_id":"other"}"#, None);
+        assert!(nl2.contains("live control unavailable"), "{nl2}");
+
         // send_message refuses an empty payload (no text, no attachments).
-        let empty = send_message_impl(&db, r#"{"session_id":"s1","text":"  "}"#, None);
+        let empty = send_message_impl(&db, pid, &inv, r#"{"session_id":"s1","text":"  "}"#, None);
         assert!(empty.contains("requires"), "{empty}");
 
         // Malformed base64 attachment is rejected before dispatch.
         let bad = send_message_impl(
             &db,
+            pid,
+            &inv,
             r#"{"session_id":"s1","text":"hi","attachments":[{"filename":"a.png","mime_type":"image/png","data_base64":"!notbase64!"}]}"#,
             None,
         );

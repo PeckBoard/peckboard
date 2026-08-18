@@ -5,6 +5,7 @@ pub mod host;
 pub mod manager;
 pub mod notify;
 pub mod registry;
+pub mod session_control_auth;
 pub mod settings;
 pub mod ssh;
 pub mod todo_hook;

@@ -79,6 +79,8 @@ Only plain text messages in chat sessions are intercepted. Worker and expert ses
 
 Session Control adds tools a session can use on _other_ sessions — it is what lets one agent coordinate others, for example a chat session redirecting a subagent it spawned.
 
+Same-folder targets run immediately. Cross-folder mutating actions ask the user (*Approve once* / *Approve always* / *Deny*); *Always* is remembered for that controlling session. `find_session` stays folder-blind so agents can discover targets without a prompt. Upgrading past 0.2.0 re-triggers plugin approval because it adds the `ask_user` and `data_store` permissions.
+
 | Tool                | What it does                                                                      |
 | ------------------- | --------------------------------------------------------------------------------- |
 | `find_session`      | Lists sessions across every folder and project, with an optional substring query  |

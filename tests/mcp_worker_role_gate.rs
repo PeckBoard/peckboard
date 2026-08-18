@@ -336,7 +336,7 @@ impl LiveHost for NoopLiveHost {
 
 fn session_control_plugin_wasm() -> Option<PathBuf> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../peck-plugins/session-control/target/wasm32-unknown-unknown/release/\
+        "peck-plugins/session-control/target/wasm32-unknown-unknown/release/\
          peckboard_session_control_plugin.wasm",
     );
     p.exists().then_some(p)
