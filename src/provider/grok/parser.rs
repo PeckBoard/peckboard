@@ -323,6 +323,110 @@ pub(super) fn error_reason(json: &serde_json::Value) -> Option<String> {
     Some(msg)
 }
 
+/// Result of parsing `grok models` stdout. Catalog is auth-scoped: OAuth
+/// hosts may list `grok-4.6` while API-key / unauth hosts only list
+/// `grok-4.5`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ParsedCatalog {
+    /// Id from the `Default model:` line, when present.
+    pub default_id: Option<String>,
+    /// Model ids in CLI order, with `default_id` moved to the front when it
+    /// appeared in the list (or alone when the bullet list was empty).
+    pub models: Vec<String>,
+}
+
+/// Parse the human-readable listing from `grok models`.
+///
+/// Verified against grok 1.0.3:
+/// ```text
+/// You are logged in with grok.com.
+///
+/// Default model: grok-4.6
+///
+/// Available models:
+///   * grok-4.6 (default)
+///   - grok-4.5
+/// ```
+/// Returns `None` when nothing usable was found so the caller can fall back
+/// to the static seed.
+pub(super) fn parse_cli_models(output: &str) -> Option<ParsedCatalog> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut default_id: Option<String> = None;
+    let mut models: Vec<String> = Vec::new();
+    let mut in_list = false;
+
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line
+            .strip_prefix("Default model:")
+            .or_else(|| line.strip_prefix("default model:"))
+        {
+            let id = rest.trim().to_string();
+            if !id.is_empty() {
+                default_id = Some(id);
+            }
+            continue;
+        }
+        if line.eq_ignore_ascii_case("Available models:")
+            || line.eq_ignore_ascii_case("Available models")
+        {
+            in_list = true;
+            continue;
+        }
+        if !in_list {
+            continue;
+        }
+        // Bullet lines: "* id (default)" / "- id" / "• id". Stop if we hit
+        // prose that isn't a model bullet (e.g. a trailing tip).
+        let bullet = line
+            .strip_prefix('*')
+            .or_else(|| line.strip_prefix('-'))
+            .or_else(|| line.strip_prefix('•'))
+            .map(str::trim);
+        let Some(rest) = bullet else {
+            // Non-bullet after the header — end of list.
+            break;
+        };
+        let id = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(['(', ')', ','])
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if !models.iter().any(|existing| existing == &id) {
+            models.push(id);
+        }
+    }
+
+    // Prefer the explicit default even if the bullet list was missing it.
+    if let Some(def) = default_id.as_ref() {
+        if let Some(pos) = models.iter().position(|m| m == def) {
+            if pos != 0 {
+                let m = models.remove(pos);
+                models.insert(0, m);
+            }
+        } else {
+            models.insert(0, def.clone());
+        }
+    }
+
+    if models.is_empty() {
+        None
+    } else {
+        Some(ParsedCatalog { default_id, models })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +855,74 @@ mod tests {
             panic!("expected ToolEnd");
         };
         assert!(output.is_none());
+    }
+
+    #[test]
+    fn parse_cli_models_oauth_lists_46_then_45() {
+        let out = "\
+You are logged in with grok.com.
+
+Default model: grok-4.6
+
+Available models:
+  * grok-4.6 (default)
+  - grok-4.5
+";
+        let cat = parse_cli_models(out).expect("oauth catalog");
+        assert_eq!(cat.default_id.as_deref(), Some("grok-4.6"));
+        assert_eq!(cat.models, vec!["grok-4.6", "grok-4.5"]);
+    }
+
+    #[test]
+    fn parse_cli_models_api_key_lists_only_45() {
+        let out = "\
+You are using XAI_API_KEY.
+
+Default model: grok-4.5
+
+Available models:
+  * grok-4.5 (default)
+";
+        let cat = parse_cli_models(out).expect("api-key catalog");
+        assert_eq!(cat.default_id.as_deref(), Some("grok-4.5"));
+        assert_eq!(cat.models, vec!["grok-4.5"]);
+    }
+
+    #[test]
+    fn parse_cli_models_unauth_lists_only_45() {
+        let out = "\
+You are not authenticated.
+
+Default model: grok-4.5
+
+Available models:
+  * grok-4.5 (default)
+";
+        let cat = parse_cli_models(out).expect("unauth catalog");
+        assert_eq!(cat.models, vec!["grok-4.5"]);
+    }
+
+    #[test]
+    fn parse_cli_models_rejects_empty_and_garbage() {
+        assert_eq!(parse_cli_models(""), None);
+        assert_eq!(parse_cli_models("   "), None);
+        assert_eq!(parse_cli_models("no models here"), None);
+        assert_eq!(
+            parse_cli_models("Default model:\n\nAvailable models:\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_cli_models_moves_default_to_front() {
+        let out = "\
+Default model: grok-4.6
+
+Available models:
+  - grok-4.5
+  - grok-4.6
+";
+        let cat = parse_cli_models(out).unwrap();
+        assert_eq!(cat.models, vec!["grok-4.6", "grok-4.5"]);
     }
 }

@@ -30,10 +30,12 @@ mod mcp;
 mod parser;
 
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
@@ -41,7 +43,9 @@ use crate::plugin::settings::PluginSettingsStore;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext};
 use crate::provider::registry::split_model_account;
 use crate::provider::stream::{ModelInfo, ProviderEvent};
-use crate::provider::turn::{self, StderrMarker, TurnSpec, TurnStream, setting_str};
+use crate::provider::turn::{
+    self, StderrMarker, TurnSpec, TurnStream, setting_bool, setting_str, setting_str_list,
+};
 
 /// Default CLI binary name; overridable via the `cli_path` setting.
 const DEFAULT_CLI: &str = "grok";
@@ -54,6 +58,11 @@ const CLI_FALLBACK_DIRS: &[&str] = &[
     "~/.bun/bin",
     "/usr/local/bin",
 ];
+/// How long a model-discovery probe (success or failure) is cached, so the
+/// picker doesn't shell out on every render.
+const MODEL_DISCOVERY_TTL: Duration = Duration::from_secs(60);
+/// Bound on how long `grok models` may run.
+const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
 /// Grok prints its device-login URL to stderr when the account it runs as
 /// isn't signed in. Seeing it means the turn would otherwise block forever on
 /// "Waiting for authorization...", so the harness fast-fails on it. grok 1.0
@@ -85,6 +94,12 @@ struct GrokRun {
     retire: Arc<Notify>,
 }
 
+/// TTL cache for one `grok models` probe (host or a single account).
+struct DiscoveryCache {
+    fetched_at: Instant,
+    models: Option<Vec<String>>,
+}
+
 /// `AgentProvider` backed by per-turn `grok` invocations.
 pub struct GrokProvider {
     runs: Arc<Mutex<HashMap<String, GrokRun>>>,
@@ -93,9 +108,12 @@ pub struct GrokProvider {
     /// to inject. `None` in tests / no-DB registrations keeps the
     /// single-(Default-)account behaviour.
     db: Option<crate::db::Db>,
-    /// Plugin settings, for the `cli_path` override. `None` in tests /
-    /// no-plugin registrations, which then use the default binary name.
+    /// Plugin settings, for the `cli_path` / `discover_models` overrides.
+    /// `None` in tests / no-plugin registrations, which then use the default
+    /// binary name and discovery on.
     settings: Option<PluginSettingsStore>,
+    /// Per-scope (`""` = host, else account id) cache of `grok models` probes.
+    discovery_cache: Arc<Mutex<HashMap<String, DiscoveryCache>>>,
 }
 
 impl GrokProvider {
@@ -104,6 +122,7 @@ impl GrokProvider {
             runs: Arc::new(Mutex::new(HashMap::new())),
             db: None,
             settings: None,
+            discovery_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -119,20 +138,26 @@ impl GrokProvider {
         self
     }
 
+    /// Load plugin settings, or an empty map when unset / unloadable.
+    async fn load_settings(&self) -> HashMap<String, serde_json::Value> {
+        match &self.settings {
+            Some(store) => match store.load().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("grok: failed to load settings: {e}");
+                    HashMap::new()
+                }
+            },
+            None => HashMap::new(),
+        }
+    }
+
     /// The `grok` executable to spawn: the plugin's `cli_path` setting when
     /// one is configured, else the default name — either way resolved against
     /// the server's PATH and the usual install locations.
     async fn cli_path(&self) -> String {
-        let configured = match &self.settings {
-            Some(store) => match store.load().await {
-                Ok(s) => setting_str(&s, "cli_path"),
-                Err(e) => {
-                    tracing::warn!("grok: failed to load settings for cli_path: {e}");
-                    None
-                }
-            },
-            None => None,
-        };
+        let settings = self.load_settings().await;
+        let configured = setting_str(&settings, "cli_path");
         turn::resolve_cli_path(
             &configured.unwrap_or_else(|| DEFAULT_CLI.to_string()),
             CLI_FALLBACK_DIRS,
@@ -167,32 +192,85 @@ impl GrokProvider {
         Ok(())
     }
 
-    /// The model catalog the picker shows: the Default-account models (bare
-    /// ids) plus one labelled variant per stored account
-    /// (`<model>@<account_id>`, shown as `[Account] Model`). Mirrors the
-    /// Claude provider's `account_scoped_models`.
-    async fn account_scoped_models(&self) -> Vec<ModelInfo> {
-        let base = default_models();
+    /// Run `grok models` under `env` and return model ids, via the per-scope
+    /// TTL cache (`scope`: "" = host ambient credentials, or a grok account
+    /// id whose env selects its `GROK_HOME` / `XAI_API_KEY`). `Some(list)` on
+    /// success (possibly empty), `None` when the last probe failed and the
+    /// caller should fall back.
+    async fn discovered_models(
+        &self,
+        cli_path: &str,
+        scope: &str,
+        env: &HashMap<String, String>,
+    ) -> Option<Vec<String>> {
+        {
+            let cache = self.discovery_cache.lock().await;
+            if let Some(entry) = cache.get(scope)
+                && entry.fetched_at.elapsed() < MODEL_DISCOVERY_TTL
+            {
+                return entry.models.clone();
+            }
+        }
+        let result = probe_cli_models(cli_path, env).await;
+        let mut cache = self.discovery_cache.lock().await;
+        cache.insert(
+            scope.to_string(),
+            DiscoveryCache {
+                fetched_at: Instant::now(),
+                models: result.clone(),
+            },
+        );
+        result
+    }
+
+    /// One labelled variant per stored account (`<model>@<account_id>`, shown
+    /// as `[Account] Model`). Each account is probed under its own
+    /// `GROK_HOME` / `XAI_API_KEY` because the CLI catalog is auth-scoped
+    /// (OAuth lists `grok-4.6`; API-key / unauth often only `grok-4.5`).
+    /// Discovery off/failed falls back to mirroring `base`.
+    async fn account_scoped_models(
+        &self,
+        base: &[ModelInfo],
+        cli_path: &str,
+        discover: bool,
+    ) -> Vec<ModelInfo> {
         let Some(db) = &self.db else {
-            return base;
+            return Vec::new();
         };
         let accounts = match db.list_grok_accounts().await {
             Ok(a) => a,
             Err(e) => {
                 tracing::warn!("grok: failed to list accounts for model catalog: {e}");
-                return base;
+                return Vec::new();
             }
         };
-        if accounts.is_empty() {
-            return base;
-        }
-        let mut out = base.clone();
+        let mut out = Vec::new();
         for acct in &accounts {
-            for m in &base {
+            let discovered = if discover {
+                let mut env = HashMap::new();
+                match self.inject_account_env(&acct.id, &mut env).await {
+                    Ok(()) => self.discovered_models(cli_path, &acct.id, &env).await,
+                    Err(e) => {
+                        tracing::warn!("grok: skip discovery for account {}: {e}", acct.id);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let acct_base: Vec<ModelInfo> = match discovered {
+                Some(ids) if !ids.is_empty() => ids
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, id)| model_info(id, i as i32))
+                    .collect(),
+                _ => base.to_vec(),
+            };
+            for m in acct_base {
                 out.push(ModelInfo {
                     id: format!("{}@{}", m.id, acct.id),
                     display_name: format!("[{}] {}", acct.name, m.display_name),
-                    capabilities: m.capabilities.clone(),
+                    capabilities: m.capabilities,
                     tier: m.tier,
                 });
             }
@@ -214,7 +292,30 @@ impl AgentProvider for GrokProvider {
     }
 
     async fn dynamic_models(&self) -> Option<Vec<ModelInfo>> {
-        Some(self.account_scoped_models().await)
+        let settings = self.load_settings().await;
+        let cli_path = turn::resolve_cli_path(
+            &setting_str(&settings, "cli_path").unwrap_or_else(|| DEFAULT_CLI.to_string()),
+            CLI_FALLBACK_DIRS,
+        );
+        let extras = setting_str_list(&settings, "additional_models");
+        let discover = setting_bool(&settings, "discover_models").unwrap_or(true);
+
+        let base = if discover {
+            match self.discovered_models(&cli_path, "", &HashMap::new()).await {
+                Some(ids) if !ids.is_empty() => ids
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, id)| model_info(id, i as i32))
+                    .collect(),
+                _ => default_models(),
+            }
+        } else {
+            default_models()
+        };
+
+        let base = merge_additional_models(base, extras);
+        let account_variants = self.account_scoped_models(&base, &cli_path, discover).await;
+        Some(base.into_iter().chain(account_variants).collect())
     }
 
     async fn auth_configured(&self) -> Option<bool> {
@@ -540,7 +641,9 @@ fn build_cli_args(
     args
 }
 
-/// Grok's default (and, when unauthenticated, only visible) model.
+/// Safe fallback model for empty / legacy ids. Kept as `grok-4.5` because
+/// that id is in every auth-scoped CLI catalog (OAuth, API key, unauth);
+/// `grok-4.6` is OAuth-only and would hard-error on API-key turns.
 const DEFAULT_MODEL: &str = "grok-4.5";
 
 /// The default model grok 0.x shipped with; grok 1.0 removed it from the
@@ -558,16 +661,84 @@ fn effective_model(base_model: &str) -> String {
     }
 }
 
-/// The built-in seed model list. Grok exposes its full catalog only to an
-/// authenticated account; the picker seeds the verified default and the
-/// per-account variants are layered on by `account_scoped_models`.
+/// The built-in seed model list used when `discover_models` is off or
+/// `grok models` fails. Live catalogs come from the CLI (see
+/// [`GrokProvider::dynamic_models`]); this seed only fills the gap.
 pub fn default_models() -> Vec<ModelInfo> {
-    vec![ModelInfo {
-        id: DEFAULT_MODEL.into(),
-        display_name: "Grok 4.5".into(),
+    vec![
+        model_info("grok-4.6".into(), 0),
+        model_info("grok-4.5".into(), 1),
+    ]
+}
+
+/// Humanize a bare CLI model id for the picker (`grok-4.6` → `Grok 4.6`).
+fn model_display_name(id: &str) -> String {
+    match id.strip_prefix("grok-") {
+        Some(rest) if !rest.is_empty() => format!("Grok {rest}"),
+        _ => id.to_string(),
+    }
+}
+
+fn model_info(id: String, tier: i32) -> ModelInfo {
+    ModelInfo {
+        display_name: model_display_name(&id),
+        id,
         capabilities: vec!["code".into(), "reasoning".into()],
-        tier: 0,
-    }]
+        tier,
+    }
+}
+
+fn merge_additional_models(base: Vec<ModelInfo>, extras: Vec<String>) -> Vec<ModelInfo> {
+    turn::merge_additional_models(base, extras, |id| model_info(id, 99))
+}
+
+/// Run `grok models` under `env` and parse the listing. `None` on any
+/// failure so the caller seeds statically.
+async fn probe_cli_models(cli_path: &str, env: &HashMap<String, String>) -> Option<Vec<String>> {
+    let mut cmd = Command::new(cli_path);
+    cmd.arg("models")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("grok: model discovery spawn failed: {e}");
+            return None;
+        }
+    };
+
+    let output = match tokio::time::timeout(
+        Duration::from_secs(MODEL_DISCOVERY_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            tracing::warn!("grok: model discovery failed: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("grok: model discovery timed out");
+            return None;
+        }
+    };
+
+    if !output.status.success() {
+        tracing::warn!(
+            "grok: model discovery exited with {:?}",
+            output.status.code()
+        );
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parser::parse_cli_models(&text).map(|c| c.models)
 }
 
 #[cfg(test)]
@@ -677,5 +848,155 @@ mod tests {
             assert!(!m.id.contains(':'), "id {} should be prefix-free", m.id);
             assert!(!m.id.contains('@'), "id {} should be account-free", m.id);
         }
+    }
+
+    #[test]
+    fn default_models_seed_includes_46_and_45() {
+        let seed = default_models();
+        let ids: Vec<&str> = seed.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["grok-4.6", "grok-4.5"]);
+        assert_eq!(seed[0].display_name, "Grok 4.6");
+        assert_eq!(seed[1].display_name, "Grok 4.5");
+    }
+
+    #[test]
+    fn model_display_name_humanizes_grok_prefix() {
+        assert_eq!(model_display_name("grok-4.6"), "Grok 4.6");
+        assert_eq!(model_display_name("grok-4.5"), "Grok 4.5");
+        assert_eq!(model_display_name("other"), "other");
+    }
+
+    #[test]
+    fn merge_additional_models_dedups_against_seed() {
+        let merged = merge_additional_models(
+            default_models(),
+            vec!["grok-4.5".into(), "custom-x".into(), "custom-x".into()],
+        );
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["grok-4.6", "grok-4.5", "custom-x"]);
+        assert_eq!(merged[2].display_name, "custom-x");
+    }
+
+    /// `dynamic_models` shells out to `cli_path models` and surfaces the
+    /// parsed catalog (instead of only the static seed).
+    #[tokio::test]
+    async fn dynamic_models_reads_catalog_from_cli_shim() {
+        use crate::plugin::settings::{FieldKind, SettingField, SettingsSchema};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("fake-grok");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+if [ "$1" = models ]; then
+  cat <<'EOF'
+You are logged in with grok.com.
+
+Default model: grok-4.6
+
+Available models:
+  * grok-4.6 (default)
+  - grok-4.5
+EOF
+  exit 0
+fi
+echo "unexpected: $*" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let db = crate::db::Db::in_memory().unwrap();
+        db.set_plugin_setting(
+            "grok",
+            "cli_path",
+            &serde_json::json!(shim.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let schema = SettingsSchema::new(vec![SettingField {
+            key: "cli_path".into(),
+            title: "CLI Path".into(),
+            description: None,
+            required: false,
+            kind: FieldKind::String {
+                secret: false,
+                default: Some("grok".into()),
+                placeholder: None,
+            },
+        }]);
+        let store = crate::plugin::settings::PluginSettingsStore::new("grok", schema, db);
+        let provider = GrokProvider::new().with_settings(store);
+
+        let models = provider.dynamic_models().await.expect("Some");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["grok-4.6", "grok-4.5"], "got {ids:?}");
+        assert_eq!(models[0].display_name, "Grok 4.6");
+    }
+
+    /// When discovery is disabled, the picker keeps the static seed even if
+    /// a working CLI is configured.
+    #[tokio::test]
+    async fn dynamic_models_respects_discover_models_off() {
+        use crate::plugin::settings::{FieldKind, SettingField, SettingsSchema};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("fake-grok");
+        // Shim that would return a distinctive id if probed.
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+echo "Default model: probed-only"
+echo
+echo "Available models:"
+echo "  * probed-only (default)"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let db = crate::db::Db::in_memory().unwrap();
+        db.set_plugin_setting(
+            "grok",
+            "cli_path",
+            &serde_json::json!(shim.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        db.set_plugin_setting("grok", "discover_models", &serde_json::json!(false))
+            .await
+            .unwrap();
+
+        let schema = SettingsSchema::new(vec![
+            SettingField {
+                key: "cli_path".into(),
+                title: "CLI Path".into(),
+                description: None,
+                required: false,
+                kind: FieldKind::String {
+                    secret: false,
+                    default: Some("grok".into()),
+                    placeholder: None,
+                },
+            },
+            SettingField {
+                key: "discover_models".into(),
+                title: "Auto-Discover Models".into(),
+                description: None,
+                required: false,
+                kind: FieldKind::Boolean { default: true },
+            },
+        ]);
+        let store = crate::plugin::settings::PluginSettingsStore::new("grok", schema, db);
+        let provider = GrokProvider::new().with_settings(store);
+
+        let models = provider.dynamic_models().await.expect("Some");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["grok-4.6", "grok-4.5"]);
+        assert!(!ids.contains(&"probed-only"));
     }
 }

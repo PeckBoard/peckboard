@@ -10,6 +10,11 @@
 //!
 //! * `cli_path` (string) — path to the `grok` binary. Defaults to `grok`
 //!   (resolved on `PATH`, then the usual install locations).
+//! * `discover_models` (boolean, default `true`) — ask the CLI (`grok models`)
+//!   for its auth-scoped catalog and show those in the picker. Falls back to
+//!   the built-in seed plus `additional_models` when discovery is off or fails.
+//! * `additional_models` (string list) — extra model ids to surface in the
+//!   picker, merged on top of the discovered/seed list as `grok:<id>`.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -25,23 +30,51 @@ pub struct GrokPlugin;
 
 impl GrokPlugin {
     fn schema() -> SettingsSchema {
-        SettingsSchema::new(vec![SettingField {
-            key: "cli_path".into(),
-            title: "CLI Path".into(),
-            description: Some(
-                "Path to the grok binary. Leave as grok to resolve it on your PATH \
-                 (the provider also checks ~/.local/bin, ~/.npm-global/bin, \
-                 ~/.bun/bin and /usr/local/bin, since the server's PATH often \
-                 predates the install), or give an absolute path."
-                    .into(),
-            ),
-            required: false,
-            kind: FieldKind::String {
-                secret: false,
-                default: Some("grok".into()),
-                placeholder: Some("grok".into()),
+        SettingsSchema::new(vec![
+            SettingField {
+                key: "cli_path".into(),
+                title: "CLI Path".into(),
+                description: Some(
+                    "Path to the grok binary. Leave as grok to resolve it on your PATH \
+                     (the provider also checks ~/.local/bin, ~/.npm-global/bin, \
+                     ~/.bun/bin and /usr/local/bin, since the server's PATH often \
+                     predates the install), or give an absolute path."
+                        .into(),
+                ),
+                required: false,
+                kind: FieldKind::String {
+                    secret: false,
+                    default: Some("grok".into()),
+                    placeholder: Some("grok".into()),
+                },
             },
-        }])
+            SettingField {
+                key: "discover_models".into(),
+                title: "Auto-Discover Models".into(),
+                description: Some(
+                    "Ask the grok CLI (grok models) which models are available for \
+                     the current login and list them in the model picker. Turn this \
+                     off to show only the built-in suggestions plus any models you \
+                     add below."
+                        .into(),
+                ),
+                required: false,
+                kind: FieldKind::Boolean { default: true },
+            },
+            SettingField {
+                key: "additional_models".into(),
+                title: "Additional Models".into(),
+                description: Some(
+                    "Extra model ids to add to the picker on top of the auto-discovered \
+                     (or built-in) list. Each appears as grok:<id>."
+                        .into(),
+                ),
+                required: false,
+                kind: FieldKind::StringList {
+                    item_placeholder: Some("grok-4.6".into()),
+                },
+            },
+        ])
     }
 }
 
