@@ -1,41 +1,45 @@
 //! Parser for `grok -p --output-format streaming-json` output.
 //!
 //! Grok's headless streaming-json is newline-delimited, one flat JSON object
-//! per line tagged with a `type`:
+//! per line tagged with a `type` (verified against the shipped grok 1.0.3
+//! binary end to end):
 //!
 //! ```json
-//! {"type":"text","data":"Here's"}
+//! {"type":"available_commands","tools":[...],"commands":[...]}
 //! {"type":"thought","data":"Analyzing the directory structure..."}
-//! {"type":"tool_call","name":"read_file","input":{"path":"x"}}
-//! {"type":"tool","toolCallId":"...","result":"..."}
-//! {"type":"end","stopReason":"EndTurn","sessionId":"abc123","requestId":"xyz"}
+//! {"type":"text","data":"Here's"}
+//! {"type":"tool_call","toolCallId":"call_1","title":"Read","kind":"read",
+//!  "status":"in_progress","toolName":"read_file","rawInput":{"path":"x"}}
+//! {"type":"tool_call_update","toolCallId":"call_1","status":"completed",
+//!  "content":[],"rawOutput":{"lines":42}}
+//! {"type":"usage","usage":{"input_tokens":10,"output_tokens":5,...}}
+//! {"type":"end","stopReason":"end_turn","sessionId":"...","requestId":"...",
+//!  "usage":{...},"num_turns":1,"modelUsage":{"grok-4.5":{"inputTokens":10,...}}}
 //! ```
+//!
+//! Pre-1.0 CLIs shaped tool frames as `{"type":"tool_call","name":…,
+//! "input":…}` / `{"type":"tool","toolCallId":…,"result":…}`; both
+//! generations parse.
 //!
 //! We translate each line into zero or more [`ProviderEvent`]s and carry the
 //! `sessionId` out via `conversation_id` so the next turn can resume it with
-//! `--session-id`. The `Started` and final `Completed` events are emitted by
+//! `--resume`. The `Started` and final `Completed` events are emitted by
 //! the run loop (which owns the model label and the captured id), so this
 //! parser never produces them. `thought` (reasoning) maps to
 //! [`ProviderEvent::Thinking`], the same collapsed channel the Claude
 //! provider feeds from its `thinking` blocks.
 //!
-//! No `Usage` events: grok 0.2.77 reports no token counts in either
-//! headless output format. Its own docs list the streaming-json frames as
-//! `text` / `thought` / `tool_call` / `tool` / `attachment` / `error` /
-//! `end`, with the terminal frame being exactly
-//! `{"type":"end","stopReason":…,"sessionId":…,"requestId":…}`, and
-//! `--output-format json` a single object with `text`, `stopReason`,
-//! `sessionId`, `requestId` — token counters appear nowhere in either
-//! (verified against the shipped 0.2.77 binary). So ollama-style cost
-//! analytics can't be populated for grok until the CLI exposes them;
-//! re-check on upgrade, and the mapping is then one accessor here plus a
-//! `ProviderEvent::Usage` push in the `end` arm.
+//! Token counts: grok 1.0 reports them on the `end` frame (flat `usage`
+//! rollup plus a per-model `modelUsage` map), which [`end_usage_events`]
+//! maps to [`ProviderEvent::Usage`]. The mid-stream `usage` frame carries
+//! the same rollup and is deliberately ignored to avoid double-counting.
+//! Earlier CLIs (0.2.x) reported no counts anywhere, so an `end` frame
+//! without usage still parses fine.
 //!
 //! The exact tool-event shape isn't formally specified, so every accessor is
 //! defensive: an unrecognised shape yields no events rather than an error.
 
 use crate::provider::stream::ProviderEvent;
-
 /// Parse one JSON line of grok streaming-json into provider events, updating
 /// `conversation_id` from any `sessionId` the line carries (the `end` frame
 /// always does).
@@ -69,7 +73,9 @@ pub(super) fn parse_stream_json(
             }
         }
 
-        // A tool invocation begins.
+        // A tool invocation begins. grok 1.0 names the tool `toolName` and
+        // its arguments `rawInput` (ACP leaf names); older CLIs used
+        // `name`/`input` — both shapes parse.
         "tool_call" => {
             let tool_use_id = tool_id(json);
             let name = json
@@ -80,7 +86,8 @@ pub(super) fn parse_stream_json(
                 .unwrap_or("tool")
                 .to_string();
             let input = json
-                .get("input")
+                .get("rawInput")
+                .or_else(|| json.get("input"))
                 .or_else(|| json.get("args"))
                 .or_else(|| json.get("arguments"))
                 .or_else(|| json.get("parameters"))
@@ -90,7 +97,7 @@ pub(super) fn parse_stream_json(
             // Grok's headless `--always-approve` runs its built-in tools
             // autonomously with no pre-execution gate peckboard could hook,
             // so terminal calls are rendered honestly — real name, input,
-            // and (in the `tool` arm) real result. The old fake "denied"
+            // and (in the result arm) real result. The old fake "denied"
             // row showed an error for a command that had actually executed;
             // the WORKING_STYLE prompt remains the steer away from the
             // internal shell.
@@ -101,7 +108,28 @@ pub(super) fn parse_stream_json(
             });
         }
 
-        // A tool finished, carrying its result.
+        // grok 1.0's tool progress/result frame. Only a terminal status
+        // closes the row; in-flight updates would otherwise end it early.
+        "tool_call_update" => {
+            let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if status == "completed" || status == "failed" {
+                let tool_use_id = tool_id(json);
+                let output = tool_output(json);
+                let (output, error) = if status == "failed" {
+                    (None, output.or_else(|| Some("tool call failed".into())))
+                } else {
+                    (output, None)
+                };
+                events.push(ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output,
+                    error,
+                    images: Vec::new(),
+                });
+            }
+        }
+
+        // A tool finished, carrying its result (pre-1.0 CLIs).
         "tool" => {
             let tool_use_id = tool_id(json);
             let is_error = json
@@ -128,13 +156,76 @@ pub(super) fn parse_stream_json(
             });
         }
 
-        // `end` carries the session id (captured above); the run loop emits
-        // the terminal Completed itself. `error` is inspected by the run loop
-        // for a crash reason, so it produces no event here either.
+        // `end` also carries the session id (captured above) and the turn's
+        // token rollup; the run loop emits the terminal Completed itself.
+        "end" => events.extend(end_usage_events(json)),
+
+        // The standalone `usage` frame duplicates the rollup the `end` frame
+        // carries, so parsing both would double-count. `error` is inspected
+        // by the run loop for a crash reason, and `available_commands` is
+        // startup chatter — none produce events here.
         _ => {}
     }
 
     events
+}
+
+/// Token usage from an `end` frame (grok 1.0+). Prefers the per-model
+/// `modelUsage` map (camelCase counters, one `Usage` per model so multi-model
+/// turns roll up correctly); falls back to the flat `usage` rollup
+/// (snake_case counters, no model). Same context/total convention as the
+/// Claude and Cursor providers: context is the window at end of turn
+/// (input + cache read + cache creation), total adds the generated output.
+fn end_usage_events(json: &serde_json::Value) -> Vec<ProviderEvent> {
+    let usage_event =
+        |input: i64, output: i64, cache_read: i64, cache_creation: i64, model: Option<String>| {
+            if input + output + cache_read + cache_creation == 0 {
+                return None;
+            }
+            let context = input + cache_read + cache_creation;
+            Some(ProviderEvent::Usage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache_read,
+                cache_creation_tokens: cache_creation,
+                total_tokens: context + output,
+                context_tokens: context,
+                model,
+                turn_seq: None,
+            })
+        };
+
+    if let Some(models) = json.get("modelUsage").and_then(|v| v.as_object())
+        && !models.is_empty()
+    {
+        return models
+            .iter()
+            .filter_map(|(model, u)| {
+                let count = |key: &str| u.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+                usage_event(
+                    count("inputTokens"),
+                    count("outputTokens"),
+                    count("cacheReadInputTokens"),
+                    count("cacheCreationInputTokens"),
+                    Some(model.clone()),
+                )
+            })
+            .collect();
+    }
+
+    let Some(u) = json.get("usage") else {
+        return Vec::new();
+    };
+    let count = |key: &str| u.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+    usage_event(
+        count("input_tokens"),
+        count("output_tokens"),
+        count("cache_read_input_tokens"),
+        count("cache_creation_input_tokens"),
+        None,
+    )
+    .into_iter()
+    .collect()
 }
 
 /// Grok's `text` / `thought` payload field is `data`, but tolerate `text`.
@@ -164,10 +255,13 @@ fn tool_id(json: &serde_json::Value) -> String {
 }
 
 /// Pull a tool result's textual output, tolerating a few field names and a
-/// non-string payload (serialised to JSON).
+/// non-string payload (serialised to JSON). grok 1.0's `tool_call_update`
+/// carries `rawOutput` (arbitrary JSON) and/or `content` (ACP content-block
+/// array); older CLIs used `result` / `output` / `data`.
 fn tool_output(json: &serde_json::Value) -> Option<String> {
     let value = json
-        .get("result")
+        .get("rawOutput")
+        .or_else(|| json.get("result"))
         .or_else(|| json.get("output"))
         .or_else(|| json.get("content"))
         .or_else(|| json.get("data"))?;
@@ -175,7 +269,28 @@ fn tool_output(json: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(s) if s.is_empty() => None,
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Null => None,
+        serde_json::Value::Array(blocks) => acp_content_text(blocks),
         other => Some(other.to_string()),
+    }
+}
+
+/// Join the text out of an ACP content-block array
+/// (`[{"type":"content","content":{"type":"text","text":"..."}}]`),
+/// tolerating bare `{"type":"text","text":"..."}` blocks. `None` when the
+/// array is empty or carries no text.
+fn acp_content_text(blocks: &[serde_json::Value]) -> Option<String> {
+    let texts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| {
+            let inner = block.get("content").unwrap_or(block);
+            inner.get("text").and_then(|v| v.as_str())
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n"))
     }
 }
 
@@ -404,11 +519,10 @@ mod tests {
         );
     }
 
-    /// Regression guard for the module header: grok's terminal frame
-    /// carries the session id and a stop reason, no token counts — so it
-    /// produces no `Usage` (and no other event either).
+    /// A 0.2.x-style terminal frame with no token counts still parses: it
+    /// captures the session id and produces no `Usage`.
     #[test]
-    fn end_frame_yields_no_usage() {
+    fn end_frame_without_usage_yields_no_usage() {
         let mut conv = None;
         let events = parse(
             serde_json::json!({
@@ -421,5 +535,221 @@ mod tests {
         );
         assert!(events.is_empty());
         assert_eq!(conv.as_deref(), Some("abc123"));
+    }
+
+    /// The grok 1.0 terminal frame, exactly as the shipped 1.0.3 binary
+    /// emits it: per-model counters become one `Usage` per model.
+    #[test]
+    fn end_frame_with_model_usage_emits_usage() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type": "end", "stopReason": "end_turn", "sessionId": "s1",
+                "requestId": "r1", "num_turns": 1,
+                "usage": {
+                    "input_tokens": 10, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0, "output_tokens": 5,
+                    "reasoning_tokens": 2, "total_tokens": 15
+                },
+                "modelUsage": {
+                    "grok-4.5": {
+                        "inputTokens": 10, "outputTokens": 5,
+                        "cacheReadInputTokens": 3, "cacheCreationInputTokens": 1,
+                        "modelCalls": 1
+                    }
+                }
+            }),
+            &mut conv,
+        );
+        assert_eq!(conv.as_deref(), Some("s1"));
+        let [
+            ProviderEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                total_tokens,
+                context_tokens,
+                model,
+                ..
+            },
+        ] = &events[..]
+        else {
+            panic!("expected one Usage, got {events:?}");
+        };
+        assert_eq!(*input_tokens, 10);
+        assert_eq!(*output_tokens, 5);
+        assert_eq!(*cache_read_tokens, 3);
+        assert_eq!(*cache_creation_tokens, 1);
+        assert_eq!(*context_tokens, 14);
+        assert_eq!(*total_tokens, 19);
+        assert_eq!(model.as_deref(), Some("grok-4.5"));
+    }
+
+    /// A flat `usage` rollup (no `modelUsage`) still produces one `Usage`.
+    #[test]
+    fn end_frame_falls_back_to_flat_usage() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type": "end", "stopReason": "end_turn", "sessionId": "s1",
+                "usage": {
+                    "input_tokens": 10, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0, "output_tokens": 5,
+                    "total_tokens": 15
+                }
+            }),
+            &mut conv,
+        );
+        let [
+            ProviderEvent::Usage {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                model,
+                ..
+            },
+        ] = &events[..]
+        else {
+            panic!("expected one Usage, got {events:?}");
+        };
+        assert_eq!(*input_tokens, 10);
+        assert_eq!(*output_tokens, 5);
+        assert_eq!(*total_tokens, 15);
+        assert!(model.is_none());
+    }
+
+    /// The standalone mid-stream `usage` frame duplicates the `end` rollup
+    /// and must stay silent, or turns double-count.
+    #[test]
+    fn standalone_usage_frame_is_ignored() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type": "usage",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+            &mut conv,
+        );
+        assert!(events.is_empty());
+        assert!(events.is_empty());
+    }
+
+    /// The grok 1.0 tool-start frame, exactly as documented for the shipped
+    /// CLI: `toolName` + `rawInput` instead of `name` + `input`.
+    #[test]
+    fn acp_tool_call_becomes_tool_start() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call","toolCallId":"call_1","title":"Read",
+                "kind":"read","status":"in_progress","toolName":"read_file",
+                "rawInput":{"path":"src/main.rs"},"content":[],"locations":[]
+            }),
+            &mut conv,
+        );
+        let [
+            ProviderEvent::ToolStart {
+                tool_use_id,
+                name,
+                input,
+            },
+        ] = &events[..]
+        else {
+            panic!("expected ToolStart, got {events:?}");
+        };
+        assert_eq!(tool_use_id, "call_1");
+        assert_eq!(name, "read_file");
+        assert_eq!(input["path"], "src/main.rs");
+    }
+
+    /// A completed `tool_call_update` closes the row with its `rawOutput`.
+    #[test]
+    fn tool_call_update_completed_becomes_tool_end() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call_update","toolCallId":"call_1",
+                "status":"completed","content":[],"rawOutput":{"lines":42}
+            }),
+            &mut conv,
+        );
+        let [
+            ProviderEvent::ToolEnd {
+                tool_use_id,
+                output,
+                error,
+                ..
+            },
+        ] = &events[..]
+        else {
+            panic!("expected ToolEnd, got {events:?}");
+        };
+        assert_eq!(tool_use_id, "call_1");
+        assert_eq!(output.as_deref(), Some("{\"lines\":42}"));
+        assert!(error.is_none());
+    }
+
+    /// In-flight updates must NOT close the tool row.
+    #[test]
+    fn tool_call_update_in_progress_is_ignored() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call_update","toolCallId":"call_1",
+                "status":"in_progress","content":[]
+            }),
+            &mut conv,
+        );
+        assert!(events.is_empty());
+    }
+
+    /// A failed update routes its payload to the error side.
+    #[test]
+    fn tool_call_update_failed_becomes_tool_end_error() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call_update","toolCallId":"call_1",
+                "status":"failed",
+                "content":[{"type":"content","content":{"type":"text","text":"no such file"}}]
+            }),
+            &mut conv,
+        );
+        let [ProviderEvent::ToolEnd { output, error, .. }] = &events[..] else {
+            panic!("expected ToolEnd, got {events:?}");
+        };
+        assert!(output.is_none());
+        assert_eq!(error.as_deref(), Some("no such file"));
+    }
+
+    /// ACP content-block arrays flatten to their text; an empty array is no
+    /// output at all (not the string "[]").
+    #[test]
+    fn tool_call_update_extracts_acp_content_text() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call_update","toolCallId":"c1","status":"completed",
+                "content":[{"type":"content","content":{"type":"text","text":"42 lines"}}]
+            }),
+            &mut conv,
+        );
+        let [ProviderEvent::ToolEnd { output, .. }] = &events[..] else {
+            panic!("expected ToolEnd");
+        };
+        assert_eq!(output.as_deref(), Some("42 lines"));
+
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call_update","toolCallId":"c2","status":"completed",
+                "content":[]
+            }),
+            &mut conv,
+        );
+        let [ProviderEvent::ToolEnd { output, .. }] = &events[..] else {
+            panic!("expected ToolEnd");
+        };
+        assert!(output.is_none());
     }
 }

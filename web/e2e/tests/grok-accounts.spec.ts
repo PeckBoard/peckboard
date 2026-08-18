@@ -64,7 +64,7 @@ test('add, list, expose-in-picker, and delete a Grok api-key account', async ({
   await loadApp(page, token)
 
   // Baseline: no account-scoped models exist yet.
-  expect(await accountModelLabels(request, token)).not.toContain('[E2E Grok] Grok Build')
+  expect(await accountModelLabels(request, token)).not.toContain('[E2E Grok] Grok 4.5')
 
   const settings = await openSettings(page)
   const section = settings.getByTestId('grok-accounts-section')
@@ -94,7 +94,7 @@ test('add, list, expose-in-picker, and delete a Grok api-key account', async ({
   await expect(badge).toHaveAttribute('data-level', 'ok')
 
   // ── Account switching is wired: it appears in the model catalogue ──
-  await expect.poll(() => accountModelLabels(request, token)).toContain('[E2E Grok] Grok Build')
+  await expect.poll(() => accountModelLabels(request, token)).toContain('[E2E Grok] Grok 4.5')
 
   // ── Delete removes the row and drops it from the catalogue ─────────
   await row.locator('[data-testid^="grok-acct-delete-"]').click()
@@ -103,7 +103,7 @@ test('add, list, expose-in-picker, and delete a Grok api-key account', async ({
   await confirm.getByRole('button', { name: 'Delete' }).click()
 
   await expect(section.locator('[data-testid^="grok-acct-row-"]')).toHaveCount(0)
-  await expect.poll(() => accountModelLabels(request, token)).not.toContain('[E2E Grok] Grok Build')
+  await expect.poll(() => accountModelLabels(request, token)).not.toContain('[E2E Grok] Grok 4.5')
 })
 
 test('device sign-in flow: add account then surface the grok device link', async ({

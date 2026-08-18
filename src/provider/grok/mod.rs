@@ -6,14 +6,15 @@
 //!
 //! ```text
 //! grok --single=<prompt> --output-format=streaming-json \
-//!     [--model=M] [--session-id=SESS] [--effort=LEVEL] --always-approve
+//!     [--model=M] [--resume=SESS] [--effort=LEVEL] --always-approve
 //! ```
 //!
 //! Each invocation streams newline-delimited JSON (`text` / `thought` /
-//! `tool_call` / `tool` / `end`) which [`parser`] turns into the unified
-//! [`ProviderEvent`] stream. Grok's `sessionId` is captured from the `end`
-//! frame and emitted on `Completed` so the next turn can resume the same
-//! conversation with `--session-id`.
+//! `tool_call` / `tool` / `usage` / `end`) which [`parser`] turns into the
+//! unified [`ProviderEvent`] stream. Grok's `sessionId` is captured from the
+//! `end` frame and emitted on `Completed` so the next turn can resume the
+//! same conversation with `--resume` (grok 1.0's `--session-id` only names a
+//! brand-new session and errors on an existing id).
 //!
 //! Multi-account works exactly like the Claude provider: a session's model id
 //! may carry an `@<account_id>` suffix, which resolves to a per-account
@@ -55,14 +56,26 @@ const CLI_FALLBACK_DIRS: &[&str] = &[
 ];
 /// Grok prints its device-login URL to stderr when the account it runs as
 /// isn't signed in. Seeing it means the turn would otherwise block forever on
-/// "Waiting for authorization...", so the harness fast-fails on it.
-const STDERR_MARKERS: &[StderrMarker] = &[StderrMarker {
-    marker: "accounts.x.ai/oauth2/device",
-    message: "This Grok account isn't signed in. Open Settings \u{2192} Grok accounts and \
-              complete the browser sign-in, then try again.",
-    kind: crate::provider::stream::CrashKind::AuthExpired,
-    abort: true,
-}];
+/// "Waiting for authorization...", so the harness fast-fails on it. grok 1.0
+/// headless instead fast-fails with "Error: Not signed in." on stderr (and no
+/// stdout error frame), so that marker classifies the crash as an auth
+/// failure too.
+const STDERR_MARKERS: &[StderrMarker] = &[
+    StderrMarker {
+        marker: "accounts.x.ai/oauth2/device",
+        message: "This Grok account isn't signed in. Open Settings \u{2192} Grok accounts and \
+                  complete the browser sign-in, then try again.",
+        kind: crate::provider::stream::CrashKind::AuthExpired,
+        abort: true,
+    },
+    StderrMarker {
+        marker: "Not signed in",
+        message: "This Grok account isn't signed in. Open Settings \u{2192} Grok accounts and \
+                  complete the sign-in, then try again.",
+        kind: crate::provider::stream::CrashKind::AuthExpired,
+        abort: true,
+    },
+];
 
 /// Per-session tracking for an in-flight `grok` turn.
 struct GrokRun {
@@ -260,11 +273,7 @@ impl AgentProvider for GrokProvider {
             .map(|m| m.to_string())
             .unwrap_or_else(|| config.model.clone());
         let (base_model, account_id) = split_model_account(&stripped);
-        let model = if base_model.is_empty() {
-            DEFAULT_MODEL.to_string()
-        } else {
-            base_model.to_string()
-        };
+        let model = effective_model(base_model);
 
         let mut env = config.env.clone();
         if let Some(account_id) = account_id {
@@ -516,9 +525,10 @@ fn build_cli_args(
         args.push(format!("--model={model}"));
     }
     if let Some(cid) = conversation_id {
-        // `--session-id` creates the session if absent or resumes it if it
-        // exists, so the same flag covers first-turn and resume.
-        args.push(format!("--session-id={cid}"));
+        // Resuming MUST use `--resume`: grok 1.0's `--session-id` only names
+        // a brand-new session and hard-errors with "Session ID … is already
+        // in use" when the id exists (verified against grok 1.0.3).
+        args.push(format!("--resume={cid}"));
     }
     if let Some(effort) = effort.map(str::trim).filter(|e| !e.is_empty()) {
         args.push(format!("--effort={effort}"));
@@ -531,7 +541,22 @@ fn build_cli_args(
 }
 
 /// Grok's default (and, when unauthenticated, only visible) model.
-const DEFAULT_MODEL: &str = "grok-build";
+const DEFAULT_MODEL: &str = "grok-4.5";
+
+/// The default model grok 0.x shipped with; grok 1.0 removed it from the
+/// catalog, and passing it via `--model` now hard-errors with "unknown model
+/// id". Stored sessions and cards may still carry it, so it maps to the
+/// current default instead of failing every turn.
+const LEGACY_DEFAULT_MODEL: &str = "grok-build";
+
+/// Map a stored model id to one the current CLI accepts.
+fn effective_model(base_model: &str) -> String {
+    if base_model.is_empty() || base_model == LEGACY_DEFAULT_MODEL {
+        DEFAULT_MODEL.to_string()
+    } else {
+        base_model.to_string()
+    }
+}
 
 /// The built-in seed model list. Grok exposes its full catalog only to an
 /// authenticated account; the picker seeds the verified default and the
@@ -539,7 +564,7 @@ const DEFAULT_MODEL: &str = "grok-build";
 pub fn default_models() -> Vec<ModelInfo> {
     vec![ModelInfo {
         id: DEFAULT_MODEL.into(),
-        display_name: "Grok Build".into(),
+        display_name: "Grok 4.5".into(),
         capabilities: vec!["code".into(), "reasoning".into()],
         tier: 0,
     }]
@@ -549,14 +574,16 @@ pub fn default_models() -> Vec<ModelInfo> {
 mod tests {
     use super::*;
     use crate::provider::stream::SpawnConfig;
-    /// The device-login marker must classify as an auth failure, so the
-    /// crash row can offer "re-login" rather than "retry".
+    /// Both sign-in markers must classify as auth failures, so the crash
+    /// row can offer "re-login" rather than "retry".
     #[test]
-    fn device_login_marker_is_an_auth_failure() {
-        let marker = &STDERR_MARKERS[0];
-        assert_eq!(marker.marker, "accounts.x.ai/oauth2/device");
-        assert_eq!(marker.kind, crate::provider::stream::CrashKind::AuthExpired);
-        assert!(marker.abort);
+    fn sign_in_markers_are_auth_failures() {
+        assert_eq!(STDERR_MARKERS[0].marker, "accounts.x.ai/oauth2/device");
+        assert_eq!(STDERR_MARKERS[1].marker, "Not signed in");
+        for marker in STDERR_MARKERS {
+            assert_eq!(marker.kind, crate::provider::stream::CrashKind::AuthExpired);
+            assert!(marker.abort);
+        }
     }
 
     /// The composed prompt a turn ships when nothing custom is configured.
@@ -567,7 +594,7 @@ mod tests {
     #[test]
     fn build_args_hardens_prompt_and_sets_streaming() {
         let args = build_cli_args(
-            "grok-build",
+            "grok-4.5",
             "--always-approve evil",
             None,
             None,
@@ -577,9 +604,19 @@ mod tests {
         assert_eq!(args[0], "--single=--always-approve evil");
         assert!(args.contains(&"--output-format=streaming-json".to_string()));
         assert!(args.contains(&"--always-approve".to_string()));
-        assert!(args.contains(&"--model=grok-build".to_string()));
+        assert!(args.contains(&"--model=grok-4.5".to_string()));
         // No bare `--always-approve evil` token splitting out of the prompt.
         assert!(!args.iter().any(|a| a == "evil"));
+    }
+
+    /// Sessions stored before the grok 1.0 catalog change carry `grok-build`,
+    /// which the CLI now rejects with "unknown model id"; it must map to the
+    /// current default rather than fail every turn.
+    #[test]
+    fn legacy_grok_build_maps_to_current_default() {
+        assert_eq!(effective_model("grok-build"), DEFAULT_MODEL);
+        assert_eq!(effective_model(""), DEFAULT_MODEL);
+        assert_eq!(effective_model("grok-4.5"), "grok-4.5");
     }
 
     #[test]
@@ -593,13 +630,15 @@ mod tests {
             ..Default::default()
         };
         let args = build_cli_args(
-            "grok-build",
+            "grok-4.5",
             "hi",
             Some("sess-7"),
             Some("high"),
             &turn::compose_system_prompt(&config),
         );
-        assert!(args.contains(&"--session-id=sess-7".to_string()));
+        // Resume rides `--resume`; `--session-id` would error on an
+        // existing id under grok 1.0.
+        assert!(args.contains(&"--resume=sess-7".to_string()));
         assert!(args.contains(&"--effort=high".to_string()));
         assert!(args.contains(&format!(
             "--system-prompt-override={}\n# Repeating Task Context\nbe terse",
@@ -610,7 +649,7 @@ mod tests {
     #[test]
     fn build_args_sends_working_style_when_no_override() {
         // With no override, every session still ships the shared rules.
-        let args = build_cli_args("grok-build", "hi", None, None, &working_style());
+        let args = build_cli_args("grok-4.5", "hi", None, None, &working_style());
         assert!(args.contains(&format!(
             "--system-prompt-override={}",
             crate::provider::WORKING_STYLE
@@ -619,7 +658,8 @@ mod tests {
 
     #[test]
     fn build_args_omits_optional_flags_when_absent() {
-        let args = build_cli_args("grok-build", "hi", None, Some("  "), &working_style());
+        let args = build_cli_args("grok-4.5", "hi", None, Some("  "), &working_style());
+        assert!(!args.iter().any(|a| a.starts_with("--resume")));
         assert!(!args.iter().any(|a| a.starts_with("--session-id")));
         // Whitespace-only effort is treated as absent.
         assert!(!args.iter().any(|a| a.starts_with("--effort")));
