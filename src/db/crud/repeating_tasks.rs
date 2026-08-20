@@ -59,8 +59,25 @@ impl Db {
         .await
     }
 
-    /// Tasks the scheduler should consider on this tick: enabled and either
-    /// never run yet (`next_run_at IS NULL`) or due (`next_run_at <= now`).
+    /// Enabled tasks. The scheduler tick loads this set and decides
+    /// due-ness in Rust via [`crate::repeating::is_scheduler_due`]
+    /// (last execution vs the next scheduled slot), not by filtering
+    /// on the stored `next_run_at` column.
+    pub async fn list_enabled_repeating_tasks(&self) -> anyhow::Result<Vec<RepeatingTask>> {
+        self.with_conn(move |conn| {
+            repeating_tasks::table
+                .filter(repeating_tasks::enabled.eq(true))
+                .select(RepeatingTask::as_select())
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Tasks whose stored `next_run_at` is NULL or `<= now`. Kept for
+    /// the column-filter test and as a UI hint query — the scheduler
+    /// trigger itself uses [`list_enabled_repeating_tasks`] plus
+    /// [`crate::repeating::is_scheduler_due`].
     pub async fn list_due_repeating_tasks(
         &self,
         now_rfc3339: &str,

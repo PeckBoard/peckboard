@@ -121,10 +121,9 @@ async fn seed_task(db: &Db, id: &str, folder_id: &str, prompt: &str, model: Opti
 
 #[tokio::test]
 async fn scheduler_throttles_runs_below_min_gap_via_inline_guard() {
-    // Pin last_run_at to 30 seconds ago and the next_run_at to "now" so
-    // the scheduler's due-task query picks the task up. The inline
-    // run-policy guard should refuse the dispatch, leaving no session
-    // behind.
+    // Last run 30 seconds ago on a 60-minute interval: the next slot
+    // after last_run_at is still ~59 minutes away, so the scheduler
+    // trigger must not fire even if stored next_run_at is in the past.
     let env = fresh_state().await;
     let tmp = tempfile::tempdir().unwrap();
     seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
@@ -149,7 +148,80 @@ async fn scheduler_throttles_runs_below_min_gap_via_inline_guard() {
     let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
     assert!(
         sessions.is_empty(),
-        "throttled scheduler tick must not spawn a session; got {:?}",
+        "not-yet-due scheduler tick must not spawn a session; got {:?}",
+        sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+    );
+}
+
+#[tokio::test]
+async fn scheduler_fires_when_next_slot_after_last_run_is_past_even_if_stored_next_is_future() {
+    // Regression: bumping next_run_at into the future (throttle /
+    // already-running) used to drop an overdue slot on the floor.
+    // Last execution 90 minutes ago on a 60-minute interval means the
+    // slot at last+60m is 30 minutes past and has not run — fire it,
+    // ignoring the stored 2099 next_run_at.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_task(&env.db, "t1", "f1", "go", Some("mock:happy-path")).await;
+
+    let now = chrono::Utc::now();
+    let last = (now - chrono::Duration::minutes(90)).to_rfc3339();
+    env.db
+        .update_repeating_task(
+            "t1",
+            peckboard::db::models::UpdateRepeatingTask {
+                last_run_at: Some(Some(last)),
+                next_run_at: Some(Some("2099-01-01T00:00:00Z".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    env.rtm.run_due_tasks(env.run_ctx()).await;
+
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "overdue slot after last_run_at must dispatch even when stored next_run_at is in the future",
+    );
+    for s in &sessions {
+        env.session_manager.cancel_and_wait(&s.id).await;
+    }
+}
+
+#[tokio::test]
+async fn scheduler_does_not_fire_when_next_slot_after_last_run_is_still_future() {
+    // Inverse of the overdue-slot test: a stale next_run_at in the past
+    // must not pull the task into the trigger while the next occurrence
+    // after last_run_at is still ahead.
+    let env = fresh_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
+    seed_task(&env.db, "t1", "f1", "go", Some("mock:happy-path")).await;
+
+    let now = chrono::Utc::now();
+    let last = (now - chrono::Duration::minutes(10)).to_rfc3339();
+    env.db
+        .update_repeating_task(
+            "t1",
+            peckboard::db::models::UpdateRepeatingTask {
+                last_run_at: Some(Some(last)),
+                next_run_at: Some(Some("2020-01-01T00:00:00Z".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    env.rtm.run_due_tasks(env.run_ctx()).await;
+
+    let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
+    assert!(
+        sessions.is_empty(),
+        "next slot after last_run_at is still future; must not dispatch. got {:?}",
         sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
     );
 }
@@ -652,7 +724,7 @@ async fn run_ctx_writes_mcp_config_for_spawned_session() {
 #[tokio::test]
 async fn scheduler_disables_task_with_corrupt_schedule_instead_of_refiring() {
     // A row whose schedule_value can't be parsed has a NULL next_run_at,
-    // which `list_due_repeating_tasks` treats as "due now" — so it would
+    // which `is_scheduler_due` treats as "due now" — so it would
     // spawn a fresh session every tick. The scheduler must refuse the
     // dispatch and disable the row instead.
     let env = fresh_state().await;

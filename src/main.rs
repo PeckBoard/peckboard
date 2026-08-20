@@ -248,8 +248,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Worker orchestrator loop started (5s interval)");
     }
 
-    // Repeating tasks scheduler: tick every 30 seconds. Cheap because
-    // the due-task query is indexed on next_run_at. We don't tick more
+    // Repeating tasks scheduler: tick every 30 seconds. Each tick loads
+    // enabled tasks and fires those whose next slot after last_run_at
+    // is already in the past (and has not executed). We don't tick more
     // often than the smallest practical schedule interval (1 minute),
     // so 30s gives us at most ~30s of slack between "due" and "fired".
     {

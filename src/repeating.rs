@@ -279,20 +279,26 @@ impl RepeatingTaskManager {
             .await
     }
 
-    /// One scheduler tick. Loads every due task and tries to start a run
-    /// for each. Tasks whose lock is already held (currently dispatching
-    /// from another path, e.g. force-run) are skipped this tick —
+    /// One scheduler tick. Loads every enabled task and starts a run
+    /// for those [`is_scheduler_due`] accepts: the next scheduled slot
+    /// after `last_run_at` is already in the past and has not executed.
+    /// Tasks whose lock is already held (currently dispatching from
+    /// another path, e.g. force-run) are skipped this tick —
     /// `try_lock_task` is non-blocking so a long-running run can't starve
     /// the scheduler loop.
     pub async fn run_due_tasks(&self, ctx: RunContext<'_>) {
-        let now = Utc::now().to_rfc3339();
-        let due = match ctx.db.list_due_repeating_tasks(&now).await {
+        let now_dt = Utc::now();
+        let enabled = match ctx.db.list_enabled_repeating_tasks().await {
             Ok(t) => t,
             Err(e) => {
-                tracing::error!("Failed to list due repeating tasks: {e}");
+                tracing::error!("Failed to list enabled repeating tasks: {e}");
                 return;
             }
         };
+        let due: Vec<_> = enabled
+            .into_iter()
+            .filter(|task| is_scheduler_due(task, now_dt))
+            .collect();
 
         for task in due {
             let lock = match self.try_lock_task(&task.id).await {
@@ -337,7 +343,7 @@ impl RepeatingTaskManager {
         let session_manager = ctx.session_manager;
 
         // Reload the task inside the lock — the row may have been edited
-        // (or deleted) between `list_due_repeating_tasks` and now.
+        // (or deleted) between the due scan and now.
         let task = match db.get_repeating_task(task_id).await? {
             Some(t) => t,
             None => {
@@ -381,12 +387,9 @@ impl RepeatingTaskManager {
         }
 
         // Defence in depth: a row whose stored schedule can't be parsed
-        // has no computable next_run_at, and a NULL next_run_at is *not*
-        // idle — `list_due_repeating_tasks` selects `next_run_at IS NULL
-        // OR next_run_at <= now`, so an enabled corrupt row is
-        // perpetually due and would spawn a fresh session every tick.
-        // Refuse the scheduler dispatch and disable the row so it drops
-        // out of the due scan and an operator can see why it stopped.
+        // has no computable next slot, and [`is_scheduler_due`] treats
+        // that as due so this path can disable the row. Without the
+        // disable, an enabled corrupt row would be selected every tick.
         if let (RunTrigger::Scheduler, Err(e)) = (
             trigger,
             Schedule::parse(&task.schedule_kind, &task.schedule_value),
@@ -434,23 +437,12 @@ impl RepeatingTaskManager {
                 ?trigger,
                 "Repeating-task run policy refused dispatch: {reason}",
             );
-            // Bump next_run_at past the schedule floor so the scheduler
-            // tick doesn't keep picking the same row up every 30s and
-            // re-throttling it. Without this, a corrupted next_run_at
-            // pointing into the past would loop the scheduler through
-            // the guard every tick.
-            let (next, disable) = next_run_fields(&task, now_dt);
-            let _ = db
-                .update_repeating_task(
-                    task_id,
-                    UpdateRepeatingTask {
-                        next_run_at: Some(next),
-                        enabled: disable,
-                        updated_at: Some(now_dt.to_rfc3339()),
-                        ..Default::default()
-                    },
-                )
-                .await;
+            // Do not bump `next_run_at` here. The scheduler trigger
+            // keys off last execution vs the next scheduled slot, so
+            // advancing the stored column used to skip an overdue
+            // occurrence that had not actually run. [`is_scheduler_due`]
+            // already applies this same policy, so this branch is the
+            // race where last_run_at moved between the scan and the lock.
             record_run(
                 db,
                 task_id,
@@ -476,20 +468,14 @@ impl RepeatingTaskManager {
                     session_id = %s.id,
                     "Repeating task already has a running session; skipping",
                 );
-                // Still bump next_run_at so we don't spin every tick.
-                let (next, disable) = next_run_fields(&task, Utc::now());
-                let _ = db
-                    .update_repeating_task(
-                        task_id,
-                        UpdateRepeatingTask {
-                            next_run_at: Some(next),
-                            enabled: disable,
-                            updated_at: Some(Utc::now().to_rfc3339()),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                record_run(db, task_id, Some(&s.id), "already_running", trigger, None).await;
+                // Leave `next_run_at` alone so an overdue slot that
+                // arrived while this run was in flight still looks due
+                // after the session ends. Manual "Run now" records the
+                // overlap; scheduler ticks do not — a run that overruns
+                // its slot would otherwise write a history row every 30s.
+                if matches!(trigger, RunTrigger::Manual) {
+                    record_run(db, task_id, Some(&s.id), "already_running", trigger, None).await;
+                }
                 return Ok(StartOutcome::AlreadyRunning);
             }
         }
@@ -913,6 +899,12 @@ fn monthly_candidate(
     chrono::NaiveDate::from_ymd_opt(year, month, clamped)?.and_hms_opt(hour, minute, 0)
 }
 
+fn parse_rfc3339_utc(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
 /// Compute the next `next_run_at` *after* `now` for a task. Returns
 /// `None` if the schedule string is corrupted or if a `once` schedule
 /// has already fired. Callers persisting the result should go through
@@ -993,11 +985,10 @@ pub fn next_run_at_after(task: &RepeatingTask, now: DateTime<Utc>) -> Option<Str
 ///
 /// [`next_run_at_after`] returns `None` both when a `once` schedule is
 /// spent and when the stored schedule can't be parsed. Persisting that
-/// `None` alone is a money-loop hazard: `list_due_repeating_tasks`
-/// selects `next_run_at IS NULL OR next_run_at <= now`, so an enabled
-/// row with a NULL `next_run_at` is perpetually due and re-spawns a
-/// session on every tick (floored only by `MIN_SCHEDULER_GAP_SECONDS`).
-/// Both `None` cases therefore also disable the task.
+/// `None` alone is a money-loop hazard: [`is_scheduler_due`] treats a
+/// never-run enabled row with a NULL `next_run_at` as due now, and a
+/// corrupt schedule as due so this path can disable it. Both `None`
+/// cases therefore also disable the task.
 fn next_run_fields(task: &RepeatingTask, now: DateTime<Utc>) -> (Option<String>, Option<bool>) {
     match Schedule::parse(&task.schedule_kind, &task.schedule_value) {
         Err(e) => {
@@ -1033,6 +1024,57 @@ fn is_consumed_once(task: &RepeatingTask) -> bool {
     let re_armed = task.enabled && task.next_run_at.is_some();
     is_once && task.last_run_at.is_some() && !re_armed
 }
+
+/// Should the scheduler tick attempt a run of `task` at `now`?
+///
+/// Ground truth is last execution, not the stored `next_run_at` column.
+/// That column is a UI hint and can be bumped into the future by a
+/// throttle / already-running path, which used to skip an occurrence
+/// that was already past.
+///
+/// Due when the task is enabled and:
+/// - the stored schedule is corrupt (so the dispatch path can disable
+///   the row), or
+/// - it has never run and stored `next_run_at` is NULL or `<= now`, or
+/// - it has run, the next occurrence after `last_run_at` is `<= now`
+///   (that slot is past and has not executed), and the run-policy gap
+///   since `last_run_at` allows a scheduler fire.
+pub fn is_scheduler_due(task: &RepeatingTask, now: DateTime<Utc>) -> bool {
+    if !task.enabled {
+        return false;
+    }
+    if is_consumed_once(task) {
+        return false;
+    }
+    if Schedule::parse(&task.schedule_kind, &task.schedule_value).is_err() {
+        return true;
+    }
+
+    let last = task.last_run_at.as_deref().and_then(parse_rfc3339_utc);
+    let slot_due = match last {
+        Some(last_dt) => match next_run_at_after(task, last_dt) {
+            Some(next) => parse_rfc3339_utc(&next).is_some_and(|n| n <= now),
+            None => false,
+        },
+        None => match task.next_run_at.as_deref().and_then(parse_rfc3339_utc) {
+            Some(next) => next <= now,
+            None => true,
+        },
+    };
+    if !slot_due {
+        return false;
+    }
+    !matches!(
+        check_run_policy(
+            task,
+            task.last_run_at.as_deref(),
+            now,
+            RunTrigger::Scheduler,
+        ),
+        PolicyDecision::Throttle(_)
+    )
+}
+
 /// First `next_run_at` for a newly-created task: same as `next_run_at_after`
 /// but rounded down to the next whole minute when "interval" so the
 /// first tick lines up with a human-readable clock.
@@ -2298,8 +2340,9 @@ mod tests {
     }
 
     /// A row whose schedule can't be parsed must never be persisted as
-    /// "enabled with a NULL next_run_at" — that reads as "due now" to
-    /// `list_due_repeating_tasks` and re-fires every tick.
+    /// "enabled with a NULL next_run_at" — [`is_scheduler_due`] treats
+    /// that as due so the dispatch path can disable it, and would
+    /// re-fire every tick if we left it enabled.
     #[test]
     fn next_run_fields_disables_task_with_corrupt_schedule() {
         let task = make_task("interval", r#"{"minutes":"banana"}"#);
@@ -2321,5 +2364,137 @@ mod tests {
         let (next, disable) = next_run_fields(&task, now);
         assert_eq!(disable, None);
         assert!(next.is_some());
+    }
+
+    // ── Scheduler due-check ───────────────────────────────────────
+
+    fn task_with_runs(
+        kind: &str,
+        value: &str,
+        last_run: Option<DateTime<Utc>>,
+        next_run: Option<DateTime<Utc>>,
+    ) -> RepeatingTask {
+        let mut t = make_task(kind, value);
+        t.last_run_at = last_run.map(|d| d.to_rfc3339());
+        t.next_run_at = next_run.map(|d| d.to_rfc3339());
+        t
+    }
+
+    #[test]
+    fn scheduler_due_when_next_slot_after_last_run_is_past() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        // Last run 90 minutes ago on a 60-minute interval: the slot at
+        // last+60m is 30 minutes in the past and has not executed.
+        let task = task_with_runs(
+            "interval",
+            r#"{"minutes":60}"#,
+            Some(now - Duration::minutes(90)),
+            // Stored next_run_at lies in the future — the old trigger
+            // would skip this task. Last-run-based due must still fire.
+            Some(Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap()),
+        );
+        assert!(is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_not_due_when_next_slot_after_last_run_is_still_future() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        // Last run 10 minutes ago on a 60-minute interval: next slot is
+        // 50 minutes away. A stale next_run_at in the past must not
+        // make the scheduler fire.
+        let task = task_with_runs(
+            "interval",
+            r#"{"minutes":60}"#,
+            Some(now - Duration::minutes(10)),
+            Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap()),
+        );
+        assert!(!is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_due_never_run_when_stored_next_is_past() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let task = task_with_runs(
+            "interval",
+            r#"{"minutes":60}"#,
+            None,
+            Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap()),
+        );
+        assert!(is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_not_due_never_run_when_stored_next_is_future() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let task = task_with_runs(
+            "interval",
+            r#"{"minutes":60}"#,
+            None,
+            Some(Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap()),
+        );
+        assert!(!is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_not_due_when_disabled() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let mut task = task_with_runs(
+            "interval",
+            r#"{"minutes":60}"#,
+            Some(now - Duration::minutes(90)),
+            Some(now - Duration::minutes(30)),
+        );
+        task.enabled = false;
+        assert!(!is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_due_daily_when_yesterdays_run_missed_todays_slot() {
+        // Daily 09:00. Last executed yesterday 09:00; today 10:00 the
+        // 09:00 slot is past and has not executed.
+        let last = Utc.with_ymd_and_hms(2026, 6, 8, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        let task = task_with_runs(
+            "daily",
+            r#"{"hour":9,"minute":0}"#,
+            Some(last),
+            // Stored column already advanced to tomorrow — the skip bug.
+            Some(Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap()),
+        );
+        assert!(is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_not_due_daily_before_todays_slot() {
+        let last = Utc.with_ymd_and_hms(2026, 6, 8, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 8, 0, 0).unwrap();
+        let task = task_with_runs(
+            "daily",
+            r#"{"hour":9,"minute":0}"#,
+            Some(last),
+            Some(Utc.with_ymd_and_hms(2026, 6, 9, 9, 0, 0).unwrap()),
+        );
+        assert!(!is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_not_due_when_policy_gap_still_open() {
+        // Daily 09:00, last executed 30s before the slot. The 09:00
+        // slot is past, but the 60s hard floor refuses a scheduler fire.
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 9, 0, 0).unwrap();
+        let task = task_with_runs(
+            "daily",
+            r#"{"hour":9,"minute":0}"#,
+            Some(now - Duration::seconds(30)),
+            Some(now),
+        );
+        assert!(!is_scheduler_due(&task, now));
+    }
+
+    #[test]
+    fn scheduler_due_corrupt_schedule_so_dispatch_can_disable() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let task = make_task("interval", r#"{"minutes":"banana"}"#);
+        assert!(is_scheduler_due(&task, now));
     }
 }
