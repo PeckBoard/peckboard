@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Peckboard
+Comment=Remote control panel for Claude Code
+Exec=peckboard --desktop
+Icon=peckboard
+Terminal=false
+Categories=Development;
+StartupWMClass=com.peckboard.app

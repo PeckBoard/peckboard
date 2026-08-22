@@ -27,6 +27,8 @@ peckboard --port 8080 --https-port 8443 --data-dir /var/lib/peckboard
 | `--provider-send-timeout-secs` | `300`          | Time budget in seconds for one full agent turn of a plugin-provided provider; also `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`                               |
 | `--restore-from <FILE>`        | —              | Restore a backup archive into the data directory and exit; refuses to overwrite an existing database unless `--force` is also given                     |
 | `--force`                      | —              | Allow `--restore-from` to overwrite an existing database                                                                                                |
+| `--desktop`                    | off            | Open a native window on `http://127.0.0.1:<port>` after the server binds; also `PECKBOARD_DESKTOP=1`. Headless `peckboard` is unchanged. Linux desktop builds need WebKitGTK. |
+| `--install-desktop-entry`      | —              | Linux: write `~/.local/share/applications/peckboard.desktop` and the app icon, then exit                                                                |
 
 HTTPS uses a self-signed certificate that PeckBoard generates into the data directory on first start and renews automatically, so browsers warn on first visit. Set `RUST_LOG` (for example `RUST_LOG=debug`) to change log verbosity.
 

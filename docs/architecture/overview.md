@@ -4,14 +4,14 @@ Peckboard is a remote control panel for Claude Code. It spawns and manages Claud
 
 ## Distribution
 
-Peckboard is distributed as a **single executable binary**. No additional files, config, or runtime dependencies are required to run it. Everything is embedded at compile time:
+Peckboard is distributed as a **single executable binary**. No additional files or config are required to run it as a server. Everything is embedded at compile time:
 
 - **Database migrations** — baked in via Diesel's `embed_migrations!()`
 - **Frontend assets** — the compiled React SPA is embedded in the binary
 - **TLS certificates** — self-signed by default (ECDSA P-256, generated at runtime, no cert files shipped); an operator-uploaded certificate overrides it and hot-swaps in with no restart
 - **Default config** — sensible defaults compiled in; data directory created on first run
 
-Download one file, run it.
+Download one file, run it. `peckboard --desktop` opens a native window onto the same process. Linux desktop builds also need the system WebKitGTK library at runtime; the CLI-only Linux release asset (`peckboard-linux-*` without `-desktop`) does not. Source builds can omit the window with `cargo build --release --no-default-features`.
 
 ## High-Level Components
 

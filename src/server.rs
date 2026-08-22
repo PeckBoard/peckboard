@@ -1,0 +1,920 @@
+//! Long-running HTTP/HTTPS server. `main` dispatches here after
+//! maintenance short-circuits (`--reset-password`, `--restore-from`,
+//! `--install-desktop-entry`). Desktop mode runs this on a background
+//! Tokio runtime and opens a native window once the HTTP listener binds.
+
+use crate::auth::bootstrap::{BootstrapOutcome, ensure_admin_user};
+use crate::auth::rate_limit::RateLimiter;
+use crate::auth::session::issue_session_token;
+use crate::auth::token::load_or_create_jwt_secret;
+use crate::config::{CliArgs, Config};
+use crate::db::Db;
+use crate::plugin::builtin::BuiltinPluginRegistry;
+use crate::plugin::builtins::register_all as register_builtin_plugins;
+use crate::plugin::manager::PluginManager;
+use crate::provider::manager::SessionManager;
+use crate::provider::registry::ProviderRegistry;
+use crate::repeating::{RepeatingTaskManager, RunAuditor};
+use crate::routes::api_router;
+use crate::security::{origin_check, repair_dangling_sessions, security_headers};
+use crate::service::mcp_server::McpTokenRegistry;
+use crate::service::mdns;
+use crate::service::push::PushService;
+use crate::service::ssh_keys::load_or_create_vault_key;
+use crate::service::tls;
+use crate::service::wake::WakeDetector;
+use crate::state::AppState;
+use crate::worker::watchdog;
+use crate::ws::broadcaster::Broadcaster;
+
+use axum::middleware;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::signal;
+use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+
+/// Fired after the HTTP listener binds so a desktop window can load a
+/// live URL instead of racing startup.
+pub struct ServerReady {
+    pub http_url: String,
+    pub data_dir: PathBuf,
+    pub bootstrap_token: Option<String>,
+}
+
+/// Run the server until `window_closed` fires or SIGINT/SIGTERM.
+///
+/// `ready` is signaled after `TcpListener::bind` succeeds. Desktop mode
+/// uses that to open the WebView; CLI mode passes `None`.
+pub async fn run_server(
+    args: CliArgs,
+    window_closed: Option<tokio::sync::oneshot::Receiver<()>>,
+    ready: Option<tokio::sync::oneshot::Sender<ServerReady>>,
+) -> anyhow::Result<()> {
+    let mint_bootstrap_token = ready.is_some();
+    let config = Config::from_args(args);
+    let addr = format!("{}:{}", config.host, config.port);
+
+    let db = Db::open(&config.data_dir)?;
+    tracing::info!("Database opened at {}", config.data_dir.display());
+    // Seed the built-in named system prompts the cost-aware auto-switch
+    // picks from. Per-name create-if-missing: backfills builtins added
+    // after first run, leaves user-edited prompts untouched.
+    // auto-switch picks from. No-op once the library has any entry.
+    match db.seed_default_system_prompts().await {
+        Ok(n) if n > 0 => tracing::info!("Seeded {n} default system prompt(s)"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Failed to seed default system prompts: {e}"),
+    }
+
+    // Prime the in-memory custom-workflow registry so the orchestrator and
+    // every route see user-defined workflows from the first request.
+    if let Err(e) = crate::routes::workflows::reload_registry(&db).await {
+        tracing::warn!("Failed to load custom workflows: {e}");
+    }
+
+    // First-run bootstrap: create the sole admin user if the DB is empty.
+    // Peckboard does not expose self-service registration — operators
+    // get one auto-generated admin and can mint additional users from
+    // there. The outcome is held until the very end of startup so the
+    // credentials land below the noisy tracing logs and are the last
+    // thing the operator sees.
+    let bootstrap_outcome = ensure_admin_user(&db).await?;
+
+    // First-run setup wizard flag: only a fresh install (bootstrap admin
+    // just created) should ever see it; existing installs read completed.
+    crate::routes::settings::ensure_setup_state(&db, bootstrap_outcome.is_some()).await;
+
+    // Startup state repair: fix dangling agent-starts from previous crash
+    repair_dangling_sessions(&db).await?;
+
+    // Purge expired auth sessions
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let purged = db.delete_expired_auth_sessions(now).await?;
+    if purged > 0 {
+        tracing::info!("Purged {purged} expired auth session(s)");
+    }
+
+    let plugins = Arc::new(
+        PluginManager::new(&config.data_dir, db.clone()).with_provider_send_timeout(
+            std::time::Duration::from_secs(config.provider_send_timeout_secs),
+        ),
+    );
+    plugins.load_all().await?;
+    crate::plugin::manager::set_notify_global(plugins.clone());
+    let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
+    let ssh_vault_key = load_or_create_vault_key(&config.data_dir)?;
+    // 60/min is plenty for a single-tenant LAN server; the previous 5
+    // was so aggressive that even a normal user with a few tabs open
+    // (each authenticating its own WS) could trip it. Rate-limiting
+    // still uses the (currently hardcoded) IP, so this is a per-host
+    // ceiling, not a per-account one.
+    let login_limiter = RateLimiter::new(60);
+    // 5 password-change attempts per minute per user. Stops a stolen
+    // token from ratcheting the password to lock out the legitimate
+    // user; 5 is plenty of headroom for honest mis-clicks.
+    let password_change_limiter = RateLimiter::<String>::new(5);
+
+    let broadcaster = Broadcaster::new();
+
+    let provider_registry = Arc::new(ProviderRegistry::new());
+    let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
+    // Each built-in plugin registers its capabilities (today: an
+    // AgentProvider) through the catalog, replacing the old direct
+    // `register_*_provider` calls. The catalog records the granted
+    // permissions for `/api/plugins` and the Settings UI.
+    register_builtin_plugins(&builtin_plugins, provider_registry.clone(), db.clone()).await;
+    // Sudo askpass bridge: write the helper script and wire the registry so
+    // interactive sessions can run `sudo -A` with the password typed in the
+    // web UI (service::askpass). A write failure only disables sudo support.
+    let askpass_registry = crate::service::askpass::AskpassRegistry::new();
+    let askpass_env = match crate::service::askpass::write_askpass_script(&config.data_dir) {
+        Ok(script) => Some(crate::service::askpass::AskpassEnv {
+            registry: askpass_registry,
+            script_path: script.to_string_lossy().to_string(),
+            // The CLI child runs on this host, so loopback + the plain HTTP
+            // port is always right regardless of how the UI is reached.
+            url: format!("http://127.0.0.1:{}/api/askpass", config.port),
+        }),
+        Err(e) => {
+            tracing::warn!("askpass helper not written: {e} — sudo -A disabled in sessions");
+            None
+        }
+    };
+    let env_unlock = Arc::new(crate::service::env_vars::EnvUnlockRegistry::new());
+    // Late-bind the process-global handle so the blocking command-exec path
+    // can snapshot unlocked values (`service::env_vars::unlocked_values_blocking`).
+    crate::service::env_vars::set_global_registry(env_unlock.clone());
+    let session_manager = SessionManager::new(provider_registry.clone())
+        .with_plugins(plugins.clone())
+        .with_askpass(askpass_env)
+        .with_env_unlock(Some(env_unlock.clone()));
+    let repeating_task_manager = RepeatingTaskManager::new();
+    let run_auditor = RunAuditor::new();
+
+    let mcp_tokens = McpTokenRegistry::new();
+    let push_service = PushService::new(&config.data_dir);
+
+    let state = Arc::new(AppState {
+        config,
+        db,
+        plugins,
+        builtin_plugins,
+        jwt_secret,
+        ssh_vault_key,
+        login_limiter,
+        password_change_limiter,
+        broadcaster,
+        provider_registry,
+        session_manager,
+        repeating_task_manager,
+        run_auditor,
+        mcp_tokens,
+        push_service,
+        env_unlock,
+        tls: Arc::new(crate::state::TlsState::new()),
+    });
+
+    // Now that `AppState` exists, bind the plugin agent-dispatch bridge. A
+    // `Weak<AppState>` inside `AppLiveHost` breaks the otherwise-cyclic
+    // `state → plugins → live → state` ownership; plugins loaded earlier share
+    // the same (until now empty) slot, so they pick this up immediately.
+    state
+        .plugins
+        .set_live_host(Arc::new(crate::service::mcp_server::AppLiveHost::new(
+            &state,
+            tokio::runtime::Handle::current(),
+        )));
+
+    // Bind the provider registry and apply any plugin-registered AI
+    // providers (plugins declaring the `provider.register` hook). Runs after
+    // `set_live_host` so a registering plugin's host functions are fully
+    // wired; models registered here appear in /api/models like native ones.
+    state
+        .plugins
+        .set_provider_registry(&state.provider_registry);
+    state.plugins.sync_plugin_providers().await;
+
+    // Resume any in-flight worker sessions after startup repair
+    crate::worker::orchestrator::check_and_spawn_workers(&state).await;
+    tracing::info!("Worker orchestrator startup check complete");
+
+    // Same idea for document reviews: a review the DB still calls `running`
+    // is a pass whose process died with the last shutdown (or the upgrade
+    // that replaced this binary). Resume the interrupted turn where one was
+    // in flight, and free the rest — nothing else ever moves a review off
+    // `running`, so a stuck one disables Run pass forever.
+    //
+    // Detached deliberately: resuming dispatches a real turn, and a CLI
+    // provider can sit in its spawn path for minutes (cursor's `--resume`
+    // took 120s in the wild). Awaited here that delay lands BEFORE the
+    // listener binds and the whole server looks hung, so recovery runs
+    // alongside startup instead of in front of it.
+    {
+        let review_state = state.clone();
+        tokio::spawn(async move {
+            crate::routes::doc_reviews::resume_running_reviews(&review_state).await;
+        });
+    }
+
+    // Run orchestrator on a 5-second interval to pick up new cards quickly
+    {
+        let orch_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.tick().await; // skip immediate first tick (already ran above)
+            loop {
+                interval.tick().await;
+                crate::worker::orchestrator::check_and_spawn_workers(&orch_state).await;
+            }
+        });
+        tracing::info!("Worker orchestrator loop started (5s interval)");
+    }
+
+    // Repeating tasks scheduler: tick every 30 seconds. Each tick loads
+    // enabled tasks and fires those whose next slot after last_run_at
+    // is already in the past (and has not executed). We don't tick more
+    // often than the smallest practical schedule interval (1 minute),
+    // so 30s gives us at most ~30s of slack between "due" and "fired".
+    {
+        let sched_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            // If a tick takes longer than the interval (e.g. a slow
+            // dispatch with many due tasks), skip the missed ticks
+            // rather than bursting catch-up runs — the next tick
+            // re-queries due tasks anyway, so a burst would just
+            // re-process the same set on top of each other.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Skip the immediate first tick — every tick after start sleeps
+            // first so we don't dispatch the moment the server boots
+            // (which would race the rest of startup).
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let ctx = crate::repeating::RunContext {
+                    db: &sched_state.db,
+                    broadcaster: &sched_state.broadcaster,
+                    session_manager: &sched_state.session_manager,
+                    mcp_tokens: &sched_state.mcp_tokens,
+                    data_dir: &sched_state.config.data_dir,
+                    http_port: sched_state.config.port,
+                    auditor: &sched_state.run_auditor,
+                };
+                sched_state.repeating_task_manager.run_due_tasks(ctx).await;
+            }
+        });
+        tracing::info!("Repeating-task scheduler started (30s interval)");
+    }
+
+    // Repeating-task watchdog: independent observer that audits both the
+    // auditor's own dispatch log and the persisted session rows every
+    // 60s. Catches any scheduler-initiated runs that fired closer
+    // together than the schedule allows; on a hit, it disables the
+    // task (kill switch) and broadcasts a `repeating-task-watchdog`
+    // event so the UI can surface the failure. See [`RunAuditor`].
+    {
+        let auditor = state.run_auditor.clone();
+        let db_clone = state.db.clone();
+        let bc_clone = state.broadcaster.clone();
+        auditor.spawn_audit_loop(db_clone, bc_clone, std::time::Duration::from_secs(60));
+        tracing::info!("Repeating-task watchdog started (60s interval)");
+    }
+
+    // Idle lock-map sweepers for SessionManager + RepeatingTaskManager.
+    // Both managers insert a per-session/per-task `Arc<Mutex<()>>` on
+    // first access and previously never removed it; for a user who
+    // never closes tabs that map grows monotonically over months. The
+    // sweep is `O(N)` over the map at a 5-minute cadence — invisible
+    // until the count climbs into the thousands, and even then it
+    // serialises against hot paths only briefly because the outer
+    // mutex hold is bounded by the retain pass.
+    state.session_manager.spawn_lock_sweeper();
+    state.repeating_task_manager.spawn_lock_sweeper();
+    tracing::info!("Lock-map sweepers started (5min interval)");
+
+    // Provider login keep-alive: periodically ping each auth login with a
+    // throwaway "hi" so tokens don't go stale. No-op when the interval is 0.
+    crate::keepalive::spawn(state.clone(), state.config.keep_alive_hours);
+
+    // Claude plan-usage poller: refresh the `/usage` buckets (5-hour /
+    // weekly quotas) for the host login and every stored oauth account, so
+    // Settings → Claude Accounts always shows current subscription usage.
+    crate::provider::claude::plan_usage::spawn(state.clone());
+
+    // Scheduled backups: write tar.gz snapshots on a configured interval.
+    // No-op unless backupIntervalHours + backupDir are set in config.json.
+    crate::service::backup::spawn_scheduler(state.db.clone(), state.config.data_dir.clone());
+
+    // Data-retention sweep: hourly bound on repeating-task run sessions,
+    // idle-session events, and report files. No-op passes until an admin
+    // sets a non-zero limit in Settings → Server (all-zero default = keep
+    // forever).
+    crate::service::retention::spawn_sweeper(state.clone());
+
+    // Temp-session orphan sweep: delete temp sessions no tab points at
+    // anymore (a client died between create and tab-open, or a
+    // last-tab-close delete failed mid-way). One-shot at boot; failures
+    // are retried on the next boot.
+
+    // Subagent orphan reconcile: a subagent whose completion was only ever
+    // going to be stamped by the in-process completion listener never gets
+    // that chance if the server restarts mid-run — it would otherwise sit
+    // "running" forever, occupying its parent's concurrent-subagent slot.
+    // One-shot at boot, before any provider traffic starts.
+    let reconciled = crate::subagent::reconcile_orphan_subagents(&state.db).await;
+    if reconciled > 0 {
+        tracing::info!(
+            count = reconciled,
+            "Reconciled orphaned subagent sessions at startup"
+        );
+    }
+
+    // Handover reconcile: a `handover_to_model` still parked at boot has no
+    // in-process listener left to ever clear it — the process that dispatched
+    // the doc turn (or was about to) is gone. Left alone the session 409s on
+    // every send and model switch forever. One-shot at boot, before any
+    // provider traffic starts.
+    let handovers_reconciled = crate::handover::reconcile_parked_handovers(&state).await;
+    if handovers_reconciled > 0 {
+        tracing::info!(
+            count = handovers_reconciled,
+            "Reconciled parked handovers at startup"
+        );
+    }
+    crate::routes::sessions::sweep_orphan_temp_sessions(&state).await;
+    let app = api_router(state.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
+        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(origin_check))
+        .layer(TraceLayer::new_for_http())
+        // Outermost: gzip API/static responses when the client asks for it.
+        // Event pages are large, highly compressible JSON and the UI is
+        // typically remote — transfer time dominates the load, not the query.
+        // Default predicate already skips images and tiny bodies; the WS
+        // upgrade has no body so /ws is unaffected.
+        .layer(CompressionLayer::new())
+        .with_state(state.clone());
+
+    tracing::info!("Peckboard listening on http://{addr}");
+    let listener = TcpListener::bind(&addr).await?;
+
+    // mDNS advertisement is opt-in. Default-off avoids broadcasting
+    // service presence on the LAN, which is an unnecessary discovery
+    // / fingerprinting surface for a single-tenant LAN server. Enable
+    // explicitly with `--mdns` (or `PECKBOARD_MDNS=1`) when discovery
+    // is actually desired.
+    let mdns_handle = if state.config.mdns {
+        let mdns_name = mdns::generate_mdns_name();
+        match mdns::start_mdns(&mdns_name, state.config.port) {
+            Ok(handle) => {
+                tracing::info!("mDNS name: {mdns_name}");
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start mDNS: {e}");
+                None
+            }
+        }
+    } else {
+        tracing::info!("mDNS disabled (enable with --mdns)");
+        None
+    };
+
+    // Start wake-from-sleep detector
+    let _wake_detector = WakeDetector::start();
+    tracing::info!("Wake-from-sleep detector started");
+
+    // Start worker watchdog (orphan cleanup every 60s)
+    {
+        let watchdog_db = state.db.clone();
+        // Shares the real per-session lock map, so the sweeps'
+        // `try_lock_session` guard actually observes a dispatcher mid-flight
+        // instead of trivially succeeding against an empty map of its own.
+        let watchdog_sm = SessionManager::sharing_locks_with(&state.session_manager);
+        let watchdog_bc = state.broadcaster.clone();
+        tokio::spawn(watchdog::start_watchdog(
+            watchdog_db,
+            watchdog_sm,
+            watchdog_bc,
+        ));
+        tracing::info!("Worker watchdog started");
+    }
+
+    // Start worker completion listener -- receives notifications when a
+    // streaming process finishes and runs the worker-done handler +
+    // orchestration outside the tokio::spawn boundary (avoiding Send issues
+    // with AppState's PluginManager).
+    //
+    // Every completion (success or crash) also drains any persistent
+    // queued message for the session so a "send while busy" reliably
+    // delivers, even if the in-flight run was interrupted or crashed.
+    {
+        if let Some(mut rx) = state.session_manager.take_completion_rx().await {
+            let orchestrator_state = state.clone();
+            tokio::spawn(async move {
+                while let Some(completion) = rx.recv().await {
+                    let sid = completion.session_id.clone();
+                    // -0.5. Drain-only turn-end signal: a mid-stream
+                    //    provider's child is still alive and still owns its
+                    //    run — this is NOT a real completion. Skip handover/
+                    //    worker/subagent/compaction bookkeeping entirely and
+                    //    just deliver the queued message via the same
+                    //    per-session-locked drain every other path uses.
+                    if completion.turn_end_only {
+                        if let Err(e) = crate::worker::orchestrator::drain_queue_for_session(
+                            &orchestrator_state,
+                            &sid,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                session_id = %sid,
+                                "Turn-end queue drain failed: {e}"
+                            );
+                        }
+                        continue;
+                    }
+
+                    // 0. Handover finalize. If this completion is the
+                    //    outgoing model's doc-generation turn (session has a
+                    //    parked `handover_to_model` AND the completion's run
+                    //    stamp matches the one begin_handover recorded),
+                    //    capture the doc, flip the model, and stash the doc
+                    //    for the incoming model. Runs before worker
+                    //    bookkeeping and short-circuits the rest: a doc-gen
+                    //    turn isn't a normal worker/queue completion and must
+                    //    not respawn anything. See `handover::handle_completion`
+                    //    for the stale-completion guard.
+                    if crate::handover::handle_completion(&orchestrator_state, &completion).await {
+                        continue;
+                    }
+
+                    // 1. Worker-specific bookkeeping. Hold the per-session
+                    //    lock for the entire handler so the watchdog's
+                    //    try_lock_session check skips this session while
+                    //    plugins, token revoke, and DB updates run — even
+                    //    if the handler takes longer than the watchdog's
+                    //    grace window.
+                    {
+                        let _guard = orchestrator_state.session_manager.lock_session(&sid).await;
+                        match orchestrator_state.db.get_session(&sid).await {
+                            Ok(Some(session)) if session.is_worker => {
+                                if completion.completed {
+                                    tracing::info!(session_id = %sid, "Worker completed, running handle_worker_done");
+                                    crate::worker::orchestrator::handle_worker_done(
+                                        &orchestrator_state,
+                                        &sid,
+                                    )
+                                    .await;
+                                } else {
+                                    // Worker crashed/interrupted — clear the
+                                    // card's `worker_session_id` ONLY if it
+                                    // still points at THIS session. The
+                                    // orchestrator can have spawned a
+                                    // replacement between an outgoing cancel
+                                    // and this listener firing (5s tick); an
+                                    // unconditional clear would free the
+                                    // replacement's slot and produce two
+                                    // concurrent workers for the same card.
+                                    tracing::warn!(session_id = %sid, "Worker crashed or interrupted");
+                                    if let Some(card_id) = &session.card_id {
+                                        let _ = orchestrator_state
+                                            .db
+                                            .clear_card_worker_if_matches(card_id, &sid)
+                                            .await;
+
+                                        // Auto-pause defense: if this card has
+                                        // been crashing in a tight loop (e.g.
+                                        // rate-limit, bad credentials, broken
+                                        // sandbox), stop the project so we don't
+                                        // burn cycles. Stderr from this run goes
+                                        // into the pause reason so the user has
+                                        // a starting point.
+                                        let last_stderr =
+                                            last_crash_stderr(&orchestrator_state.db, &sid).await;
+                                        crate::worker::orchestrator::maybe_auto_pause_after_crash(
+                                            &orchestrator_state,
+                                            card_id,
+                                            last_stderr.as_deref(),
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                            // Subagent finished: report its final message
+                            // back to the parent session. Idempotent (claim
+                            // inside); a crash reports the error instead.
+                            Ok(Some(session)) if session.parent_session_id.is_some() => {
+                                crate::subagent::handle_subagent_done(
+                                    &orchestrator_state,
+                                    &session,
+                                    completion.completed,
+                                    completion.error.as_deref(),
+                                )
+                                .await;
+                            }
+                            _ => {}
+                        }
+                    } // release lock before drain_queue_for_session, which
+                    // re-acquires it inside drain_queued (tokio Mutex is
+                    // not reentrant).
+
+                    // 1.5 Auto-compaction: a worker whose context occupancy
+                    // crossed the threshold gets a same-model compaction
+                    // turn dispatched right here — the model writes a
+                    // continuation doc and the conversation restarts fresh
+                    // with it injected (see crate::handover). Workers only —
+                    // interactive sessions are prompted in the UI (clear /
+                    // compact / continue) and never auto-compacted; that and
+                    // the other eligibility guards (idle, nothing queued,
+                    // card still resuming this session) live in
+                    // maybe_auto_compact. A dispatched compaction implies an
+                    // empty queue (guard), so falling through to the drain
+                    // below is harmless.
+                    if completion.completed
+                        && let Err(e) =
+                            crate::handover::maybe_auto_compact(&orchestrator_state, &sid).await
+                    {
+                        tracing::warn!(
+                            session_id = %sid,
+                            "Auto-compaction check failed: {e}"
+                        );
+                    }
+
+                    // 1.6 Doc Review: a review session's turn just ended.
+                    // Chat-lane / clarify-only replies never call
+                    // submit_review_revision, so nothing else reacts to the
+                    // turn ending — without this the status chip says
+                    // "running" forever. Runs for EVERY outcome, not just a
+                    // clean one: a crashed or interrupted pass is exactly the
+                    // case where the user needs the review back in their
+                    // hands, and leaving it on `running` disables Run pass
+                    // with no way out. No-op unless the review is still
+                    // `running` (a revision or a question already moved it).
+                    crate::service::doc_reviews::resume_after_turn(
+                        &orchestrator_state.db,
+                        &orchestrator_state.broadcaster,
+                        &sid,
+                    )
+                    .await;
+
+                    // 1.7 Auth recovery. A turn that failed to authenticate
+                    // parks its message and — once per credential version —
+                    // releases it again immediately, so the drain below
+                    // replays it into a freshly spawned child. Ordered
+                    // before the drain deliberately: the release has to be
+                    // in place by the time the drain looks. Every other
+                    // outcome just drops the replay snapshot.
+                    crate::provider::auth_recovery::handle_completion(
+                        &orchestrator_state,
+                        &completion,
+                    )
+                    .await;
+
+                    // 2. Drain any queued message — runs for every session
+                    // (worker or interactive) and every completion outcome.
+                    // drain_queue_for_session takes the per-session lock
+                    // itself; we don't need to hold it here.
+                    if let Err(e) = crate::worker::orchestrator::drain_queue_for_session(
+                        &orchestrator_state,
+                        &sid,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            session_id = %sid,
+                            "Queue drain failed: {e}"
+                        );
+                    }
+
+                    // 3. Fill any freed worker slots.
+                    crate::worker::orchestrator::check_and_spawn_workers(&orchestrator_state).await;
+                }
+            });
+            tracing::info!("Worker completion listener started");
+        }
+    }
+
+    // Load TLS material into the hot-swappable resolver, then always bind
+    // the HTTPS listener — even with no cert loaded, the resolver returns
+    // `None` and handshakes just fail cleanly, so a certificate uploaded
+    // later starts working immediately with no restart. Only a TCP bind
+    // failure (port in use) skips the listener.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let mut tls_errors: Vec<String> = Vec::new();
+    let cert_loaded = match tls::ensure_certs(&state.config.data_dir) {
+        Ok(tls_material) => match state.tls.load_from(&state.config.data_dir, &tls_material) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!("Failed to load TLS certificate, HTTPS disabled: {e:#}");
+                tls_errors.push(format!("{e:#}"));
+                false
+            }
+        },
+        Err(e) => {
+            tracing::error!("Failed to ensure TLS certs, HTTPS disabled: {e:#}");
+            state.tls.set_error(&format!("{e:#}"));
+            tls_errors.push(format!("{e:#}"));
+            false
+        }
+    };
+
+    let https_addr = format!("{}:{}", state.config.host, state.config.https_port);
+    let (tls_handle, bind_ok) = match TcpListener::bind(&https_addr).await {
+        Ok(https_listener) => {
+            let resolver: Arc<dyn rustls::server::ResolvesServerCert> =
+                Arc::new(crate::state::TlsCertResolver(state.tls.clone()));
+            let tls_acceptor = tls::acceptor_from_resolver(resolver);
+            let https_app = app.clone();
+            tracing::info!("Peckboard listening on https://{https_addr}");
+            (
+                Some(tokio::spawn(serve_https(
+                    https_listener,
+                    tls_acceptor,
+                    https_app,
+                ))),
+                true,
+            )
+        }
+        Err(e) => {
+            tracing::error!("Failed to bind HTTPS listener on {https_addr}: {e}");
+            tls_errors.push(format!(
+                "failed to bind HTTPS listener on {https_addr}: {e}"
+            ));
+            (None, false)
+        }
+    };
+
+    state.tls.set_listener_bound(bind_ok);
+    state.tls.set_https_enabled(cert_loaded && bind_ok);
+
+    if tls_errors.is_empty() {
+        if let Err(e) = tls::clear_failure_announcement(&state.db).await {
+            tracing::warn!("Failed to clear TLS failure announcement: {e}");
+        }
+    } else if let Err(e) = tls::announce_failure(&state.db, &tls_errors.join("; ")).await {
+        tracing::warn!("Failed to record TLS failure announcement: {e}");
+    }
+
+    // Print the first-run admin credentials *last* so they sit below
+    // the startup tracing noise and are the operator's final view
+    // before the server goes quiet waiting on connections.
+    if let Some(outcome) = bootstrap_outcome.as_ref() {
+        print_bootstrap_banner(outcome);
+    }
+
+    // Desktop window waits on this. Signal only once the HTTP socket is
+    // bound *and* the rest of startup (TLS, watchdogs) has finished so
+    // the first WebView request is accepted rather than queued behind
+    // cert generation.
+    let bootstrap_token = if mint_bootstrap_token {
+        mint_desktop_bootstrap_token(&state, bootstrap_outcome.as_ref()).await
+    } else {
+        None
+    };
+    if let Some(tx) = ready {
+        let window_host = loopback_host(&state.config.host);
+        let _ = tx.send(ServerReady {
+            http_url: format!("http://{window_host}:{}", state.config.port),
+            data_dir: state.config.data_dir.clone(),
+            bootstrap_token,
+        });
+    }
+
+    // Graceful shutdown on SIGINT/SIGTERM
+    let shutdown_state = state.clone();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal(window_closed).await;
+        tracing::info!("Shutdown signal received, shutting down gracefully...");
+        shutdown_state.session_manager.shutdown().await;
+        shutdown_state.plugins.shutdown().await;
+        tracing::info!("Shutdown complete");
+    })
+    .await?;
+
+    // Stop mDNS advertisement
+    if let Some(mdns) = mdns_handle {
+        if let Err(e) = mdns.stop() {
+            tracing::warn!("Failed to stop mDNS: {e}");
+        } else {
+            tracing::info!("mDNS advertisement stopped");
+        }
+    }
+
+    // Abort the HTTPS task when HTTP server shuts down
+    if let Some(handle) = tls_handle {
+        handle.abort();
+    }
+
+    Ok(())
+}
+
+/// Serve the axum app over HTTPS by accepting TLS connections and feeding them
+/// into `axum::serve`.  Each accepted TCP stream is upgraded to TLS via the
+/// `TlsAcceptor` and then handled by the router.
+async fn serve_https(
+    listener: TcpListener,
+    tls_acceptor: tokio_rustls::TlsAcceptor,
+    app: axum::Router,
+) {
+    use tower::Service;
+
+    let mut make_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+    loop {
+        let (tcp_stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            // A per-connection error (the peer went away between the SYN
+            // and the accept) is transient and the next accept succeeds.
+            // A resource error — the process is out of file descriptors,
+            // the kernel is out of memory — persists, and `accept` then
+            // returns immediately every time: without this pause the loop
+            // would spin a core flat out for as long as the condition
+            // lasts. `axum::serve` backs the plain-HTTP listener off the
+            // same way.
+            Err(e) if is_transient_accept_error(&e) => {
+                tracing::debug!("HTTPS accept error: {e}");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("HTTPS accept failed, backing off: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        let acceptor = tls_acceptor.clone();
+        let service = match make_service.call(remote_addr).await {
+            Ok(svc) => svc,
+            Err(e) => {
+                // Infallible in practice, but handle gracefully
+                tracing::debug!("HTTPS make_service error: {e}");
+                continue;
+            }
+        };
+
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(tcp_stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("TLS handshake failed from {remote_addr}: {e}");
+                    return;
+                }
+            };
+
+            let io = hyper_util::rt::TokioIo::new(tls_stream);
+            let hyper_service = hyper_util::service::TowerToHyperService::new(service);
+
+            if let Err(e) =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(io, hyper_service)
+                    .await
+            {
+                tracing::debug!("HTTPS connection error from {remote_addr}: {e}");
+            }
+        });
+    }
+}
+
+/// Whether an `accept` error is about the connection that failed rather
+/// than the process's ability to accept at all. Transient errors are
+/// retried immediately; everything else is treated as a condition that
+/// will still be there on the next iteration and gets a short pause.
+fn is_transient_accept_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        e.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+    )
+}
+
+/// Print the first-run admin credentials in a hard-to-miss banner.
+/// Goes to stdout so it shows up in normal terminal capture and so the
+/// final `username:password` line stays pipe-friendly
+/// (`peckboard | tail -1`).
+fn print_bootstrap_banner(outcome: &BootstrapOutcome) {
+    const BAR: &str = "════════════════════════════════════════════════════════════════════";
+    println!();
+    println!("{BAR}");
+    println!("  PECKBOARD FIRST-RUN ADMIN ACCOUNT");
+    println!("{BAR}");
+    println!();
+    println!("    username:  {}", outcome.username);
+    println!("    password:  {}", outcome.new_password);
+    println!();
+    println!("  Save this — it will not be shown again.");
+    println!("  Use `peckboard --reset-password` to mint a new one if it's lost.");
+    println!();
+    println!("{BAR}");
+    // Machine-readable form (same as --reset-password) for tooling that
+    // parses `peckboard | tail -1`.
+    println!("{}:{}", outcome.username, outcome.new_password);
+}
+
+fn loopback_host(bind_host: &str) -> &str {
+    match bind_host {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
+    }
+}
+
+async fn mint_desktop_bootstrap_token(
+    state: &AppState,
+    outcome: Option<&BootstrapOutcome>,
+) -> Option<String> {
+    let outcome = outcome?;
+    let user = match state.db.get_user_by_username(&outcome.username).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            tracing::warn!("Desktop bootstrap: admin user missing after create");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("Desktop bootstrap: failed to load admin user: {e}");
+            return None;
+        }
+    };
+    match issue_session_token(
+        &state.db,
+        &state.jwt_secret,
+        &user.id,
+        &user.role,
+        Some("Peckboard desktop".into()),
+        Some("127.0.0.1".into()),
+    )
+    .await
+    {
+        Ok(token) => Some(token),
+        Err(e) => {
+            tracing::warn!("Desktop bootstrap: failed to mint auth token: {e}");
+            None
+        }
+    }
+}
+
+async fn shutdown_signal(window_closed: Option<tokio::sync::oneshot::Receiver<()>>) {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    let window = async {
+        if let Some(rx) = window_closed {
+            let _ = rx.await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+        _ = window => {},
+    }
+}
+
+/// Read the stderr text from the session's most recent crash `agent-end`
+/// event. The completion listener uses this to enrich the auto-pause
+/// reason — knowing the worker crashed isn't useful on its own; the user
+/// needs the underlying CLI error to act on it.
+async fn last_crash_stderr(db: &crate::db::Db, session_id: &str) -> Option<String> {
+    let events = db.events_tail(session_id, 16).await.ok()?;
+    for event in events.iter().rev() {
+        if event.kind != "agent-end" {
+            continue;
+        }
+        let data: serde_json::Value = serde_json::from_str(&event.data).ok()?;
+        if data.get("status").and_then(|s| s.as_str()) != Some("crashed") {
+            continue;
+        }
+        return data
+            .get("stderr")
+            .and_then(|s| s.as_str())
+            .map(str::to_string);
+    }
+    None
+}

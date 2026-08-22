@@ -12,6 +12,8 @@ Config lives at `<dataDir>/config.json`. Precedence (highest first): CLI args > 
 | --data-dir | ~/.peckboard | Data directory (also PECKBOARD_DATA_DIR env) |
 | --no-interactive | - | Skip first-run config bootstrap prompt |
 | --reset-password | - | Wipe password + tokens, generate new, print, exit |
+| --desktop | off | Open a native window on the local HTTP server (also PECKBOARD_DESKTOP) |
+| --install-desktop-entry | - | Linux: write a `.desktop` launcher, then exit |
 | --reset-mdns-name | - | Regenerate mDNS hostname, persist, print, exit |
 | --plain / --no-color | - | Disable ANSI colors (also NO_COLOR=1) |
 | --json | - | JSON log output (also LOG_FORMAT=json) |

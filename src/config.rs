@@ -65,6 +65,19 @@ pub struct CliArgs {
     /// Allow --restore-from to overwrite an existing peckboard.db.
     #[arg(long, requires = "restore_from")]
     pub force: bool,
+
+    /// Open a native desktop window onto the local server. Also
+    /// `PECKBOARD_DESKTOP=1`. Default `peckboard` stays a headless
+    /// server so systemd, Docker, Playwright, and SSH sessions are
+    /// unchanged.
+    #[arg(long, env = "PECKBOARD_DESKTOP")]
+    pub desktop: bool,
+
+    /// Write a `.desktop` launcher (Linux) that starts this binary with
+    /// `--desktop`, plus the app icon under `~/.local/share`. Exits after
+    /// installing. No-op with an error on other platforms.
+    #[arg(long)]
+    pub install_desktop_entry: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +135,8 @@ mod tests {
             provider_send_timeout_secs: 300,
             restore_from: None,
             force: false,
+            desktop: false,
+            install_desktop_entry: false,
         }
     }
 
@@ -134,6 +149,42 @@ mod tests {
         assert!(!args.reset_password);
         assert!(args.user.is_none());
         assert_eq!(args.keep_alive_hours, 1);
+        assert!(!args.desktop);
+        assert!(!args.install_desktop_entry);
+    }
+
+    #[test]
+    fn desktop_flag_parses() {
+        let args = CliArgs::try_parse_from(["peckboard", "--desktop"]).unwrap();
+        assert!(args.desktop);
+        assert!(!args.reset_password);
+    }
+
+    #[test]
+    fn desktop_and_reset_password_both_parse() {
+        // Maintenance wins at dispatch in main, not via clap exclusivity.
+        let args = CliArgs::try_parse_from(["peckboard", "--desktop", "--reset-password"]).unwrap();
+        assert!(args.desktop);
+        assert!(args.reset_password);
+    }
+
+    #[test]
+    fn desktop_env_sets_flag() {
+        let args = CliArgs::try_parse_from(["peckboard"]).unwrap();
+        // Env is read by clap at parse time from the real process env, so
+        // this only asserts the flag stays off when we don't pass it.
+        // The env path is covered by running with PECKBOARD_DESKTOP in
+        // integration; clap's `env` attribute is the contract.
+        assert!(!args.desktop);
+        let on = CliArgs::try_parse_from(["peckboard", "--desktop"]).unwrap();
+        assert!(on.desktop);
+    }
+
+    #[test]
+    fn install_desktop_entry_parses() {
+        let args = CliArgs::try_parse_from(["peckboard", "--install-desktop-entry"]).unwrap();
+        assert!(args.install_desktop_entry);
+        assert!(!args.desktop);
     }
 
     #[test]

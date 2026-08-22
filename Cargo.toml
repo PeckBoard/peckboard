@@ -88,6 +88,17 @@ flate2 = "1"
 russh = "0.62"
 russh-sftp = "2"
 
+# Desktop window (OS WebView). Optional so `--no-default-features` still
+# produces a CLI-only binary that runs on headless Linux without WebKitGTK.
+wry = { version = "0.56", optional = true }
+tao = { version = "0.36", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+open = { version = "5", optional = true }
+
+[features]
+default = ["desktop"]
+desktop = ["dep:wry", "dep:tao", "dep:image", "dep:open"]
+
 [dev-dependencies]
 rustls = "0.23.40"
 tempfile = "3.27.0"

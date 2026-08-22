@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::auth::password::{hash_password, verify_password};
-use crate::auth::token::{create_token, hash_token};
-use crate::db::models::{NewAuthSession, NewUser};
+use crate::auth::session::issue_session_token;
+use crate::db::models::NewUser;
 use crate::state::AppState;
 
 /// Minimum allowed password length. Bumped from 8 → 12 to keep a
@@ -155,45 +155,27 @@ async fn login(
 
     let user = user.expect("ok=true implies the user existed");
 
-    // Create auth session and token
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let (token, exp) =
-        create_token(&state.jwt_secret, &user.id, &user.role, &session_id).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
-
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.chars().take(256).collect::<String>());
     let ip_address = Some(ip.to_string());
 
-    state
-        .db
-        .create_auth_session(NewAuthSession {
-            id: session_id,
-            user_id: user.id.clone(),
-            token_hash: hash_token(&token),
-            created_at: now_ts,
-            expires_at: exp as i64,
-            user_agent,
-            ip_address,
-        })
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+    let token = issue_session_token(
+        &state.db,
+        &state.jwt_secret,
+        &user.id,
+        &user.role,
+        user_agent,
+        ip_address,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     state.login_limiter.reset(&ip);
 
@@ -420,45 +402,27 @@ async fn change_password(
             )
         })?;
 
-    // Issue fresh token
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let (token, exp) =
-        create_token(&state.jwt_secret, &user.id, &user.role, &session_id).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
-
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.chars().take(256).collect::<String>());
     let ip_address = Some(addr.ip().to_string());
 
-    state
-        .db
-        .create_auth_session(NewAuthSession {
-            id: session_id,
-            user_id: user.id.clone(),
-            token_hash: hash_token(&token),
-            created_at: now_ts,
-            expires_at: exp as i64,
-            user_agent,
-            ip_address,
-        })
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+    let token = issue_session_token(
+        &state.db,
+        &state.jwt_secret,
+        &user.id,
+        &user.role,
+        user_agent,
+        ip_address,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     state.password_change_limiter.reset(&auth_user.user_id);
 

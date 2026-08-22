@@ -5,7 +5,7 @@ nav_order: 7
 
 # Architecture
 
-PeckBoard runs as one Rust binary. That binary serves the web interface, stores all data in a single SQLite file, and spawns AI agent sessions that call back into it through a built-in MCP server. This page describes each part and what its tools provide.
+PeckBoard runs as one Rust binary. That binary serves the web interface, stores all data in a single SQLite file, and spawns AI agent sessions that call back into it through a built-in MCP server. `peckboard --desktop` opens a native OS WebView onto the same local server. This page describes each part and what its tools provide.
 
 In the diagram below, the browser talks to the server over HTTP and a WebSocket, the server reads and writes one SQLite file, and the agent sessions it spawns act on the board through MCP tool calls.
 

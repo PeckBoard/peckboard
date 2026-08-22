@@ -6,7 +6,7 @@
 
 A remote control panel for [Claude Code](https://claude.com/claude-code). Peckboard spawns and manages Claude CLI child processes, exposes them through a mobile-friendly web UI, and orchestrates multi-agent workflows on a kanban board.
 
-Ships as a **single executable binary** — frontend assets, database migrations, and TLS certs are all embedded or generated at runtime. Drop the binary on a host, run it, point a browser at it.
+Ships as a **single executable binary** — frontend assets, database migrations, and TLS certs are all embedded or generated at runtime. Run it as a server and point a browser at it, or pass `--desktop` to open a native window onto the same server.
 
 ## What's in the Box
 
@@ -36,6 +36,7 @@ See `docs/architecture/overview.md` for the full design.
   - Debian/Ubuntu: `sudo apt install build-essential pkg-config`
   - Fedora: `sudo dnf install gcc gcc-c++ make pkgconf-pkg-config`
   - macOS: Xcode Command Line Tools (`xcode-select --install`)
+- **Desktop window (Linux)** — the default `desktop` cargo feature links the OS WebView. Source builds need `libwebkit2gtk-4.1-dev libgtk-3-dev`. Runtime for `--desktop` needs `libwebkit2gtk-4.1-0`. Headless/VPS builds: `cargo build --release --no-default-features`. macOS and Windows use the system WebView; no extra packages.
 
 No OpenSSL needed — Peckboard uses `rustls`.
 
@@ -59,7 +60,8 @@ The resulting binary is `target/release/peckboard`.
 ## Run
 
 ```bash
-./target/release/peckboard
+./target/release/peckboard              # server, as before
+./target/release/peckboard --desktop    # same server + native window
 ```
 
 On first launch Peckboard will:
@@ -81,6 +83,8 @@ Browse to:
 ```bash
 peckboard --port 8080 --https-port 8443
 peckboard --data-dir ./tmp-data        # throwaway profile
+peckboard --desktop                    # native window on http://127.0.0.1:<port>
+peckboard --install-desktop-entry      # Linux: write ~/.local/share Applications launcher
 peckboard --reset-password              # reset the single user's password, print it, exit
 peckboard --reset-password --user alice # reset a specific user (required when >1 user exists)
 peckboard --reset-mdns-name             # regenerate mDNS hostname
