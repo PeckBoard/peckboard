@@ -41,6 +41,10 @@ State that is deliberately _not_ in a store:
 - **Theme + accent hue** — `util/appearance.ts`, persisted to localStorage
   (`peckboard_theme`, `peckboard_hue`) and applied to
   `document.documentElement`.
+- **Notification sounds** — `util/sounds.ts`, persisted to localStorage
+  (`peckboard_sounds`). Synthesized over Web Audio. `SoundsListener` in
+  `App.tsx` plays live WS events; Settings → Sounds toggles each kind.
+  Frequent chimes (tool, send, run start, queue) default off.
 - **Context menus / dropdowns** — `hooks/useContextMenu.tsx` +
   `components/ContextMenuView.tsx`, local to the trigger.
 - **View, active ids, modal visibility** — `useState` in `App.tsx`,

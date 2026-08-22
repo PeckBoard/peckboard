@@ -135,6 +135,24 @@
   font-weight: 500;
   color: var(--text);
 }
+.settings-sound-row {
+  padding-bottom: 8px;
+}
+.settings-sound-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+.settings-sound-preview {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.settings-sound-hint {
+  margin: -4px 0 8px 27px;
+}
 /* Label-over-hint rows with a compact control on the right
    (Data retention and similar numeric rows). */
 .settings-field-row {

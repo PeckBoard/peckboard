@@ -23,6 +23,14 @@ import {
   getStoredMotion,
   setMotion,
 } from '../util/appearance'
+import {
+  SOUND_KINDS,
+  SOUND_META,
+  loadSoundPrefs,
+  saveSoundPrefs,
+  previewSound,
+  type SoundPrefs,
+} from '../util/sounds'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
 import GrokAccountsSection from './GrokAccountsSection'
 import KimiAccountsSection from './KimiAccountsSection'
@@ -86,6 +94,7 @@ function formatWhen(at: string): string {
 type SubPage =
   | 'account'
   | 'appearance'
+  | 'sounds'
   | 'chat'
   | 'prompts'
   | 'workflows'
@@ -132,6 +141,11 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
     title: 'General',
     pages: [
       { id: 'appearance', title: 'Appearance', blurb: 'Theme, accent, text size, density, motion' },
+      {
+        id: 'sounds',
+        title: 'Sounds',
+        blurb: 'Chimes for questions, finished runs, limits, and more',
+      },
       {
         id: 'chat',
         title: 'Chat & Models',
@@ -260,6 +274,18 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'compact comfortable spacing',
   },
   { page: 'appearance', section: 'Motion', anchor: 'motion', keywords: 'animation reduced' },
+  {
+    page: 'sounds',
+    section: 'Master',
+    anchor: 'sounds-master',
+    keywords: 'mute chime notification audio quiet',
+  },
+  {
+    page: 'sounds',
+    section: 'Events',
+    anchor: 'sounds-events',
+    keywords: 'question complete tool limit queue send start',
+  },
   {
     page: 'chat',
     section: 'Default Model',
@@ -419,6 +445,12 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
       <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
       <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
       <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+    </>
+  ),
+  sounds: (
+    <>
+      <path d="M2.5 6.5h2L7.5 4v8L4.5 9.5h-2z" />
+      <path d="M10 6.2a2.4 2.4 0 0 1 0 3.6M11.8 4.6a4.4 4.4 0 0 1 0 6.8" />
     </>
   ),
   chat: (
@@ -624,6 +656,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const [fontSize, setFontSizeState] = useState<FontSize>(getStoredFontSize)
   const [density, setDensityState] = useState<Density>(getStoredDensity)
   const [motion, setMotionState] = useState<MotionPref>(getStoredMotion)
+  const [soundPrefs, setSoundPrefs] = useState<SoundPrefs>(loadSoundPrefs)
   const skipBacklogConfirm = useUiStore((s) => s.skipBacklogConfirm)
   const setSkipBacklogConfirm = useUiStore((s) => s.setSkipBacklogConfirm)
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
@@ -1054,6 +1087,75 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                   >
                     {m === 'system' ? 'System' : 'Reduced'}
                   </button>
+                ))}
+              </div>
+            </section>
+          </>
+        )}
+
+        {activeSubPage === 'sounds' && (
+          <>
+            <section
+              className="settings-section"
+              data-testid="sounds-master-section"
+              data-settings-anchor="sounds-master"
+            >
+              <h3>Sounds</h3>
+              <p className="form-hint">
+                Soft chimes for board events. Frequent ones (tool calls, send, run start, queue)
+                start off. Preview always plays so you can hear a sample before turning one on.
+              </p>
+              <div className="settings-info-grid">
+                <label className="settings-row settings-row-toggle">
+                  <input
+                    type="checkbox"
+                    checked={soundPrefs.enabled}
+                    data-testid="sounds-master"
+                    onChange={(e) => {
+                      const next = { ...soundPrefs, enabled: e.target.checked }
+                      setSoundPrefs(next)
+                      saveSoundPrefs(next)
+                    }}
+                  />
+                  <span className="settings-label">Enable sounds</span>
+                </label>
+              </div>
+            </section>
+
+            <section
+              className="settings-section"
+              data-testid="sounds-events-section"
+              data-settings-anchor="sounds-events"
+            >
+              <h3>Events</h3>
+              <div className="settings-info-grid">
+                {SOUND_KINDS.map((kind) => (
+                  <div key={kind} className="settings-sound-row">
+                    <div className="settings-row settings-row-toggle">
+                      <label className="settings-sound-toggle">
+                        <input
+                          type="checkbox"
+                          checked={soundPrefs[kind]}
+                          data-testid={`sounds-toggle-${kind}`}
+                          onChange={(e) => {
+                            const next = { ...soundPrefs, [kind]: e.target.checked }
+                            setSoundPrefs(next)
+                            saveSoundPrefs(next)
+                          }}
+                        />
+                        <span className="settings-label">{SOUND_META[kind].label}</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="btn-secondary btn-sm settings-sound-preview"
+                        data-testid={`sounds-preview-${kind}`}
+                        onClick={() => previewSound(kind)}
+                      >
+                        Preview
+                      </button>
+                    </div>
+                    <p className="form-hint settings-sound-hint">{SOUND_META[kind].hint}</p>
+                  </div>
                 ))}
               </div>
             </section>

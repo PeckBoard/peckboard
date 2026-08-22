@@ -48,6 +48,7 @@ import { useRepeatingTasksStore } from './store/repeatingTasks'
 import ErrorBoundary from './components/ErrorBoundary'
 import AskpassDialog from './components/AskpassDialog'
 import EnvUnlockDialog from './components/EnvUnlockDialog'
+import SoundsListener from './components/SoundsListener'
 import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
@@ -1882,6 +1883,7 @@ function App() {
         </div>
       </main>
 
+      {authenticated && <SoundsListener />}
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showNewSession && (
         <NewSessionModal

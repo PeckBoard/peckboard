@@ -4,6 +4,7 @@ import { authedFetch } from '../store/auth'
 import { useSessionsStore } from '../store/sessions'
 import { useMentions, filterMentions, type MentionItem } from '../hooks/useMentions'
 import { describeActionError } from '../utils/actionError'
+import { playSound } from '../util/sounds'
 
 interface InputBarProps {
   sessionId: string
@@ -316,7 +317,9 @@ export default function InputBar({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
-        if (!res.ok) {
+        if (res.ok) {
+          playSound('messageSent')
+        } else {
           const detail = (await res.json().catch(() => null))?.error
           rollbackFailedSend(
             pendingId,
