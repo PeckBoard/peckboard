@@ -14,6 +14,77 @@
   margin: auto 0;
 }
 
+.confirm-dialog-wide {
+  max-width: 480px;
+}
+
+.confirm-dialog-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 20px;
+}
+
+.confirm-dialog-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.confirm-dialog-choice:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.confirm-dialog-choice:has(input:disabled) {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.confirm-dialog-choice input {
+  margin-top: 3px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.confirm-dialog-choice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.confirm-dialog-choice-label {
+  font-weight: 600;
+}
+
+.confirm-dialog-choice-hint {
+  color: var(--text2);
+}
+
+.confirm-dialog-cost {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.confirm-dialog-cost-warn {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .confirm-dialog-title {
   margin: 0 0 8px;
   font-size: var(--text-lg);

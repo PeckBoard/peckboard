@@ -184,6 +184,7 @@ export type DisplayItem =
       to: string
       doc: string
       compaction: boolean
+      recovery: boolean
       ts: number
       key: string
     }
@@ -825,6 +826,7 @@ function foldEvent(st: FoldState, ev: Event): void {
         to: (ev.data.to as string) ?? '',
         doc: (ev.data.doc as string) ?? '',
         compaction: (ev.data.compaction as boolean) ?? false,
+        recovery: (ev.data.recovery as boolean) ?? false,
         ts: ev.ts,
         key: ev.id,
       })

@@ -117,6 +117,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/read", post(mark_read))
         .route("/api/sessions/{id}/clear", post(clear_session))
         .route("/api/sessions/{id}/compact", post(compact_session))
+        .route("/api/sessions/{id}/recovery-preview", get(recovery_preview))
+        .route("/api/sessions/{id}/recover", post(recover_session))
         .route("/api/sessions/{id}/message", post(dispatch::send_message))
         .route("/api/sessions/{id}/cancel", post(dispatch::cancel_session))
         .route(
@@ -800,6 +802,73 @@ async fn compact_session(
             Json(serde_json::json!({ "error": e.to_string() })),
         )),
     }
+}
+
+#[derive(Deserialize)]
+struct RecoveryPreviewQuery {
+    model: String,
+}
+
+#[derive(Deserialize)]
+struct RecoverRequest {
+    model: String,
+    /// Same semantics as PATCH: explicit `null` clears a stale effort the
+    /// target provider doesn't offer; absent leaves the stored effort.
+    #[serde(default, deserialize_with = "explicit_null")]
+    effort: Option<Option<String>>,
+}
+
+fn recovery_error(e: crate::handover::RecoveryError) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::handover::RecoveryError::*;
+    let status = match &e {
+        NotFound => StatusCode::NOT_FOUND,
+        SameContinuity | NoHistory | TooLarge { .. } => StatusCode::BAD_REQUEST,
+        Worker | HandoverInFlight | MidTurn => StatusCode::CONFLICT,
+        Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(serde_json::json!({ "error": e.to_string() })))
+}
+
+/// GET /api/sessions/:id/recovery-preview?model=… — token count and input
+/// cost of sending this session's transcript to `model` as a recovery
+/// switch. Does not mutate anything. The dialog fetches this before the
+/// user confirms, so they see the bill they are about to send.
+async fn recovery_preview(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<RecoveryPreviewQuery>,
+) -> Result<Json<crate::handover::RecoveryPreview>, (StatusCode, Json<serde_json::Value>)> {
+    if q.model.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "model is required" })),
+        ));
+    }
+    crate::handover::recovery_preview(&state, &id, q.model.trim())
+        .await
+        .map(Json)
+        .map_err(recovery_error)
+}
+
+/// POST /api/sessions/:id/recover — switch provider/account by sending the
+/// reconstructed transcript to the incoming model, without using the
+/// outgoing agent. Used when the current account has hit a usage limit so
+/// a summary handover cannot run. Returns the updated session row.
+async fn recover_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RecoverRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.model.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "model is required" })),
+        ));
+    }
+    crate::handover::begin_recovery(&state, &id, body.model.trim(), body.effort)
+        .await
+        .map(|s| Json(serde_json::json!(s)))
+        .map_err(recovery_error)
 }
 
 /// POST /api/sessions/:id/clear -- kill process (placeholder), delete events,

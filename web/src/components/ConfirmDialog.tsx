@@ -1,9 +1,14 @@
-import { useId } from 'react'
+import { useId, type ReactNode } from 'react'
 import Modal from './Modal'
 
 interface ConfirmDialogProps {
   title: string
   message: string
+  /** Extra body between the message and the actions (choice lists, cost
+   *  warnings). Keep it short — this is still a confirm, not a form. */
+  children?: ReactNode
+  /** Stretch past the default 380px when the body needs a choice list. */
+  wide?: boolean
   confirmLabel?: string
   cancelLabel?: string
   danger?: boolean
@@ -28,6 +33,9 @@ interface ConfirmDialogProps {
   /** Override the confirm button's testid. Defaults to the shared
    *  `confirm-dialog-confirm`. */
   confirmTestId?: string
+  /** Lock the confirm button without the in-flight `busy` chrome — e.g. a
+   *  choice that is currently ineligible. */
+  confirmDisabled?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -41,6 +49,8 @@ interface ConfirmDialogProps {
 export default function ConfirmDialog({
   title,
   message,
+  children,
+  wide = false,
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   danger = false,
@@ -53,6 +63,7 @@ export default function ConfirmDialog({
   secondaryAction,
   testId,
   confirmTestId,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -61,7 +72,7 @@ export default function ConfirmDialog({
 
   return (
     <Modal
-      className="confirm-dialog"
+      className={`confirm-dialog${wide ? ' confirm-dialog-wide' : ''}`}
       // `alertdialog` for the destructive variant: it tells a screen
       // reader this is an interruption that needs an answer, not just
       // another panel.
@@ -79,6 +90,7 @@ export default function ConfirmDialog({
       <p className="confirm-dialog-message" id={messageId}>
         {message}
       </p>
+      {children}
       {error && (
         <p className="confirm-dialog-error" role="alert" data-testid="confirm-dialog-error">
           {error}
@@ -122,7 +134,7 @@ export default function ConfirmDialog({
         <button
           className={danger ? 'btn-primary confirm-dialog-danger' : 'btn-primary'}
           onClick={onConfirm}
-          disabled={busy}
+          disabled={busy || confirmDisabled}
           aria-busy={busy || undefined}
           data-testid={confirmTestId ?? 'confirm-dialog-confirm'}
         >

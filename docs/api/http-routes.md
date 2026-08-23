@@ -25,6 +25,8 @@ All `/api/*` routes require bearer token auth unless noted. Global middleware: H
 | GET    | /api/sessions/:id/messages          | -          | Legacy chat messages. Query: `offset`, `limit`                                |
 | POST   | /api/sessions/:id/messages          | -          | Append chat messages. Body: `{ messages: ChatMessage[] }`                     |
 | POST   | /api/sessions/:id/clear             | -          | Kill process, reset conversation, delete attachments                          |
+| GET    | /api/sessions/:id/recovery-preview  | -          | Query: `model`. Token count + input cost of a recovery switch to that model   |
+| POST   | /api/sessions/:id/recover           | -          | Recovery switch: send full transcript to `model` without using the current agent. Body: `{ model, effort? }` |
 | POST   | /api/sessions/:id/read              | 60/min     | Append session-read event (syncs unread state across devices)                 |
 | GET    | /api/worker-sessions                | -          | Current worker session mapping by project                                     |
 | GET    | /api/existing-sessions              | -          | List Claude CLI sessions from `~/.claude`. Query: `dir?`                      |

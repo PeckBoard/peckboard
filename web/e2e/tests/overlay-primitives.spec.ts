@@ -165,6 +165,7 @@ test('cross-provider switch prompt is a real dialog: Escape cancels it', async (
   await expect(dialog).toHaveAttribute('aria-describedby', /.+/)
   await expect(page.getByTestId('model-switch-clear')).toBeVisible()
   await expect(page.getByTestId('model-switch-handover')).toBeVisible()
+  await expect(page.getByTestId('model-switch-recovery')).toBeVisible()
 
   // The hand-rolled copy had no Escape handler at all: a keyboard user was
   // stuck until they found the mouse.

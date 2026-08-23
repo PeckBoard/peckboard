@@ -66,7 +66,15 @@ export function transcriptMarkdown(events: Event[], sessionName: string): string
         lines.push(`- ⚠️ agent crashed: ${item.reason}`)
         break
       case 'handover':
-        lines.push(`- ↔️ ${item.compaction ? 'context compacted' : `handover to ${item.to}`}`)
+        lines.push(
+          `- ↔️ ${
+            item.compaction
+              ? 'context compacted'
+              : item.recovery
+                ? `recovery transcript sent to ${item.to}`
+                : `handover to ${item.to}`
+          }`,
+        )
         break
       default:
         break

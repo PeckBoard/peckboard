@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { highlightPlugins } from './markdownHighlight'
 import SafeMarkdown from './SafeMarkdown'
-import type { CostTable, Event, QueuedMessage, Session } from '../types/api'
+import type { CostTable, Event, QueuedMessage, RecoveryPreview, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
@@ -19,6 +19,7 @@ import {
 } from '../store/resources'
 import { useUsageStore } from '../store/usage'
 import { usageCost } from '../util/cost'
+import { fmtInt, fmtTokens, fmtUsd } from '../util/format'
 import { downloadTranscript } from '../util/transcript'
 import InputBar from './InputBar'
 import ToolUseBlock, { CopyButton } from './ToolUseBlock'
@@ -713,7 +714,9 @@ const ChatRow = memo(function ChatRow({
               <span>
                 {item.compaction
                   ? 'Context compacted'
-                  : `Context handed over to ${item.to.replace(/^claude:/, '')}`}
+                  : item.recovery
+                    ? `Transcript sent to ${item.to.replace(/^claude:/, '')} (recovery)`
+                    : `Context handed over to ${item.to.replace(/^claude:/, '')}`}
               </span>
               <span className="chat-handover-time">{formatTime(item.ts)}</span>
             </summary>
@@ -1091,8 +1094,13 @@ export default function ChatView({
   // or by the dismiss button.
   const [patchError, setPatchError] = useState<string | null>(null)
   // Cross-provider/account model switch awaiting the user's choice in the
-  // modal below (hand over a summary / clear & switch / cancel).
+  // modal below (hand over a summary / recovery transcript / clear).
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null)
+  const [switchMode, setSwitchMode] = useState<'handover' | 'recovery' | 'clear'>('handover')
+  const [recoveryPreview, setRecoveryPreview] = useState<RecoveryPreview | null>(null)
+  const [recoveryPreviewError, setRecoveryPreviewError] = useState<string | null>(null)
+  const [switchBusy, setSwitchBusy] = useState(false)
+  const [switchError, setSwitchError] = useState<string | null>(null)
   // Suppression floor for the interactive context prompt: the banner shows
   // once contextTokens reaches `until`. Picking Continue bumps it by
   // CONTEXT_PROMPT_STEP so the choice returns as the window keeps filling.
@@ -1248,6 +1256,43 @@ export default function ChatView({
       })
       .catch(() => setModelsError(true))
   }, [availableModels.length, modelsError])
+
+  // Token/cost preview for recovery mode. Fetched when the switch dialog
+  // opens so the user sees the bill before confirming. Cancelled if they
+  // pick a different target or close the dialog.
+  useEffect(() => {
+    if (!pendingModelSwitch) {
+      setRecoveryPreview(null)
+      setRecoveryPreviewError(null)
+      return
+    }
+    let cancelled = false
+    setRecoveryPreview(null)
+    setRecoveryPreviewError(null)
+    const qs = new URLSearchParams({ model: pendingModelSwitch })
+    authedFetch(`/api/sessions/${sessionId}/recovery-preview?${qs.toString()}`)
+      .then(async (res) => {
+        const body = (await res.json().catch(() => null)) as
+          | (RecoveryPreview & { error?: string })
+          | null
+        if (cancelled) return
+        if (!res.ok) {
+          setRecoveryPreviewError(body?.error ?? `preview failed (${res.status})`)
+          return
+        }
+        if (body && typeof body.tokens === 'number') {
+          setRecoveryPreview(body)
+        } else {
+          setRecoveryPreviewError('preview failed')
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setRecoveryPreviewError("Couldn't estimate token cost.")
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pendingModelSwitch, sessionId])
   // Load named system prompts once per mount so the 3-dot menu's
   // "System prompt" submenu has options ready the first time it opens.
   useEffect(() => {
@@ -1892,12 +1937,76 @@ export default function ChatView({
   const requestModelChange = (id: string) => {
     const crosses = continuityKey(sessionDetail?.model) !== continuityKey(id)
     if (crosses && events.length > 0 && !sessionDetail?.is_worker) {
+      setSwitchMode('handover')
+      setSwitchError(null)
       setPendingModelSwitch(id)
     } else {
       // Clears effort in the same PATCH when the target provider has no
       // matching level — the modals do this via their on-change guard; the
       // chat switch was the odd one out and kept sending a stale effort.
       patchSession(sessionModelPatch(id, sessionDetail?.effort, availableProviders))
+    }
+  }
+
+  const closeSwitchDialog = () => {
+    if (switchBusy) return
+    setPendingModelSwitch(null)
+    setSwitchMode('handover')
+    setSwitchError(null)
+    setRecoveryPreview(null)
+    setRecoveryPreviewError(null)
+  }
+
+  const runModelSwitch = async () => {
+    const target = pendingModelSwitch
+    if (!target || switchBusy) return
+    setSwitchBusy(true)
+    setSwitchError(null)
+    const patch = sessionModelPatch(target, sessionDetail?.effort, availableProviders)
+    try {
+      if (switchMode === 'clear') {
+        await clearSession(sessionId)
+        await patchSession(patch)
+      } else {
+        const url =
+          switchMode === 'recovery'
+            ? `/api/sessions/${sessionId}/recover`
+            : `/api/sessions/${sessionId}`
+        const res = await authedFetch(url, {
+          method: switchMode === 'recovery' ? 'POST' : 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        })
+        if (!res.ok) {
+          const err = (await res.json().catch(() => null)) as { error?: string } | null
+          throw new Error(
+            err?.error ??
+              (switchMode === 'recovery'
+                ? `Recovery failed (${res.status}).`
+                : `update failed (${res.status})`),
+          )
+        }
+        const updated: Session = await res.json()
+        setSessionDetail(updated)
+        setPatchError(null)
+      }
+      setPendingModelSwitch(null)
+      setSwitchMode('handover')
+      setRecoveryPreview(null)
+      setRecoveryPreviewError(null)
+    } catch (e) {
+      setSwitchError(
+        describeActionError(
+          e,
+          switchMode === 'recovery'
+            ? "Couldn't send the transcript. Please try again."
+            : switchMode === 'clear'
+              ? "Couldn't clear this session. Please try again."
+              : "Couldn't switch models. Please try again.",
+        ),
+      )
+    } finally {
+      setSwitchBusy(false)
     }
   }
   const autoswitchOn = sessionDetail?.model_autoswitch ?? !!sessionDetail?.is_worker
@@ -2538,37 +2647,109 @@ export default function ChatView({
       {pendingModelSwitch !== null && (
         <ConfirmDialog
           title="Switch model?"
-          message={`Switching to ${modelDisplayName(pendingModelSwitch)} crosses a provider or account boundary — the new model starts with no memory of this conversation. Hand over a summary, or clear the context and switch fresh.`}
+          message={`Switching to ${modelDisplayName(pendingModelSwitch)} crosses a provider or account boundary — the new model starts with no memory of this conversation.`}
+          wide
           cancelLabel="Cancel"
-          secondaryAction={{
-            label: 'Clear & switch',
-            testId: 'model-switch-clear',
-            onSelect: () => {
-              const target = pendingModelSwitch
-              setPendingModelSwitch(null)
-              void (async () => {
-                try {
-                  await clearSession(sessionId)
-                } catch (e) {
-                  setPatchError(
-                    describeActionError(e, "Couldn't clear this session. Please try again."),
-                  )
-                  return
-                }
-                patchSession(sessionModelPatch(target, sessionDetail?.effort, availableProviders))
-              })()
-            },
-          }}
-          confirmLabel="Hand over context"
-          confirmTestId="model-switch-handover"
+          confirmLabel={
+            switchMode === 'recovery'
+              ? 'Send transcript'
+              : switchMode === 'clear'
+                ? 'Clear & switch'
+                : 'Hand over context'
+          }
+          confirmTestId={
+            switchMode === 'recovery'
+              ? 'model-switch-recovery-confirm'
+              : switchMode === 'clear'
+                ? 'model-switch-clear-confirm'
+                : 'model-switch-handover'
+          }
+          confirmDisabled={switchMode === 'recovery' && recoveryPreview?.fits === false}
+          danger={switchMode === 'recovery' || switchMode === 'clear'}
+          busy={switchBusy}
+          error={switchError}
           testId="model-switch-prompt"
-          onConfirm={() => {
-            const target = pendingModelSwitch
-            setPendingModelSwitch(null)
-            patchSession(sessionModelPatch(target, sessionDetail?.effort, availableProviders))
-          }}
-          onCancel={() => setPendingModelSwitch(null)}
-        />
+          onConfirm={() => void runModelSwitch()}
+          onCancel={closeSwitchDialog}
+        >
+          <div
+            className="confirm-dialog-choices"
+            role="radiogroup"
+            aria-label="How to pass context"
+          >
+            <label className="confirm-dialog-choice">
+              <input
+                type="radio"
+                name="model-switch-mode"
+                checked={switchMode === 'handover'}
+                disabled={switchBusy}
+                onChange={() => setSwitchMode('handover')}
+              />
+              <span className="confirm-dialog-choice-body">
+                <span className="confirm-dialog-choice-label">Hand over a summary</span>
+                <span className="confirm-dialog-choice-hint">
+                  The current agent writes a handover doc. Won&apos;t work if this account has hit a
+                  usage limit.
+                </span>
+              </span>
+            </label>
+            <label className="confirm-dialog-choice" data-testid="model-switch-recovery">
+              <input
+                type="radio"
+                name="model-switch-mode"
+                checked={switchMode === 'recovery'}
+                disabled={switchBusy}
+                onChange={() => setSwitchMode('recovery')}
+              />
+              <span className="confirm-dialog-choice-body">
+                <span className="confirm-dialog-choice-label">Send full transcript (recovery)</span>
+                <span className="confirm-dialog-choice-hint">
+                  Does not use the current agent. The entire conversation is sent to the new model
+                  as one input — billed to the new account. Use this when the current account has
+                  hit a limit.
+                </span>
+                {recoveryPreviewError ? (
+                  <span className="confirm-dialog-cost-warn">{recoveryPreviewError}</span>
+                ) : recoveryPreview ? (
+                  <>
+                    <span className="confirm-dialog-cost">
+                      <span data-testid="model-switch-recovery-tokens">
+                        ~{fmtInt(recoveryPreview.tokens)} tokens (
+                        {fmtTokens(recoveryPreview.tokens)})
+                      </span>
+                      <span data-testid="model-switch-recovery-cost">
+                        ~{fmtUsd(recoveryPreview.est_cost_usd)} at the new model&apos;s input rate
+                      </span>
+                    </span>
+                    {!recoveryPreview.fits && (
+                      <span className="confirm-dialog-cost-warn">
+                        This exceeds the new model&apos;s ~{fmtInt(recoveryPreview.context_window)}
+                        -token context window. Compact or recap first.
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="confirm-dialog-choice-hint">Estimating token cost…</span>
+                )}
+              </span>
+            </label>
+            <label className="confirm-dialog-choice" data-testid="model-switch-clear">
+              <input
+                type="radio"
+                name="model-switch-mode"
+                checked={switchMode === 'clear'}
+                disabled={switchBusy}
+                onChange={() => setSwitchMode('clear')}
+              />
+              <span className="confirm-dialog-choice-body">
+                <span className="confirm-dialog-choice-label">Clear context and switch</span>
+                <span className="confirm-dialog-choice-hint">
+                  Start fresh. This conversation is not passed on.
+                </span>
+              </span>
+            </label>
+          </div>
+        </ConfirmDialog>
       )}
       {confirmAction && (
         <ConfirmDialog

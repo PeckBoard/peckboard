@@ -26,6 +26,15 @@
 //!    model consumes the doc and prepends it, so the incoming model opens
 //!    with its predecessor's context.
 //!
+//! **Recovery** is the other cross-boundary path, for when the outgoing
+//! agent *cannot* write that doc — typically the account has hit a usage
+//! limit. [`begin_recovery`] never talks to the current provider: it
+//! reconstructs the user/assistant transcript from the event log, parks it
+//! as `pending_handover_doc`, and flips `model` immediately. The incoming
+//! model reads the full transcript on its first turn. That first turn is
+//! billed as one large input, so [`recovery_preview`] estimates the token
+//! count and input-token cost **before** the user confirms.
+//!
 //! If the doc-generation turn instead fails or the user interrupts it, the
 //! completion listener calls [`abort_handover`] rather than
 //! [`finalize_handover`]: it clears the parked target and leaves `model` and
@@ -49,10 +58,11 @@
 
 use std::sync::Arc;
 
-use crate::db::models::UpdateSession;
+use crate::db::models::{Event, UpdateSession};
 use crate::provider::message::UserMessage;
 use crate::provider::registry::{ProviderRegistry, split_model_account};
 use crate::provider::stream::SpawnConfig;
+use crate::routes::usage::cost::{TokenKind, token_cost};
 use crate::state::AppState;
 use crate::ws::broadcaster::WsEvent;
 
@@ -157,6 +167,396 @@ pub fn build_compaction_injection(doc: &str, user_text: &str) -> String {
          <compaction>\n{doc}\n</compaction>\n\n\
          ---\n\nUser's message:\n{user_text}"
     )
+}
+
+/// Recovery variant: the previous account/provider could not continue, so
+/// the incoming model gets the reconstructed transcript rather than a
+/// summary the outgoing model wrote. Distinct wording so the reader knows
+/// this is the raw history, not a curated handover.
+pub fn build_recovery_injection(from_model: &str, transcript: &str, user_text: &str) -> String {
+    format!(
+        "[Recovery context — you are continuing a conversation previously \
+         handled by a different model ({from_model}) whose account or provider \
+         could not continue (typically a usage limit). You share no memory \
+         with it. The transcript below is the full user/assistant history, \
+         reconstructed without that model's help. Treat it as authoritative \
+         background, then respond to the user's message that follows.]\n\n\
+         <transcript>\n{transcript}\n</transcript>\n\n\
+         ---\n\nUser's message:\n{user_text}"
+    )
+}
+
+/// ~4 Unicode chars per token — the usual estimate without a model-specific
+/// tokenizer. Round up so the preview never undersells the first-turn bill.
+/// Empty input is 0, not 1.
+pub fn estimate_tokens(text: &str) -> i64 {
+    let n = text.chars().count() as i64;
+    if n == 0 { 0 } else { (n + 3) / 4 }
+}
+
+/// Usable context-window size (tokens) for a model id. Matches the
+/// frontend's `contextWindowInfo`: `[1m]` aliases are 1M, everything else
+/// is the 200K default. Recovery uses this only as a `fits` check — a miss
+/// is labelled as an estimate, not a hard provider limit.
+pub fn context_window_for(model: &str) -> i64 {
+    let (model, _acct) = split_model_account(model);
+    let id = model.rsplit(':').next().unwrap_or(model);
+    if id.ends_with("[1m]") {
+        1_000_000
+    } else {
+        200_000
+    }
+}
+
+/// Pull `data.text` out of an event's JSON payload.
+fn event_text(data: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Reconstruct the current conversation as Markdown the incoming model can
+/// read: user messages and concatenated assistant text, plus tool names as
+/// one-liners (inputs/outputs are dropped — they are the usual token bomb).
+///
+/// Starts after the most recent `handover` event when one exists, so a
+/// compacted session sends the continuation doc + later turns rather than
+/// the discarded pre-compaction history.
+pub fn build_recovery_transcript(events: &[Event]) -> String {
+    let last_handover = events.iter().rposition(|e| e.kind == "handover");
+    let (prior_doc, rest) = match last_handover {
+        Some(i) => {
+            let doc = serde_json::from_str::<serde_json::Value>(&events[i].data)
+                .ok()
+                .and_then(|v| {
+                    v.get("doc")
+                        .and_then(|d| d.as_str())
+                        .map(|s| s.trim().to_string())
+                })
+                .filter(|s| !s.is_empty());
+            (doc, &events[i + 1..])
+        }
+        None => (None, events),
+    };
+
+    let mut out = String::new();
+    let mut assistant = String::new();
+
+    let flush_assistant = |out: &mut String, assistant: &mut String| {
+        if assistant.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("## Assistant\n\n");
+        out.push_str(assistant.trim_end());
+        assistant.clear();
+    };
+
+    for ev in rest {
+        match ev.kind.as_str() {
+            "user" => {
+                let text = event_text(&ev.data);
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                flush_assistant(&mut out, &mut assistant);
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str("## User\n\n");
+                out.push_str(text);
+            }
+            "agent-text" => {
+                assistant.push_str(&event_text(&ev.data));
+            }
+            "agent-tool-start" => {
+                let name = serde_json::from_str::<serde_json::Value>(&ev.data)
+                    .ok()
+                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| "tool".into());
+                // Strip the mcp__plugin__ prefix the same way the chat UI does.
+                let bare = name
+                    .strip_prefix("mcp__")
+                    .and_then(|s| s.split_once("__").map(|(_, rest)| rest))
+                    .unwrap_or(&name);
+                assistant.push_str(&format!("\n- `{bare}`"));
+            }
+            "agent-end" | "handover-start" | "handover" | "handover-aborted" => {
+                flush_assistant(&mut out, &mut assistant);
+            }
+            _ => {}
+        }
+    }
+    flush_assistant(&mut out, &mut assistant);
+
+    match prior_doc {
+        Some(doc) if !out.is_empty() => format!("## Prior context\n\n{doc}\n\n{out}"),
+        Some(doc) => format!("## Prior context\n\n{doc}"),
+        None => out,
+    }
+}
+
+/// Token/cost preview for a recovery switch. `tokens` is the input the
+/// incoming model will see on its first turn (transcript + recovery
+/// wrapper), not including the user's next message. `est_cost_usd` prices
+/// that as **input** tokens at the target model's rate — the first-turn
+/// bill, billed to the NEW account.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecoveryPreview {
+    pub tokens: i64,
+    pub chars: i64,
+    pub est_cost_usd: f64,
+    pub context_window: i64,
+    pub fits: bool,
+    pub from_model: String,
+    pub to_model: String,
+}
+
+/// Why a recovery switch can't run. The route maps these to 4xx; the
+/// strings are user-facing.
+#[derive(Debug)]
+pub enum RecoveryError {
+    NotFound,
+    SameContinuity,
+    Worker,
+    HandoverInFlight,
+    MidTurn,
+    NoHistory,
+    TooLarge { tokens: i64, window: i64 },
+    Internal(anyhow::Error),
+}
+
+impl std::fmt::Display for RecoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "session not found"),
+            Self::SameContinuity => write!(
+                f,
+                "target model is the same provider and account; recovery is only for switching accounts or providers"
+            ),
+            Self::Worker => write!(
+                f,
+                "worker sessions can only switch models within the same provider and account; set the card or project model to move future workers elsewhere"
+            ),
+            Self::HandoverInFlight => write!(
+                f,
+                "model handover in progress; wait for it to finish before switching again"
+            ),
+            Self::MidTurn => write!(
+                f,
+                "agent is mid-turn; wait for it to finish before switching provider or account"
+            ),
+            Self::NoHistory => {
+                write!(
+                    f,
+                    "nothing to recover — this session has no conversation yet"
+                )
+            }
+            Self::TooLarge { tokens, window } => write!(
+                f,
+                "transcript is ~{tokens} tokens, which exceeds the new model's ~{window}-token context window"
+            ),
+            Self::Internal(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<anyhow::Error> for RecoveryError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Internal(e)
+    }
+}
+
+/// Is a turn actively streaming? True when the latest `agent-start` has no
+/// `agent-end` after it — same signal the PATCH handover guard uses.
+fn recovery_turn_in_flight(events: &[Event]) -> bool {
+    let last_start = events.iter().rposition(|e| e.kind == "agent-start");
+    let last_end = events.iter().rposition(|e| e.kind == "agent-end");
+    match (last_start, last_end) {
+        (Some(s), Some(e)) => s > e,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+struct PreparedRecovery {
+    from_model: String,
+    transcript: String,
+    preview: RecoveryPreview,
+}
+
+/// Shared load + guard + transcript build for preview and execute.
+/// `require_idle` is true for the POST (mid-turn is a 409) and false for
+/// the GET so the dialog can show the cost while a turn is still finishing.
+async fn prepare_recovery(
+    state: &AppState,
+    session_id: &str,
+    to_model: &str,
+    require_idle: bool,
+) -> Result<PreparedRecovery, RecoveryError> {
+    let session = state
+        .db
+        .get_session(session_id)
+        .await
+        .map_err(RecoveryError::from)?
+        .ok_or(RecoveryError::NotFound)?;
+
+    if session.handover_to_model.is_some() {
+        return Err(RecoveryError::HandoverInFlight);
+    }
+    if session.is_worker {
+        return Err(RecoveryError::Worker);
+    }
+
+    let from_model = session.model.clone().unwrap_or_else(|| "default".into());
+    if !needs_handover(&from_model, to_model) {
+        return Err(RecoveryError::SameContinuity);
+    }
+
+    let events = state
+        .db
+        .list_events_by_session(session_id, None)
+        .await
+        .map_err(RecoveryError::from)?;
+
+    if require_idle && recovery_turn_in_flight(&events) {
+        return Err(RecoveryError::MidTurn);
+    }
+
+    let has_history = events
+        .iter()
+        .any(|e| e.kind == "agent-text" || e.kind == "agent-start" || e.kind == "user");
+    if !has_history {
+        return Err(RecoveryError::NoHistory);
+    }
+
+    let transcript = build_recovery_transcript(&events);
+    if transcript.trim().is_empty() {
+        return Err(RecoveryError::NoHistory);
+    }
+
+    // Count the bytes the incoming model will actually see: wrapper +
+    // transcript. The user's next message is extra and is not in this figure.
+    let injected = build_recovery_injection(&from_model, &transcript, "");
+    let chars = injected.chars().count() as i64;
+    let tokens = estimate_tokens(&injected);
+    let context_window = context_window_for(to_model);
+    let preview = RecoveryPreview {
+        tokens,
+        chars,
+        est_cost_usd: token_cost(Some(to_model), TokenKind::Input, tokens),
+        context_window,
+        fits: tokens <= context_window,
+        from_model: from_model.clone(),
+        to_model: to_model.to_string(),
+    };
+    Ok(PreparedRecovery {
+        from_model,
+        transcript,
+        preview,
+    })
+}
+
+/// Token/cost preview for a recovery switch. Does not mutate the session.
+pub async fn recovery_preview(
+    state: &AppState,
+    session_id: &str,
+    to_model: &str,
+) -> Result<RecoveryPreview, RecoveryError> {
+    Ok(prepare_recovery(state, session_id, to_model, false)
+        .await?
+        .preview)
+}
+
+/// Switch provider/account by sending the reconstructed transcript to the
+/// incoming model — **without** asking the outgoing agent to write a
+/// handover doc. Flips `model` immediately, clears `conversation_id`, and
+/// parks the transcript in `pending_handover_doc` for the next turn.
+pub async fn begin_recovery(
+    state: &Arc<AppState>,
+    session_id: &str,
+    to_model: &str,
+    effort: Option<Option<String>>,
+) -> Result<crate::db::models::Session, RecoveryError> {
+    let prepared = prepare_recovery(state, session_id, to_model, true).await?;
+    if !prepared.preview.fits {
+        return Err(RecoveryError::TooLarge {
+            tokens: prepared.preview.tokens,
+            window: prepared.preview.context_window,
+        });
+    }
+
+    // Kill the outgoing child now. There is no doc turn to wait for, and
+    // a live child in the run map would swallow the incoming model's first
+    // message on the old account's stdin (see begin_handover's shutdown
+    // comment). cancel_and_wait so a late agent-end from the dying process
+    // can't land after we flip the row.
+    state.session_manager.cancel_and_wait(session_id).await;
+
+    let handover_data = serde_json::json!({
+        "from": prepared.from_model,
+        "to": to_model,
+        "doc": prepared.transcript,
+        "compaction": false,
+        "recovery": true,
+        "tokens": prepared.preview.tokens,
+        "est_cost_usd": prepared.preview.est_cost_usd,
+    });
+    if let Ok(ev) = state
+        .db
+        .append_event(session_id, "handover", handover_data.clone())
+        .await
+    {
+        state.broadcaster.broadcast(WsEvent {
+            event_type: "event".into(),
+            session_id: session_id.to_string(),
+            data: serde_json::json!({
+                "id": ev.id,
+                "seq": ev.seq,
+                "ts": ev.ts,
+                "kind": ev.kind,
+                "data": handover_data,
+            }),
+        });
+    }
+
+    let updated = state
+        .db
+        .update_session(
+            session_id,
+            UpdateSession {
+                model: Some(Some(to_model.to_string())),
+                effort,
+                conversation_id: Some(None),
+                handover_to_model: Some(None),
+                handover_run_id: Some(None),
+                pending_handover_doc: Some(Some(prepared.transcript)),
+                context_reset_ts: Some(Some(chrono::Utc::now().timestamp_millis())),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(RecoveryError::from)?
+        .ok_or(RecoveryError::NotFound)?;
+
+    state.broadcaster.broadcast(WsEvent {
+        event_type: "session-updated".into(),
+        session_id: session_id.to_string(),
+        data: serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null),
+    });
+
+    tracing::info!(
+        session_id = %session_id,
+        from = %prepared.from_model,
+        to = %to_model,
+        tokens = prepared.preview.tokens,
+        "Recovery switch: transcript parked, outgoing agent unused"
+    );
+    Ok(updated)
 }
 
 /// Fallback doc when the outgoing model produced no usable text (e.g. its
@@ -1047,8 +1447,9 @@ pub async fn peek_pending_injection(
     {
         used.handover_doc = true;
         out = match latest_handover_meta(db, session_id).await {
-            Some((_, true)) => build_compaction_injection(&doc, text),
-            Some((from, false)) => build_injection(&from, &doc, text),
+            Some(meta) if meta.recovery => build_recovery_injection(&meta.from, &doc, text),
+            Some(meta) if meta.compaction => build_compaction_injection(&doc, text),
+            Some(meta) => build_injection(&meta.from, &doc, text),
             None => build_injection("a previous model", &doc, text),
         };
     }
@@ -1198,8 +1599,16 @@ fn build_doc_review_injection(
     )
 }
 
-/// `(from_model, is_compaction)` of the most recent `handover` event, if any.
-async fn latest_handover_meta(db: &crate::db::Db, session_id: &str) -> Option<(String, bool)> {
+/// Shape of the most recent `handover` event, if any. Drives which
+/// injection wrapper `peek_pending_injection` applies.
+struct HandoverMeta {
+    from: String,
+    compaction: bool,
+    recovery: bool,
+}
+
+/// Most recent `handover` event's metadata, if any.
+async fn latest_handover_meta(db: &crate::db::Db, session_id: &str) -> Option<HandoverMeta> {
     let events = db.events_tail(session_id, 200).await.ok()?;
     events.iter().rev().find_map(|e| {
         if e.kind != "handover" {
@@ -1207,11 +1616,16 @@ async fn latest_handover_meta(db: &crate::db::Db, session_id: &str) -> Option<(S
         }
         let v = serde_json::from_str::<serde_json::Value>(&e.data).ok()?;
         let from = v.get("from")?.as_str()?.to_string();
+        let recovery = v.get("recovery").and_then(|c| c.as_bool()).unwrap_or(false);
         let compaction = v
             .get("compaction")
             .and_then(|c| c.as_bool())
             .unwrap_or_else(|| v.get("to").and_then(|t| t.as_str()) == Some(from.as_str()));
-        Some((from, compaction))
+        Some(HandoverMeta {
+            from,
+            compaction,
+            recovery,
+        })
     })
 }
 
@@ -1306,6 +1720,86 @@ mod tests {
         let out = build_compaction_injection("the doc body", "do the thing");
         assert!(out.contains("<compaction>\nthe doc body\n</compaction>"));
         assert!(out.contains("do the thing"));
+    }
+
+    #[test]
+    fn estimate_tokens_rounds_up_four_chars() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+        // 12 chars → 3 tokens exactly.
+        assert_eq!(estimate_tokens("abcdefghijkl"), 3);
+    }
+
+    #[test]
+    fn context_window_for_long_context_alias() {
+        assert_eq!(context_window_for("claude:opus[1m]"), 1_000_000);
+        assert_eq!(context_window_for("claude:opus[1m]@acct"), 1_000_000);
+        assert_eq!(context_window_for("claude:opus"), 200_000);
+        assert_eq!(context_window_for("mock:echo@acct2"), 200_000);
+    }
+
+    #[test]
+    fn build_recovery_injection_uses_transcript_tag() {
+        let out = build_recovery_injection("claude:opus", "## User\n\nhi", "continue");
+        assert!(out.contains("<transcript>\n## User\n\nhi\n</transcript>"));
+        assert!(out.contains("continue"));
+        assert!(out.contains("claude:opus"));
+        assert!(out.contains("Recovery context"));
+        assert!(!out.contains("<handover>"));
+    }
+
+    #[test]
+    fn build_recovery_transcript_joins_user_and_assistant() {
+        let events = vec![
+            ev(1, "user", serde_json::json!({ "text": "hello" })),
+            ev(2, "agent-start", serde_json::json!({ "model": "m" })),
+            ev(3, "agent-text", serde_json::json!({ "text": "Hi " })),
+            ev(4, "agent-text", serde_json::json!({ "text": "there." })),
+            ev(5, "agent-tool-start", serde_json::json!({ "name": "Read" })),
+            ev(6, "agent-end", serde_json::json!({ "status": "complete" })),
+            ev(7, "user", serde_json::json!({ "text": "go on" })),
+        ];
+        let out = build_recovery_transcript(&events);
+        assert!(out.contains("## User\n\nhello"), "got: {out}");
+        assert!(
+            out.contains("## Assistant\n\nHi there.\n- `Read`"),
+            "chunks concatenate and tool is a one-liner: {out}"
+        );
+        assert!(out.contains("## User\n\ngo on"), "got: {out}");
+        // Tool payloads never leak in.
+        assert!(!out.contains("agent-tool-end"));
+    }
+
+    #[test]
+    fn build_recovery_transcript_starts_after_last_handover() {
+        let events = vec![
+            ev(1, "user", serde_json::json!({ "text": "old" })),
+            ev(2, "agent-text", serde_json::json!({ "text": "old reply" })),
+            ev(
+                3,
+                "handover",
+                serde_json::json!({
+                    "from": "a",
+                    "to": "a",
+                    "doc": "Keep going on foo.rs",
+                    "compaction": true
+                }),
+            ),
+            ev(4, "user", serde_json::json!({ "text": "and then?" })),
+            ev(5, "agent-text", serde_json::json!({ "text": "next" })),
+        ];
+        let out = build_recovery_transcript(&events);
+        assert!(
+            out.contains("## Prior context\n\nKeep going on foo.rs"),
+            "got: {out}"
+        );
+        assert!(out.contains("## User\n\nand then?"), "got: {out}");
+        assert!(out.contains("## Assistant\n\nnext"), "got: {out}");
+        assert!(
+            !out.contains("old reply"),
+            "pre-compaction turns dropped: {out}"
+        );
     }
 
     #[test]
@@ -1455,6 +1949,60 @@ mod tests {
         assert_eq!(
             second, "And again.",
             "the flag is consumed by the first turn"
+        );
+    }
+
+    /// A recovery-flagged handover event must pick the transcript wrapper,
+    /// not the summary-handover wrapper — the incoming model has to know
+    /// this is raw history, not a curated doc.
+    #[tokio::test]
+    async fn take_pending_injection_uses_recovery_wrapper() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "Chat".into(),
+            folder_id: "f1".into(),
+            model: Some("mock:echo@acct2".into()),
+            created_at: ts.clone(),
+            last_activity: ts,
+            pending_handover_doc: Some("## User\n\nhello".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        db.append_event(
+            "s1",
+            "handover",
+            serde_json::json!({
+                "from": "mock:echo",
+                "to": "mock:echo@acct2",
+                "doc": "## User\n\nhello",
+                "compaction": false,
+                "recovery": true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let out = take_pending_injection(&db, "s1", "continue").await;
+        assert!(out.contains("Recovery context"), "got: {out}");
+        assert!(
+            out.contains("<transcript>\n## User\n\nhello\n</transcript>"),
+            "got: {out}"
+        );
+        assert!(out.contains("continue"), "got: {out}");
+        assert!(
+            !out.contains("<handover>"),
+            "recovery must not use the summary wrapper: {out}"
         );
     }
 

@@ -41,12 +41,23 @@ export interface Session {
   pending_handover_doc?: string | null
   /** Latest context-window occupancy (tokens) from the session's usage
    *  rows — present on GET /api/sessions/:id only; live updates arrive via
-  /** Latest context-window occupancy (tokens) from the session's usage
-   *  rows — present on GET /api/sessions/:id only; live updates arrive via
    *  streamed `agent-usage` events. */
   context_tokens?: number
   /** Named system prompt to inject at the top of the context. */
   system_prompt_name?: string | null
+}
+
+/** Token/cost preview for a recovery-mode account/provider switch.
+ *  `tokens` is the input the incoming model will see on its first turn
+ *  (transcript + wrapper), not including the user's next message. */
+export interface RecoveryPreview {
+  tokens: number
+  chars: number
+  est_cost_usd: number
+  context_window: number
+  fits: boolean
+  from_model: string
+  to_model: string
 }
 
 export type RepeatingScheduleKind = 'interval' | 'daily' | 'weekly' | 'monthly' | 'once'
