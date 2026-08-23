@@ -43,8 +43,9 @@ State that is deliberately _not_ in a store:
   `document.documentElement`.
 - **Notification sounds** — `util/sounds.ts`, persisted to localStorage
   (`peckboard_sounds`). Synthesized over Web Audio. `SoundsListener` in
-  `App.tsx` plays live WS events; Settings → Sounds toggles each kind.
-  Frequent chimes (tool, send, run start, queue) default off.
+  `App.tsx` plays live WS events plus UI clicks and error alerts;
+  Settings → Sounds toggles each kind. Frequent agent chimes (tool, send,
+  run start, queue) default off; clicks and errors default on.
 - **Context menus / dropdowns** — `hooks/useContextMenu.tsx` +
   `components/ContextMenuView.tsx`, local to the trigger.
 - **View, active ids, modal visibility** — `useState` in `App.tsx`,

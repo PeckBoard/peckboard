@@ -5,6 +5,8 @@
 export const SOUNDS_KEY = 'peckboard_sounds'
 
 export const SOUND_KINDS = [
+  'uiClick',
+  'error',
   'question',
   'runComplete',
   'accountLimit',
@@ -16,14 +18,19 @@ export const SOUND_KINDS = [
 
 export type SoundKind = (typeof SOUND_KINDS)[number]
 
+export type SoundGroup = 'interface' | 'event'
+
 export type SoundPrefs = {
   /** Master mute. When false, no event plays (Preview still works). */
   enabled: boolean
 } & Record<SoundKind, boolean>
 
-/** Frequent / redundant chimes start OFF. Attention-worthy ones start ON. */
+/** Frequent / redundant chimes start OFF. Attention-worthy ones start ON.
+ *  Clicks are frequent but the whole point of the toggle — they start ON. */
 export const DEFAULT_SOUND_PREFS: SoundPrefs = {
   enabled: true,
+  uiClick: true,
+  error: true,
   question: true,
   runComplete: true,
   accountLimit: true,
@@ -33,36 +40,56 @@ export const DEFAULT_SOUND_PREFS: SoundPrefs = {
   queueProcessed: false,
 }
 
-export const SOUND_META: Record<SoundKind, { label: string; hint: string }> = {
+export const SOUND_META: Record<SoundKind, { label: string; hint: string; group: SoundGroup }> = {
+  uiClick: {
+    label: 'Clicks',
+    hint: 'Buttons, menu items, tabs, and links.',
+    group: 'interface',
+  },
+  error: {
+    label: 'Error',
+    hint: 'A form failed, a fetch failed, or an agent turn crashed.',
+    group: 'interface',
+  },
   question: {
     label: 'Question',
     hint: 'An agent or worker needs an answer, or a sudo / env-unlock prompt appeared.',
+    group: 'event',
   },
   runComplete: {
     label: 'Run complete',
     hint: 'A turn finished successfully.',
+    group: 'event',
   },
   accountLimit: {
     label: 'Account at limit',
     hint: 'A provider budget, plan quota, or project spend cap was hit.',
+    group: 'event',
   },
   runStart: {
     label: 'Run start',
     hint: 'An agent turn began. Off by default — workers fire this often.',
+    group: 'event',
   },
   toolUsed: {
     label: 'Tool used',
     hint: 'A tool call finished. Off by default — a single turn can fire dozens.',
+    group: 'event',
   },
   messageSent: {
     label: 'Message sent',
     hint: 'Your send was accepted. Off by default — you already clicked Send.',
+    group: 'event',
   },
   queueProcessed: {
     label: 'Queued message sent',
     hint: 'A parked message left the queue and went to the agent.',
+    group: 'event',
   },
 }
+
+export const INTERFACE_SOUND_KINDS = SOUND_KINDS.filter((k) => SOUND_META[k].group === 'interface')
+export const EVENT_SOUND_KINDS = SOUND_KINDS.filter((k) => SOUND_META[k].group === 'event')
 
 type Note = { f: number; at: number; dur: number; gain: number }
 
@@ -95,10 +122,50 @@ const MOTIFS: Record<SoundKind, Note[]> = {
     { f: 392.0, at: 0, dur: 0.09, gain: 0.06 },
     { f: 493.88, at: 0.08, dur: 0.12, gain: 0.06 },
   ],
+  // Tiny high tick — a click, not a chime.
+  uiClick: [
+    { f: 2100, at: 0, dur: 0.016, gain: 0.045 },
+    { f: 1400, at: 0.004, dur: 0.02, gain: 0.025 },
+  ],
+  // Falling minor third — distinct from the account-limit fifth.
+  error: [
+    { f: 415.3, at: 0, dur: 0.14, gain: 0.09 },
+    { f: 311.13, at: 0.11, dur: 0.26, gain: 0.08 },
+  ],
 }
 
-const COOLDOWN_MS = 400
+const DEFAULT_COOLDOWN_MS = 400
+const COOLDOWN_MS: Partial<Record<SoundKind, number>> = {
+  uiClick: 50,
+  error: 600,
+}
 const LIVE_WINDOW_MS = 8_000
+
+/** Buttons, menu rows, tabs, links — not checkboxes, radios, or text. */
+const UI_CLICK_SEL = [
+  'button',
+  '[role="button"]',
+  '[role="menuitem"]',
+  '[role="option"]',
+  '[role="tab"]',
+  '[role="switch"]',
+  'a[href]',
+  'summary',
+  'input[type="button"]',
+  'input[type="submit"]',
+  'input[type="reset"]',
+].join(',')
+
+const ERROR_SOUND_SEL = [
+  '[role="alert"]',
+  '.form-error',
+  '.form-field-error',
+  '.settings-error',
+  '.fetch-error-banner',
+  '.fetch-error-pane',
+  '.error-boundary',
+  '.send-error',
+].join(',')
 
 let ctx: AudioContext | null = null
 let unlocked = false
@@ -201,7 +268,24 @@ export function playSound(kind: SoundKind): void {
   if (!isSoundEnabled(kind)) return
   const now = Date.now()
   const prev = lastPlayed.get(kind) ?? 0
-  if (now - prev < COOLDOWN_MS) return
+  const wait = COOLDOWN_MS[kind] ?? DEFAULT_COOLDOWN_MS
+  if (now - prev < wait) return
   lastPlayed.set(kind, now)
   playMotif(kind)
+}
+
+export function isUiClickTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  const el = target.closest(UI_CLICK_SEL)
+  if (!(el instanceof HTMLElement)) return false
+  if ('disabled' in el && (el as HTMLButtonElement).disabled) return false
+  if (el.getAttribute('aria-disabled') === 'true') return false
+  if (el.closest('fieldset[disabled]')) return false
+  return true
+}
+
+export function addedNodeHasError(node: Node): boolean {
+  if (!(node instanceof Element)) return false
+  if (node.matches(ERROR_SOUND_SEL)) return true
+  return node.querySelector(ERROR_SOUND_SEL) !== null
 }

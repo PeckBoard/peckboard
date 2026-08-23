@@ -4,7 +4,14 @@ import { useClaudeAccountsStore } from '../store/claudeAccounts'
 import { useGrokAccountsStore } from '../store/grokAccounts'
 import { useKimiAccountsStore } from '../store/kimiAccounts'
 import type { Event as SessionEvent, WarnLevel, PlanUsageMap } from '../types/api'
-import { isLiveEventTs, playSound, unlockSounds, type SoundKind } from '../util/sounds'
+import {
+  addedNodeHasError,
+  isLiveEventTs,
+  isUiClickTarget,
+  playSound,
+  unlockSounds,
+  type SoundKind,
+} from '../util/sounds'
 
 const LIMIT_RE = /rate.?limit|usage.?limit|over.?quota|quota.?exceed|budget/i
 
@@ -28,15 +35,40 @@ function cappedPlanKeys(plan: PlanUsageMap): Set<string> {
   return out
 }
 
+const STOP_RE = /interrupt|cancell?ed|operator-stop|server-shutdown/i
+
+function asText(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+function agentBlob(data: SessionEvent['data']): string {
+  return [data.status, data.reason, data.error, data.stderr, data.errorKind, data.error_kind]
+    .map(asText)
+    .join(' ')
+}
+
+function isUserStop(data: SessionEvent['data']): boolean {
+  return STOP_RE.test(agentBlob(data))
+}
+
+function isAgentFailure(data: SessionEvent['data']): boolean {
+  if (isUserStop(data)) return false
+  const status = String(data.status ?? '')
+  if (status === 'crashed' || status === 'error' || status === 'failed') return true
+  const err = data.error
+  return typeof err === 'string' && err.length > 0
+}
+
 function onEvent(event: SessionEvent) {
   if (!isLiveEventTs(event.ts)) return
   const kind = event.kind
   if (kind === 'question') playSound('question')
   else if (kind === 'agent-end') {
     const status = (event.data.status as string) ?? ''
-    if (status === 'complete') playSound('runComplete')
-    const err = `${event.data.error ?? ''} ${event.data.stderr ?? ''}`
+    const err = agentBlob(event.data)
     if (LIMIT_RE.test(err)) playSound('accountLimit')
+    else if (isAgentFailure(event.data)) playSound('error')
+    else if (status === 'complete') playSound('runComplete')
   } else if (kind === 'agent-start') playSound('runStart')
   else if (kind === 'agent-tool-end') playSound('toolUsed')
 }
@@ -55,6 +87,30 @@ export default function SoundsListener() {
       window.removeEventListener('pointerdown', unlock)
       window.removeEventListener('keydown', unlock)
     }
+  }, [])
+
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (e.button !== 0) return
+      if (isUiClickTarget(e.target)) playSound('uiClick')
+    }
+    document.addEventListener('click', onClick, true)
+    return () => document.removeEventListener('click', onClick, true)
+  }, [])
+
+  useEffect(() => {
+    const obs = new MutationObserver((records) => {
+      for (const r of records) {
+        for (const n of r.addedNodes) {
+          if (addedNodeHasError(n)) {
+            playSound('error')
+            return
+          }
+        }
+      }
+    })
+    obs.observe(document.body, { childList: true, subtree: true })
+    return () => obs.disconnect()
   }, [])
 
   useEffect(() => {

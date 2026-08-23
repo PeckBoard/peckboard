@@ -24,11 +24,13 @@ import {
   setMotion,
 } from '../util/appearance'
 import {
-  SOUND_KINDS,
+  EVENT_SOUND_KINDS,
+  INTERFACE_SOUND_KINDS,
   SOUND_META,
   loadSoundPrefs,
   saveSoundPrefs,
   previewSound,
+  type SoundKind,
   type SoundPrefs,
 } from '../util/sounds'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
@@ -144,7 +146,7 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
       {
         id: 'sounds',
         title: 'Sounds',
-        blurb: 'Chimes for questions, finished runs, limits, and more',
+        blurb: 'Clicks, errors, and chimes for questions, finished runs, limits',
       },
       {
         id: 'chat',
@@ -279,6 +281,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'Master',
     anchor: 'sounds-master',
     keywords: 'mute chime notification audio quiet',
+  },
+  {
+    page: 'sounds',
+    section: 'Interface',
+    anchor: 'sounds-interface',
+    keywords: 'click button menu error alert',
   },
   {
     page: 'sounds',
@@ -535,6 +543,45 @@ function NavIcon({ id }: { id: SubPage }) {
     >
       {NAV_ICON_PATHS[id]}
     </svg>
+  )
+}
+
+function renderSoundRows(
+  kinds: readonly SoundKind[],
+  soundPrefs: SoundPrefs,
+  setSoundPrefs: (prefs: SoundPrefs) => void,
+) {
+  return (
+    <div className="settings-info-grid">
+      {kinds.map((kind) => (
+        <div key={kind} className="settings-sound-row">
+          <div className="settings-row settings-row-toggle">
+            <label className="settings-sound-toggle">
+              <input
+                type="checkbox"
+                checked={soundPrefs[kind]}
+                data-testid={`sounds-toggle-${kind}`}
+                onChange={(e) => {
+                  const next = { ...soundPrefs, [kind]: e.target.checked }
+                  setSoundPrefs(next)
+                  saveSoundPrefs(next)
+                }}
+              />
+              <span className="settings-label">{SOUND_META[kind].label}</span>
+            </label>
+            <button
+              type="button"
+              className="btn-secondary btn-sm settings-sound-preview"
+              data-testid={`sounds-preview-${kind}`}
+              onClick={() => previewSound(kind)}
+            >
+              Preview
+            </button>
+          </div>
+          <p className="form-hint settings-sound-hint">{SOUND_META[kind].hint}</p>
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -1102,8 +1149,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
             >
               <h3>Sounds</h3>
               <p className="form-hint">
-                Soft chimes for board events. Frequent ones (tool calls, send, run start, queue)
-                start off. Preview always plays so you can hear a sample before turning one on.
+                Clicks, errors, and soft chimes for board events. Frequent agent ones (tool calls,
+                send, run start, queue) start off. Preview always plays so you can hear a sample
+                before turning one on.
               </p>
               <div className="settings-info-grid">
                 <label className="settings-row settings-row-toggle">
@@ -1124,40 +1172,20 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
             <section
               className="settings-section"
+              data-testid="sounds-interface-section"
+              data-settings-anchor="sounds-interface"
+            >
+              <h3>Interface</h3>
+              {renderSoundRows(INTERFACE_SOUND_KINDS, soundPrefs, setSoundPrefs)}
+            </section>
+
+            <section
+              className="settings-section"
               data-testid="sounds-events-section"
               data-settings-anchor="sounds-events"
             >
               <h3>Events</h3>
-              <div className="settings-info-grid">
-                {SOUND_KINDS.map((kind) => (
-                  <div key={kind} className="settings-sound-row">
-                    <div className="settings-row settings-row-toggle">
-                      <label className="settings-sound-toggle">
-                        <input
-                          type="checkbox"
-                          checked={soundPrefs[kind]}
-                          data-testid={`sounds-toggle-${kind}`}
-                          onChange={(e) => {
-                            const next = { ...soundPrefs, [kind]: e.target.checked }
-                            setSoundPrefs(next)
-                            saveSoundPrefs(next)
-                          }}
-                        />
-                        <span className="settings-label">{SOUND_META[kind].label}</span>
-                      </label>
-                      <button
-                        type="button"
-                        className="btn-secondary btn-sm settings-sound-preview"
-                        data-testid={`sounds-preview-${kind}`}
-                        onClick={() => previewSound(kind)}
-                      >
-                        Preview
-                      </button>
-                    </div>
-                    <p className="form-hint settings-sound-hint">{SOUND_META[kind].hint}</p>
-                  </div>
-                ))}
-              </div>
+              {renderSoundRows(EVENT_SOUND_KINDS, soundPrefs, setSoundPrefs)}
             </section>
           </>
         )}

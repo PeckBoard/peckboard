@@ -40,8 +40,12 @@ test('Settings Sounds page: attention on, frequent off; persist; preview fires',
   await loadAt(page, token, '/settings/sounds')
   await expect(page.getByTestId('settings-page')).toBeVisible({ timeout: 10_000 })
   await expect(page.getByTestId('sounds-master-section')).toBeVisible()
+  await expect(page.getByTestId('sounds-interface-section')).toBeVisible()
+  await expect(page.getByTestId('sounds-events-section')).toBeVisible()
 
   await expect(page.getByTestId('sounds-master')).toBeChecked()
+  await expect(page.getByTestId('sounds-toggle-uiClick')).toBeChecked()
+  await expect(page.getByTestId('sounds-toggle-error')).toBeChecked()
   await expect(page.getByTestId('sounds-toggle-question')).toBeChecked()
   await expect(page.getByTestId('sounds-toggle-runComplete')).toBeChecked()
   await expect(page.getByTestId('sounds-toggle-accountLimit')).toBeChecked()
@@ -86,4 +90,56 @@ test('a finished mock run plays the run-complete chime', async ({ request, page 
   const kinds = await played(page)
   expect(kinds).not.toContain('toolUsed')
   expect(kinds).not.toContain('runStart')
+})
+
+test('button and menu clicks play uiClick; a form error plays error', async ({ request, page }) => {
+  const { token } = await authenticate(request)
+  await loadAt(page, token, '/')
+  await expect(page.locator('.tab-new')).toBeVisible({ timeout: 10_000 })
+
+  await page.locator('.tab-new').click()
+  await expect.poll(async () => played(page)).toContain('uiClick')
+
+  await expect(page.getByTestId('new-session-model')).toBeVisible()
+  await page.getByTestId('new-session-model').click()
+  const item = page.locator('.dropdown-item:not([disabled])').first()
+  await expect(item).toBeVisible({ timeout: 10_000 })
+  await item.click()
+  await expect.poll(async () => played(page)).toContain('uiClick')
+
+  await page.goto('/users')
+  await expect(page.getByRole('button', { name: 'Create User' })).toBeVisible({ timeout: 10_000 })
+  await page.getByRole('button', { name: 'Create User' }).click()
+  await page.locator('#new-user-username').fill('tester-sounds')
+  await page.locator('#new-user-password').fill('abc')
+  await expect(page.getByTestId('new-user-password-error')).toBeVisible()
+  await expect.poll(async () => played(page)).toContain('error')
+})
+
+test('a crashed mock run plays the error chime', async ({ request, page }) => {
+  const { token, auth } = await authenticate(request)
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-sounds-crash-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: `e2e-sounds-crash-${Date.now()}`, path: folderPath },
+  })
+  expect(folderRes.ok(), await folderRes.text()).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  const sessionRes = await request.post('/api/sessions', {
+    headers: auth,
+    data: { name: 'sounds crash', folder_id: folder.id, model: 'mock:crash' },
+  })
+  expect(sessionRes.ok(), await sessionRes.text()).toBeTruthy()
+  const session = (await sessionRes.json()) as { id: string }
+
+  await loadAt(page, token, `/sessions/${session.id}`)
+  await expect(page.locator('.send-btn')).toBeVisible({ timeout: 10_000 })
+
+  await page.locator('.input-textarea').fill('crash please')
+  await page.locator('.send-btn').click()
+
+  await expect.poll(async () => played(page), { timeout: 15_000 }).toContain('error')
+  const kinds = await played(page)
+  expect(kinds).not.toContain('runComplete')
 })
