@@ -83,8 +83,9 @@ pub fn known_rates_for(model: &str) -> Option<ModelRates> {
     let (model, _acct) = crate::provider::registry::split_model_account(model);
     let id = model.strip_prefix("claude:").unwrap_or(model);
     match id {
-        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-fable-5" => Some(OPUS),
-        "claude-sonnet-4-6" => Some(SONNET),
+        "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
+        | "claude-fable-5" => Some(OPUS),
+        "claude-sonnet-5" | "claude-sonnet-4-6" => Some(SONNET),
         "claude-haiku-4-5" => Some(HAIKU),
         _ => None,
     }

@@ -163,3 +163,43 @@ test('model picker groups by provider and flags unconfigured providers', async (
   await expect(search).toHaveCount(0)
   await expect(trigger).toContainText('Mock: happy path')
 })
+
+test('claude picker lists every still-available opus snapshot', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedSession(request, authHeader)
+
+  await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
+  await page.goto(`/sessions/${sessionId}`)
+  await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
+
+  await page.locator('.tab-new').click()
+  const trigger = page.getByTestId('new-session-model')
+  await expect(trigger).toBeVisible({ timeout: 10_000 })
+  await trigger.click()
+  const search = page.getByTestId('new-session-model-search')
+  await expect(search).toBeVisible()
+
+  // Type the bare id: the catalogue must keep Opus 4.6 / 4.7 / 4.8
+  // selectable after Opus 5 shipped, plus the current Sonnet / Fable /
+  // Haiku ids. Discovery is off in e2e, so this is the static seed.
+  const pinned = [
+    'claude:claude-opus-5',
+    'claude:claude-opus-4-8',
+    'claude:claude-opus-4-7',
+    'claude:claude-opus-4-6',
+    'claude:claude-sonnet-5',
+    'claude:claude-sonnet-4-6',
+    'claude:claude-fable-5',
+    'claude:claude-haiku-4-5',
+  ]
+  for (const id of pinned) {
+    await search.fill(id.slice('claude:'.length))
+    await expect(page.getByTestId(`new-session-model-option-${id}`)).toBeVisible()
+  }
+})

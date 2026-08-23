@@ -243,8 +243,9 @@ impl ClaudeProvider {
     ///
     /// A probed catalog is topped up with
     /// [`always_offered_models`](super::always_offered_models) first: the CLI
-    /// omits ids it has no alias for, and dropping them here would hide a
-    /// model the user can still run.
+    /// advertises family aliases (`opus[1m]`, `sonnet`), not the pinned
+    /// snapshots (`claude-opus-4-8`, `claude-opus-4-7`, …), and dropping
+    /// those here would hide models the user can still run.
     async fn account_scoped_models(&self) -> Vec<crate::provider::stream::ModelInfo> {
         let mut base = match self.discovered_models().await {
             Some(models) if !models.is_empty() => models,
@@ -1138,11 +1139,11 @@ mod tests {
 
     /// End of the wiring the picker actually walks: a probed catalog (here
     /// pre-seeded into the discovery cache, so no CLI is spawned) reaches
-    /// `dynamic_models` topped up with the always-offered ids the CLI has no
-    /// alias for. Without the merge this list is Opus/Sonnet only and
-    /// `claude-fable-5` is unreachable from the model picker.
+    /// `dynamic_models` topped up with the pinned snapshots the CLI only
+    /// covers as family aliases. Without the merge this list is Opus/Sonnet
+    /// aliases only and Opus 4.6 / 4.7 / 4.8 are unreachable from the picker.
     #[tokio::test]
-    async fn dynamic_models_tops_up_a_probed_catalog_that_omits_fable() {
+    async fn dynamic_models_tops_up_a_probed_catalog_with_pinned_ids() {
         let provider = ClaudeProvider::new();
         *provider.discovery_cache.lock().await = Some(DiscoveryCache {
             fetched_at: std::time::Instant::now(),
@@ -1165,7 +1166,21 @@ mod tests {
         let models = provider.dynamic_models().await.unwrap();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
 
-        assert_eq!(ids, ["opus[1m]", "sonnet", "claude-fable-5"]);
+        assert_eq!(
+            ids,
+            [
+                "opus[1m]",
+                "sonnet",
+                "claude-fable-5",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5",
+            ]
+        );
     }
 
     #[test]

@@ -84,46 +84,55 @@ pub(crate) fn write_subagent_context_file(
     std::fs::write(&context_path, serde_json::to_string_pretty(&hook_output)?)?;
     Ok(context_path)
 }
+fn pinned_model(id: &str, display_name: &str, capabilities: &[&str], tier: i32) -> ModelInfo {
+    ModelInfo {
+        id: id.into(),
+        display_name: display_name.into(),
+        capabilities: capabilities.iter().map(|s| (*s).to_string()).collect(),
+        tier,
+    }
+}
+
+/// Pinned Claude API ids that are still active. Newest-first within each
+/// family. Anthropic keeps previous Opus/Sonnet snapshots selectable after a
+/// newer one ships (`claude-opus-4-8` did not retire `4-7` or `4-6`); the
+/// picker must list every one, not just the current alias.
+///
+/// Mythos 5 is invitation-only (Project Glasswing) and is not seeded here.
+fn static_models() -> Vec<ModelInfo> {
+    const CODE_REASONING_VISION: &[&str] = &["code", "reasoning", "vision"];
+    const CODE_VISION: &[&str] = &["code", "vision"];
+    const CODE: &[&str] = &["code"];
+    vec![
+        pinned_model("claude-fable-5", "Claude Fable 5", CODE_REASONING_VISION, 4),
+        pinned_model("claude-opus-5", "Claude Opus 5", CODE_REASONING_VISION, 3),
+        pinned_model(
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+            CODE_REASONING_VISION,
+            3,
+        ),
+        pinned_model(
+            "claude-opus-4-7",
+            "Claude Opus 4.7",
+            CODE_REASONING_VISION,
+            3,
+        ),
+        pinned_model(
+            "claude-opus-4-6",
+            "Claude Opus 4.6",
+            CODE_REASONING_VISION,
+            3,
+        ),
+        pinned_model("claude-sonnet-5", "Claude Sonnet 5", CODE_VISION, 2),
+        pinned_model("claude-sonnet-4-6", "Claude Sonnet 4.6", CODE_VISION, 2),
+        pinned_model("claude-haiku-4-5", "Claude Haiku 4.5", CODE, 1),
+    ]
+}
+
 /// Discover available Claude models.
 pub(crate) fn discover_models() -> Vec<ModelInfo> {
-    let mut models = vec![
-        ModelInfo {
-            id: "claude-fable-5".into(),
-            display_name: "Claude Fable 5".into(),
-            capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
-            tier: 4,
-        },
-        ModelInfo {
-            id: "claude-opus-4-8".into(),
-            display_name: "Claude Opus 4.8".into(),
-            capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
-            tier: 3,
-        },
-        ModelInfo {
-            id: "claude-opus-4-7".into(),
-            display_name: "Claude Opus 4.7".into(),
-            capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
-            tier: 3,
-        },
-        ModelInfo {
-            id: "claude-opus-4-6".into(),
-            display_name: "Claude Opus 4.6".into(),
-            capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
-            tier: 3,
-        },
-        ModelInfo {
-            id: "claude-sonnet-4-6".into(),
-            display_name: "Claude Sonnet 4.6".into(),
-            capabilities: vec!["code".into(), "vision".into()],
-            tier: 2,
-        },
-        ModelInfo {
-            id: "claude-haiku-4-5".into(),
-            display_name: "Claude Haiku 4.5".into(),
-            capabilities: vec!["code".into()],
-            tier: 1,
-        },
-    ];
+    let mut models = static_models();
 
     // Check for Bedrock ARNs in environment
     for (env_var, tier) in &[
@@ -150,41 +159,24 @@ pub(crate) fn discover_models() -> Vec<ModelInfo> {
 /// them out.
 ///
 /// The catalog the CLI advertises is its own alias set — today `default`,
-/// `opus[1m]`, `sonnet`, `haiku` — so a model that is newer than the
-/// installed CLI, or gated to some accounts, is simply absent from it while
+/// `opus[1m]`, `sonnet`, `haiku` — so pinned snapshots (Opus 4.8 / 4.7 /
+/// 4.6, …) and models newer than the installed CLI are absent from it while
 /// `--model=<id>` still accepts the id. Discovery REPLACES the static seed
-/// (see `ClaudeProvider::account_scoped_models`), so without this merge such
-/// a model silently vanishes from the picker on any machine with a real
-/// `claude` binary: that is exactly how `claude-fable-5` went missing.
+/// (see `ClaudeProvider::account_scoped_models`), so without this merge those
+/// ids silently vanish from the picker on any machine with a real `claude`
+/// binary.
 pub(crate) fn always_offered_models() -> Vec<ModelInfo> {
-    vec![ModelInfo {
-        id: "claude-fable-5".into(),
-        display_name: "Claude Fable 5".into(),
-        capabilities: vec!["code".into(), "reasoning".into(), "vision".into()],
-        tier: 4,
-    }]
-}
-
-/// The model family an id belongs to, or `None` for ids that name no known
-/// family (Bedrock ARNs, say). Used to compare a CLI alias (`opus[1m]`)
-/// against a pinned id (`claude-opus-4-8`) — string equality never matches
-/// those, family does.
-fn model_family(id: &str) -> Option<&'static str> {
-    const FAMILIES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
-    let id = id.to_ascii_lowercase();
-    FAMILIES.into_iter().find(|f| id.contains(f))
+    static_models()
 }
 
 /// Append every [`always_offered_models`] entry the probed catalog doesn't
-/// already carry. Matched by id AND by family, so the day the CLI starts
-/// advertising its own `fable` alias the picker gets that one entry, not two.
+/// already carry. Matched by id only: a CLI family alias (`opus[1m]`) is not
+/// the same as a pinned snapshot (`claude-opus-4-8`), and both stay
+/// selectable — that is how Opus 4.6 / 4.7 / 4.8 remain pickable after the
+/// CLI starts advertising a newer `opus` alias.
 pub(crate) fn merge_always_offered(models: &mut Vec<ModelInfo>) {
     for extra in always_offered_models() {
-        let family = model_family(&extra.id);
-        let known = models
-            .iter()
-            .any(|m| m.id == extra.id || (family.is_some() && model_family(&m.id) == family));
-        if !known {
+        if !models.iter().any(|m| m.id == extra.id) {
             models.push(extra);
         }
     }
@@ -691,17 +683,26 @@ mod tests {
     #[test]
     fn test_discover_models() {
         let models = discover_models();
-        assert!(models.len() >= 5);
-        assert!(models.iter().any(|m| m.id == "claude-fable-5"));
-        assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
-        assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
-        assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "claude-fable-5",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5",
+            ]
+        );
     }
-    /// A CLI that advertises no Fable alias (the real 2.1.x catalog: default,
-    /// `opus[1m]`, `sonnet`, `haiku`) must not cost the picker the model —
-    /// discovery replaces the seed, so the merge is what keeps it selectable.
+    /// A CLI that advertises only family aliases (`opus[1m]`, `sonnet`) must
+    /// not cost the picker the pinned snapshots — discovery replaces the
+    /// seed, so the merge is what keeps Opus 4.6 / 4.7 / 4.8 selectable.
     #[test]
-    fn merge_always_offered_restores_a_model_the_cli_omits() {
+    fn merge_always_offered_restores_pinned_ids_the_cli_aliases() {
         let mut probed = vec![
             ModelInfo {
                 id: "opus[1m]".into(),
@@ -720,21 +721,47 @@ mod tests {
         merge_always_offered(&mut probed);
 
         let ids: Vec<&str> = probed.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["opus[1m]", "sonnet", "claude-fable-5"]);
-        assert_eq!(probed[2].tier, 4);
+        assert_eq!(
+            ids,
+            [
+                "opus[1m]",
+                "sonnet",
+                "claude-fable-5",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5",
+            ]
+        );
     }
 
-    /// Once the CLI does advertise the family — under any alias — the merge
-    /// steps aside, so the picker never shows two Fable entries.
+    /// An exact id the CLI already listed is not appended a second time.
     #[test]
-    fn merge_always_offered_skips_a_family_the_cli_already_lists() {
+    fn merge_always_offered_skips_an_id_the_cli_already_lists() {
         let mut probed = parse_initialize_models(&initialize_fixture("rid-1"), "rid-1").unwrap();
         let before = probed.len();
+        assert!(probed.iter().any(|m| m.id == "claude-fable-5[1m]"));
+        assert!(!probed.iter().any(|m| m.id == "claude-fable-5"));
 
         merge_always_offered(&mut probed);
 
-        assert_eq!(probed.len(), before);
-        assert_eq!(probed.iter().filter(|m| m.id.contains("fable")).count(), 1);
+        // Alias (`claude-fable-5[1m]`) and pinned id are distinct; the
+        // pinned snapshot is appended, the alias is kept.
+        assert_eq!(probed.len(), before + static_models().len());
+        assert_eq!(
+            probed.iter().filter(|m| m.id == "claude-fable-5").count(),
+            1
+        );
+        assert_eq!(
+            probed
+                .iter()
+                .filter(|m| m.id == "claude-fable-5[1m]")
+                .count(),
+            1
+        );
     }
 
     /// The static seed already carries every always-offered model; merging
