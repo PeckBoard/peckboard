@@ -42,7 +42,7 @@ use tokio::task::JoinHandle;
 use crate::plugin::settings::PluginSettingsStore;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext};
 use crate::provider::registry::split_model_account;
-use crate::provider::stream::{ModelInfo, ProviderEvent};
+use crate::provider::stream::{ModelInfo, ProviderEvent, SpawnConfig};
 use crate::provider::turn::{
     self, StderrMarker, TurnSpec, TurnStream, setting_bool, setting_str, setting_str_list,
 };
@@ -396,9 +396,12 @@ impl AgentProvider for GrokProvider {
         // MCP wiring: mirror the peckboard server AND any user-defined
         // servers (Settings → MCP Servers, already provider-filtered into the
         // per-session worker-mcp file at dispatch) into the workspace
-        // `.mcp.json`, which Grok Build loads as a compatibility source. The
-        // bearer token stays out of the file — it rides an env var the file
-        // references. Best-effort: the turn runs without MCP on any failure.
+        // `.mcp.json` (compat) and `.grok/config.toml` (native — always
+        // scanned; `.mcp.json` is skipped after the Claude import prompt is
+        // dismissed). The bearer token stays out of the files — it rides an
+        // env var they reference. Best-effort: the turn runs without MCP on
+        // any failure.
+        let mut extra_mcp_servers: Vec<String> = Vec::new();
         if !config.working_dir.is_empty()
             && let Some(path) = config.mcp_config_path.as_deref()
         {
@@ -409,6 +412,7 @@ impl AgentProvider for GrokProvider {
                 Some(w) => w.extra_servers.clone(),
                 None => mcp::extra_servers_from_worker_config(path),
             };
+            extra_mcp_servers = extras.iter().map(|(n, _)| n.clone()).collect();
             match mcp::ensure_workspace_mcp_json(
                 &config.working_dir,
                 wiring.as_ref().map(|w| w.url.as_str()),
@@ -423,6 +427,13 @@ impl AgentProvider for GrokProvider {
                     tracing::warn!(session_id = %session_id, "grok: MCP wiring skipped: {e}")
                 }
             }
+            if let Err(e) = mcp::ensure_workspace_grok_toml(
+                &config.working_dir,
+                wiring.as_ref().map(|w| w.url.as_str()),
+                &extras,
+            ) {
+                tracing::warn!(session_id = %session_id, "grok: native MCP toml skipped: {e}");
+            }
         }
 
         let args = build_cli_args(
@@ -431,6 +442,8 @@ impl AgentProvider for GrokProvider {
             conversation_id.as_deref(),
             config.effort.as_deref(),
             &turn::compose_system_prompt(&config),
+            &config,
+            &extra_mcp_servers,
         );
 
         let cancel = Arc::new(Notify::new());
@@ -614,6 +627,8 @@ fn build_cli_args(
     conversation_id: Option<&str>,
     effort: Option<&str>,
     system_prompt: &str,
+    config: &SpawnConfig,
+    extra_mcp_servers: &[String],
 ) -> Vec<String> {
     let mut args = vec![
         format!("--single={prompt}"),
@@ -621,6 +636,12 @@ fn build_cli_args(
         // Headless turns auto-approve tool actions; peckboard scopes work to
         // the session's working dir, matching the Cursor provider's default.
         "--always-approve".to_string(),
+        // Repo-local MCP (workspace `.mcp.json` / `.grok/config.toml`) is
+        // gated on folder trust — untrusted dirs start the servers but
+        // advertise **zero tools** (`grok mcp doctor`: "re-run with --trust
+        // to allow repo-local servers"). Cursor passes `--trust` for the
+        // same reason.
+        "--trust".to_string(),
     ];
     if !model.is_empty() {
         args.push(format!("--model={model}"));
@@ -638,7 +659,62 @@ fn build_cli_args(
     // (shared working-style rules, then the per-spawn suffix, then any
     // per-session override) — the same layering Claude applies.
     args.push(format!("--system-prompt-override={system_prompt}"));
+
+    // MCP tool list, Claude-shaped, grok-flagged:
+    //
+    // Claude passes `--allowedTools=mcp__peckboard__*` so the model sees
+    // Peckboard tools as first-class functions. Grok 1.0 hides MCP behind
+    // `search_tool`/`use_tool` and names them `server__tool` (no `mcp__`
+    // prefix). `--tools` is an exclusive *built-in* allowlist and would
+    // drop the rest of the toolset, so we:
+    //   1. `--allow=MCPTool(peckboard__*)` (and extras) so MCP calls are
+    //      in the permission allowlist like Claude's pre-approval.
+    //   2. `--disallowed-tools` the grok builtins that collide with
+    //      Peckboard MCP (read_file, shell, …), matching Claude's
+    //      `--disallowedTools=Read,Write,Edit,Bash`.
+    // User-disabled MCP tools from Settings ride `--deny=MCPTool(…)`.
+    if config.mcp_config_path.is_some() {
+        args.push("--allow=MCPTool(peckboard__*)".to_string());
+        for server in extra_mcp_servers {
+            if server != "peckboard" && mcp::is_safe_server_name(server) {
+                let rule = format!("--allow=MCPTool({server}__*)");
+                if !args.contains(&rule) {
+                    args.push(rule);
+                }
+            }
+        }
+        args.push(format!(
+            "--disallowed-tools={}",
+            grok_denied_builtins(config)
+        ));
+        for t in &config.extra_disallowed_tools {
+            args.push(format!("--deny=MCPTool({})", grok_mcp_tool_name(t)));
+        }
+    }
     args
+}
+
+/// Grok MCP names are `server__tool`. Claude-style `mcp__server__tool`
+/// (and bare core names from `tool_names()` / plugin extras) map here.
+fn grok_mcp_tool_name(name: &str) -> String {
+    let rest = name.strip_prefix("mcp__").unwrap_or(name);
+    if rest.contains("__") {
+        rest.to_string()
+    } else {
+        format!("peckboard__{rest}")
+    }
+}
+
+/// Grok built-ins that Peckboard MCP replaces. Tool IDs are grok's
+/// `--disallowed-tools` names (not the TUI labels). Pre-hatcher sessions
+/// also lose web/task — the MCP server already hard-gates writes.
+fn grok_denied_builtins(config: &SpawnConfig) -> &'static str {
+    if config.is_pre_hatcher {
+        "read_file,search_replace,list_dir,run_terminal_cmd,grep,grep_search,\
+         web_search,web_fetch,todo_write,task"
+    } else {
+        "read_file,search_replace,list_dir,run_terminal_cmd,grep,grep_search"
+    }
 }
 
 /// Safe fallback model for empty / legacy ids. Kept as `grok-4.5` because
@@ -744,7 +820,6 @@ async fn probe_cli_models(cli_path: &str, env: &HashMap<String, String>) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::stream::SpawnConfig;
     /// Both sign-in markers must classify as auth failures, so the crash
     /// row can offer "re-login" rather than "retry".
     #[test]
@@ -770,11 +845,14 @@ mod tests {
             None,
             None,
             &working_style(),
+            &SpawnConfig::default(),
+            &[],
         );
         // The whole prompt is the value of --single, never a separate flag.
         assert_eq!(args[0], "--single=--always-approve evil");
         assert!(args.contains(&"--output-format=streaming-json".to_string()));
         assert!(args.contains(&"--always-approve".to_string()));
+        assert!(args.contains(&"--trust".to_string()));
         assert!(args.contains(&"--model=grok-4.5".to_string()));
         // No bare `--always-approve evil` token splitting out of the prompt.
         assert!(!args.iter().any(|a| a == "evil"));
@@ -806,6 +884,8 @@ mod tests {
             Some("sess-7"),
             Some("high"),
             &turn::compose_system_prompt(&config),
+            &config,
+            &[],
         );
         // Resume rides `--resume`; `--session-id` would error on an
         // existing id under grok 1.0.
@@ -820,7 +900,15 @@ mod tests {
     #[test]
     fn build_args_sends_working_style_when_no_override() {
         // With no override, every session still ships the shared rules.
-        let args = build_cli_args("grok-4.5", "hi", None, None, &working_style());
+        let args = build_cli_args(
+            "grok-4.5",
+            "hi",
+            None,
+            None,
+            &working_style(),
+            &SpawnConfig::default(),
+            &[],
+        );
         assert!(args.contains(&format!(
             "--system-prompt-override={}",
             crate::provider::WORKING_STYLE
@@ -829,7 +917,15 @@ mod tests {
 
     #[test]
     fn build_args_omits_optional_flags_when_absent() {
-        let args = build_cli_args("grok-4.5", "hi", None, Some("  "), &working_style());
+        let args = build_cli_args(
+            "grok-4.5",
+            "hi",
+            None,
+            Some("  "),
+            &working_style(),
+            &SpawnConfig::default(),
+            &[],
+        );
         assert!(!args.iter().any(|a| a.starts_with("--resume")));
         assert!(!args.iter().any(|a| a.starts_with("--session-id")));
         // Whitespace-only effort is treated as absent.
@@ -840,6 +936,71 @@ mod tests {
             args.iter()
                 .any(|a| a.starts_with("--system-prompt-override="))
         );
+    }
+
+    #[test]
+    fn grok_mcp_tool_name_maps_claude_and_bare_ids() {
+        assert_eq!(grok_mcp_tool_name("read_file"), "peckboard__read_file");
+        assert_eq!(
+            grok_mcp_tool_name("mcp__peckboard__edit_file"),
+            "peckboard__edit_file"
+        );
+        assert_eq!(
+            grok_mcp_tool_name("mcp__github__create_issue"),
+            "github__create_issue"
+        );
+    }
+
+    #[test]
+    fn mcp_wiring_allowlists_peckboard_and_denies_colliding_builtins() {
+        let config = SpawnConfig {
+            mcp_config_path: Some("/tmp/worker-mcp/s.json".into()),
+            extra_disallowed_tools: vec!["mcp__github__delete_repo".into()],
+            ..Default::default()
+        };
+        let args = build_cli_args(
+            "grok-4.5",
+            "hi",
+            None,
+            None,
+            &working_style(),
+            &config,
+            &["linear".into()],
+        );
+        assert!(args.contains(&"--trust".to_string()));
+        assert!(args.contains(&"--allow=MCPTool(peckboard__*)".to_string()));
+        assert!(args.contains(&"--allow=MCPTool(linear__*)".to_string()));
+        let denied = args
+            .iter()
+            .find(|a| a.starts_with("--disallowed-tools="))
+            .expect("disallowed-tools present");
+        for builtin in [
+            "read_file",
+            "search_replace",
+            "list_dir",
+            "run_terminal_cmd",
+            "grep",
+        ] {
+            assert!(
+                denied
+                    .split(',')
+                    .any(|t| t == builtin || t.ends_with(builtin)),
+                "{builtin} missing from {denied}"
+            );
+        }
+        assert!(args.contains(&"--deny=MCPTool(github__delete_repo)".to_string()));
+        // No MCP flags when the session has no MCP config.
+        let plain = build_cli_args(
+            "grok-4.5",
+            "hi",
+            None,
+            None,
+            &working_style(),
+            &SpawnConfig::default(),
+            &[],
+        );
+        assert!(!plain.iter().any(|a| a.starts_with("--allow=MCPTool")));
+        assert!(!plain.iter().any(|a| a.starts_with("--disallowed-tools=")));
     }
 
     #[test]

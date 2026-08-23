@@ -78,14 +78,14 @@ pub(super) fn parse_stream_json(
         // `name`/`input` — both shapes parse.
         "tool_call" => {
             let tool_use_id = tool_id(json);
-            let name = json
+            let raw_name = json
                 .get("name")
                 .or_else(|| json.get("tool"))
                 .or_else(|| json.get("toolName"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool")
                 .to_string();
-            let input = json
+            let raw_input = json
                 .get("rawInput")
                 .or_else(|| json.get("input"))
                 .or_else(|| json.get("args"))
@@ -94,6 +94,11 @@ pub(super) fn parse_stream_json(
                 .or_else(|| json.get("params"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
+            // Grok routes MCP through `use_tool` (and older `CallMcpTool`)
+            // with the real identity in `tool_name` = `server__tool`. Unwrap
+            // to `mcp__<server>__<tool>` — the shape Claude and cursor emit,
+            // so the shared tool-display layer labels the row.
+            let (name, input) = unwrap_mcp_use_tool(&raw_name, raw_input);
             // Grok's headless `--always-approve` runs its built-in tools
             // autonomously with no pre-execution gate peckboard could hook,
             // so terminal calls are rendered honestly — real name, input,
@@ -234,6 +239,40 @@ fn event_data_str(json: &serde_json::Value) -> Option<String> {
         .or_else(|| json.get("text"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// Real name + arguments of a grok MCP dispatch (`use_tool` / `CallMcpTool`).
+/// Grok's MCP tools are `server__tool`; Claude and cursor emit
+/// `mcp__<server>__<tool>`. Rewrite so the chat row matches the other
+/// providers. Unrecognised shapes stay `use_tool` with the original args.
+fn unwrap_mcp_use_tool(raw_name: &str, input: serde_json::Value) -> (String, serde_json::Value) {
+    match raw_name {
+        "use_tool" | "CallMcpTool" | "mcp" => {}
+        _ => return (raw_name.to_string(), input),
+    }
+    let field = |key: &str| {
+        input
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let Some(qualified) = field("tool_name").or_else(|| field("name")) else {
+        return (raw_name.to_string(), input);
+    };
+    let display = if qualified.starts_with("mcp__") {
+        qualified.to_string()
+    } else if qualified.contains("__") {
+        format!("mcp__{qualified}")
+    } else {
+        format!("mcp__peckboard__{qualified}")
+    };
+    let inner = input
+        .get("tool_input")
+        .or_else(|| input.get("arguments"))
+        .or_else(|| input.get("args"))
+        .cloned()
+        .unwrap_or(input);
+    (display, inner)
 }
 
 /// A tool call/result id under any of the names grok might use. Falls back to
@@ -576,6 +615,42 @@ mod tests {
             &result[..],
             [ProviderEvent::ToolEnd { tool_use_id, output: Some(o), error: None, .. }]
                 if tool_use_id == "b1" && o == "file.txt"
+        ));
+    }
+
+    #[test]
+    fn use_tool_unwraps_to_mcp_qualified_name() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call","toolCallId":"u1","toolName":"use_tool",
+                "rawInput":{
+                    "tool_name":"peckboard__search_files",
+                    "tool_input":{"pattern":"foo"}
+                }
+            }),
+            &mut conv,
+        );
+        let ProviderEvent::ToolStart { name, input, .. } = &events[0] else {
+            panic!("expected ToolStart, got {:?}", events[0]);
+        };
+        assert_eq!(name, "mcp__peckboard__search_files");
+        assert_eq!(input["pattern"], "foo");
+    }
+
+    #[test]
+    fn use_tool_without_inner_name_stays_use_tool() {
+        let mut conv = None;
+        let events = parse(
+            serde_json::json!({
+                "type":"tool_call","toolCallId":"u2","name":"use_tool",
+                "input":{"query":"whatever"}
+            }),
+            &mut conv,
+        );
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::ToolStart { name, .. } if name == "use_tool"
         ));
     }
 

@@ -185,6 +185,173 @@ pub fn ensure_workspace_mcp_json(
     Ok(true)
 }
 
+/// Server names grok accepts (`letters, numbers, hyphens, underscores`).
+pub fn is_safe_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+const GROK_TOML_BEGIN: &str = "# BEGIN PECKBOARD MCP";
+const GROK_TOML_END: &str = "# END PECKBOARD MCP";
+
+/// Merge the peckboard HTTP entry plus user-defined extras into
+/// `<working_dir>/.grok/config.toml` as a managed block. Grok always
+/// scans this file; `.mcp.json` is Claude-compat and can be skipped after
+/// the import prompt is dismissed. Unrelated TOML outside the managed
+/// markers is left untouched.
+pub fn ensure_workspace_grok_toml(
+    working_dir: &str,
+    peckboard_url: Option<&str>,
+    extras: &[(String, serde_json::Value)],
+) -> anyhow::Result<bool> {
+    if extras.is_empty() && peckboard_url.is_none() {
+        return Ok(false);
+    }
+    let dir = Path::new(working_dir).join(".grok");
+    let path = dir.join("config.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let without = strip_managed_toml_block(&existing);
+    let block = render_managed_toml_block(peckboard_url, extras);
+    if block.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut next = without.trim_end().to_string();
+    if !next.is_empty() {
+        next.push('\n');
+        next.push('\n');
+    }
+    next.push_str(&block);
+    if !next.ends_with('\n') {
+        next.push('\n');
+    }
+    if next == existing {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, next)?;
+    Ok(true)
+}
+
+fn strip_managed_toml_block(text: &str) -> String {
+    let Some(start) = text.find(GROK_TOML_BEGIN) else {
+        return text.to_string();
+    };
+    let after_start = start + GROK_TOML_BEGIN.len();
+    let end = text[after_start..]
+        .find(GROK_TOML_END)
+        .map(|i| after_start + i + GROK_TOML_END.len())
+        .unwrap_or(text.len());
+    let mut out = String::new();
+    out.push_str(text[..start].trim_end());
+    let rest = text[end..].trim_start();
+    if !out.is_empty() && !rest.is_empty() {
+        out.push('\n');
+        out.push('\n');
+    }
+    out.push_str(rest);
+    out
+}
+
+fn render_managed_toml_block(
+    peckboard_url: Option<&str>,
+    extras: &[(String, serde_json::Value)],
+) -> String {
+    let mut body = String::new();
+    if let Some(url) = peckboard_url {
+        body.push_str(&format!(
+            "[mcp_servers.{RESERVED}]\n\
+             url = {url}\n\
+             headers = {{ Authorization = \"Bearer ${{{TOKEN_ENV_VAR}}}\" }}\n\
+             enabled = true\n",
+            url = toml_string(url),
+        ));
+    }
+    for (name, entry) in extras {
+        if name == RESERVED || !is_safe_server_name(name) {
+            continue;
+        }
+        if let Some(section) = json_server_to_toml(name, entry) {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&section);
+        }
+    }
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("{GROK_TOML_BEGIN}\n{body}{GROK_TOML_END}\n")
+}
+
+fn json_server_to_toml(name: &str, entry: &serde_json::Value) -> Option<String> {
+    let mut lines = vec![format!("[mcp_servers.{name}]")];
+    if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
+        lines.push(format!("url = {}", toml_string(url)));
+    }
+    if let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) {
+        lines.push(format!("command = {}", toml_string(cmd)));
+    }
+    if let Some(args) = entry.get("args").and_then(|v| v.as_array()) {
+        let items: Vec<String> = args
+            .iter()
+            .filter_map(|v| v.as_str().map(toml_string))
+            .collect();
+        lines.push(format!("args = [{}]", items.join(", ")));
+    }
+    if let Some(headers) = entry.get("headers").and_then(|v| v.as_object())
+        && !headers.is_empty()
+    {
+        let items: Vec<String> = headers
+            .iter()
+            .filter_map(|(k, v)| {
+                let val = v.as_str()?;
+                Some(format!("{} = {}", toml_key(k), toml_string(val)))
+            })
+            .collect();
+        if !items.is_empty() {
+            lines.push(format!("headers = {{ {} }}", items.join(", ")));
+        }
+    }
+    if let Some(env) = entry.get("env").and_then(|v| v.as_object())
+        && !env.is_empty()
+    {
+        let items: Vec<String> = env
+            .iter()
+            .filter_map(|(k, v)| {
+                let val = v.as_str()?;
+                Some(format!("{} = {}", toml_key(k), toml_string(val)))
+            })
+            .collect();
+        if !items.is_empty() {
+            lines.push(format!("env = {{ {} }}", items.join(", ")));
+        }
+    }
+    if lines.len() == 1 {
+        return None;
+    }
+    lines.push("enabled = true".into());
+    lines.push(String::new());
+    Some(lines.join("\n"))
+}
+
+fn toml_key(key: &str) -> String {
+    if key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && !key.is_empty()
+    {
+        key.to_string()
+    } else {
+        toml_string(key)
+    }
+}
+
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +513,51 @@ mod tests {
         assert_eq!(wiring.extra_servers[0].0, "github");
 
         assert!(parse_worker_mcp_config("/nonexistent/x.json").is_none());
+    }
+
+    #[test]
+    fn grok_toml_writes_peckboard_and_extras_as_a_managed_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_str().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".grok")).unwrap();
+        std::fs::write(
+            tmp.path().join(".grok/config.toml"),
+            "[cli]\ninstaller = \"internal\"\n",
+        )
+        .unwrap();
+
+        assert!(
+            ensure_workspace_grok_toml(ws, Some("http://127.0.0.1:4100/mcp"), &[gh_entry()],)
+                .unwrap()
+        );
+        let text = std::fs::read_to_string(tmp.path().join(".grok/config.toml")).unwrap();
+        assert!(text.contains("[cli]"));
+        assert!(text.contains("installer = \"internal\""));
+        assert!(text.contains("[mcp_servers.peckboard]"));
+        assert!(text.contains("Bearer ${PECKBOARD_MCP_TOKEN}"));
+        assert!(text.contains("[mcp_servers.github]"));
+        assert!(text.contains("command = \"npx\""));
+
+        // Idempotent while unchanged.
+        assert!(
+            !ensure_workspace_grok_toml(ws, Some("http://127.0.0.1:4100/mcp"), &[gh_entry()],)
+                .unwrap()
+        );
+
+        // Replacing extras rewrites only the managed block.
+        assert!(ensure_workspace_grok_toml(ws, Some("http://127.0.0.1:4100/mcp"), &[]).unwrap());
+        let text = std::fs::read_to_string(tmp.path().join(".grok/config.toml")).unwrap();
+        assert!(text.contains("[cli]"));
+        assert!(text.contains("[mcp_servers.peckboard]"));
+        assert!(!text.contains("[mcp_servers.github]"));
+    }
+
+    #[test]
+    fn is_safe_server_name_matches_grok_rules() {
+        assert!(is_safe_server_name("peckboard"));
+        assert!(is_safe_server_name("github-bridge"));
+        assert!(!is_safe_server_name("has space"));
+        assert!(!is_safe_server_name("dot.name"));
+        assert!(!is_safe_server_name(""));
     }
 }
