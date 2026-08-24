@@ -13,6 +13,7 @@ pub mod mdns;
 pub mod push;
 pub mod questions;
 pub mod redact;
+pub mod repo_diff;
 pub mod repo_scan;
 pub mod retention;
 pub mod secret_mask;

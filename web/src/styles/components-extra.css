@@ -837,3 +837,82 @@ select.form-input {
 .dropdown-footer a {
   color: var(--accent);
 }
+
+/* ---- Folder repo browser (/folders/<id>/repos) ---- */
+.repo-diff-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.repo-back-btn {
+  background: transparent;
+  border: 0;
+  color: var(--text3);
+  font-size: 22px;
+  line-height: 1;
+  padding: 2px 8px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.repo-back-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+.repo-branch-chip {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.repo-path-tag {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.repo-diff-body {
+  padding: 12px 16px;
+}
+.repo-diff-summary {
+  font-size: var(--text-sm);
+  color: var(--text2);
+  margin: 4px 2px 12px;
+}
+.repo-diff-file {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.repo-diff-file .diff-block {
+  flex: 1;
+  min-width: 0;
+}
+.repo-file-status {
+  flex: none;
+  margin-top: 6px;
+  width: 76px;
+  text-align: center;
+  font-size: var(--text-xs);
+  border-radius: 999px;
+  padding: 2px 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text3);
+}
+.repo-file-status-added,
+.repo-file-status-untracked {
+  color: var(--success, #3fb950);
+  border-color: currentColor;
+}
+.repo-file-status-deleted {
+  color: var(--danger, #f85149);
+  border-color: currentColor;
+}
+.repo-file-status-renamed {
+  color: var(--accent);
+  border-color: currentColor;
+}

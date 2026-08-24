@@ -386,6 +386,42 @@ export async function listRepos(folderId?: string): Promise<RepoEntry[]> {
   return data.repos
 }
 
+/** One changed file in a repo's working tree, as served by
+ *  GET /api/repos/diff. `status` is added | deleted | renamed | modified |
+ *  untracked; `diff` is a unified body (hunks only, no git header). */
+export interface RepoFileDiff {
+  path: string
+  status: string
+  diff: string
+  added: number
+  removed: number
+  truncated: boolean
+}
+
+/** A repo working tree's dirty state vs HEAD (staged + unstaged +
+ *  untracked). `truncated` marks a file list cut at the server cap. */
+export interface RepoDiffResult {
+  repo: string
+  name: string
+  tree: string
+  branch: string
+  files: RepoFileDiff[]
+  truncated: boolean
+}
+
+/** Diff one scanned repo's working tree. `repo` is the folder-relative
+ *  path from [[listRepos]] (`''` = folder root); `tree` optionally picks a
+ *  linked worktree instead of the main checkout. */
+export async function repoDiff(
+  folderId: string,
+  repo: string,
+  tree?: string,
+): Promise<RepoDiffResult> {
+  const params = new URLSearchParams({ folder_id: folderId, repo })
+  if (tree !== undefined) params.set('tree', tree)
+  const res = await authedFetch(`/api/repos/diff?${params}`)
+  return json<RepoDiffResult>(res, "Couldn't diff that repo")
+}
 export async function readMarkdownFile(folderId: string, path: string): Promise<string> {
   const res = await authedFetch(
     `/api/folders/${encodeURIComponent(folderId)}/markdown-file?path=${encodeURIComponent(path)}`,

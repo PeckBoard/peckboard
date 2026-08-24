@@ -14,6 +14,7 @@ use crate::db::crud::MoveFolderOutcome;
 use crate::db::models::NewFolder;
 use crate::service::doc_review_sources as sources;
 use crate::service::fs_jail;
+use crate::service::repo_diff as repo_diff_svc;
 use crate::service::repo_scan;
 use crate::state::AppState;
 
@@ -104,6 +105,10 @@ fn user_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // review wizard's repo → worktree → file cascade. Read-only, same
         // audience as the markdown routes above.
         .route("/api/repos", get(list_repos))
+        // Working-tree diff of one scanned repo — the repo browser's
+        // per-repo diff viewer. Same audience and jail as `/api/repos`:
+        // the tree is only served when the scan itself found it.
+        .route("/api/repos/diff", get(repo_diff))
 }
 
 /// Moving a session cancels its running agent and repoints the workspace
@@ -962,6 +967,68 @@ async fn list_repos(
         }
     }
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "repos": repos })))
+}
+
+/// Query for `GET /api/repos/diff`.
+#[derive(Deserialize)]
+struct RepoDiffQuery {
+    folder_id: String,
+    /// Folder-relative repo path from `/api/repos` (`""` = folder root).
+    repo: String,
+    /// Optional worktree path (defaults to the repo's main tree). Must be
+    /// one of the worktrees the scan reported for this repo.
+    tree: Option<String>,
+}
+
+/// GET /api/repos/diff — staged + unstaged + untracked changes of one
+/// repo's working tree vs HEAD. The repo and tree params are validated
+/// against a fresh [`repo_scan`] pass, so only trees the scan itself
+/// serves can be diffed — no arbitrary-path probing.
+async fn repo_diff(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RepoDiffQuery>,
+) -> impl IntoResponse {
+    let err = |status: StatusCode, msg: &str| (status, Json(serde_json::json!({ "error": msg })));
+    let folder = match state.db.get_folder(&q.folder_id).await {
+        Ok(Some(f)) => f,
+        Ok(None) => return Err(err(StatusCode::NOT_FOUND, "folder not found")),
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+    let Ok(root) = std::fs::canonicalize(&folder.path) else {
+        return Err(err(StatusCode::NOT_FOUND, "folder path unreadable"));
+    };
+    let repos = repo_scan::scan_repos(&root);
+    let Some(repo) = repos.iter().find(|r| r.path == q.repo) else {
+        return Err(err(StatusCode::NOT_FOUND, "repo not found in folder"));
+    };
+    let tree_rel = q.tree.as_deref().unwrap_or(repo.path.as_str());
+    if !repo.worktrees.iter().any(|w| w.path == tree_rel) {
+        return Err(err(StatusCode::NOT_FOUND, "worktree not found in repo"));
+    }
+    let tree_abs = if tree_rel.is_empty() {
+        root.clone()
+    } else {
+        root.join(tree_rel)
+    };
+    match repo_diff_svc::working_tree_diff(&tree_abs).await {
+        Ok(diff) => Ok(Json(serde_json::json!({
+            "repo": repo.path,
+            "name": if repo.path.is_empty() { folder.name.clone() } else { repo.name.clone() },
+            "tree": tree_rel,
+            "branch": diff.branch,
+            "files": diff.files,
+            "truncated": diff.truncated,
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )),
+    }
 }
 
 #[cfg(test)]

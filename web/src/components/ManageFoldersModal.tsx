@@ -22,9 +22,11 @@ interface Props {
   pluginItems?: FolderPluginItem[]
   /** Open one, for the given folder. */
   onOpenPlugin?: (folderId: string, itemId: string) => void
+  /** Open the folder's repo browser (`/folders/<id>/repos`). */
+  onOpenRepos?: (folderId: string) => void
 }
 
-export default function FoldersPage({ pluginItems = [], onOpenPlugin }: Props = {}) {
+export default function FoldersPage({ pluginItems = [], onOpenPlugin, onOpenRepos }: Props = {}) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
@@ -159,8 +161,21 @@ export default function FoldersPage({ pluginItems = [], onOpenPlugin }: Props = 
                 <strong>{f.name}</strong>
                 <span className="folder-path">{f.path}</span>
               </div>
-              {(pluginItems.length > 0 || isAdmin) && (
+              {(pluginItems.length > 0 || isAdmin || onOpenRepos) && (
                 <div className="folder-row-actions">
+                  {/* Repo browser — read-only, so not admin-gated: any
+                      authenticated user may already call /api/repos. */}
+                  {onOpenRepos && (
+                    <button
+                      className="btn-secondary"
+                      onClick={() => onOpenRepos(f.id)}
+                      title={`Browse git repos in ${f.name}`}
+                      aria-label={`Browse repos in folder ${f.name}`}
+                      data-testid={`folder-repos-${f.name}`}
+                    >
+                      Repos
+                    </button>
+                  )}
                   {/* Folder-scoped plugin pages (manifest `folder_items`).
                       Deliberately outside the isAdmin gate: these are the same
                       pages a non-admin already reaches from a project or

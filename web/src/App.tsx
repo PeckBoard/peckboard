@@ -24,6 +24,7 @@ import NewSessionModal from './components/NewSessionModal'
 import ShortcutsModal from './components/ShortcutsModal'
 import NewProjectModal from './components/NewProjectModal'
 import FoldersPage from './components/ManageFoldersModal'
+import RepoBrowserPage from './components/RepoBrowserPage'
 import ConfirmDialog from './components/ConfirmDialog'
 import RenameModal from './components/RenameModal'
 import ReportBrowser from './components/ReportBrowser'
@@ -95,7 +96,7 @@ interface SidebarItem {
  *  /{sessions,projects}/{id}/todos), or `plugin:<itemId>` for a full-page
  *  plugin view contributed via the manifest's project_items/session_items
  *  (reachable at /{sessions,projects}/{id}/plugin/<itemId>). */
-type SessionSub = 'chat' | 'todos' | `plugin:${string}`
+type SessionSub = 'chat' | 'todos' | 'repos' | `plugin:${string}`
 
 /** The plugin item id encoded in a `plugin:<itemId>` sub, or null. */
 function pluginSubItemId(sub: SessionSub): string | null {
@@ -149,8 +150,9 @@ function parseRoute(): {
       return { view: 'repeatingTasks', activeId: id, sub: 'chat' }
     case 'folders':
       // `/folders` — the folder list; `/folders/<folderId>/plugin/<itemId>` — a
-      // folder-scoped plugin page, same shape as the project/session routes.
-      return { view: 'folders', activeId: id, sub: subFor() }
+      // folder-scoped plugin page, same shape as the project/session routes;
+      // `/folders/<folderId>/repos` — the folder's repo browser + diff viewers.
+      return { view: 'folders', activeId: id, sub: third === 'repos' ? 'repos' : subFor() }
     case 'settings':
       // `/settings/<sub>` deep-links a specific sub-page; bare `/settings`
       // lands on the default page (SettingsPage validates the id).
@@ -202,6 +204,9 @@ function buildPath(view: View, activeId?: string | null, sub?: SessionSub): stri
     sub.startsWith('plugin:')
   ) {
     return `/${view}/${activeId}/plugin/${sub.slice('plugin:'.length)}`
+  }
+  if (view === 'folders' && activeId && sub === 'repos') {
+    return `/folders/${activeId}/repos`
   }
   // A folder id alone is not a route — the Folders page shows the whole list.
   if (view === 'folders') return '/folders'
@@ -1786,9 +1791,17 @@ function App() {
                 )
               })()}
             {view === 'folders' &&
-              (activeFolderId &&
-              pluginSubItemId(sessionSub) &&
-              folderItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
+              (activeFolderId && sessionSub === 'repos' ? (
+                <RepoBrowserPage
+                  folderId={activeFolderId}
+                  onBack={() => {
+                    setActiveFolderId(null)
+                    navigate('folders', null)
+                  }}
+                />
+              ) : activeFolderId &&
+                pluginSubItemId(sessionSub) &&
+                folderItems.find((i) => i.id === pluginSubItemId(sessionSub)) ? (
                 (() => {
                   const item = folderItems.find((i) => i.id === pluginSubItemId(sessionSub))!
                   return (
@@ -1810,6 +1823,10 @@ function App() {
                   onOpenPlugin={(folderId, itemId) => {
                     setActiveFolderId(folderId)
                     navigate('folders', folderId, `plugin:${itemId}`)
+                  }}
+                  onOpenRepos={(folderId) => {
+                    setActiveFolderId(folderId)
+                    navigate('folders', folderId, 'repos')
                   }}
                 />
               ))}
