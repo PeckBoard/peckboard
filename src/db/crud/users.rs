@@ -70,6 +70,16 @@ impl Db {
         let id = id.to_string();
         self.with_conn(move |conn| {
             conn.transaction::<_, anyhow::Error, _>(|conn| {
+                diesel::delete(mfa_pending::table.filter(mfa_pending::user_id.eq(&id)))
+                    .execute(conn)?;
+                diesel::delete(mfa_challenges::table.filter(mfa_challenges::user_id.eq(&id)))
+                    .execute(conn)?;
+                diesel::delete(
+                    mfa_recovery_codes::table.filter(mfa_recovery_codes::user_id.eq(&id)),
+                )
+                .execute(conn)?;
+                diesel::delete(mfa_methods::table.filter(mfa_methods::user_id.eq(&id)))
+                    .execute(conn)?;
                 diesel::delete(auth_sessions::table.filter(auth_sessions::user_id.eq(&id)))
                     .execute(conn)?;
                 diesel::delete(user_tabs::table.filter(user_tabs::user_id.eq(&id)))

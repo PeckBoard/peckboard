@@ -45,6 +45,7 @@ import ModelPicker from './ModelPicker'
 import OllamaPullModel from './OllamaPullModel'
 import PluginsSection from './PluginsSection'
 import ChangePasswordModal from './ChangePasswordModal'
+import MfaSetupModal, { MfaActionModal } from './MfaSetupModal'
 import UserManagement from './UserManagement'
 import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
@@ -136,7 +137,7 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
   {
     title: null,
     pages: [
-      { id: 'account', title: 'Account', blurb: 'Your user info, password and confirmations' },
+      { id: 'account', title: 'Account', blurb: 'Your user info, password, 2FA and confirmations' },
     ],
   },
   {
@@ -260,6 +261,12 @@ const SUB_PAGES: PageDef[] = GROUPS.flatMap((g) => g.pages)
 const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords: string }[] = [
   { page: 'account', section: 'User Info', anchor: 'user-info', keywords: 'username role' },
   { page: 'account', section: 'Password', anchor: 'password', keywords: 'change password' },
+  {
+    page: 'account',
+    section: 'Two-Factor Authentication',
+    anchor: 'mfa',
+    keywords: '2fa totp mfa authenticator recovery codes',
+  },
   {
     page: 'account',
     section: 'Confirmations',
@@ -594,6 +601,7 @@ interface Props {
 
 export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const user = useAuthStore((s) => s.user)
+  const setMfaEnabled = useAuthStore((s) => s.setMfaEnabled)
   const isAdmin = user?.role === 'admin'
   const visibleSubPages = SUB_PAGES.filter((p) => isAdmin || !p.adminOnly)
   // Desktop lands straight on Account — the sidebar is persistent there,
@@ -626,6 +634,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const [flashAnchor, setFlashAnchor] = useState<string | null>(null)
   // Account → Change Password opens the same self-mode modal as the user menu.
   const [showChangePassword, setShowChangePassword] = useState(false)
+  const [showMfaSetup, setShowMfaSetup] = useState(false)
+  const [showMfaDisable, setShowMfaDisable] = useState(false)
+  const [showMfaRegen, setShowMfaRegen] = useState(false)
 
   useEffect(() => {
     // Legacy entry paths (`/plugins`, `/plugin-registry`, `/plugin-settings`,
@@ -980,6 +991,49 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               </div>
             </section>
 
+            <section
+              className="settings-section"
+              data-settings-anchor="mfa"
+              data-testid="mfa-section"
+            >
+              <h3>Two-Factor Authentication</h3>
+              <p className="form-hint">
+                {user?.mfa_enabled
+                  ? 'An authenticator app is required after your password.'
+                  : 'Add an authenticator app so a stolen password is not enough to sign in.'}
+              </p>
+              <div className="settings-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                {user?.mfa_enabled ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      data-testid="mfa-regen"
+                      onClick={() => setShowMfaRegen(true)}
+                    >
+                      Regenerate recovery codes
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-danger"
+                      data-testid="mfa-disable"
+                      onClick={() => setShowMfaDisable(true)}
+                    >
+                      Disable 2FA
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    data-testid="mfa-enable"
+                    onClick={() => setShowMfaSetup(true)}
+                  >
+                    Enable 2FA
+                  </button>
+                )}
+              </div>
+            </section>
             <section
               className="settings-section"
               data-testid="confirmations-section"
@@ -1651,6 +1705,51 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
       {showChangePassword && (
         <ChangePasswordModal mode={{ kind: 'self' }} onClose={() => setShowChangePassword(false)} />
+      )}
+      {showMfaSetup && (
+        <MfaSetupModal
+          onClose={() => setShowMfaSetup(false)}
+          onEnabled={() => setMfaEnabled(true)}
+        />
+      )}
+      {showMfaDisable && (
+        <MfaActionModal
+          title="Disable Two-Factor Auth"
+          message="You'll only need your password to sign in after this."
+          confirmLabel="Disable 2FA"
+          danger
+          onClose={() => setShowMfaDisable(false)}
+          onSubmit={async (password, method, code) => {
+            const res = await authedFetch('/api/auth/mfa/disable', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password, method, code }),
+            })
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: 'Failed to disable' }))
+              throw new Error(err.error || 'Failed to disable')
+            }
+            setMfaEnabled(false)
+          }}
+        />
+      )}
+      {showMfaRegen && (
+        <MfaActionModal
+          title="Regenerate Recovery Codes"
+          message="Previous recovery codes will stop working."
+          confirmLabel="Regenerate"
+          onClose={() => setShowMfaRegen(false)}
+          onSubmit={async (password, method, code) => {
+            const res = await authedFetch('/api/auth/mfa/recovery/regenerate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password, method, code }),
+            })
+            const data = await res.json().catch(() => ({ error: 'Failed' }))
+            if (!res.ok) throw new Error(data.error || 'Failed')
+            return data.recovery_codes as string[]
+          }}
+        />
       )}
     </div>
   )

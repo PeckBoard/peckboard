@@ -1,5 +1,6 @@
 pub mod access;
 pub mod bootstrap;
+pub mod mfa;
 pub mod middleware;
 pub mod password;
 pub mod rate_limit;

@@ -25,6 +25,8 @@ libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 # Auth / crypto
 argon2 = "0.5"
 aes-gcm = "0.11"
+totp-rs = { version = "5.7", features = ["otpauth", "gen_secret"] }
+qrcode = "0.14"
 rand = "0.8"
 # SSH keypair generation (ssh-key/russh::keys use this RNG version, not rand 0.8's).
 # getrandom's "sys_rng" feature provides a `rand_core` 0.10-compatible OS RNG

@@ -104,6 +104,7 @@ async fn build_state(folder_path: &std::path::Path) -> (Arc<AppState>, String) {
         builtin_plugins: Arc::new(BuiltinPluginRegistry::new()),
         jwt_secret,
         ssh_vault_key: vec![0u8; 32],
+        mfa_vault_key: vec![0u8; 32],
         login_limiter: RateLimiter::new(60),
         password_change_limiter: RateLimiter::<String>::new(5),
         broadcaster: Broadcaster::new(),

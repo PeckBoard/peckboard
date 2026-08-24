@@ -517,6 +517,51 @@ diesel::joinable!(projects -> folders (folder_id));
 diesel::joinable!(cards -> projects (project_id));
 diesel::joinable!(events -> sessions (session_id));
 diesel::joinable!(auth_sessions -> users (user_id));
+diesel::table! {
+    mfa_methods (id) {
+        id -> Text,
+        user_id -> Text,
+        kind -> Text,
+        label -> Nullable<Text>,
+        secret_ct -> Nullable<Text>,
+        secret_nonce -> Nullable<Text>,
+        last_timestep -> Nullable<BigInt>,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    mfa_recovery_codes (id) {
+        id -> Text,
+        user_id -> Text,
+        code_hash -> Text,
+        used_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    mfa_challenges (id) {
+        id -> Text,
+        user_id -> Text,
+        token_hash -> Text,
+        created_at -> BigInt,
+        expires_at -> BigInt,
+        consumed_at -> Nullable<BigInt>,
+        failures -> Integer,
+    }
+}
+
+diesel::table! {
+    mfa_pending (id) {
+        id -> Text,
+        user_id -> Text,
+        kind -> Text,
+        secret_ct -> Text,
+        secret_nonce -> Text,
+        created_at -> BigInt,
+        expires_at -> BigInt,
+    }
+}
 diesel::joinable!(queued_messages -> sessions (session_id));
 diesel::joinable!(todos -> sessions (session_id));
 diesel::joinable!(repeating_tasks -> folders (folder_id));
@@ -530,6 +575,10 @@ diesel::joinable!(doc_review_comments -> doc_reviews (review_id));
 diesel::joinable!(agent_vars -> folders (folder_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
+diesel::joinable!(mfa_methods -> users (user_id));
+diesel::joinable!(mfa_recovery_codes -> users (user_id));
+diesel::joinable!(mfa_challenges -> users (user_id));
+diesel::joinable!(mfa_pending -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -565,5 +614,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     doc_review_comments,
     custom_workflows,
     custom_workflow_steps,
+    mfa_methods,
+    mfa_recovery_codes,
+    mfa_challenges,
+    mfa_pending,
     doc_review_pr_links,
 );

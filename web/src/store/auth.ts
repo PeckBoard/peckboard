@@ -42,15 +42,33 @@ export async function authedFetch(input: RequestInfo | URL, init?: RequestInit):
   return res
 }
 
+export interface AuthUserInfo {
+  id: string
+  username: string
+  role: string
+  mfa_enabled?: boolean
+}
+
+export type LoginResult =
+  | { ok: true; mfa?: undefined }
+  | { ok?: false; mfa: { challenge: string; methods: string[] } }
+
 interface AuthState {
   initialized: boolean
   authenticated: boolean
-  user: { id: string; username: string; role: string } | null
+  user: AuthUserInfo | null
   clearAuth: () => void
   checkAuth: () => Promise<void>
-  login: (username: string, password: string, rememberMe?: boolean) => Promise<void>
+  login: (username: string, password: string, rememberMe?: boolean) => Promise<LoginResult>
+  verifyMfa: (
+    challenge: string,
+    method: string,
+    code: string,
+    rememberMe?: boolean,
+  ) => Promise<void>
   logout: () => Promise<void>
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>
+  setMfaEnabled: (enabled: boolean) => void
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -86,6 +104,10 @@ export const useAuthStore = create<AuthState>((set) => ({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     })
+    if (res.status === 202) {
+      const data = (await res.json()) as { challenge: string; methods: string[] }
+      return { mfa: { challenge: data.challenge, methods: data.methods || [] } }
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Login failed' }))
       throw new Error(err.error || 'Login failed')
@@ -93,6 +115,28 @@ export const useAuthStore = create<AuthState>((set) => ({
     const data = await res.json()
     setToken(data.token, rememberMe)
     set({ authenticated: true, user: data.user })
+    return { ok: true }
+  },
+
+  verifyMfa: async (challenge, method, code, rememberMe = true) => {
+    const res = await fetch('/api/auth/mfa/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challenge, method, code }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Login failed' }))
+      throw new Error(err.error || 'Login failed')
+    }
+    const data = await res.json()
+    setToken(data.token, rememberMe)
+    set({ authenticated: true, user: data.user })
+  },
+
+  setMfaEnabled: (enabled) => {
+    const user = useAuthStore.getState().user
+    if (!user) return
+    set({ user: { ...user, mfa_enabled: enabled } })
   },
 
   logout: async () => {

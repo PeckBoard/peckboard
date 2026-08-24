@@ -101,7 +101,8 @@ async fn build_fixture() -> Fixture {
     let push_service = PushService::new(&config.data_dir);
     let ssh_vault_key =
         peckboard::service::ssh_keys::load_or_create_vault_key(&config.data_dir).unwrap();
-
+    let mfa_vault_key =
+        peckboard::auth::mfa::vault::load_or_create_vault_key(&config.data_dir).unwrap();
     let admin_token = seed_user(&db, &jwt_secret, "u1", "admin", "admin", "as1").await;
     let user_token = seed_user(&db, &jwt_secret, "u2", "tester2", "user", "as2").await;
 
@@ -115,6 +116,7 @@ async fn build_fixture() -> Fixture {
         password_change_limiter: RateLimiter::<String>::new(5),
         login_limiter: RateLimiter::new(60),
         ssh_vault_key,
+        mfa_vault_key,
         broadcaster: Broadcaster::new(),
         provider_registry,
         session_manager,

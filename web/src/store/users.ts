@@ -7,6 +7,7 @@ export interface UserRecord {
   username: string
   email: string | null
   role: string
+  mfa_enabled?: boolean
   created_at: string
 }
 
@@ -23,6 +24,7 @@ interface UsersState {
   }) => Promise<void>
   deleteUser: (id: string) => Promise<void>
   setUserPassword: (id: string, newPassword: string) => Promise<void>
+  resetMfa: (id: string) => Promise<void>
   clearError: () => void
 }
 
@@ -90,6 +92,15 @@ export const useUsersStore = create<UsersState>((set, get) => ({
       const err = await res.json().catch(() => ({ error: 'Failed to set password' }))
       throw new Error(err.error || 'Failed to set password')
     }
+  },
+
+  resetMfa: async (id: string) => {
+    const res = await authedFetch(`/api/users/${id}/mfa`, { method: 'DELETE' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to reset 2FA' }))
+      throw new Error(err.error || 'Failed to reset 2FA')
+    }
+    await get().fetchUsers()
   },
 
   clearError: () => set({ error: '' }),

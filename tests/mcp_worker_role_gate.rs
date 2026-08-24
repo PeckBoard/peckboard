@@ -56,6 +56,7 @@ async fn build_state() -> Arc<AppState> {
         builtin_plugins: Arc::new(BuiltinPluginRegistry::new()),
         jwt_secret: vec![0u8; 32],
         ssh_vault_key: vec![0u8; 32],
+        mfa_vault_key: vec![0u8; 32],
         login_limiter: RateLimiter::new(100),
         password_change_limiter: RateLimiter::new(100),
         broadcaster: Broadcaster::new(),

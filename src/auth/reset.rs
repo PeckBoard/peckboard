@@ -1,9 +1,9 @@
 //! `--reset-password` CLI flow.
 //!
-//! Resets a single user's password to a freshly-generated random value
-//! and revokes their auth sessions so any leaked tokens stop working.
-//! Deliberately narrow: it does not touch other users, never wipes the
-//! `users` table, and prints the new password to stdout exactly once.
+//! Resets a single user's password to a freshly-generated random value,
+//! revokes their auth sessions so any leaked tokens stop working, and
+//! wipes MFA so a lost authenticator cannot lock the operator out of
+//! the only admin account.
 
 use rand::Rng;
 
@@ -53,6 +53,7 @@ pub async fn reset_user_password(db: &Db, username: Option<&str>) -> anyhow::Res
     )
     .await?
     .ok_or_else(|| anyhow::anyhow!("failed to update user '{}'", user.username))?;
+    db.wipe_user_mfa(&user.id).await?;
 
     let sessions_revoked = db.delete_auth_sessions_by_user(&user.id).await?;
 
@@ -177,5 +178,27 @@ mod tests {
         let db = Db::in_memory().unwrap();
         let err = reset_user_password(&db, None).await.unwrap_err();
         assert!(err.to_string().contains("no users exist"));
+    }
+
+    #[tokio::test]
+    async fn reset_wipes_mfa_so_password_only_login_works() {
+        use crate::db::models::NewMfaMethod;
+        let db = Db::in_memory().unwrap();
+        let id = seed_user(&db, "alice", "twelve-chars!!").await;
+        db.insert_mfa_method(NewMfaMethod {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: id.clone(),
+            kind: "totp".into(),
+            label: None,
+            secret_ct: Some("x".into()),
+            secret_nonce: Some("y".into()),
+            last_timestep: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        assert!(db.user_has_mfa(&id).await.unwrap());
+        reset_user_password(&db, Some("alice")).await.unwrap();
+        assert!(!db.user_has_mfa(&id).await.unwrap());
     }
 }

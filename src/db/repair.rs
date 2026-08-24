@@ -65,6 +65,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_repeating_task_runs_table(conn)?;
     ensure_env_vars_table(conn)?;
     ensure_agent_vars_table(conn)?;
+    ensure_mfa_tables(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -1685,6 +1686,75 @@ fn ensure_agent_vars_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     .execute(conn)?;
     sql_query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_vars_folder_name ON agent_vars(folder_id, name) WHERE folder_id IS NOT NULL",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1787500000_mfa`. CREATE TABLE IF NOT EXISTS is a
+/// no-op on a healthy DB.
+fn ensure_mfa_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "mfa_methods")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS mfa_methods (
+            id             TEXT PRIMARY KEY NOT NULL,
+            user_id        TEXT NOT NULL REFERENCES users(id),
+            kind           TEXT NOT NULL,
+            label          TEXT,
+            secret_ct      TEXT,
+            secret_nonce   TEXT,
+            last_timestep  INTEGER,
+            created_at     TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mfa_methods_user_kind ON mfa_methods(user_id, kind)",
+    )
+    .execute(conn)?;
+
+    log_if_healing_table(conn, "mfa_recovery_codes")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS mfa_recovery_codes (
+            id         TEXT PRIMARY KEY NOT NULL,
+            user_id    TEXT NOT NULL REFERENCES users(id),
+            code_hash  TEXT NOT NULL,
+            used_at    TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_mfa_recovery_codes_user ON mfa_recovery_codes(user_id)",
+    )
+    .execute(conn)?;
+
+    log_if_healing_table(conn, "mfa_challenges")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS mfa_challenges (
+            id           TEXT PRIMARY KEY NOT NULL,
+            user_id      TEXT NOT NULL REFERENCES users(id),
+            token_hash   TEXT NOT NULL UNIQUE,
+            created_at   INTEGER NOT NULL,
+            expires_at   INTEGER NOT NULL,
+            consumed_at  INTEGER,
+            failures     INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_mfa_challenges_user ON mfa_challenges(user_id)")
+        .execute(conn)?;
+
+    log_if_healing_table(conn, "mfa_pending")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS mfa_pending (
+            id            TEXT PRIMARY KEY NOT NULL,
+            user_id       TEXT NOT NULL UNIQUE REFERENCES users(id),
+            kind          TEXT NOT NULL,
+            secret_ct     TEXT NOT NULL,
+            secret_nonce  TEXT NOT NULL,
+            created_at    INTEGER NOT NULL,
+            expires_at    INTEGER NOT NULL
+        )",
     )
     .execute(conn)?;
     Ok(())

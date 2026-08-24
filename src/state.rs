@@ -129,6 +129,10 @@ pub struct AppState {
     /// Server-held, not derived from a user password -- see that module's
     /// docs for why.
     pub ssh_vault_key: Vec<u8>,
+    /// AES-256-GCM key for TOTP secrets (`auth::mfa::vault`). Server-held,
+    /// not derived from a user password — verification happens after the
+    /// password has left memory.
+    pub mfa_vault_key: Vec<u8>,
     pub login_limiter: RateLimiter,
     /// Per-user throttle on `POST /api/auth/change-password`. Keyed by
     /// user id so a compromised token can't flip the password in a

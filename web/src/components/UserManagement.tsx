@@ -14,6 +14,7 @@ export default function UserManagement() {
   const storeError = useUsersStore((s) => s.error)
   const fetchUsers = useUsersStore((s) => s.fetchUsers)
   const createUserAction = useUsersStore((s) => s.createUser)
+  const resetMfaAction = useUsersStore((s) => s.resetMfa)
   const deleteUserAction = useUsersStore((s) => s.deleteUser)
 
   const [localError, setLocalError] = useState('')
@@ -49,6 +50,9 @@ export default function UserManagement() {
     null,
   )
 
+  const [mfaTarget, setMfaTarget] = useState<{ id: string; username: string } | null>(null)
+  const [mfaError, setMfaError] = useState<string | null>(null)
+  const [resettingMfa, setResettingMfa] = useState(false)
   useEffect(() => {
     fetchUsers()
   }, [fetchUsers])
@@ -115,6 +119,18 @@ export default function UserManagement() {
     }
   }
 
+  const handleResetMfa = async (id: string) => {
+    setMfaError(null)
+    setResettingMfa(true)
+    try {
+      await resetMfaAction(id)
+      setMfaTarget(null)
+    } catch (err) {
+      setMfaError(err instanceof Error ? err.message : 'Failed to reset 2FA')
+    } finally {
+      setResettingMfa(false)
+    }
+  }
   const formatDate = (dateStr: string): string => {
     try {
       return new Date(dateStr).toLocaleDateString(undefined, {
@@ -276,6 +292,20 @@ export default function UserManagement() {
                 </div>
                 {u.id !== currentUser?.id && (
                   <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    {u.mfa_enabled && (
+                      <button
+                        className="btn-secondary"
+                        style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
+                        onClick={() => {
+                          setMfaError(null)
+                          setMfaTarget({ id: u.id, username: u.username })
+                        }}
+                        title="Reset this user's two-factor authentication"
+                        data-testid={`user-reset-2fa-${u.username}`}
+                      >
+                        Reset 2FA
+                      </button>
+                    )}
                     <button
                       className="btn-secondary"
                       style={{ fontSize: 'var(--text-xs)', padding: '4px 10px' }}
@@ -330,6 +360,24 @@ export default function UserManagement() {
             targetUsername: passwordTarget.username,
           }}
           onClose={() => setPasswordTarget(null)}
+        />
+      )}
+
+      {mfaTarget && (
+        <ConfirmDialog
+          testId="user-reset-2fa-confirm"
+          danger
+          title={`Reset 2FA for ${mfaTarget.username}?`}
+          message={`${mfaTarget.username} will sign in with a password only until they enable 2FA again. Use this when they have lost the authenticator and recovery codes.`}
+          confirmLabel="Reset 2FA"
+          error={mfaError}
+          busy={resettingMfa}
+          busyLabel="Resetting…"
+          onConfirm={() => void handleResetMfa(mfaTarget.id)}
+          onCancel={() => {
+            setMfaTarget(null)
+            setMfaError(null)
+          }}
         />
       )}
     </div>

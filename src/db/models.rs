@@ -1300,3 +1300,97 @@ pub struct CustomWorkflowStepRow {
     pub step: String,
     pub instructions: String,
 }
+
+// ── MFA ──────────────────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = mfa_methods)]
+pub struct MfaMethodRow {
+    pub id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub label: Option<String>,
+    pub secret_ct: Option<String>,
+    pub secret_nonce: Option<String>,
+    pub last_timestep: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = mfa_methods)]
+pub struct NewMfaMethod {
+    pub id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub label: Option<String>,
+    pub secret_ct: Option<String>,
+    pub secret_nonce: Option<String>,
+    pub last_timestep: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Queryable, Selectable, Debug, Clone)]
+#[diesel(table_name = mfa_recovery_codes)]
+pub struct MfaRecoveryCode {
+    pub id: String,
+    pub user_id: String,
+    pub code_hash: String,
+    pub used_at: Option<String>,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = mfa_recovery_codes)]
+pub struct NewMfaRecoveryCode {
+    pub id: String,
+    pub user_id: String,
+    pub code_hash: String,
+    pub used_at: Option<String>,
+}
+
+#[derive(Queryable, Selectable, Debug, Clone)]
+#[diesel(table_name = mfa_challenges)]
+pub struct MfaChallengeRow {
+    pub id: String,
+    pub user_id: String,
+    pub token_hash: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub consumed_at: Option<i64>,
+    pub failures: i32,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = mfa_challenges)]
+pub struct NewMfaChallenge {
+    pub id: String,
+    pub user_id: String,
+    pub token_hash: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub consumed_at: Option<i64>,
+    pub failures: i32,
+}
+
+#[derive(Queryable, Selectable, Debug, Clone)]
+#[diesel(table_name = mfa_pending)]
+pub struct MfaPending {
+    pub id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub secret_ct: String,
+    pub secret_nonce: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = mfa_pending)]
+pub struct NewMfaPending {
+    pub id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub secret_ct: String,
+    pub secret_nonce: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}

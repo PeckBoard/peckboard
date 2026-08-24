@@ -9,6 +9,24 @@
 - Passwords hashed with Argon2
 - Verification uses timing-safe comparison
 
+## Two-Factor Authentication
+
+- Opt-in per user. Password-only login is unchanged until the user enables 2FA.
+- Methods: TOTP (RFC 6238, authenticator app) and one-time recovery codes.
+  New methods plug into `auth::mfa::MfaMethod` without rewriting login.
+- Login with MFA on returns `202` `{ mfa_required, challenge, methods }`.
+  `POST /api/auth/mfa/verify` consumes the challenge and issues the JWT.
+  The challenge is an opaque token, not a Bearer JWT.
+- TOTP secrets are AES-256-GCM encrypted with `<data_dir>/mfa_vault_key` (0600).
+- Enrollment does not consume the current TOTP window — the same code can be
+  used immediately to sign in or disable. Replay protection applies across
+  logins (and disable) after that.
+- Authenticated MFA failures (wrong password or code on enable/disable) return
+  403, not 401, so a typo does not look like a dead session.
+- Disable requires password **and** a valid TOTP/recovery code (stolen session JWT is not enough).
+- `--reset-password` and admin `DELETE /api/users/{id}/mfa` wipe MFA (lockout recovery).
+- Enroll: Settings → Account → Enable 2FA. QR + secret, then recovery codes shown once.
+
 ## Resource Ownership
 
 - Sessions are per-user: `sessions.user_id` records the creator (backfilled
@@ -59,6 +77,7 @@
 - **Public routes** (no auth required):
   - `GET /api/auth/status` — check if any users exist (drives registration vs login page)
   - `POST /api/auth/register` — first user registration (disabled once an admin exists)
+  - `POST /api/auth/mfa/verify` — second factor after a 202 login
   - `POST /api/auth/login` — credential submission
   - `/api/internal/mcp/*` — separate worker token auth + loopback gating
 - All other `/api/*` routes require valid JWT
@@ -81,13 +100,13 @@
 
 ## Rate Limiting
 
-| Bucket | Limit | Applies to |
-|--------|-------|------------|
-| create | 60/min | POST sessions, projects, cards, report edits, session reads |
-| attachment | 20/min | POST session attachments |
-| login | 5/min | POST /api/auth/login |
-| register | 5/min | POST /api/auth/register |
-| mcpCreateCard | 60/min | POST /api/internal/mcp/create_card |
+| Bucket        | Limit  | Applies to                                                  |
+| ------------- | ------ | ----------------------------------------------------------- |
+| create        | 60/min | POST sessions, projects, cards, report edits, session reads |
+| attachment    | 20/min | POST session attachments                                    |
+| login         | 5/min  | POST /api/auth/login, POST /api/auth/mfa/verify             |
+| register      | 5/min  | POST /api/auth/register                                     |
+| mcpCreateCard | 60/min | POST /api/internal/mcp/create_card                          |
 
 Per-IP failed attempt tracker adds linear delay ramp (0ms for first 2 failures, then 500ms × (count-2), capped at 5s). Memory-only, cleared on restart.
 

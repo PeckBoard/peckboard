@@ -4,6 +4,7 @@
 //! Tokio runtime and opens a native window once the HTTP listener binds.
 
 use crate::auth::bootstrap::{BootstrapOutcome, ensure_admin_user};
+use crate::auth::mfa::vault::load_or_create_vault_key as load_or_create_mfa_vault_key;
 use crate::auth::rate_limit::RateLimiter;
 use crate::auth::session::issue_session_token;
 use crate::auth::token::load_or_create_jwt_secret;
@@ -107,6 +108,7 @@ pub async fn run_server(
     crate::plugin::manager::set_notify_global(plugins.clone());
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
     let ssh_vault_key = load_or_create_vault_key(&config.data_dir)?;
+    let mfa_vault_key = load_or_create_mfa_vault_key(&config.data_dir)?;
     // 60/min is plenty for a single-tenant LAN server; the previous 5
     // was so aggressive that even a normal user with a few tabs open
     // (each authenticating its own WS) could trip it. Rate-limiting
@@ -165,6 +167,7 @@ pub async fn run_server(
         builtin_plugins,
         jwt_secret,
         ssh_vault_key,
+        mfa_vault_key,
         login_limiter,
         password_change_limiter,
         broadcaster,

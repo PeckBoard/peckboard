@@ -1,5 +1,5 @@
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
     middleware,
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::auth::mfa::{self, MfaError, PasswordVerified};
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::auth::password::{hash_password, verify_password};
 use crate::auth::session::issue_session_token;
@@ -60,6 +61,7 @@ pub struct UserInfo {
     pub id: String,
     pub username: String,
     pub role: String,
+    pub mfa_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -67,25 +69,109 @@ pub struct StatusResponse {
     pub has_users: bool,
 }
 
+#[derive(Serialize)]
+struct MfaRequiredResponse {
+    mfa_required: bool,
+    challenge: String,
+    methods: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct TotpConfirmBody {
+    password: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct MfaCodeBody {
+    password: String,
+    method: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct MfaVerifyBody {
+    challenge: String,
+    method: String,
+    code: String,
+}
+
+enum LoginSuccess {
+    Authed(Json<AuthResponse>),
+    Mfa(Json<MfaRequiredResponse>),
+}
+
+impl IntoResponse for LoginSuccess {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Authed(body) => body.into_response(),
+            Self::Mfa(body) => (StatusCode::ACCEPTED, body).into_response(),
+        }
+    }
+}
+
+fn mfa_http_err(e: MfaError) -> (StatusCode, Json<serde_json::Value>) {
+    if matches!(e, MfaError::Internal(_)) {
+        tracing::error!(error = %e, "MFA internal error");
+    }
+    (
+        e.status(),
+        Json(serde_json::json!({"error": e.to_string()})),
+    )
+}
+
+fn mfa_authed_err(e: MfaError) -> (StatusCode, Json<serde_json::Value>) {
+    if matches!(e, MfaError::Internal(_)) {
+        tracing::error!(error = %e, "MFA internal error");
+    }
+    (
+        e.authed_status(),
+        Json(serde_json::json!({"error": e.to_string()})),
+    )
+}
+
+async fn user_info(db: &crate::db::Db, user: &crate::db::models::User) -> UserInfo {
+    UserInfo {
+        id: user.id.clone(),
+        username: user.username.clone(),
+        role: user.role.clone(),
+        mfa_enabled: db.user_has_mfa(&user.id).await.unwrap_or(false),
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let public = Router::new()
         .route("/api/auth/status", get(status))
-        .route("/api/auth/login", post(login));
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/mfa/verify", post(mfa_verify));
 
     let protected = Router::new()
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/change-password", post(change_password))
         .route("/api/auth/me", get(me))
+        .route("/api/auth/mfa", get(mfa_status))
+        .route("/api/auth/mfa/totp/begin", post(mfa_totp_begin))
+        .route("/api/auth/mfa/totp/confirm", post(mfa_totp_confirm))
+        .route("/api/auth/mfa/disable", post(mfa_disable))
+        .route(
+            "/api/auth/mfa/recovery/regenerate",
+            post(mfa_regen_recovery),
+        )
         .route("/api/auth/sessions", get(list_sessions).delete(revoke_all))
         .route("/api/auth/sessions/{id}", delete(revoke_one))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", get(get_user).delete(delete_user))
         .route("/api/users/{id}/password", put(admin_set_password))
+        .route("/api/users/{id}/mfa", delete(admin_wipe_mfa))
         .route_layer(middleware::from_fn_with_state(state, require_auth));
 
     public.merge(protected)
 }
-
 /// GET /api/auth/status — kept for compatibility with frontend startup probing.
 /// Self-service registration is gone; the bootstrap admin is created server-side
 /// on first run, so this always reports `has_users: true`.
@@ -99,7 +185,7 @@ async fn login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
-) -> impl IntoResponse {
+) -> Result<LoginSuccess, (StatusCode, Json<serde_json::Value>)> {
     tracing::info!(username = %body.username, "Login attempt");
     // Real per-IP rate limiting. The previous hardcoded 0.0.0.0 bucket
     // meant one attacker could lock out every user on the server.
@@ -154,6 +240,13 @@ async fn login(
     }
 
     let user = user.expect("ok=true implies the user existed");
+    let mfa_enabled = state.db.user_has_mfa(&user.id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    let proof = PasswordVerified::after_password_ok(&user, mfa_enabled);
 
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -161,32 +254,44 @@ async fn login(
         .map(|s| s.chars().take(256).collect::<String>());
     let ip_address = Some(ip.to_string());
 
-    let token = issue_session_token(
-        &state.db,
-        &state.jwt_secret,
-        &user.id,
-        &user.role,
-        user_agent,
-        ip_address,
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
-
-    state.login_limiter.reset(&ip);
-
-    Ok(Json(AuthResponse {
-        token,
-        user: UserInfo {
-            id: user.id,
-            username: user.username,
-            role: user.role,
-        },
-    }))
+    match proof.session_grant() {
+        Ok(grant) => {
+            let token =
+                mfa::complete_login(&state.db, &state.jwt_secret, &grant, user_agent, ip_address)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": e.to_string()})),
+                        )
+                    })?;
+            state.login_limiter.reset(&ip);
+            Ok(LoginSuccess::Authed(Json(AuthResponse {
+                token,
+                user: UserInfo {
+                    id: grant.user_id().to_string(),
+                    username: grant.username().to_string(),
+                    role: grant.role().to_string(),
+                    mfa_enabled: false,
+                },
+            })))
+        }
+        Err(proof) => {
+            let issued = mfa::issue_challenge(&state.db, &proof)
+                .await
+                .map_err(mfa_http_err)?;
+            let methods = mfa::available_methods(&state.db, proof.user_id())
+                .await
+                .map_err(mfa_http_err)?;
+            // Password was correct; don't count this toward the failure ramp.
+            state.login_limiter.reset(&ip);
+            Ok(LoginSuccess::Mfa(Json(MfaRequiredResponse {
+                mfa_required: true,
+                challenge: issued.raw_token,
+                methods,
+            })))
+        }
+    }
 }
 
 /// POST /api/auth/logout
@@ -222,11 +327,7 @@ async fn me(
     let user = state.db.get_user(&auth_user.user_id).await.ok().flatten();
 
     match user {
-        Some(u) => Ok(Json(UserInfo {
-            id: u.id,
-            username: u.username,
-            role: u.role,
-        })),
+        Some(u) => Ok(Json(user_info(&state.db, &u).await)),
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -428,11 +529,7 @@ async fn change_password(
 
     Ok(Json(AuthResponse {
         token,
-        user: UserInfo {
-            id: user.id,
-            username: user.username,
-            role: user.role,
-        },
+        user: user_info(&state.db, &user).await,
     }))
 }
 
@@ -548,18 +645,18 @@ async fn list_users(
         )
     })?;
 
-    let users_json: Vec<serde_json::Value> = users
-        .iter()
-        .map(|u| {
-            serde_json::json!({
-                "id": u.id,
-                "username": u.username,
-                "email": u.email,
-                "role": u.role,
-                "created_at": u.created_at,
-            })
-        })
-        .collect();
+    let mut users_json = Vec::new();
+    for u in users {
+        let mfa_enabled = state.db.user_has_mfa(&u.id).await.unwrap_or(false);
+        users_json.push(serde_json::json!({
+            "id": u.id,
+            "username": u.username,
+            "email": u.email,
+            "role": u.role,
+            "created_at": u.created_at,
+            "mfa_enabled": mfa_enabled,
+        }));
+    }
 
     Ok(Json(serde_json::json!(users_json)))
 }
@@ -845,5 +942,215 @@ async fn delete_user(
         ));
     }
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn authed_user(
+    state: &AppState,
+    auth_user: &AuthUser,
+) -> Result<crate::db::models::User, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .db
+        .get_user(&auth_user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        ))
+}
+
+/// POST /api/auth/mfa/verify
+async fn mfa_verify(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<MfaVerifyBody>,
+) -> Result<Json<AuthResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let ip = addr.ip();
+    let delay = state.login_limiter.check(ip).map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "too many login attempts, try again later"})),
+        )
+    })?;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+
+    match mfa::verify_challenge(
+        &state.db,
+        &state.mfa_vault_key,
+        &body.challenge,
+        &body.method,
+        &body.code,
+    )
+    .await
+    {
+        Ok(verified) => {
+            let grant = verified.session_grant();
+            let user_agent = headers
+                .get(header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.chars().take(256).collect::<String>());
+            let token = mfa::complete_login(
+                &state.db,
+                &state.jwt_secret,
+                &grant,
+                user_agent,
+                Some(ip.to_string()),
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+            })?;
+            state.login_limiter.reset(&ip);
+            let user = state.db.get_user(grant.user_id()).await.ok().flatten();
+            let info = match user {
+                Some(u) => user_info(&state.db, &u).await,
+                None => UserInfo {
+                    id: grant.user_id().to_string(),
+                    username: grant.username().to_string(),
+                    role: grant.role().to_string(),
+                    mfa_enabled: true,
+                },
+            };
+            Ok(Json(AuthResponse { token, user: info }))
+        }
+        Err(e) => {
+            if matches!(e, MfaError::InvalidCode | MfaError::LockedOut) {
+                state.login_limiter.record_failure(ip);
+            }
+            Err(mfa_http_err(e))
+        }
+    }
+}
+
+async fn mfa_status(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let (enabled, methods) = mfa::status(&state.db, &auth.user_id)
+        .await
+        .map_err(mfa_authed_err)?;
+    Ok(Json(
+        serde_json::json!({ "enabled": enabled, "methods": methods }),
+    ))
+}
+
+/// POST /api/auth/mfa/totp/begin
+async fn mfa_totp_begin(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<PasswordBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user = authed_user(&state, &auth).await?;
+    let mat = mfa::begin_totp(&state.db, &state.mfa_vault_key, &user, &body.password)
+        .await
+        .map_err(mfa_authed_err)?;
+    Ok(Json(serde_json::json!({
+        "secret": mat.secret_b32,
+        "otpauth_url": mat.otpauth_url,
+        "qr_svg": mat.qr_svg,
+    })))
+}
+
+/// POST /api/auth/mfa/totp/confirm
+async fn mfa_totp_confirm(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<TotpConfirmBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user = authed_user(&state, &auth).await?;
+    let codes = mfa::confirm_totp(
+        &state.db,
+        &state.mfa_vault_key,
+        &user,
+        &body.password,
+        &body.code,
+    )
+    .await
+    .map_err(mfa_authed_err)?;
+    Ok(Json(serde_json::json!({ "recovery_codes": codes })))
+}
+
+/// POST /api/auth/mfa/disable
+async fn mfa_disable(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<MfaCodeBody>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let user = authed_user(&state, &auth).await?;
+    mfa::disable(
+        &state.db,
+        &state.mfa_vault_key,
+        &user,
+        &body.password,
+        &body.method,
+        &body.code,
+    )
+    .await
+    .map_err(mfa_authed_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/auth/mfa/recovery/regenerate
+async fn mfa_regen_recovery(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<MfaCodeBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user = authed_user(&state, &auth).await?;
+    let codes = mfa::regenerate_recovery(
+        &state.db,
+        &state.mfa_vault_key,
+        &user,
+        &body.password,
+        &body.method,
+        &body.code,
+    )
+    .await
+    .map_err(mfa_authed_err)?;
+    Ok(Json(serde_json::json!({ "recovery_codes": codes })))
+}
+
+/// DELETE /api/users/:id/mfa — admin wipe (lockout recovery)
+async fn admin_wipe_mfa(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Extension(auth): Extension<AuthUser>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    if !auth.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "admin only"})),
+        ));
+    }
+    let user = state.db.get_user(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    if user.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        ));
+    }
+    state.db.wipe_user_mfa(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
