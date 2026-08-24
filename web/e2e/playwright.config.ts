@@ -60,7 +60,7 @@ const pluginsSrcRoots = [
   path.resolve(e2eDir, '..', '..', 'peck-plugins'),
   path.resolve(e2eDir, '..', '..', '..', 'peck-plugins'),
 ]
-for (const plugin of ['openai-compat', 'chicken-coop', 'app-manager']) {
+for (const plugin of ['openai-compat', 'chicken-coop', 'app-manager', 'project-planner']) {
   const wasm = pluginsSrcRoots
     .map((root) => path.join(root, plugin, 'dist', 'plugin.wasm'))
     .find((candidate) => existsSync(candidate))
