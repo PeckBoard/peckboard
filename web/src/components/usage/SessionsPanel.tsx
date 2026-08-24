@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { SessionUsage } from '../../types/api'
 import { useUsageStore } from '../../store/usage'
-import { contextWindowInfo } from '../../util/cost'
+import { bareModelId, contextWindowInfo } from '../../util/cost'
 import { fmtInt, fmtTokens, fmtUsd } from '../../util/format'
 
 /** Which figure the session list sorts on, biggest first. */
@@ -20,10 +20,10 @@ function sortValue(s: SessionUsage, key: SessionSort): number {
 }
 
 /** Display form of a session's model id: no provider prefix, no `@account`
- *  suffix, so the row shows `opus[1m]` rather than `claude:opus[1m]@work`. */
+ *  suffix, so the row shows `grok-4.5` rather than `grok:grok-4.5@work`. */
 function bareModelLabel(model: string | null): string {
   if (!model) return 'unknown model'
-  return model.split('@')[0].replace(/^claude:/, '')
+  return bareModelId(model)
 }
 
 /** Body of the Sessions panel: a sortable list of sessions, each showing its

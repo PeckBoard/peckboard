@@ -314,10 +314,11 @@ pub async fn emit_event(
                 turn_seq,
             } = event
             {
-                // Attribute the turn to the Claude account it billed
+                // Attribute the turn to the provider account it billed
                 // against, parsed from the `@<account_id>` suffix on the
                 // session's model id. `None` for the implicit Default
-                // account (host credentials) or any non-Claude provider.
+                // account (host credentials) or a provider whose `@` suffix
+                // is not a peckboard account (ollama host, cursor, …).
                 let account_id = match db.get_session(session_id).await {
                     Ok(Some(s)) => s.model.as_deref().and_then(usage_account_id),
                     _ => None,
@@ -460,14 +461,16 @@ pub async fn emit_event(
     }
 }
 
-/// Usage-event account attribution for a session's model id. Only Claude
-/// accounts are tracked in `claude_accounts`/rollups — a non-Claude model id
-/// (e.g. `ollama:qwen@gpu-box`) must not have its `@`-suffix mistaken for a
-/// Claude account id, so this checks the parsed provider before extracting
-/// the account.
+/// Usage-event account attribution for a session's model id. Only providers
+/// with a peckboard account table (Claude, Grok, Kimi) get the `@<account_id>`
+/// suffix recorded — `ollama:qwen@gpu-box` must not have its host suffix
+/// mistaken for an account id.
 fn usage_account_id(model: &str) -> Option<String> {
     let (provider, account) = crate::handover::continuity_key(model);
-    if provider == "claude" { account } else { None }
+    match provider.as_str() {
+        "claude" | "grok" | "kimi" => account,
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -495,5 +498,26 @@ mod tests {
     #[test]
     fn usage_account_id_none_for_unscoped_claude_model() {
         assert_eq!(usage_account_id("claude:opus"), None);
+    }
+
+    #[test]
+    fn usage_account_id_some_for_scoped_grok_model() {
+        assert_eq!(
+            usage_account_id("grok:grok-4.5@acc_g"),
+            Some("acc_g".to_string())
+        );
+    }
+
+    #[test]
+    fn usage_account_id_some_for_scoped_kimi_model() {
+        assert_eq!(
+            usage_account_id("kimi:kimi-k2.5@acc_k"),
+            Some("acc_k".to_string())
+        );
+    }
+
+    #[test]
+    fn usage_account_id_none_for_unscoped_grok_model() {
+        assert_eq!(usage_account_id("grok:grok-4.5"), None);
     }
 }

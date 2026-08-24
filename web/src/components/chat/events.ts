@@ -1,4 +1,5 @@
 import type { Event } from '../../types/api'
+import { bareModelId } from '../../util/cost'
 
 // Stable empty array so subscribers don't see a new reference every render
 // when there are no events yet for a given session.
@@ -713,8 +714,8 @@ function foldEvent(st: FoldState, ev: Event): void {
       st.pendingInterrupt = false
       st.turnAnchorTs = ev.ts
       const model = (ev.data.model as string) ?? 'default'
-      // Strip provider prefix for display
-      const displayModel = model.replace(/^claude:/, '')
+      // Strip provider prefix / @account for display
+      const displayModel = bareModelId(model)
       const effort = (ev.data.effort as string) ?? ''
       items.push({
         type: 'agent-start',

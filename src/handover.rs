@@ -195,14 +195,17 @@ pub fn estimate_tokens(text: &str) -> i64 {
 }
 
 /// Usable context-window size (tokens) for a model id. Matches the
-/// frontend's `contextWindowInfo`: `[1m]` aliases are 1M, everything else
-/// is the 200K default. Recovery uses this only as a `fits` check — a miss
-/// is labelled as an estimate, not a hard provider limit.
+/// frontend's `contextWindowInfo`: `[1m]` aliases are 1M, grok-4.5/4.6
+/// are 500K, everything else is the 200K default. Recovery uses this
+/// only as a `fits` check — a miss is labelled as an estimate, not a
+/// hard provider limit.
 pub fn context_window_for(model: &str) -> i64 {
     let (model, _acct) = split_model_account(model);
     let id = model.rsplit(':').next().unwrap_or(model);
     if id.ends_with("[1m]") {
         1_000_000
+    } else if id == "grok-4.5" || id == "grok-4.6" {
+        500_000
     } else {
         200_000
     }
@@ -1737,6 +1740,8 @@ mod tests {
         assert_eq!(context_window_for("claude:opus[1m]@acct"), 1_000_000);
         assert_eq!(context_window_for("claude:opus"), 200_000);
         assert_eq!(context_window_for("mock:echo@acct2"), 200_000);
+        assert_eq!(context_window_for("grok:grok-4.5"), 500_000);
+        assert_eq!(context_window_for("grok:grok-4.6@acct"), 500_000);
     }
 
     #[test]

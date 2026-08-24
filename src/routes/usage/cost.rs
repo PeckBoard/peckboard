@@ -7,10 +7,10 @@
 //! from `GET /api/usage/costs` and prices client-side trends with the same
 //! numbers — so Rust and TS never hardcode rates independently.
 //!
-//! When the model registry (`crate::provider::claude::discover_models`)
-//! gains or renames a model, update [`rates_for`] here. The
-//! `every_registry_model_is_priced` test fails if a registry model is left
-//! without an explicit tier.
+//! When the Claude registry (`crate::provider::claude::discover_models`) or
+//! the Grok seed (`crate::provider::grok::default_models`) gains or renames
+//! a model, update [`rates_for`] here. The `every_registry_model_is_priced`
+//! test fails if a registry model is left without an explicit tier.
 
 use std::collections::BTreeMap;
 
@@ -70,29 +70,57 @@ const HAIKU: ModelRates = ModelRates {
     cache_creation_per_mtok: 1.0,
 };
 
+// xAI published short-context rates (prompt < 200k). Cache-creation has
+// no published write premium, so it matches input. Long-context (≥200k)
+// doubles these; we price the common short-context tier.
+const GROK_46: ModelRates = ModelRates {
+    input_per_mtok: 2.0,
+    output_per_mtok: 6.0,
+    cache_read_per_mtok: 0.50,
+    cache_creation_per_mtok: 2.0,
+};
+const GROK_45: ModelRates = ModelRates {
+    input_per_mtok: 2.0,
+    output_per_mtok: 6.0,
+    cache_read_per_mtok: 0.30,
+    cache_creation_per_mtok: 2.0,
+};
+
 /// Fallback for an unrecognized model id (a renamed/removed registry model
 /// or a non-Claude provider). Priced at the Opus tier so an unknown model
 /// is never silently free — the most expensive tier keeps cost estimates
 /// conservative rather than misleadingly low.
 const DEFAULT_RATES: ModelRates = OPUS;
 
-/// Exact published rates for a known Claude model id, or `None` for a model
-/// we carry no price for. Accepts ids with or without the `claude:` provider
+/// Strip a `provider:` prefix and `@account` suffix so rate/window lookups
+/// key on the bare model id. `claude-opus-4-8` and `grok-4.5` have no
+/// colon and pass through; `grok:grok-4.5@acc` becomes `grok-4.5`.
+fn bare_model_id(model: &str) -> &str {
+    let (model, _acct) = crate::provider::registry::split_model_account(model);
+    match model.split_once(':') {
+        Some((_, rest)) if !rest.is_empty() => rest,
+        _ => model,
+    }
+}
+
+/// Exact published rates for a known model id, or `None` for a model
+/// we carry no price for. Accepts ids with or without a provider
 /// prefix and with or without an `@account` suffix.
 pub fn known_rates_for(model: &str) -> Option<ModelRates> {
-    let (model, _acct) = crate::provider::registry::split_model_account(model);
-    let id = model.strip_prefix("claude:").unwrap_or(model);
+    let id = bare_model_id(model);
     match id {
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
         | "claude-fable-5" => Some(OPUS),
         "claude-sonnet-5" | "claude-sonnet-4-6" => Some(SONNET),
         "claude-haiku-4-5" => Some(HAIKU),
+        "grok-4.6" => Some(GROK_46),
+        "grok-4.5" | "grok-build" | "grok-build-0.1" => Some(GROK_45),
         _ => None,
     }
 }
 
-/// Rates for a model id. Accepts ids with or without the `claude:` provider
-/// prefix (usage rows store either form — see `usage_events.model`). Unknown
+/// Rates for a model id. Accepts ids with or without a provider prefix
+/// (usage rows store either form — see `usage_events.model`). Unknown
 /// models fall back to the conservative default tier.
 pub fn rates_for(model: Option<&str>) -> ModelRates {
     match model {
@@ -134,13 +162,13 @@ pub struct CostTable {
 /// carries a published rate. The frontend caches this and prices its own
 /// trend lines with it, matching the backend's `est_cost` exactly.
 pub fn cost_table() -> CostTable {
-    let rates = crate::provider::claude::discover_models()
-        .into_iter()
-        .map(|m| {
-            let r = rates_for(Some(&m.id));
-            (m.id, r)
-        })
-        .collect();
+    let mut rates = BTreeMap::new();
+    for m in crate::provider::claude::discover_models() {
+        rates.insert(m.id.clone(), rates_for(Some(&m.id)));
+    }
+    for m in crate::provider::grok::default_models() {
+        rates.insert(m.id.clone(), rates_for(Some(&m.id)));
+    }
     CostTable { rates }
 }
 
@@ -173,6 +201,15 @@ mod tests {
             ),
             15.0,
         );
+        // Grok is priced at xAI's published short-context rates, not Opus.
+        approx(
+            token_cost(Some("grok:grok-4.5"), TokenKind::Output, 1_000_000),
+            6.0,
+        );
+        approx(
+            token_cost(Some("grok-4.6@acc_1"), TokenKind::CacheRead, 1_000_000),
+            0.50,
+        );
         // 500k cache-read tokens on Haiku = 0.5 * $0.08 = $0.04.
         approx(
             token_cost(Some("claude-haiku-4-5"), TokenKind::CacheRead, 500_000),
@@ -196,7 +233,10 @@ mod tests {
     #[test]
     fn every_registry_model_is_priced() {
         let table = cost_table();
-        for model in crate::provider::claude::discover_models() {
+        for model in crate::provider::claude::discover_models()
+            .into_iter()
+            .chain(crate::provider::grok::default_models())
+        {
             let rates = table
                 .rates
                 .get(&model.id)
@@ -207,5 +247,7 @@ mod tests {
                 model.id
             );
         }
+        assert_eq!(table.rates["grok-4.5"].output_per_mtok, 6.0);
+        assert_eq!(table.rates["grok-4.6"].cache_read_per_mtok, 0.50);
     }
 }

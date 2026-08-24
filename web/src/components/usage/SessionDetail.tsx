@@ -6,7 +6,7 @@ import {
   useUsageStore,
 } from '../../store/usage'
 import type { OperationCost, SessionUsage, TurnUsage } from '../../types/api'
-import { contextWindowInfo } from '../../util/cost'
+import { bareModelId, contextWindowInfo } from '../../util/cost'
 import CostFootnote from './CostFootnote'
 import { fmtInt, fmtTokens, fmtUsd } from '../../util/format'
 import LineChart, { type ChartSeries } from './LineChart'
@@ -27,12 +27,12 @@ function fmtTime(ts: number): string {
   return `${mm}/${dd} ${hh}:${mi}`
 }
 
-/** Bare model id for display — drops the `claude:` provider prefix. */
+/** Bare model id for display — drops any `provider:` prefix and `@account`
+ *  suffix. */
 function bareModel(model: string | null): string {
   if (!model) return '—'
-  return model.startsWith('claude:') ? model.slice('claude:'.length) : model
+  return bareModelId(model)
 }
-
 /** The most recent turn's model — what the context-window gauge should be
  *  measured against, since occupancy is a now-snapshot. */
 function latestModel(turns: TurnUsage[]): string | null {

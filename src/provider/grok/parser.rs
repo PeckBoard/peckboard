@@ -29,23 +29,191 @@
 //! [`ProviderEvent::Thinking`], the same collapsed channel the Claude
 //! provider feeds from its `thinking` blocks.
 //!
-//! Token counts: grok 1.0 reports them on the `end` frame (flat `usage`
-//! rollup plus a per-model `modelUsage` map), which [`end_usage_events`]
-//! maps to [`ProviderEvent::Usage`]. The mid-stream `usage` frame carries
-//! the same rollup and is deliberately ignored to avoid double-counting.
-//! Earlier CLIs (0.2.x) reported no counts anywhere, so an `end` frame
-//! without usage still parses fine.
+//! Token counts: grok 1.0 reports two distinct figures that must not be
+//! mixed. The mid-stream `usage` frame is **one per model response** (a
+//! tool-loop round). The `end` frame's `usage` / `modelUsage` **sums**
+//! every round in the prompt, including finished subagents. Billed slices
+//! therefore come from `end`; context-window occupancy is the last
+//! per-response snapshot (the window at end of turn). Using the end-frame
+//! sum as occupancy inflates the session gauge by `num_turns` — the same
+//! class of bug Claude's `UsageTracker` documents. [`UsageTracker`] holds
+//! the per-response snapshots across lines of one turn. Earlier CLIs
+//! (0.2.x) reported no counts anywhere, so an `end` frame without usage
+//! still parses fine.
 //!
 //! The exact tool-event shape isn't formally specified, so every accessor is
 //! defensive: an unrecognised shape yields no events rather than an error.
 
 use crate::provider::stream::ProviderEvent;
+
+/// Per-turn token accounting for one grok process. Observe every stdout
+/// line; settle on the `end` frame. One process = one turn, so there is
+/// no cross-turn cumulative delta (unlike Claude's long-lived CLI).
+#[derive(Default)]
+pub(super) struct UsageTracker {
+    /// Per-response snapshots from mid-stream `usage` frames, in order.
+    responses: Vec<UsageSlices>,
+}
+
+/// The four billed token slices, same shape as Claude's tracker.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct UsageSlices {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_creation: i64,
+}
+
+impl UsageSlices {
+    fn is_zero(self) -> bool {
+        self == Self::default()
+    }
+
+    fn context(self) -> i64 {
+        self.input + self.cache_read + self.cache_creation
+    }
+
+    fn total(self) -> i64 {
+        self.context() + self.output
+    }
+
+    /// Parse a usage object, tolerating headless snake_case, modelUsage
+    /// camelCase, and ACP `cachedReadTokens` / `cacheCreationTokens`.
+    fn from_obj(usage: &serde_json::Value) -> Self {
+        let field = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|k| usage.get(*k).and_then(|v| v.as_i64()))
+                .unwrap_or(0)
+        };
+        Self {
+            input: field(&["input_tokens", "inputTokens"]),
+            output: field(&["output_tokens", "outputTokens"]),
+            cache_read: field(&[
+                "cache_read_input_tokens",
+                "cacheReadInputTokens",
+                "cachedReadTokens",
+            ]),
+            cache_creation: field(&[
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+                "cacheCreationTokens",
+            ]),
+        }
+    }
+}
+
+impl UsageTracker {
+    /// Record a mid-stream `usage` frame. No-op on any other type.
+    fn observe(&mut self, json: &serde_json::Value) {
+        if json.get("type").and_then(|v| v.as_str()) != Some("usage") {
+            return;
+        }
+        let Some(obj) = json.get("usage") else {
+            return;
+        };
+        let slices = UsageSlices::from_obj(obj);
+        if !slices.is_zero() {
+            self.responses.push(slices);
+        }
+    }
+
+    /// Occupancy at end of turn: last positive per-response context, so a
+    /// mid-turn compact is reflected. `None` when no usage frames arrived.
+    fn occupancy(&self) -> Option<i64> {
+        self.responses
+            .iter()
+            .rev()
+            .map(|s| s.context())
+            .find(|&c| c > 0)
+    }
+
+    /// Build `Usage` events from an `end` frame. Prefers per-model
+    /// `modelUsage` (one event per model so subagents roll up); falls back
+    /// to the flat `usage` rollup. Context occupancy is the last
+    /// per-response snapshot when any exist; otherwise the billed
+    /// occupancy (correct for a single-round turn).
+    fn on_end(&mut self, json: &serde_json::Value, main_model: Option<&str>) -> Vec<ProviderEvent> {
+        let occupancy = self.occupancy();
+        self.responses.clear();
+
+        let to_event = |slices: UsageSlices, model: Option<String>, ctx: i64| {
+            if slices.is_zero() {
+                return None;
+            }
+            Some(ProviderEvent::Usage {
+                input_tokens: slices.input,
+                output_tokens: slices.output,
+                cache_read_tokens: slices.cache_read,
+                cache_creation_tokens: slices.cache_creation,
+                total_tokens: slices.total(),
+                context_tokens: ctx,
+                model,
+                turn_seq: None,
+            })
+        };
+
+        if let Some(models) = json.get("modelUsage").and_then(|v| v.as_object())
+            && !models.is_empty()
+        {
+            let mut out: Vec<(UsageSlices, Option<String>)> = models
+                .iter()
+                .filter_map(|(model, u)| {
+                    let slices = UsageSlices::from_obj(u);
+                    if slices.is_zero() {
+                        None
+                    } else {
+                        Some((slices, Some(model.clone())))
+                    }
+                })
+                .collect();
+            if out.is_empty() {
+                return Vec::new();
+            }
+            let ctx_idx = out
+                .iter()
+                .position(|(_, m)| m.as_deref() == main_model)
+                .unwrap_or_else(|| {
+                    out.iter()
+                        .enumerate()
+                        .max_by_key(|(_, (s, _))| s.context())
+                        .map(|(i, _)| i)
+                        .unwrap_or(0)
+                });
+            return out
+                .drain(..)
+                .enumerate()
+                .filter_map(|(i, (slices, model))| {
+                    let ctx = if i == ctx_idx {
+                        occupancy.unwrap_or_else(|| slices.context())
+                    } else {
+                        0
+                    };
+                    to_event(slices, model, ctx)
+                })
+                .collect();
+        }
+
+        let Some(u) = json.get("usage") else {
+            return Vec::new();
+        };
+        let slices = UsageSlices::from_obj(u);
+        let ctx = occupancy.unwrap_or_else(|| slices.context());
+        to_event(slices, main_model.map(str::to_string), ctx)
+            .into_iter()
+            .collect()
+    }
+}
+
 /// Parse one JSON line of grok streaming-json into provider events, updating
 /// `conversation_id` from any `sessionId` the line carries (the `end` frame
-/// always does).
+/// always does). `usage` is the per-turn tracker; `main_model` is the
+/// session's bare CLI model id, used to pin occupancy on the right
+/// `modelUsage` row.
 pub(super) fn parse_stream_json(
     json: &serde_json::Value,
     conversation_id: &mut Option<String>,
+    usage: &mut UsageTracker,
+    main_model: Option<&str>,
 ) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
     let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -162,75 +330,20 @@ pub(super) fn parse_stream_json(
         }
 
         // `end` also carries the session id (captured above) and the turn's
-        // token rollup; the run loop emits the terminal Completed itself.
-        "end" => events.extend(end_usage_events(json)),
+        // billed token rollup; occupancy comes from observed `usage` frames.
+        // The run loop emits the terminal Completed itself.
+        "end" => events.extend(usage.on_end(json, main_model)),
 
-        // The standalone `usage` frame duplicates the rollup the `end` frame
-        // carries, so parsing both would double-count. `error` is inspected
-        // by the run loop for a crash reason, and `available_commands` is
-        // startup chatter — none produce events here.
+        // Per-response snapshot: record for occupancy, emit nothing. Emitting
+        // here would double-count billed tokens against the `end` rollup.
+        // `error` is inspected by the run loop for a crash reason, and
+        // `available_commands` is startup chatter.
+        "usage" => usage.observe(json),
+
         _ => {}
     }
 
     events
-}
-
-/// Token usage from an `end` frame (grok 1.0+). Prefers the per-model
-/// `modelUsage` map (camelCase counters, one `Usage` per model so multi-model
-/// turns roll up correctly); falls back to the flat `usage` rollup
-/// (snake_case counters, no model). Same context/total convention as the
-/// Claude and Cursor providers: context is the window at end of turn
-/// (input + cache read + cache creation), total adds the generated output.
-fn end_usage_events(json: &serde_json::Value) -> Vec<ProviderEvent> {
-    let usage_event =
-        |input: i64, output: i64, cache_read: i64, cache_creation: i64, model: Option<String>| {
-            if input + output + cache_read + cache_creation == 0 {
-                return None;
-            }
-            let context = input + cache_read + cache_creation;
-            Some(ProviderEvent::Usage {
-                input_tokens: input,
-                output_tokens: output,
-                cache_read_tokens: cache_read,
-                cache_creation_tokens: cache_creation,
-                total_tokens: context + output,
-                context_tokens: context,
-                model,
-                turn_seq: None,
-            })
-        };
-
-    if let Some(models) = json.get("modelUsage").and_then(|v| v.as_object())
-        && !models.is_empty()
-    {
-        return models
-            .iter()
-            .filter_map(|(model, u)| {
-                let count = |key: &str| u.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
-                usage_event(
-                    count("inputTokens"),
-                    count("outputTokens"),
-                    count("cacheReadInputTokens"),
-                    count("cacheCreationInputTokens"),
-                    Some(model.clone()),
-                )
-            })
-            .collect();
-    }
-
-    let Some(u) = json.get("usage") else {
-        return Vec::new();
-    };
-    let count = |key: &str| u.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
-    usage_event(
-        count("input_tokens"),
-        count("output_tokens"),
-        count("cache_read_input_tokens"),
-        count("cache_creation_input_tokens"),
-        None,
-    )
-    .into_iter()
-    .collect()
 }
 
 /// Grok's `text` / `thought` payload field is `data`, but tolerate `text`.
@@ -471,7 +584,18 @@ mod tests {
     use super::*;
 
     fn parse(json: serde_json::Value, conv: &mut Option<String>) -> Vec<ProviderEvent> {
-        parse_stream_json(&json, conv)
+        let mut usage = UsageTracker::default();
+        parse_stream_json(&json, conv, &mut usage, None)
+    }
+
+    fn parse_turn(lines: &[serde_json::Value], main_model: Option<&str>) -> Vec<ProviderEvent> {
+        let mut conv = None;
+        let mut usage = UsageTracker::default();
+        let mut events = Vec::new();
+        for json in lines {
+            events.extend(parse_stream_json(json, &mut conv, &mut usage, main_model));
+        }
+        events
     }
 
     #[test]
@@ -798,8 +922,9 @@ mod tests {
         assert!(model.is_none());
     }
 
-    /// The standalone mid-stream `usage` frame duplicates the `end` rollup
-    /// and must stay silent, or turns double-count.
+    /// The standalone mid-stream `usage` frame is a per-response snapshot:
+    /// it must not emit a `Usage` event (that would double-count against
+    /// `end`), but it is recorded for occupancy.
     #[test]
     fn standalone_usage_frame_is_ignored() {
         let mut conv = None;
@@ -811,7 +936,192 @@ mod tests {
             &mut conv,
         );
         assert!(events.is_empty());
-        assert!(events.is_empty());
+    }
+
+    /// A multi-round turn: `end.usage` sums every round; occupancy is the
+    /// last per-response snapshot, not that sum. This is the grok 1.0
+    /// streaming-json shape (`num_turns: 7` in the CLI docs).
+    #[test]
+    fn occupancy_is_last_response_not_end_sum() {
+        let events = parse_turn(
+            &[
+                serde_json::json!({
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": 800, "output_tokens": 40,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                }),
+                serde_json::json!({
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": 200, "output_tokens": 30,
+                        "cache_read_input_tokens": 8000,
+                        "cache_creation_input_tokens": 0
+                    }
+                }),
+                serde_json::json!({
+                    "type": "end", "stopReason": "end_turn", "sessionId": "s1",
+                    "num_turns": 2,
+                    "usage": {
+                        "input_tokens": 1000, "output_tokens": 70,
+                        "cache_read_input_tokens": 8000,
+                        "cache_creation_input_tokens": 0,
+                        "total_tokens": 9070
+                    },
+                    "modelUsage": {
+                        "grok-4.5": {
+                            "inputTokens": 1000, "outputTokens": 70,
+                            "cacheReadInputTokens": 8000,
+                            "cacheCreationInputTokens": 0,
+                            "modelCalls": 2
+                        }
+                    }
+                }),
+            ],
+            Some("grok-4.5"),
+        );
+        let [
+            ProviderEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                total_tokens,
+                context_tokens,
+                model,
+                ..
+            },
+        ] = &events[..]
+        else {
+            panic!("expected one Usage, got {events:?}");
+        };
+        // Billed slices come from the end-frame sum.
+        assert_eq!(*input_tokens, 1000);
+        assert_eq!(*output_tokens, 70);
+        assert_eq!(*cache_read_tokens, 8000);
+        assert_eq!(*total_tokens, 9070);
+        // Occupancy is the last round (200 + 8000), not 1000 + 8000.
+        assert_eq!(*context_tokens, 8200);
+        assert_eq!(model.as_deref(), Some("grok-4.5"));
+    }
+
+    /// After a mid-turn compact the last response is smaller than earlier
+    /// ones; occupancy follows the last snapshot, not the peak.
+    #[test]
+    fn occupancy_follows_last_response_after_compact() {
+        let events = parse_turn(
+            &[
+                serde_json::json!({
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": 100, "output_tokens": 10,
+                        "cache_read_input_tokens": 90_000
+                    }
+                }),
+                serde_json::json!({
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": 80, "output_tokens": 12,
+                        "cache_read_input_tokens": 5_000
+                    }
+                }),
+                serde_json::json!({
+                    "type": "end",
+                    "usage": {
+                        "input_tokens": 180, "output_tokens": 22,
+                        "cache_read_input_tokens": 95_000
+                    }
+                }),
+            ],
+            None,
+        );
+        let [ProviderEvent::Usage { context_tokens, .. }] = &events[..] else {
+            panic!("expected one Usage, got {events:?}");
+        };
+        assert_eq!(*context_tokens, 5_080);
+    }
+
+    /// A subagent modelUsage row carries billed tokens but no session
+    /// occupancy — same convention as Claude.
+    #[test]
+    fn subagent_model_row_has_zero_context() {
+        let events = parse_turn(
+            &[
+                serde_json::json!({
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": 50, "output_tokens": 10,
+                        "cache_read_input_tokens": 400
+                    }
+                }),
+                serde_json::json!({
+                    "type": "end",
+                    "modelUsage": {
+                        "grok-4.5": {
+                            "inputTokens": 50, "outputTokens": 10,
+                            "cacheReadInputTokens": 400
+                        },
+                        "grok-4-fast": {
+                            "inputTokens": 20, "outputTokens": 8
+                        }
+                    }
+                }),
+            ],
+            Some("grok-4.5"),
+        );
+        assert_eq!(events.len(), 2);
+        let mut by_model: Vec<_> = events
+            .iter()
+            .map(|e| match e {
+                ProviderEvent::Usage {
+                    model,
+                    context_tokens,
+                    input_tokens,
+                    ..
+                } => (model.clone(), *context_tokens, *input_tokens),
+                other => panic!("expected Usage, got {other:?}"),
+            })
+            .collect();
+        by_model.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(by_model[0].0.as_deref(), Some("grok-4-fast"));
+        assert_eq!(by_model[0].1, 0);
+        assert_eq!(by_model[0].2, 20);
+        assert_eq!(by_model[1].0.as_deref(), Some("grok-4.5"));
+        assert_eq!(by_model[1].1, 450);
+        assert_eq!(by_model[1].2, 50);
+    }
+
+    /// ACP-shaped cache keys on `modelUsage` still parse (cachedReadTokens
+    /// rather than cacheReadInputTokens).
+    #[test]
+    fn model_usage_accepts_acp_cache_keys() {
+        let events = parse(
+            serde_json::json!({
+                "type": "end",
+                "modelUsage": {
+                    "grok-4.5": {
+                        "inputTokens": 10, "outputTokens": 5,
+                        "cachedReadTokens": 100, "cacheCreationTokens": 20
+                    }
+                }
+            }),
+            &mut None,
+        );
+        let [
+            ProviderEvent::Usage {
+                cache_read_tokens,
+                cache_creation_tokens,
+                context_tokens,
+                ..
+            },
+        ] = &events[..]
+        else {
+            panic!("expected one Usage, got {events:?}");
+        };
+        assert_eq!(*cache_read_tokens, 100);
+        assert_eq!(*cache_creation_tokens, 20);
+        assert_eq!(*context_tokens, 130);
     }
 
     /// The grok 1.0 tool-start frame, exactly as documented for the shipped

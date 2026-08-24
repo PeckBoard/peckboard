@@ -456,7 +456,10 @@ impl AgentProvider for GrokProvider {
         let working_dir = config.working_dir.clone();
 
         let handle = tokio::spawn(async move {
-            let mut stream = GrokStream::default();
+            let mut stream = GrokStream {
+                main_model: Some(model.clone()),
+                ..Default::default()
+            };
             let result = turn::run_turn(
                 TurnSpec {
                     provider: "grok",
@@ -594,6 +597,10 @@ impl AgentProvider for GrokProvider {
 struct GrokStream {
     conversation_id: Option<String>,
     error: Option<String>,
+    usage: parser::UsageTracker,
+    /// Bare CLI model id (`grok-4.5`), used to pin occupancy on the matching
+    /// `modelUsage` row when a turn billed more than one model.
+    main_model: Option<String>,
 }
 
 impl TurnStream for GrokStream {
@@ -604,7 +611,12 @@ impl TurnStream for GrokStream {
             self.error = Some(reason);
             return Vec::new();
         }
-        parser::parse_stream_json(json, &mut self.conversation_id)
+        parser::parse_stream_json(
+            json,
+            &mut self.conversation_id,
+            &mut self.usage,
+            self.main_model.as_deref(),
+        )
     }
 
     fn take_conversation_id(&mut self) -> Option<String> {

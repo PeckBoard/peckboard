@@ -128,19 +128,20 @@ impl BuiltinPlugin for GrokPlugin {
                     display_name: "Grok (CLI)".into(),
                     models: default_models(),
                     effort_levels: standard_effort_levels(),
-                    // Per-turn CLI: attachments are dropped, no Usage
-                    // events are parsed, and answers arrive as a fresh
-                    // turn. `--session-id` resumes the conversation across
-                    // turns. Interrupt sends SIGINT and drains stdout for
-                    // a couple seconds (`turn::graceful_cancel`) before
-                    // SIGKILL, so a frame the CLI flushes in response
-                    // still reaches the transcript — but grok has no
-                    // stdin/control channel to settle a turn in-band, so
-                    // this stays `HardKill`, not `Soft`.
+                    // Per-turn CLI: attachments are dropped, Usage events
+                    // come from the `end` rollup + per-response occupancy,
+                    // and answers arrive as a fresh turn. `--resume`
+                    // continues the conversation across turns. Interrupt
+                    // sends SIGINT and drains stdout for a couple seconds
+                    // (`turn::graceful_cancel`) before SIGKILL, so a frame
+                    // the CLI flushes in response still reaches the
+                    // transcript — but grok has no stdin/control channel to
+                    // settle a turn in-band, so this stays `HardKill`, not
+                    // `Soft`.
                     capabilities: ProviderCapabilities {
                         supports_thinking: true,
                         supports_images_in: false,
-                        supports_usage: false,
+                        supports_usage: true,
                         supports_resume: true,
                         interrupt_kind: InterruptKind::HardKill,
                         supports_mid_stream_injection: false,

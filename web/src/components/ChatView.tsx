@@ -18,7 +18,7 @@ import {
   type ProviderInfo,
 } from '../store/resources'
 import { useUsageStore } from '../store/usage'
-import { usageCost } from '../util/cost'
+import { bareModelId, usageCost } from '../util/cost'
 import { fmtInt, fmtTokens, fmtUsd } from '../util/format'
 import { downloadTranscript } from '../util/transcript'
 import InputBar from './InputBar'
@@ -653,7 +653,7 @@ const ChatRow = memo(function ChatRow({
             <span className="chat-agent-start-detail">
               {item.compaction
                 ? 'summarizing context to free the window'
-                : `preparing context for ${item.to.replace(/^claude:/, '')}`}
+                : `preparing context for ${bareModelId(item.to)}`}
             </span>
             <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
           </div>
@@ -682,7 +682,7 @@ const ChatRow = memo(function ChatRow({
             <span className="chat-agent-start-detail">
               {item.compaction
                 ? 'context left intact'
-                : `staying on ${item.from.replace(/^claude:/, '')} — context kept`}
+                : `staying on ${bareModelId(item.from)} — context kept`}
             </span>
             <span className="chat-agent-start-time">{formatTime(item.ts)}</span>
           </div>
@@ -715,8 +715,8 @@ const ChatRow = memo(function ChatRow({
                 {item.compaction
                   ? 'Context compacted'
                   : item.recovery
-                    ? `Transcript sent to ${item.to.replace(/^claude:/, '')} (recovery)`
-                    : `Context handed over to ${item.to.replace(/^claude:/, '')}`}
+                    ? `Transcript sent to ${bareModelId(item.to)} (recovery)`
+                    : `Context handed over to ${bareModelId(item.to)}`}
               </span>
               <span className="chat-handover-time">{formatTime(item.ts)}</span>
             </summary>
