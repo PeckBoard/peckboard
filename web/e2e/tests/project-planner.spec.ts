@@ -8,6 +8,8 @@ import path from 'node:path'
  *
  *  - The Folders page offers a per-folder "Project Planner" button
  *    (manifest `folder_items`), which opens the sandboxed slideshow page.
+ *  - The same button is offered on that folder's repo list (`/repos`), so
+ *    opening Repos does not hide the planner.
  *  - The start slide renders with a model picker (thinking models only —
  *    the mock provider contributes "Mock: plan review (thinking)").
  *  - Beginning the interview creates + dispatches a real temp session and
@@ -94,6 +96,39 @@ test('slideshow page: start → thinking → watchdog verdict on a tool-less run
 
   // Reset offers a clean restart.
   await frame.getByRole('button', { name: 'Reset and start again' }).click()
+  await expect(frame.getByText('Plan this project, one question at a time')).toBeVisible({
+    timeout: 15_000,
+  })
+})
+
+test('repo list offers the Project Planner folder item', async ({ page, baseURL, request }) => {
+  expect(baseURL).toBeTruthy()
+  const auth = await authenticate(request)
+
+  const catalogRes = await request.get('/api/plugins', { headers: auth })
+  const catalog = catalogRes.ok() ? await catalogRes.json() : { plugins: [] }
+  test.skip(
+    !JSON.stringify(catalog).includes('project-planner'),
+    'project-planner wasm not built/staged — run peck-plugins/project-planner/build.sh',
+  )
+
+  const folderName = `e2e-planner-repos-${Date.now()}`
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: folderName, path: mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-')) },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  await loginUi(page, baseURL!)
+  await page.locator('.rail-btn[title="Folders"]').click()
+  await page.getByTestId(`folder-repos-${folderName}`).click()
+  await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/repos$`))
+  await expect(page.getByTestId('repo-list-view')).toBeVisible()
+
+  await page.getByTestId('repo-list-plugin-project-planner').click()
+  await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/plugin/project-planner$`))
+  const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
   await expect(frame.getByText('Plan this project, one question at a time')).toBeVisible({
     timeout: 15_000,
   })

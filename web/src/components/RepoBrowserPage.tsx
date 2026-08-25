@@ -2,14 +2,22 @@ import { useCallback, useEffect, useState } from 'react'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
 import DiffBlock from './DiffBlock'
+import { PluginIcon } from './PluginIcon'
 import { listRepos, repoDiff, type RepoDiffResult, type RepoEntry } from '../lib/review'
 import { useFoldersStore } from '../store/folders'
+import type { FolderPluginItem } from './ManageFoldersModal'
 
 interface Props {
   /** The folder whose tree was scanned (`/folders/<id>/repos`). */
   folderId: string
   /** Back to the Folders page. */
   onBack: () => void
+  /** Folder-scoped plugin pages (manifest `folder_items`) — same set the
+   *  Folders row already offers. Surfaced here so opening Repos does not
+   *  hide Project Planner / Graphify / … */
+  pluginItems?: FolderPluginItem[]
+  /** Open one for this folder. */
+  onOpenPlugin?: (itemId: string) => void
 }
 
 /** Human status chip text for a diffed file. */
@@ -28,7 +36,12 @@ const STATUS_LABEL: Record<string, string> = {
  * diff per file. Discovery and the diff both stay folder-jailed on the
  * server; this page only ever names what the scan reported.
  */
-export default function RepoBrowserPage({ folderId, onBack }: Props) {
+export default function RepoBrowserPage({
+  folderId,
+  onBack,
+  pluginItems = [],
+  onOpenPlugin,
+}: Props) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const folderName = folders.find((f) => f.id === folderId)?.name
@@ -173,14 +186,30 @@ export default function RepoBrowserPage({ folderId, onBack }: Props) {
       <ListViewHeader
         title={folderName ? `Repos — ${folderName}` : 'Repos'}
         extras={
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onBack}
-            data-testid="repo-list-back"
-          >
-            ‹ Folders
-          </button>
+          <div className="repo-list-header-extras">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={onBack}
+              data-testid="repo-list-back"
+            >
+              ‹ Folders
+            </button>
+            {pluginItems.map((item) => (
+              <button
+                key={`${item.plugin}:${item.id}`}
+                type="button"
+                className="btn-secondary folder-plugin-btn"
+                onClick={() => onOpenPlugin?.(item.id)}
+                title={item.label}
+                aria-label={item.label}
+                data-testid={`repo-list-plugin-${item.id}`}
+              >
+                <PluginIcon icon={item.icon} />
+                <span>{item.label}</span>
+              </button>
+            ))}
+          </div>
         }
         actionLabel="Rescan"
         onAction={loadRepos}

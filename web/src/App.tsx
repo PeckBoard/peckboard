@@ -432,43 +432,50 @@ function App() {
   const railIsTopbar = useMediaQuery('(max-width: 768px)')
 
   // Load the plugin UI-panel catalog once authenticated so each declared
-  // panel can appear as a link in the user dropdown menu.
+  // panel can appear as a link in the user dropdown menu. Refetch on
+  // `peckboard:plugin-approval` so a just-approved plugin's folder/sidebar
+  // items show up without a full reload (Project Planner after approve).
   useEffect(() => {
     // Only fetch when authenticated. When logged out the user menu isn't
     // rendered, so stale panels can't show; the next login refetches.
     if (!authenticated) return
     let cancelled = false
-    authedFetch('/api/plugins')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then(
-        (data: {
-          ui_panels?: UiPanel[]
-          sidebar_items?: SidebarItem[]
-          project_items?: SidebarItem[]
-          session_items?: SidebarItem[]
-          folder_items?: SidebarItem[]
-        }) => {
-          if (cancelled) return
-          setUiPanels(data.ui_panels ?? [])
-          setSidebarItems(data.sidebar_items ?? [])
-          setProjectItems(data.project_items ?? [])
-          setSessionItems(data.session_items ?? [])
-          setFolderItems(data.folder_items ?? [])
-          setPluginsLoaded(true)
-        },
-      )
-      .catch(() => {
-        if (!cancelled) {
-          setUiPanels([])
-          setSidebarItems([])
-          setProjectItems([])
-          setSessionItems([])
-          setFolderItems([])
-          setPluginsLoaded(true)
-        }
-      })
+    const loadCatalog = () => {
+      authedFetch('/api/plugins')
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+        .then(
+          (data: {
+            ui_panels?: UiPanel[]
+            sidebar_items?: SidebarItem[]
+            project_items?: SidebarItem[]
+            session_items?: SidebarItem[]
+            folder_items?: SidebarItem[]
+          }) => {
+            if (cancelled) return
+            setUiPanels(data.ui_panels ?? [])
+            setSidebarItems(data.sidebar_items ?? [])
+            setProjectItems(data.project_items ?? [])
+            setSessionItems(data.session_items ?? [])
+            setFolderItems(data.folder_items ?? [])
+            setPluginsLoaded(true)
+          },
+        )
+        .catch(() => {
+          if (!cancelled) {
+            setUiPanels([])
+            setSidebarItems([])
+            setProjectItems([])
+            setSessionItems([])
+            setFolderItems([])
+            setPluginsLoaded(true)
+          }
+        })
+    }
+    loadCatalog()
+    window.addEventListener('peckboard:plugin-approval', loadCatalog)
     return () => {
       cancelled = true
+      window.removeEventListener('peckboard:plugin-approval', loadCatalog)
     }
   }, [authenticated])
 
@@ -1794,6 +1801,10 @@ function App() {
               (activeFolderId && sessionSub === 'repos' ? (
                 <RepoBrowserPage
                   folderId={activeFolderId}
+                  pluginItems={folderItems}
+                  onOpenPlugin={(itemId) => {
+                    navigate('folders', activeFolderId, `plugin:${itemId}`)
+                  }}
                   onBack={() => {
                     setActiveFolderId(null)
                     navigate('folders', null)

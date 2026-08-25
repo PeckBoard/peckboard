@@ -218,6 +218,14 @@
   height: 100%;
   display: block;
 }
+.repo-list-header-extras {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  margin-right: 8px;
+  flex-wrap: wrap;
+}
 /* Report list item */
 .report-list-item {
   flex: 1;
