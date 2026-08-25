@@ -5,9 +5,10 @@ import path from 'node:path'
 
 /**
  * Chat ergonomics batch:
- *
  *  - Message bubbles carry a hover/focus-revealed Copy button that copies
  *    the raw markdown source (tool output already had one via ClampedPre).
+ *    Copy still works when `navigator.clipboard` is missing (plain HTTP),
+ *    and the hidden button is not selectable / not click-blocking.
  *  - Dragging files over the window shows a drop-to-attach overlay on the
  *    composer; dropping uploads through the same pipeline as paste/picker.
  *  - Global shortcuts: `?` opens the cheat sheet, `n` opens New Session
@@ -69,8 +70,8 @@ async function loadAppAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-/** Replace navigator.clipboard so the test can read what got copied
- *  without clipboard permissions. */
+/** Capture whatever the Copy button put on the clipboard — either via
+ *  `navigator.clipboard.writeText` or the `execCommand('copy')` fallback. */
 async function stubClipboard(page: Page) {
   await page.addInitScript(() => {
     ;(window as unknown as { __copiedText: string | null }).__copiedText = null
@@ -83,6 +84,39 @@ async function stubClipboard(page: Page) {
         },
       },
     })
+    const orig = document.execCommand.bind(document)
+    document.execCommand = (command: string) => {
+      if (command === 'copy') {
+        const el = document.activeElement as HTMLTextAreaElement | null
+        if (el && typeof el.value === 'string') {
+          ;(window as unknown as { __copiedText: string | null }).__copiedText = el.value
+        }
+        return true
+      }
+      return orig(command)
+    }
+  })
+}
+
+/** Simulate PeckBoard on plain HTTP: no clipboard API, capture the
+ *  execCommand('copy') fallback payload. */
+async function stubClipboardFallback(page: Page) {
+  await page.addInitScript(() => {
+    ;(window as unknown as { __copiedText: string | null }).__copiedText = null
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+    const orig = document.execCommand.bind(document)
+    document.execCommand = (command: string) => {
+      if (command === 'copy') {
+        const el = document.activeElement as HTMLTextAreaElement | null
+        ;(window as unknown as { __copiedText: string | null }).__copiedText =
+          el && typeof el.value === 'string' ? el.value : null
+        return true
+      }
+      return orig(command)
+    }
   })
 }
 
@@ -101,11 +135,13 @@ test('message bubbles expose a Copy button on hover that copies the markdown sou
   await loadAppAt(page, token, `/sessions/${sessionId}`)
   await expect(page.getByText('bold', { exact: true })).toBeVisible({ timeout: 15_000 })
 
-  // Hidden at rest, revealed by hovering the bubble.
+  // Hidden at rest: not painted, not clickable, not in a drag-select.
   const assistantBtn = page.locator('.chat-bubble-assistant .chat-bubble-copy').first()
   await expect(assistantBtn).toHaveCSS('opacity', '0')
+  await expect(assistantBtn).toHaveCSS('pointer-events', 'none')
   await page.locator('.chat-bubble-assistant').first().hover()
   await expect(assistantBtn).toHaveCSS('opacity', '1')
+  await expect(assistantBtn).toHaveCSS('pointer-events', 'auto')
 
   // Copies the raw markdown, not the rendered text, and confirms inline.
   await assistantBtn.click()
@@ -121,6 +157,47 @@ test('message bubbles expose a Copy button on hover that copies the markdown sou
   expect(
     await page.evaluate(() => (window as unknown as { __copiedText: string | null }).__copiedText),
   ).toBe('copy me user')
+})
+
+test('Copy still works when the clipboard API is missing (plain HTTP fallback)', async ({
+  request,
+  page,
+}) => {
+  const { token, authHeader } = await authenticate(request)
+  const sessionId = await seedSession(request, authHeader, 'bubble copy http')
+  await injectEvent(request, authHeader, sessionId, 'agent-text', {
+    text: 'plain-http copy target',
+  })
+
+  await stubClipboardFallback(page)
+  await loadAppAt(page, token, `/sessions/${sessionId}`)
+  await expect(page.getByText('plain-http copy target')).toBeVisible({ timeout: 15_000 })
+
+  const assistantBtn = page.locator('.chat-bubble-assistant .chat-bubble-copy').first()
+  await page.locator('.chat-bubble-assistant').first().hover()
+  await assistantBtn.click()
+  await expect(assistantBtn).toHaveText('Copied')
+  expect(
+    await page.evaluate(() => (window as unknown as { __copiedText: string | null }).__copiedText),
+  ).toBe('plain-http copy target')
+})
+
+test('selecting a message does not pick up the hidden Copy label', async ({ request, page }) => {
+  const { token, authHeader } = await authenticate(request)
+  const sessionId = await seedSession(request, authHeader, 'bubble select')
+  await injectEvent(request, authHeader, sessionId, 'agent-text', {
+    text: 'selectable assistant reply',
+  })
+
+  await loadAppAt(page, token, `/sessions/${sessionId}`)
+  await expect(page.getByText('selectable assistant reply')).toBeVisible({ timeout: 15_000 })
+
+  const bubble = page.locator('.chat-bubble-assistant').first()
+  await bubble.click({ clickCount: 3 })
+  const selected = await page.evaluate(() => window.getSelection()?.toString() ?? '')
+  expect(selected).toContain('selectable assistant reply')
+  expect(selected).not.toMatch(/\bCopy\b/)
+  expect(selected).not.toMatch(/\bCopied\b/)
 })
 
 test('dragging files over the chat shows the drop overlay and dropping attaches them', async ({

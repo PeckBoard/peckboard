@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { copyText } from '../lib/clipboard'
 import { readFileAsText } from '../lib/readFileAsText'
 import { useAuthStore } from '../store/auth'
 import { useSshKeysStore } from '../store/sshKeys'
@@ -16,34 +17,6 @@ import type { MenuItem } from './Dropdown'
 const GENERATE_KEY_TYPES = [{ value: 'ed25519', label: 'ed25519 (recommended)' }]
 
 const ADMIN_ONLY_REASON = 'Only admins can add, rename or delete SSH keys.'
-
-/** Copy `text` to the clipboard, reporting whether it worked.
- *  `navigator.clipboard` only exists in a secure context and PeckBoard is
- *  routinely reached over plain HTTP on a LAN — hence the legacy fallback. */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return true
-    }
-  } catch {
-    // Permission denied / document not focused — try the legacy path.
-  }
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.setAttribute('readonly', '')
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
-  } catch {
-    return false
-  }
-}
 
 /** Fingerprints are ~50 chars of base64; the head is enough to recognise a
  *  key at a glance, and the full value is in the title + the public-key

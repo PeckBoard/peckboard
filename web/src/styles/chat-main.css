@@ -435,11 +435,14 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 /* Hover/focus-revealed "Copy" on message bubbles. Sits astride the
    bubble's top edge (not over the text) and copies the raw markdown
    source. Hidden until the bubble is hovered or the button itself has
-   keyboard focus; on touch devices (no hover) it stays visible. */
+   keyboard focus; on touch devices (no hover) it stays visible.
+
+   Hidden != gone: opacity:0 alone still captures clicks and can land in
+   a drag-select, so pointer-events and user-select stay off until the
+   button is actually shown. */
 .chat-bubble-copy {
   position: absolute;
   top: -10px;
@@ -454,6 +457,10 @@
   font-weight: 600;
   cursor: pointer;
   opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  z-index: 1;
   transition:
     opacity var(--transition),
     background var(--transition),
@@ -463,6 +470,7 @@
 .chat-bubble:focus-within .chat-bubble-copy,
 .chat-bubble-copy:focus-visible {
   opacity: 1;
+  pointer-events: auto;
 }
 .chat-bubble-copy:hover {
   background: var(--surface3);
@@ -471,9 +479,9 @@
 @media (hover: none) {
   .chat-bubble-copy {
     opacity: 1;
+    pointer-events: auto;
   }
 }
-
 .chat-bubble-user {
   background: var(--accent);
   color: var(--text-inverse);

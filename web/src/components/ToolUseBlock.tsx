@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { copyText } from '../lib/clipboard'
 import { highlightPlugins } from './markdownHighlight'
 import Modal from './Modal'
 import DiffBlock from './DiffBlock'
@@ -180,8 +181,9 @@ function parseTestCounts(text: string): string {
 const PRE_CLAMP_LINES = 40
 const PRE_CLAMP_SLACK = 8
 
-/** Copy-to-clipboard button with transient "Copied" feedback. Exported so
- *  chat bubbles (ChatView) reuse the exact ClampedPre interaction. */
+/** Copy-to-clipboard button with transient "Copied" / "Copy failed"
+ *  feedback. Exported so chat bubbles (ChatView) reuse the exact ClampedPre
+ *  interaction. Uses `copyText` so it still works over plain HTTP. */
 export function CopyButton({
   text,
   className,
@@ -191,23 +193,25 @@ export function CopyButton({
   className?: string
   label?: string
 }) {
-  const [copied, setCopied] = useState(false)
+  const [status, setStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   useEffect(() => {
-    if (!copied) return
-    const id = setTimeout(() => setCopied(false), 1500)
+    if (status === 'idle') return
+    const id = setTimeout(() => setStatus('idle'), 1500)
     return () => clearTimeout(id)
-  }, [copied])
+  }, [status])
   return (
     <button
       type="button"
       className={className ?? 'tool-mini-btn'}
       title={label ?? 'Copy to clipboard'}
       aria-label={label ?? 'Copy to clipboard'}
-      onClick={() => {
-        void navigator.clipboard?.writeText(text).then(() => setCopied(true))
+      onClick={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        void copyText(text).then((ok) => setStatus(ok ? 'copied' : 'failed'))
       }}
     >
-      {copied ? 'Copied' : 'Copy'}
+      {status === 'copied' ? 'Copied' : status === 'failed' ? 'Copy failed' : 'Copy'}
     </button>
   )
 }
