@@ -12,12 +12,16 @@ interface Props {
   folderId: string
   /** Back to the Folders page. */
   onBack: () => void
-  /** Folder-scoped plugin pages (manifest `folder_items`) — same set the
-   *  Folders row already offers. Surfaced here so opening Repos does not
-   *  hide Project Planner / Graphify / … */
+  /** Folder-scoped plugin pages (manifest `folder_items`). Items marked
+   *  `repo_scoped` act on ONE repo: they are offered per repo row (via
+   *  `onOpenPluginForRepo`), never at the folder level; the rest show on
+   *  the header as before. */
   pluginItems?: FolderPluginItem[]
-  /** Open one for this folder. */
+  /** Open a folder-level item for this folder. */
   onOpenPlugin?: (itemId: string) => void
+  /** Open a repo-scoped item aimed at one repo (folder-relative path,
+   *  `'.'` = the folder root). */
+  onOpenPluginForRepo?: (itemId: string, repoPath: string) => void
 }
 
 /** Human status chip text for a diffed file. */
@@ -41,7 +45,10 @@ export default function RepoBrowserPage({
   onBack,
   pluginItems = [],
   onOpenPlugin,
+  onOpenPluginForRepo,
 }: Props) {
+  const folderLevelItems = pluginItems.filter((i) => !i.repo_scoped)
+  const repoScopedItems = pluginItems.filter((i) => i.repo_scoped)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const folderName = folders.find((f) => f.id === folderId)?.name
@@ -195,7 +202,7 @@ export default function RepoBrowserPage({
             >
               ‹ Folders
             </button>
-            {pluginItems.map((item) => (
+            {folderLevelItems.map((item) => (
               <button
                 key={`${item.plugin}:${item.id}`}
                 type="button"
@@ -230,6 +237,12 @@ export default function RepoBrowserPage({
           items={repos}
           getKey={(r) => r.path || '.'}
           onActivate={(r) => openDiff(r.path)}
+          getMenuItems={(r) =>
+            repoScopedItems.map((item) => ({
+              label: item.label,
+              onSelect: () => onOpenPluginForRepo?.(item.id, r.path || '.'),
+            }))
+          }
           emptyState={
             <div className="list-view-empty" data-testid="repo-list-empty">
               <p>No git repos found in this folder or its subfolders.</p>

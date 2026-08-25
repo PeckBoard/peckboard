@@ -15,6 +15,10 @@ export interface FolderPluginItem {
   label: string
   icon?: string | null
   path: string
+  /** The page acts on one git repo, not the folder — folder-level surfaces
+   *  (this page, the repo-list header) skip it; the repo browser offers it
+   *  per repo row instead. */
+  repo_scoped?: boolean
 }
 
 interface Props {
@@ -179,20 +183,24 @@ export default function FoldersPage({ pluginItems = [], onOpenPlugin, onOpenRepo
                   {/* Folder-scoped plugin pages (manifest `folder_items`).
                       Deliberately outside the isAdmin gate: these are the same
                       pages a non-admin already reaches from a project or
-                      session, only aimed at the folder itself. */}
-                  {pluginItems.map((item) => (
-                    <button
-                      key={`${item.plugin}:${item.id}`}
-                      className="btn-secondary folder-plugin-btn"
-                      onClick={() => onOpenPlugin?.(f.id, item.id)}
-                      title={`${item.label} — ${f.name}`}
-                      aria-label={`${item.label} for folder ${f.name}`}
-                      data-testid={`folder-plugin-${item.id}-${f.name}`}
-                    >
-                      <PluginIcon icon={item.icon} />
-                      <span>{item.label}</span>
-                    </button>
-                  ))}
+                      session, only aimed at the folder itself. Items marked
+                      repo_scoped act on ONE repo and live on the repo browser
+                      rows instead — never here. */}
+                  {pluginItems
+                    .filter((item) => !item.repo_scoped)
+                    .map((item) => (
+                      <button
+                        key={`${item.plugin}:${item.id}`}
+                        className="btn-secondary folder-plugin-btn"
+                        onClick={() => onOpenPlugin?.(f.id, item.id)}
+                        title={`${item.label} — ${f.name}`}
+                        aria-label={`${item.label} for folder ${f.name}`}
+                        data-testid={`folder-plugin-${item.id}-${f.name}`}
+                      >
+                        <PluginIcon icon={item.icon} />
+                        <span>{item.label}</span>
+                      </button>
+                    ))}
                   {isAdmin && (
                     <>
                       <button

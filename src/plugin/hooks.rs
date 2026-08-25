@@ -225,6 +225,12 @@ pub struct SidebarItem {
     #[serde(default)]
     pub icon: Option<String>,
     pub path: String,
+    /// `folder_items` only: the page acts on ONE git repo, not the folder.
+    /// Folder-level surfaces (the Folders row, the repo-list header) skip
+    /// the item; the repo browser offers it per repo row instead, opening
+    /// the page with `?repo=<folder-relative path>` for the page to read.
+    #[serde(default)]
+    pub repo_scoped: bool,
 }
 
 /// A validated sidebar entry surfaced in the `/api/plugins` catalog: the
@@ -236,6 +242,7 @@ pub struct SidebarItemEntry {
     pub label: String,
     pub icon: Option<String>,
     pub path: String,
+    pub repo_scoped: bool,
 }
 
 /// A UI panel a plugin contributes to the web app, declared in the

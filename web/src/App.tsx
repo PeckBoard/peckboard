@@ -89,6 +89,9 @@ interface SidebarItem {
   label: string
   icon?: string | null
   path: string
+  /** folder_items only: the page acts on one git repo — folder-level
+   *  surfaces skip it; the repo browser offers it per repo row. */
+  repo_scoped?: boolean
 }
 
 /** Sub-view for an active session or project — 'chat' (the default
@@ -1804,6 +1807,17 @@ function App() {
                   pluginItems={folderItems}
                   onOpenPlugin={(itemId) => {
                     navigate('folders', activeFolderId, `plugin:${itemId}`)
+                  }}
+                  onOpenPluginForRepo={(itemId, repoPath) => {
+                    // Repo-scoped launch: same plugin route, plus ?repo= so
+                    // the page opens directly on that repo (PluginFullPage
+                    // forwards the query into the iframe).
+                    navigate('folders', activeFolderId, `plugin:${itemId}`)
+                    history.replaceState(
+                      null,
+                      '',
+                      `/folders/${activeFolderId}/plugin/${itemId}?repo=${encodeURIComponent(repoPath)}`,
+                    )
                   }}
                   onBack={() => {
                     setActiveFolderId(null)

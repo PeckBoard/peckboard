@@ -37,9 +37,21 @@ async function authenticate(request: APIRequestContext) {
 
 async function loginUi(page: import('@playwright/test').Page, baseURL: string) {
   await page.goto(baseURL)
-  await page.getByLabel('Username').fill(E2E_USER)
-  await page.getByLabel('Password').fill(E2E_PASS)
-  await page.getByRole('button', { name: /sign in/i }).click()
+  // Auth occasionally restores before the form paints — only log in when
+  // the form actually shows, then wait for the rail either way.
+  const username = page.getByLabel('Username')
+  await Promise.race([
+    username.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {}),
+    page
+      .locator('.rail')
+      .waitFor({ state: 'visible', timeout: 10_000 })
+      .catch(() => {}),
+  ])
+  if (await username.isVisible().catch(() => false)) {
+    await username.fill(E2E_USER)
+    await page.getByLabel('Password').fill(E2E_PASS)
+    await page.getByRole('button', { name: /sign in/i }).click()
+  }
   await expect(page.locator('.rail')).toBeVisible()
 }
 
@@ -82,15 +94,23 @@ test('slideshow page: start → thinking → watchdog verdict on a tool-less run
   await loginUi(page, baseURL!)
   await page.locator('.rail-btn[title="Folders"]').click()
 
-  // The plugin contributed a per-folder page item.
-  await page.getByTestId(`folder-plugin-project-planner-${folderName}`).click()
-  await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/plugin/project-planner$`))
+  // NO folder-level button: the planner is repo_scoped, so the Folders row
+  // must not offer it — the launch lives on the repo browser's repo rows.
+  await expect(page.getByTestId(`folder-repos-${folderName}`)).toBeVisible()
+  await expect(page.getByTestId(`folder-plugin-project-planner-${folderName}`)).toHaveCount(0)
+
+  await page.getByTestId(`folder-repos-${folderName}`).click()
+  await expect(page.getByTestId('repo-list-view')).toBeVisible()
+  await page.locator('.list-view-row .list-view-menu').first().click()
+  await page.getByRole('menuitem', { name: 'Project Planner' }).click()
+  await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/plugin/project-planner\\?repo=`))
   const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
 
-  // Start slide: hero copy + model picker with the mock thinking model.
+  // Deep-linked to the repo: the start slide shows directly (no picker).
   await expect(frame.getByText('Plan this project, one question at a time')).toBeVisible({
     timeout: 15_000,
   })
+  await expect(frame.getByText('Pick a repository')).toHaveCount(0)
   const select = frame.locator('.model-select')
   await expect(select).toBeVisible()
   await select.selectOption({ label: 'Mock: plan review (thinking)' })
@@ -111,7 +131,11 @@ test('slideshow page: start → thinking → watchdog verdict on a tool-less run
   })
 })
 
-test('repo list offers the Project Planner folder item', async ({ page, baseURL, request }) => {
+test('repo rows offer the repo-scoped Project Planner; header does not', async ({
+  page,
+  baseURL,
+  request,
+}) => {
   expect(baseURL).toBeTruthy()
   const auth = await authenticate(request)
 
@@ -136,13 +160,18 @@ test('repo list offers the Project Planner folder item', async ({ page, baseURL,
   const folder = (await folderRes.json()) as { id: string }
 
   await loginUi(page, baseURL!)
+  await loginUi(page, baseURL!)
   await page.locator('.rail-btn[title="Folders"]').click()
   await page.getByTestId(`folder-repos-${folderName}`).click()
   await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/repos$`))
   await expect(page.getByTestId('repo-list-view')).toBeVisible()
 
-  await page.getByTestId('repo-list-plugin-project-planner').click()
-  await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/plugin/project-planner$`))
+  // repo_scoped: never on the folder-level header…
+  await expect(page.getByTestId('repo-list-plugin-project-planner')).toHaveCount(0)
+  // …but on each repo row's menu, opening the planner aimed at that repo.
+  await page.locator('.list-view-row .list-view-menu').first().click()
+  await page.getByRole('menuitem', { name: 'Project Planner' }).click()
+  await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/plugin/project-planner\\?repo=`))
   const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
   await expect(frame.getByText('Plan this project, one question at a time')).toBeVisible({
     timeout: 15_000,

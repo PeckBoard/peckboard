@@ -2786,6 +2786,7 @@ fn collect_items(
                 label: item.label.clone(),
                 icon,
                 path: item.path.clone(),
+                repo_scoped: item.repo_scoped,
             });
         }
     }
