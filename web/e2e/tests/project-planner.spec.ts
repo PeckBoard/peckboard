@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test'
-import { mkdtempSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -61,10 +62,19 @@ test('slideshow page: start → thinking → watchdog verdict on a tool-less run
     'project-planner wasm not built/staged — run peck-plugins/project-planner/build.sh',
   )
 
+  // Interviews are repo-scoped: the folder root is made a git repo so the
+  // picker auto-selects it (a single-repo folder skips the picker).
   const folderName = `e2e-planner-${Date.now()}`
+  const root = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-'))
+  const git = (args: string[]) => {
+    const res = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' })
+    expect(res.status, `git ${args.join(' ')}: ${res.stderr}`).toBe(0)
+  }
+  git(['init', '-b', 'main'])
+  writeFileSync(path.join(root, 'README.md'), 'hello\n')
   const folderRes = await request.post('/api/folders', {
     headers: auth,
-    data: { name: folderName, path: mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-')) },
+    data: { name: folderName, path: root },
   })
   expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
@@ -113,9 +123,14 @@ test('repo list offers the Project Planner folder item', async ({ page, baseURL,
   )
 
   const folderName = `e2e-planner-repos-${Date.now()}`
+  // Repo-scoped planner: the folder must hold a git repo for the start
+  // screen to appear (a single repo is auto-selected past the picker).
+  const root = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-'))
+  const res = spawnSync('git', ['-C', root, 'init', '-b', 'main'], { encoding: 'utf8' })
+  expect(res.status, res.stderr).toBe(0)
   const folderRes = await request.post('/api/folders', {
     headers: auth,
-    data: { name: folderName, path: mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-')) },
+    data: { name: folderName, path: root },
   })
   expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
