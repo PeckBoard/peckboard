@@ -57,8 +57,10 @@ test('folder page → repo list → per-repo diff viewer', async ({ page, baseUR
   expect(baseURL).toBeTruthy()
   const auth = await authenticate(request)
 
-  // Folder root with two repos in subfolders: one dirty, one clean.
+  // Folder root is itself a repo, with two nested repos in subfolders:
+  // one dirty, one clean. All three must show up in the list.
   const root = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-repos-'))
+  makeRepo(root)
   const dirty = path.join(root, 'apps', 'web-repo')
   const clean = path.join(root, 'tools', 'cli-repo')
   makeRepo(dirty)
@@ -85,6 +87,8 @@ test('folder page → repo list → per-repo diff viewer', async ({ page, baseUR
   await expect(page.getByRole('heading', { name: `Repos — ${folderName}` })).toBeVisible()
   await expect(page.locator('.list-view-name', { hasText: 'web-repo' })).toBeVisible()
   await expect(page.locator('.list-view-name', { hasText: 'cli-repo' })).toBeVisible()
+  // The folder-root repo is listed under the folder's own name.
+  await expect(page.locator('.list-view-name', { hasText: folderName })).toBeVisible()
   await expect(page.locator('.repo-path-tag', { hasText: 'apps/web-repo' })).toBeVisible()
 
   // Dirty repo → its diff viewer: 2 files, modified + untracked.

@@ -53,8 +53,11 @@ pub struct WorktreeEntry {
 }
 
 /// Scan `folder_root` (already canonicalized) for git repos and their
-/// worktrees. Repos are not descended into, so a repo nested inside
-/// another repo's tree (a vendored checkout) is not listed.
+/// worktrees. The scan keeps descending below a repo, so repos nested
+/// inside another repo's tree (e.g. plugin checkouts kept untracked in a
+/// parent repo) are listed too. Ignored dirs (dot-dirs, `node_modules`,
+/// `target`, `vendor`, …) still prune the walk, which keeps vendored
+/// checkouts and card worktrees (`.peckboard/…`) out of the list.
 pub fn scan_repos(folder_root: &Path) -> Vec<RepoEntry> {
     let mut repos = Vec::new();
     let mut visited = 0usize;
@@ -72,8 +75,10 @@ fn scan_dir(dir: &Path, root: &Path, depth: usize, visited: &mut usize, out: &mu
     // no-follow rule as every jailed walk.
     let git = dir.join(".git");
     if git.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
+        // Record it, then keep descending: nested repos are real repos
+        // too. The ignored-dir pruning below keeps vendored checkouts
+        // (`vendor`, `node_modules`) and card worktrees (dot-dirs) out.
         out.push(read_repo(dir, root));
-        return; // a repo's insides are its own tree — don't scan deeper
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -292,19 +297,23 @@ mod tests {
     }
 
     #[test]
-    fn root_repo_detached_head_and_no_descent_into_repos() {
+    fn root_repo_detached_head_and_nested_repos_listed() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join(".git/HEAD"), "0123456789abcdef0123\n").unwrap();
-        // A repo nested inside the root repo's tree stays invisible.
-        mk_repo(&root.join("vendor-checkout/inner"), "main");
+        // A repo nested inside the root repo's tree is listed too…
+        mk_repo(&root.join("plugins/inner"), "main");
+        // …but one under an ignored dir stays invisible.
+        mk_repo(&root.join("vendor/dep"), "main");
 
         let repos = scan_repos(&root);
-        assert_eq!(repos.len(), 1, "root repo only");
-        assert_eq!(repos[0].path, "");
+        let paths: Vec<&str> = repos.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["", "plugins/inner"], "{paths:?}");
         assert_eq!(repos[0].worktrees[0].path, "");
         assert!(repos[0].worktrees[0].main);
         assert_eq!(repos[0].worktrees[0].branch, "01234567");
+        assert_eq!(repos[1].name, "inner");
+        assert_eq!(repos[1].worktrees[0].branch, "main");
     }
 }

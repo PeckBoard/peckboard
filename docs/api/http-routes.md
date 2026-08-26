@@ -14,24 +14,24 @@ All `/api/*` routes require bearer token auth unless noted. Global middleware: H
 
 ## Sessions
 
-| Method | Path                                | Rate Limit | Description                                                                   |
-| ------ | ----------------------------------- | ---------- | ----------------------------------------------------------------------------- |
-| GET    | /api/sessions                       | -          | List plain sessions (excludes workers). Enriched with conversationId + status |
-| POST   | /api/sessions                       | 60/min     | Create session. Body: `{ name, dir, model?, effort?, conversationId? }`       |
-| GET    | /api/sessions/:id                   | -          | Get single session                                                            |
-| PATCH  | /api/sessions/:id                   | -          | Update name/model/effort. Model/effort change kills live process              |
-| DELETE | /api/sessions/:id                   | -          | Kill process, delete session + attachments + queue entry                      |
-| GET    | /api/sessions/:id/events            | -          | Query params: `afterSeq`, `limit` (1-5000). Returns events oldest-to-newest   |
-| GET    | /api/sessions/:id/messages          | -          | Legacy chat messages. Query: `offset`, `limit`                                |
-| POST   | /api/sessions/:id/messages          | -          | Append chat messages. Body: `{ messages: ChatMessage[] }`                     |
-| POST   | /api/sessions/:id/clear             | -          | Kill process, reset conversation, delete attachments                          |
-| GET    | /api/sessions/:id/recovery-preview  | -          | Query: `model`. Token count + input cost of a recovery switch to that model   |
+| Method | Path                                | Rate Limit | Description                                                                                                  |
+| ------ | ----------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
+| GET    | /api/sessions                       | -          | List plain sessions (excludes workers). Enriched with conversationId + status                                |
+| POST   | /api/sessions                       | 60/min     | Create session. Body: `{ name, dir, model?, effort?, conversationId? }`                                      |
+| GET    | /api/sessions/:id                   | -          | Get single session                                                                                           |
+| PATCH  | /api/sessions/:id                   | -          | Update name/model/effort. Model/effort change kills live process                                             |
+| DELETE | /api/sessions/:id                   | -          | Kill process, delete session + attachments + queue entry                                                     |
+| GET    | /api/sessions/:id/events            | -          | Query params: `afterSeq`, `limit` (1-5000). Returns events oldest-to-newest                                  |
+| GET    | /api/sessions/:id/messages          | -          | Legacy chat messages. Query: `offset`, `limit`                                                               |
+| POST   | /api/sessions/:id/messages          | -          | Append chat messages. Body: `{ messages: ChatMessage[] }`                                                    |
+| POST   | /api/sessions/:id/clear             | -          | Kill process, reset conversation, delete attachments                                                         |
+| GET    | /api/sessions/:id/recovery-preview  | -          | Query: `model`. Token count + input cost of a recovery switch to that model                                  |
 | POST   | /api/sessions/:id/recover           | -          | Recovery switch: send full transcript to `model` without using the current agent. Body: `{ model, effort? }` |
-| POST   | /api/sessions/:id/read              | 60/min     | Append session-read event (syncs unread state across devices)                 |
-| GET    | /api/worker-sessions                | -          | Current worker session mapping by project                                     |
-| GET    | /api/existing-sessions              | -          | List Claude CLI sessions from `~/.claude`. Query: `dir?`                      |
-| GET    | /api/existing-sessions/:id/messages | -          | Extract messages from existing CLI session JSONL                              |
-| GET    | /api/queued                         | -          | List all queued follow-up messages                                            |
+| POST   | /api/sessions/:id/read              | 60/min     | Append session-read event (syncs unread state across devices)                                                |
+| GET    | /api/worker-sessions                | -          | Current worker session mapping by project                                                                    |
+| GET    | /api/existing-sessions              | -          | List Claude CLI sessions from `~/.claude`. Query: `dir?`                                                     |
+| GET    | /api/existing-sessions/:id/messages | -          | Extract messages from existing CLI session JSONL                                                             |
+| GET    | /api/queued                         | -          | List all queued follow-up messages                                                                           |
 
 ## Session Attachments
 
@@ -108,7 +108,7 @@ Jailed, read-only markdown access inside a registered workspace folder — the s
 | ------ | ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET    | /api/folders/:id/markdown-files | -          | Recursive `.md` listing (relative path + size). Skips hidden/build dirs; depth 8, 20k cap. `?scope=<rel/dir>` walks only that subdir (paths come back `<scope>/`-prefixed); `?worktree=<id8>` is the legacy spelling of `scope=.peckboard/worktrees/<id8>` |
 
-| GET | /api/repos | folder_id? | Git repos in one folder (or across all, unscoped) by subfolder scan, no `git` binary, each with its worktrees: main checkout, git-registered linked trees, `.peckboard/worktrees/<id8>` card trees. Worktrees outside the folder are dropped |
+| GET | /api/repos | folder_id? | Git repos in one folder (or across all, unscoped) by recursive scan, no `git` binary; repos nested inside another repo's tree are listed too (ignored dirs — dot-dirs, `node_modules`, `vendor`, … — prune the walk). Each repo carries its worktrees: main checkout, git-registered linked trees, `.peckboard/worktrees/<id8>` card trees. Worktrees outside the folder are dropped |
 
 ## Config and Misc
 
