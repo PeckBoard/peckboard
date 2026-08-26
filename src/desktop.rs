@@ -319,7 +319,7 @@ mod native {
         // Detach it once the GUI is taking over. CLI mode never reaches
         // this function.
         #[link(name = "kernel32")]
-        extern "system" {
+        unsafe extern "system" {
             fn FreeConsole() -> i32;
         }
         unsafe {
