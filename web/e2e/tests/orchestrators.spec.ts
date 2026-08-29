@@ -109,8 +109,11 @@ test('orchestrator: create on the page → watched session idles → fire lands 
     )
     .not.toBe('')
 
-  // Create the orchestrator from the page.
+  // Create the orchestrator from the page. A preset fills Goal + Trigger
+  // prompt; both stay editable (the goal is overwritten with a test value).
   await frame.getByTestId('orch-new').click()
+  await frame.getByTestId('orch-preset').selectOption('project-def')
+  await expect(frame.getByTestId('orch-goal')).toHaveValue(/PROJECT_DEFINITION\.md/)
   await frame.getByTestId('orch-name').fill('Ship the widget')
   await frame.getByTestId('orch-goal').fill('Build the widget end to end')
   await frame.getByTestId('orch-folder').selectOption(folder.id)
