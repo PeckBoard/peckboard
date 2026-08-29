@@ -4,13 +4,17 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  * ui-gauge plugin (staged + approved by the e2e harness):
  *
  *  - The global sidebar offers a "UI Gauge" page served by the plugin.
+ *  - The generate-a-baseline controls render (folder + model pickers, the
+ *    Generate button) along with the living overall baseline prompt, which
+ *    starts at its "no validated directives" state.
  *  - The six default categories render in the editor; a bar override
  *    saves and becomes the effective bar.
  *  - Uploading a baseline screenshot (downscaled client-side) with 1-10
  *    rankings adds it to the gallery, image and all.
  *  - The evaluation history starts empty with its explainer.
  *
- * The scoring pipeline itself (rubric → judge → subpar → cards) is
+ * The scoring pipeline and the generation/overall-prompt logic
+ * (rubric → judge → subpar → cards; high ratings → overall prompt) are
  * unit-tested in peck-plugins/ui-gauge; this spec proves the page, the
  * authed routes, and baseline storage end to end.
  */
@@ -69,6 +73,12 @@ test('ui-gauge page: categories, bar override, and a ranked baseline', async ({
   await loginUi(page, baseURL!)
   await page.getByTestId('plugin-sidebar-ui-gauge-ui-gauge').click()
   const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
+
+  // Generation controls + the overall prompt panel render; no directives yet.
+  await expect(frame.getByTestId('gauge-generate')).toBeVisible({ timeout: 15_000 })
+  await expect(frame.getByTestId('gauge-gen-folder')).toBeVisible()
+  await expect(frame.getByTestId('gauge-gen-model')).toBeVisible()
+  await expect(frame.getByTestId('gauge-overall')).toContainText('No validated directives')
 
   // The six default categories render in the editor.
   await expect(frame.locator('[data-cat-key]')).toHaveCount(6, { timeout: 15_000 })
