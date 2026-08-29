@@ -180,6 +180,17 @@ pub struct PluginManifest {
     /// hooks on hot paths (message dispatch) should keep the default.
     #[serde(default)]
     pub call_timeout_secs: Option<u64>,
+    /// How many calls into this plugin may run concurrently, each on its own
+    /// wasm instance (guest memory is per-instance and ephemeral — durable
+    /// state must go through the store host functions). Default 1: calls
+    /// serialize, the behaviour every plugin was written against. Opt in only
+    /// if the plugin's state handling tolerates parallel `handle` calls (no
+    /// read-modify-write races against the store). Clamped at load to
+    /// [1, 4]; the `provider.*` family always runs on its own dedicated
+    /// single instance regardless. Cores older than 0.0.189 ignore this
+    /// field (calls stay serialized).
+    #[serde(default)]
+    pub concurrency: Option<u32>,
     /// Operator-editable settings this plugin declares, rendered by the
     /// Settings UI exactly like a built-in plugin's schema and stored in the
     /// same `plugin_settings` rows the plugin reads back through

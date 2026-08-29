@@ -46,6 +46,13 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// through an outbound HTTP host call, or an `ssh_run` command running up
 /// to its 600s tool-side cap).
 const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(610);
+
+/// Ceiling for a manifest-declared `concurrency` (see
+/// [`crate::plugin::hooks::PluginManifest::concurrency`]): how many pooled
+/// wasm instances one plugin may run concurrent calls on. Each instance
+/// reserves [`MEMORY_RESERVATION_BYTES`] of address space, so the cap bounds
+/// the worst case per plugin.
+const MAX_PLUGIN_CONCURRENCY: u32 = 4;
 /// Default per-call budget for a `provider.send` dispatch (one full agent
 /// turn, HTTP round-trips included). Deliberately ABOVE the normal
 /// 2–180s hook clamp: extism pins the call timeout per instance, so a plugin
@@ -60,6 +67,17 @@ const DEFAULT_PROVIDER_SEND_TIMEOUT: Duration = Duration::from_secs(300);
 /// `sync_plugin_providers` after a `provider.register` dispatch.
 type PendingProviderSlot =
     Arc<std::sync::RwLock<Option<crate::provider::plugin_provider::ProviderRegistration>>>;
+
+/// Builds one wasm instance of a plugin, parameterized by the call budget
+/// and the trusted-context slots that instance's host functions read — the
+/// slots are per-instance so pooled instances never share context state.
+type InstanceBuilder = dyn Fn(
+        Duration,
+        Arc<std::sync::RwLock<Option<crate::plugin::host::InvocationContext>>>,
+        Arc<std::sync::RwLock<Option<crate::plugin::host::UserContext>>>,
+    ) -> anyhow::Result<Plugin>
+    + Send
+    + Sync;
 
 /// The complete set of hook names Peckboard actually dispatches. A
 /// plugin manifest may only register handlers for hooks in this list;
@@ -207,7 +225,12 @@ struct LoadedPlugin {
     /// instance — the plugin's HTTP/MCP/notify surface — responsive while a
     /// turn runs. `None` unless the manifest declares `provider.send`.
     provider_plugin: Option<Arc<Mutex<PluginCell>>>,
-    plugin: Arc<Mutex<PluginCell>>,
+    /// The plugin's non-provider wasm instances. One instance by default
+    /// (calls serialize, the behaviour every plugin was written against);
+    /// grows on contention up to the manifest's `concurrency` cap for
+    /// plugins that opted in. Each pooled instance carries its own trusted
+    /// context slots — see [`PluginInstance`].
+    pool: Arc<PluginPool>,
     /// Canonical (sorted, newline-joined) form of `manifest.hooks` — the
     /// exact string an approval decision is stored and compared against.
     hooks_canonical: String,
@@ -216,17 +239,6 @@ struct LoadedPlugin {
     /// `Some(error)` if `init` was run (on approval) but failed; the plugin
     /// is then treated as inactive even though the hook set was approved.
     init_error: Option<String>,
-    /// Shared with this plugin's scoped host functions: the trusted context of
-    /// the `mcp.tool.invoke` currently running (or `None`). `invoke_mcp_tool`
-    /// sets it from the verified caller context right before calling `handle`
-    /// and clears it after, so the host functions re-derive scope server-side
-    /// rather than from plugin-supplied ids (see [`host::InvocationContext`]).
-    invocation: Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>,
-    /// Shared with this plugin's scoped host functions: the trusted
-    /// authenticated-user context of an in-flight `http.request.authed` request
-    /// (or `None`). `serve_http_authed` sets it from the `require_auth`-verified
-    /// user around the dispatch and clears it after.
-    user: Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
     /// Staging slot the `peckboard_register_provider` host function writes
     /// into. `sync_plugin_providers` clears it, dispatches the plugin's
     /// `provider.register` hook, then applies whatever the plugin staged.
@@ -626,28 +638,178 @@ impl PluginCell {
     }
 }
 
-/// Run `f` against a plugin's instance on a blocking-pool thread, acquiring
-/// the per-plugin lock there. Wasm calls burn real CPU (QuickJS) and host
-/// functions may legitimately block (process exec, sync locks); on an async
-/// worker that starves the runtime — and blocking-only APIs panic outright
-/// (live incident 2026-07-31: an env-var `blocking_lock` inside diff-viewer's
-/// exec host call panicked on a runtime worker and poisoned the extism
-/// instance lock, wedging the plugin). Provider dispatches (`provider.send`
-/// & co) keep their own spawn_blocking shape with custom budgets; every
-/// other hook dispatch funnels through here.
-async fn with_cell_blocking<F>(
-    plugin: Arc<Mutex<PluginCell>>,
-    f: F,
-) -> Result<String, extism::Error>
+/// One pooled wasm instance of a plugin: the extism cell plus the trusted
+/// context slots its host functions read. Slots are per-instance so two
+/// concurrent calls land their contexts on different instances — a call only
+/// ever sees the context of the dispatch that checked its instance out.
+struct PluginInstance {
+    cell: Mutex<PluginCell>,
+    /// See [`super::host::InvocationContext`]; landed by `invoke_mcp_tool`.
+    invocation: Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>,
+    /// See [`super::host::UserContext`]; landed by `serve_http_authed`,
+    /// `dispatch_scoped`, and `dispatch_authed`.
+    user: Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
+}
+
+/// A pool of instances for one plugin's non-provider surface. Dispatch
+/// checks an instance out, runs the wasm call on it (blocking pool), and
+/// returns it on guard drop. The pool starts at one instance and grows on
+/// contention up to `cap` — the manifest's `concurrency`, default 1, so a
+/// plugin must opt in to concurrent calls (guest state is per-instance;
+/// plugins doing read–modify–write against the store would race). The
+/// `provider.*` family runs on its own dedicated instance, never the pool.
+struct PluginPool {
+    /// Idle instances. Invariant: `sem` permits == `idle.len()` — a permit
+    /// is added only after a push, and a pop happens only after an acquire.
+    idle: std::sync::Mutex<Vec<Arc<PluginInstance>>>,
+    sem: Arc<tokio::sync::Semaphore>,
+    /// Instances ever built (idle + checked out); grows monotonically to `cap`.
+    total: std::sync::atomic::AtomicUsize,
+    cap: usize,
+    /// Build + `init` one more instance with its own context slots. Only
+    /// called while the plugin is active (dispatch reaches the pool only
+    /// then), so running `init` unconditionally is correct. Runs on a
+    /// blocking thread.
+    build: Arc<dyn Fn() -> anyhow::Result<PluginInstance> + Send + Sync>,
+}
+
+/// A checked-out instance; hands itself back to the pool on drop, so every
+/// return path (including panics unwinding through the dispatch) checks in.
+struct PooledInstance {
+    pool: Arc<PluginPool>,
+    inst: Option<Arc<PluginInstance>>,
+}
+
+impl PooledInstance {
+    fn instance(&self) -> Arc<PluginInstance> {
+        self.inst.clone().expect("instance present until drop")
+    }
+}
+
+impl Drop for PooledInstance {
+    fn drop(&mut self) {
+        if let Some(inst) = self.inst.take() {
+            self.pool.checkin(inst);
+        }
+    }
+}
+
+impl PluginPool {
+    fn new(
+        cap: usize,
+        first: PluginInstance,
+        build: Arc<dyn Fn() -> anyhow::Result<PluginInstance> + Send + Sync>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            idle: std::sync::Mutex::new(vec![Arc::new(first)]),
+            sem: Arc::new(tokio::sync::Semaphore::new(1)),
+            total: std::sync::atomic::AtomicUsize::new(1),
+            cap: cap.max(1),
+            build,
+        })
+    }
+
+    /// Take an instance: an idle one when available, a freshly built one
+    /// while under `cap`, otherwise wait for a check-in. Never fails — the
+    /// first instance always exists, so waiting always terminates when the
+    /// holder returns it (extism call timeouts bound how long that takes).
+    async fn checkout(self: &Arc<Self>) -> PooledInstance {
+        use std::sync::atomic::Ordering;
+        if let Ok(permit) = self.sem.clone().try_acquire_owned() {
+            permit.forget();
+            let inst = self.pop_idle();
+            return PooledInstance {
+                pool: self.clone(),
+                inst: Some(inst),
+            };
+        }
+        // Contended: grow if the cap allows (reserve the slot first so two
+        // racing checkouts can't both build past the cap).
+        if self
+            .total
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |t| {
+                (t < self.cap).then_some(t + 1)
+            })
+            .is_ok()
+        {
+            let build = self.build.clone();
+            match tokio::task::spawn_blocking(move || build()).await {
+                Ok(Ok(inst)) => {
+                    return PooledInstance {
+                        pool: self.clone(),
+                        inst: Some(Arc::new(inst)),
+                    };
+                }
+                Ok(Err(e)) => {
+                    warn!("plugin pool: building an extra instance failed: {e}");
+                    self.total.fetch_sub(1, Ordering::SeqCst);
+                }
+                Err(e) => {
+                    warn!("plugin pool: instance build task failed: {e}");
+                    self.total.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            // Fall through: wait for an existing instance instead.
+        }
+        let permit = self
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("plugin pool semaphore never closes");
+        permit.forget();
+        let inst = self.pop_idle();
+        PooledInstance {
+            pool: self.clone(),
+            inst: Some(inst),
+        }
+    }
+
+    fn pop_idle(&self) -> Arc<PluginInstance> {
+        self.idle
+            .lock()
+            .expect("plugin pool idle lock")
+            .pop()
+            .expect("a held permit implies an idle instance")
+    }
+
+    fn checkin(&self, inst: Arc<PluginInstance>) {
+        self.idle.lock().expect("plugin pool idle lock").push(inst);
+        self.sem.add_permits(1);
+    }
+
+    /// The instances currently idle — for `init`-on-approval and `shutdown`
+    /// sweeps, which run when no dispatch is in flight.
+    fn idle_snapshot(&self) -> Vec<Arc<PluginInstance>> {
+        self.idle.lock().expect("plugin pool idle lock").clone()
+    }
+}
+
+/// Check an instance out of `pool` and run `f` against it on a blocking-pool
+/// thread. Wasm calls burn real CPU (QuickJS) and host functions may
+/// legitimately block (process exec, sync locks); on an async worker that
+/// starves the runtime — and blocking-only APIs panic outright (live
+/// incident 2026-07-31: an env-var `blocking_lock` inside diff-viewer's exec
+/// host call panicked on a runtime worker and poisoned the extism instance
+/// lock, wedging the plugin). `f` gets the instance too, so context landing
+/// targets the checked-out instance's own slots. Provider dispatches
+/// (`provider.send` & co) keep their own spawn_blocking shape with custom
+/// budgets on the dedicated provider cell; every other hook dispatch funnels
+/// through here.
+async fn with_instance_blocking<F>(pool: Arc<PluginPool>, f: F) -> Result<String, extism::Error>
 where
-    F: FnOnce(&mut PluginCell) -> Result<String, extism::Error> + Send + 'static,
+    F: FnOnce(&PluginInstance, &mut PluginCell) -> Result<String, extism::Error> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let mut guard = plugin.blocking_lock();
-        f(&mut guard)
+    let pooled = pool.checkout().await;
+    let inst = pooled.instance();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut guard = inst.cell.blocking_lock();
+        f(&inst, &mut guard)
     })
     .await
-    .unwrap_or_else(|e| Err(extism::Error::msg(format!("plugin call task failed: {e}"))))
+    .unwrap_or_else(|e| Err(extism::Error::msg(format!("plugin call task failed: {e}"))));
+    drop(pooled);
+    result
 }
 /// Process-global plugin manager for fire-and-forget notification hooks.
 ///
@@ -875,75 +1037,78 @@ impl PluginManager {
         // function actually executes.
         let granted_permissions: Arc<std::sync::RwLock<std::collections::HashSet<String>>> =
             Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
-        // Shared with the plugin's scoped host functions; `invoke_mcp_tool`
-        // populates it per-call (see `LoadedPlugin::invocation`).
+        // Trusted-context slots for the FIRST pooled instance. Every extra
+        // pooled instance — and the dedicated provider instance — gets its
+        // own pair (see `PluginInstance`), so concurrent calls never share
+        // context state.
         let invocation: Arc<std::sync::RwLock<Option<super::host::InvocationContext>>> =
             Arc::new(std::sync::RwLock::new(None));
-        // Shared with the scoped host functions; `serve_http_authed` populates it
-        // per authenticated request (see `LoadedPlugin::user`).
         let user: Arc<std::sync::RwLock<Option<super::host::UserContext>>> =
             Arc::new(std::sync::RwLock::new(None));
         // Staging slot `peckboard_register_provider` writes into; applied by
         // `sync_plugin_providers` after a `provider.register` dispatch.
+        // Shared plugin-wide: registration is idempotent per plugin.
         let pending_provider: PendingProviderSlot = Arc::new(std::sync::RwLock::new(None));
 
-        // Building the sandboxed instance is repeatable: the manifest export
-        // may declare a larger `call_timeout_secs` (Extism pins the call
-        // timeout at construction), and a failed call heals by rebuilding the
-        // instance (see `PluginCell`). The closure owns clones of everything
-        // it needs so the cell can keep it for the plugin's whole life; the
-        // shared slots are captured by Arc, so a rebuilt instance keeps the
-        // exact same permission/invocation/user state the host functions read.
-        let build_plugin: Arc<dyn Fn(Duration) -> anyhow::Result<Plugin> + Send + Sync> = {
+        // Building the sandboxed instance is repeatable AND parameterized by
+        // context slots: the manifest export may declare a larger
+        // `call_timeout_secs` (Extism pins the call timeout at construction),
+        // a failed call heals by rebuilding the instance in place (see
+        // `PluginCell`), and every pooled instance carries its OWN
+        // invocation/user slots so concurrent calls can't clobber each
+        // other's trusted context. The closure owns clones of everything else
+        // it needs; the permission set is shared plugin-wide by Arc, so a
+        // rebuilt or extra instance reads the same grant.
+        let build_plugin: Arc<InstanceBuilder> = {
             let wasm = wasm;
             let db = self.db.clone();
             let name = name.clone();
             let granted_permissions = granted_permissions.clone();
-            let invocation = invocation.clone();
             let live = self.live.clone();
-            let user = user.clone();
             let data_dir = self.data_dir();
             let provider_runtime = self.provider_runtime.clone();
             let provider_registry = self.provider_registry.clone();
             let pending_provider = pending_provider.clone();
-            Arc::new(move |call_timeout: Duration| -> anyhow::Result<Plugin> {
-                let manifest = ExtismManifest::new([wasm.clone()])
-                    .with_timeout(call_timeout)
-                    .with_memory_max(MEMORY_LIMIT_PAGES);
-                let functions = match &db {
-                    // `name` is the plugin's id (its `.wasm` file stem), the same id
-                    // its `plugin_settings` rows are keyed by — so the self-storage
-                    // host functions stay scoped to this plugin's own namespace.
-                    Some(db) => super::host::host_functions(
-                        db,
-                        &name,
-                        granted_permissions.clone(),
-                        invocation.clone(),
-                        live.clone(),
-                        user.clone(),
-                        data_dir.clone(),
-                        provider_runtime.clone(),
-                        pending_provider.clone(),
-                        provider_registry.clone(),
-                    ),
-                    None => Vec::new(),
-                };
-                // Shrink wasmtime's per-memory address-space reservation from the 4 GiB
-                // default down to our growth cap (see `MEMORY_RESERVATION_BYTES`). Built
-                // via `PluginBuilder` so we can hand wasmtime a custom `Config`;
-                // `Plugin::new(manifest, functions, true)` is just this chain without the
-                // config override.
-                let mut wasmtime_config = wasmtime::Config::new();
-                wasmtime_config.memory_reservation(MEMORY_RESERVATION_BYTES);
-                PluginBuilder::new(manifest)
-                    .with_functions(functions)
-                    .with_wasi(true)
-                    .with_wasmtime_config(wasmtime_config)
-                    .build()
-                    .map_err(Into::into)
-            })
+            Arc::new(
+                move |call_timeout: Duration, invocation, user| -> anyhow::Result<Plugin> {
+                    let manifest = ExtismManifest::new([wasm.clone()])
+                        .with_timeout(call_timeout)
+                        .with_memory_max(MEMORY_LIMIT_PAGES);
+                    let functions = match &db {
+                        // `name` is the plugin's id (its `.wasm` file stem), the same id
+                        // its `plugin_settings` rows are keyed by — so the self-storage
+                        // host functions stay scoped to this plugin's own namespace.
+                        Some(db) => super::host::host_functions(
+                            db,
+                            &name,
+                            granted_permissions.clone(),
+                            invocation.clone(),
+                            live.clone(),
+                            user.clone(),
+                            data_dir.clone(),
+                            provider_runtime.clone(),
+                            pending_provider.clone(),
+                            provider_registry.clone(),
+                        ),
+                        None => Vec::new(),
+                    };
+                    // Shrink wasmtime's per-memory address-space reservation from the 4 GiB
+                    // default down to our growth cap (see `MEMORY_RESERVATION_BYTES`). Built
+                    // via `PluginBuilder` so we can hand wasmtime a custom `Config`;
+                    // `Plugin::new(manifest, functions, true)` is just this chain without the
+                    // config override.
+                    let mut wasmtime_config = wasmtime::Config::new();
+                    wasmtime_config.memory_reservation(MEMORY_RESERVATION_BYTES);
+                    PluginBuilder::new(manifest)
+                        .with_functions(functions)
+                        .with_wasi(true)
+                        .with_wasmtime_config(wasmtime_config)
+                        .build()
+                        .map_err(Into::into)
+                },
+            )
         };
-        let mut plugin = build_plugin(CALL_TIMEOUT)?;
+        let mut plugin = build_plugin(CALL_TIMEOUT, invocation.clone(), user.clone())?;
         // Call manifest export to get hook declarations.
         let manifest_json = plugin.call::<&str, String>("manifest", "")?;
         let plugin_manifest: PluginManifest = serde_json::from_str(&manifest_json)?;
@@ -1107,7 +1272,7 @@ impl PluginManager {
             .map(|s| Duration::from_secs(s).clamp(CALL_TIMEOUT, self.max_call_timeout))
             .unwrap_or(CALL_TIMEOUT);
         if call_timeout != CALL_TIMEOUT {
-            plugin = build_plugin(call_timeout)?;
+            plugin = build_plugin(call_timeout, invocation.clone(), user.clone())?;
         }
         // Resolve the operator's stored approval for this exact hook set —
         // a missing decision, or one made against a different hook set,
@@ -1150,26 +1315,83 @@ impl PluginManager {
             .unwrap_or(0);
         let cell = {
             let rebuild = build_plugin.clone();
+            let (inv, usr) = (invocation.clone(), user.clone());
             PluginCell {
                 plugin,
                 name: name.clone(),
                 plugins_dir: self.plugins_dir.clone(),
-                rebuild: Box::new(move || rebuild(call_timeout)),
+                rebuild: Box::new(move || rebuild(call_timeout, inv.clone(), usr.clone())),
                 stats: stats.clone(),
             }
         };
-        // Provider plugins get a SECOND instance dedicated to the
-        // `provider.*` hook family (send/register/models/interrupt), with
-        // the provider-send budget. Shares the plugin's stats cell and the
-        // same host wiring/slots — provider hooks land no user/invocation
-        // context, so nothing races.
+        let first_instance = PluginInstance {
+            cell: Mutex::new(cell),
+            invocation,
+            user,
+        };
+        // How many calls may run concurrently — the manifest's opt-in,
+        // clamped. Default 1: calls serialize, exactly the pre-pool
+        // behaviour every plugin was written against.
+        let concurrency = plugin_manifest
+            .concurrency
+            .unwrap_or(1)
+            .clamp(1, MAX_PLUGIN_CONCURRENCY) as usize;
+        // Builder for extra pooled instances: fresh context slots, same
+        // wiring, and `init` run at build — the pool only grows while the
+        // plugin is active, which implies approved + successfully
+        // initialized.
+        let pool_build: Arc<dyn Fn() -> anyhow::Result<PluginInstance> + Send + Sync> = {
+            let build_plugin = build_plugin.clone();
+            let name = name.clone();
+            let plugins_dir = self.plugins_dir.clone();
+            let stats = stats.clone();
+            Arc::new(move || {
+                let invocation: Arc<std::sync::RwLock<Option<super::host::InvocationContext>>> =
+                    Arc::new(std::sync::RwLock::new(None));
+                let user: Arc<std::sync::RwLock<Option<super::host::UserContext>>> =
+                    Arc::new(std::sync::RwLock::new(None));
+                let mut plugin = build_plugin(call_timeout, invocation.clone(), user.clone())?;
+                let config = read_plugin_config(&plugins_dir, &name);
+                run_init(&mut plugin, config)
+                    .map_err(|e| anyhow::anyhow!("init on pooled instance failed: {e}"))?;
+                let rebuild: Box<dyn Fn() -> anyhow::Result<Plugin> + Send + Sync> = {
+                    let build_plugin = build_plugin.clone();
+                    let (inv, usr) = (invocation.clone(), user.clone());
+                    Box::new(move || build_plugin(call_timeout, inv.clone(), usr.clone()))
+                };
+                Ok(PluginInstance {
+                    cell: Mutex::new(PluginCell {
+                        plugin,
+                        name: name.clone(),
+                        plugins_dir: plugins_dir.clone(),
+                        rebuild,
+                        stats: stats.clone(),
+                    }),
+                    invocation,
+                    user,
+                })
+            })
+        };
+        let pool = PluginPool::new(concurrency, first_instance, pool_build);
+        // Provider plugins get a dedicated instance for the `provider.*`
+        // hook family (send/register/models/interrupt), with the
+        // provider-send budget — NEVER pooled: one turn at a time per
+        // plugin, and `provider.interrupt`'s semantics (it lands once the
+        // in-flight send returns) depend on that. Shares the plugin's stats
+        // cell; its context slots are its own and stay empty (provider hooks
+        // land no user/invocation context).
         let provider_plugin = if plugin_manifest
             .hooks
             .iter()
             .any(|h| h == PROVIDER_SEND_HOOK)
         {
             let provider_timeout = call_timeout.max(self.provider_send_timeout);
-            let mut provider_instance = build_plugin(provider_timeout)?;
+            let p_invocation: Arc<std::sync::RwLock<Option<super::host::InvocationContext>>> =
+                Arc::new(std::sync::RwLock::new(None));
+            let p_user: Arc<std::sync::RwLock<Option<super::host::UserContext>>> =
+                Arc::new(std::sync::RwLock::new(None));
+            let mut provider_instance =
+                build_plugin(provider_timeout, p_invocation.clone(), p_user.clone())?;
             if approval == ApprovalState::Approved && init_error.is_none() {
                 let init_config = read_plugin_config(&self.plugins_dir, &name);
                 if let Err(e) = run_init(&mut provider_instance, init_config) {
@@ -1182,7 +1404,9 @@ impl PluginManager {
                 plugin: provider_instance,
                 name: name.clone(),
                 plugins_dir: self.plugins_dir.clone(),
-                rebuild: Box::new(move || rebuild(provider_timeout)),
+                rebuild: Box::new(move || {
+                    rebuild(provider_timeout, p_invocation.clone(), p_user.clone())
+                }),
                 stats: stats.clone(),
             })))
         } else {
@@ -1191,13 +1415,11 @@ impl PluginManager {
         Ok(LoadedPlugin {
             name,
             manifest: plugin_manifest,
-            plugin: Arc::new(Mutex::new(cell)),
+            pool,
             hooks_canonical,
             approval,
             provider_plugin,
             init_error,
-            invocation,
-            user,
             pending_provider,
             stats,
             wasm_bytes,
@@ -1218,24 +1440,25 @@ impl PluginManager {
     /// can take up to its call timeout (2 s default; a manifest may raise it
     /// via `call_timeout_secs`, clamped to `MAX_CALL_TIMEOUT`).
     pub async fn dispatch(&self, hook: &str, payload: serde_json::Value) -> HookResult {
-        let targets: Vec<(String, Arc<Mutex<PluginCell>>)> = {
+        let targets: Vec<(String, Arc<PluginPool>)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
                 .filter(|p| p.is_active() && p.manifest.hooks.contains(&hook.to_string()))
-                .map(|p| (p.name.clone(), p.plugin.clone()))
+                .map(|p| (p.name.clone(), p.pool.clone()))
                 .collect()
         };
 
         let mut current_payload = payload;
-        for (name, plugin) in targets {
+        for (name, pool) in targets {
             let call_input = serde_json::json!({
                 "hook": hook,
                 "payload": current_payload,
             });
 
             let input = call_input.to_string();
-            let result = with_cell_blocking(plugin, move |cell| cell.call_handle(input)).await;
+            let result =
+                with_instance_blocking(pool, move |_inst, cell| cell.call_handle(input)).await;
 
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
@@ -1295,43 +1518,38 @@ impl PluginManager {
         session_id: Option<String>,
         payload: serde_json::Value,
     ) -> HookResult {
-        type ScopedTarget = (
-            String,
-            Arc<Mutex<PluginCell>>,
-            Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
-        );
-        let targets: Vec<ScopedTarget> = {
+        let targets: Vec<(String, Arc<PluginPool>)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
                 .filter(|p| p.is_active() && p.manifest.hooks.iter().any(|h| h == hook))
-                .map(|p| (p.name.clone(), p.plugin.clone(), p.user.clone()))
+                .map(|p| (p.name.clone(), p.pool.clone()))
                 .collect()
         };
 
         let mut current_payload = payload;
-        for (name, plugin, user_slot) in targets {
+        for (name, pool) in targets {
             let call_input = serde_json::json!({
                 "hook": hook,
                 "payload": current_payload,
             });
             let input = call_input.to_string();
-            let slot = user_slot.clone();
-            // Land the trusted user context only while the call holds the
-            // instance, then clear it before releasing the lock so a
-            // concurrent dispatch can't clobber it mid-call.
+            // Land the trusted user context on the checked-out instance's own
+            // slot only while the call holds it, then clear it before the
+            // instance returns to the pool — so no other dispatch can ever
+            // observe this call's context.
             let ctx = super::host::UserContext {
                 user_id: user_id.to_string(),
                 folder_id: folder_id.clone(),
                 project_id: project_id.clone(),
                 session_id: session_id.clone(),
             };
-            let result = with_cell_blocking(plugin, move |cell| {
-                if let Ok(mut s) = slot.write() {
+            let result = with_instance_blocking(pool, move |inst, cell| {
+                if let Ok(mut s) = inst.user.write() {
                     *s = Some(ctx);
                 }
                 let out = cell.call_handle(input);
-                if let Ok(mut s) = slot.write() {
+                if let Ok(mut s) = inst.user.write() {
                     *s = None;
                 }
                 out
@@ -1382,40 +1600,34 @@ impl PluginManager {
     ///
     /// [`serve_http_authed`]: PluginManager::serve_http_authed
     pub async fn dispatch_authed(&self, hook: &str, user_id: &str, payload: serde_json::Value) {
-        type AuthedTarget = (
-            String,
-            Arc<Mutex<PluginCell>>,
-            Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
-        );
-        let targets: Vec<AuthedTarget> = {
+        let targets: Vec<(String, Arc<PluginPool>)> = {
             let plugins = self.plugins.lock().await;
             plugins
                 .iter()
                 .filter(|p| p.is_active() && p.manifest.hooks.iter().any(|h| h == hook))
-                .map(|p| (p.name.clone(), p.plugin.clone(), p.user.clone()))
+                .map(|p| (p.name.clone(), p.pool.clone()))
                 .collect()
         };
 
         let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
-        for (name, plugin, user_slot) in targets {
+        for (name, pool) in targets {
             let input = call_input.clone();
-            let slot = user_slot.clone();
-            // Land the trusted user context only while the call holds the
-            // instance (a notification carries no request scope), then clear
-            // it before releasing the lock so a concurrent dispatch can't
-            // clobber it mid-call.
+            // Land the trusted user context on the checked-out instance's own
+            // slot only while the call holds it (a notification carries no
+            // request scope), then clear it before the instance returns to
+            // the pool.
             let ctx = super::host::UserContext {
                 user_id: user_id.to_string(),
                 folder_id: None,
                 project_id: None,
                 session_id: None,
             };
-            let result = with_cell_blocking(plugin, move |cell| {
-                if let Ok(mut s) = slot.write() {
+            let result = with_instance_blocking(pool, move |inst, cell| {
+                if let Ok(mut s) = inst.user.write() {
                     *s = Some(ctx);
                 }
                 let out = cell.call_handle(input);
-                if let Ok(mut s) = slot.write() {
+                if let Ok(mut s) = inst.user.write() {
                     *s = None;
                 }
                 out
@@ -1443,24 +1655,24 @@ impl PluginManager {
         let hook = hook.to_string();
         let call_input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
         tokio::spawn(async move {
-            let targets: Vec<(String, Arc<Mutex<PluginCell>>)> = {
+            let targets: Vec<(String, Arc<PluginPool>)> = {
                 let plugins = plugins_ref.lock().await;
                 plugins
                     .iter()
                     .filter(|p| p.is_active() && p.manifest.hooks.iter().any(|h| h == &hook))
-                    .map(|p| (p.name.clone(), p.plugin.clone()))
+                    .map(|p| (p.name.clone(), p.pool.clone()))
                     .collect()
             };
-            for (name, plugin) in targets {
+            for (name, pool) in targets {
                 let input = call_input.clone();
-                let result = with_cell_blocking(plugin, move |cell| cell.call_handle(input)).await;
+                let result =
+                    with_instance_blocking(pool, move |_inst, cell| cell.call_handle(input)).await;
                 if let Err(e) = result {
                     warn!("Plugin '{name}' failed on notify hook '{hook}': {e}");
                 }
             }
         });
     }
-
     /// Run one agent turn on `plugin_id`'s provider by dispatching the
     /// `provider.send` hook. The extism call runs on a dedicated blocking
     /// thread with the provider-send budget (default 300s — deliberately
@@ -1487,11 +1699,9 @@ impl PluginManager {
                         && p.is_active()
                         && p.manifest.hooks.iter().any(|h| h == PROVIDER_SEND_HOOK)
                 })
-                .map(|p| {
-                    p.provider_plugin
-                        .clone()
-                        .unwrap_or_else(|| p.plugin.clone())
-                })
+                // Always the dedicated provider instance — built whenever
+                // the manifest declares provider.send (validated at load).
+                .and_then(|p| p.provider_plugin.clone())
         };
         let Some(plugin) = target else {
             return Err(format!(
@@ -1556,11 +1766,7 @@ impl PluginManager {
                         && p.is_active()
                         && p.manifest.hooks.iter().any(|h| h == PROVIDER_MODELS_HOOK)
                 })
-                .map(|p| {
-                    p.provider_plugin
-                        .clone()
-                        .unwrap_or_else(|| p.plugin.clone())
-                })?
+                .and_then(|p| p.provider_plugin.clone())?
         };
         let provider_id = {
             let owned = self.plugin_providers.lock().await;
@@ -1647,11 +1853,7 @@ impl PluginManager {
                                 .iter()
                                 .any(|h| h == PROVIDER_INTERRUPT_HOOK)
                     })
-                    .map(|p| {
-                        p.provider_plugin
-                            .clone()
-                            .unwrap_or_else(|| p.plugin.clone())
-                    })
+                    .and_then(|p| p.provider_plugin.clone())
             };
             let Some(plugin) = target else {
                 return;
@@ -1725,18 +1927,15 @@ impl PluginManager {
                 .filter(|p| {
                     p.is_active() && p.manifest.hooks.iter().any(|h| h == PROVIDER_REGISTER_HOOK)
                 })
-                .map(|p| {
-                    (
-                        p.name.clone(),
-                        p.provider_plugin
-                            .clone()
-                            .unwrap_or_else(|| p.plugin.clone()),
-                        p.pending_provider.clone(),
-                    )
+                // The dedicated provider instance always exists here: the
+                // register hook requires provider.send (validated at load),
+                // which builds it.
+                .filter_map(|p| {
+                    let cell = p.provider_plugin.clone()?;
+                    Some((p.name.clone(), cell, p.pending_provider.clone()))
                 })
                 .collect()
         };
-
         {
             let mut owned = self.plugin_providers.lock().await;
             // 1. Providers of plugins that are gone or inactive.
@@ -1862,10 +2061,10 @@ impl PluginManager {
     ) -> PluginHttpOutcome {
         // Find which plugins claim a route matching this request, with
         // the path params each pattern captured. Hold the outer lock
-        // only long enough to clone the per-plugin Arc<Mutex<Plugin>>.
-        // (plugin name, plugin handle, captured path params) for each
+        // only long enough to clone the per-plugin pool handle.
+        // (plugin name, instance pool, captured path params) for each
         // plugin whose declared routes match this request.
-        type HttpTarget = (String, Arc<Mutex<PluginCell>>, BTreeMap<String, String>);
+        type HttpTarget = (String, Arc<PluginPool>, BTreeMap<String, String>);
         let targets: Vec<HttpTarget> = {
             let plugins = self.plugins.lock().await;
             plugins
@@ -1878,7 +2077,7 @@ impl PluginManager {
                         .http_routes
                         .iter()
                         .find_map(|route| match_http_route(route, method, path))
-                        .map(|params| (p.name.clone(), p.plugin.clone(), params))
+                        .map(|params| (p.name.clone(), p.pool.clone(), params))
                 })
                 .collect()
         };
@@ -1895,7 +2094,7 @@ impl PluginManager {
             "body": body,
         });
 
-        for (name, plugin, params) in targets {
+        for (name, pool, params) in targets {
             let mut req_payload = payload.clone();
             req_payload["params"] = serde_json::json!(params);
             let call_input = serde_json::json!({
@@ -1904,7 +2103,8 @@ impl PluginManager {
             });
 
             let input = call_input.to_string();
-            let result = with_cell_blocking(plugin, move |cell| cell.call_handle(input)).await;
+            let result =
+                with_instance_blocking(pool, move |_inst, cell| cell.call_handle(input)).await;
 
             match result {
                 Ok(output) => match serde_json::from_str::<Verdict>(&output) {
@@ -1959,12 +2159,7 @@ impl PluginManager {
         headers: &BTreeMap<String, String>,
         body: &str,
     ) -> PluginHttpOutcome {
-        type AuthedTarget = (
-            String,
-            Arc<Mutex<PluginCell>>,
-            BTreeMap<String, String>,
-            Arc<std::sync::RwLock<Option<super::host::UserContext>>>,
-        );
+        type AuthedTarget = (String, Arc<PluginPool>, BTreeMap<String, String>);
         let targets: Vec<AuthedTarget> = {
             let plugins = self.plugins.lock().await;
             plugins
@@ -1975,7 +2170,7 @@ impl PluginManager {
                         .ui_routes
                         .iter()
                         .find_map(|route| match_http_route(route, method, path))
-                        .map(|params| (p.name.clone(), p.plugin.clone(), params, p.user.clone()))
+                        .map(|params| (p.name.clone(), p.pool.clone(), params))
                 })
                 .collect()
         };
@@ -2004,7 +2199,7 @@ impl PluginManager {
         // scope") rather than an error here.
         let scope = self.resolve_authed_scope(headers).await;
 
-        for (name, plugin, params, user_slot) in targets {
+        for (name, pool, params) in targets {
             let mut req_payload = payload.clone();
             req_payload["params"] = serde_json::json!(params);
             let call_input = serde_json::json!({
@@ -2013,22 +2208,22 @@ impl PluginManager {
             });
 
             let input = call_input.to_string();
-            let slot = user_slot.clone();
-            // Land the trusted user context only while the call holds the
-            // instance, then clear it before releasing the lock — so a
-            // concurrent authed request can't clobber it mid-call.
+            // Land the trusted user context on the checked-out instance's own
+            // slot only while the call holds it, then clear it before the
+            // instance returns to the pool — so a concurrent authed request
+            // can't observe it.
             let ctx = super::host::UserContext {
                 user_id: user_id.to_string(),
                 folder_id: scope.folder_id.clone(),
                 project_id: scope.project_id.clone(),
                 session_id: scope.session_id.clone(),
             };
-            let result = with_cell_blocking(plugin, move |cell| {
-                if let Ok(mut s) = slot.write() {
+            let result = with_instance_blocking(pool, move |inst, cell| {
+                if let Ok(mut s) = inst.user.write() {
                     *s = Some(ctx);
                 }
                 let out = cell.call_handle(input);
-                if let Ok(mut s) = slot.write() {
+                if let Ok(mut s) = inst.user.write() {
                     *s = None;
                 }
                 out
@@ -2165,13 +2360,13 @@ impl PluginManager {
             let plugins = self.plugins.lock().await;
             plugins.iter().find(|p| p.name == plugin_id).map(|p| {
                 (
-                    p.plugin.clone(),
+                    p.pool.clone(),
                     p.provider_plugin.clone(),
                     p.hooks_canonical.clone(),
                 )
             })
         };
-        let Some((plugin, provider_plugin, hooks_canonical)) = target else {
+        let Some((pool, provider_plugin, hooks_canonical)) = target else {
             return Ok(None);
         };
 
@@ -2185,19 +2380,18 @@ impl PluginManager {
                 .await?;
         }
 
-        // Approving runs the deferred `init`; denying leaves the plugin
-        // inert with `init` never run.
-        // Approving runs the deferred `init` — on the provider instance too,
-        // when the plugin has one; denying leaves the plugin inert with
-        // `init` never run.
+        // Approving runs the deferred `init` — on every pooled instance (the
+        // plugin was inert until now, so they are all idle; in practice just
+        // the first) and on the provider instance too, when the plugin has
+        // one. Denying leaves the plugin inert with `init` never run.
         let mut init_error = None;
         let new_state = if approve {
             let init_config = read_plugin_config(&self.plugins_dir, plugin_id);
-            {
-                let mut guard = plugin.lock().await;
+            for inst in pool.idle_snapshot() {
+                let mut guard = inst.cell.lock().await;
                 if let Err(e) = run_init(&mut guard.plugin, init_config.clone()) {
                     warn!("Plugin '{plugin_id}' init failed on approval: {e}");
-                    init_error = Some(e);
+                    init_error = init_error.or(Some(e));
                 }
             }
             if let Some(pp) = provider_plugin {
@@ -2263,9 +2457,11 @@ impl PluginManager {
             let mut plugins = self.plugins.lock().await;
             if let Some(pos) = plugins.iter().position(|p| p.name == loaded.name) {
                 let old = plugins.remove(pos);
-                let mut guard = old.plugin.lock().await;
-                if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
-                    warn!("Plugin '{}' shutdown on upgrade failed: {e}", loaded.name);
+                for inst in old.pool.idle_snapshot() {
+                    let mut guard = inst.cell.lock().await;
+                    if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
+                        warn!("Plugin '{}' shutdown on upgrade failed: {e}", loaded.name);
+                    }
                 }
             }
             plugins.push(loaded);
@@ -2368,9 +2564,11 @@ impl PluginManager {
             match plugins.iter().position(|p| p.name == id) {
                 Some(pos) => {
                     let old = plugins.remove(pos);
-                    let mut guard = old.plugin.lock().await;
-                    if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
-                        warn!("Plugin '{id}' shutdown on uninstall failed: {e}");
+                    for inst in old.pool.idle_snapshot() {
+                        let mut guard = inst.cell.lock().await;
+                        if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
+                            warn!("Plugin '{id}' shutdown on uninstall failed: {e}");
+                        }
                     }
                     true
                 }
@@ -2404,9 +2602,11 @@ impl PluginManager {
     pub async fn shutdown(&self) {
         let mut plugins = self.plugins.lock().await;
         for loaded in plugins.iter() {
-            let mut guard = loaded.plugin.lock().await;
-            if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
-                warn!("Plugin '{}' shutdown failed: {e}", loaded.name);
+            for inst in loaded.pool.idle_snapshot() {
+                let mut guard = inst.cell.lock().await;
+                if let Err(e) = guard.plugin.call::<&str, String>("shutdown", "") {
+                    warn!("Plugin '{}' shutdown failed: {e}", loaded.name);
+                }
             }
         }
         plugins.clear();
@@ -2576,10 +2776,9 @@ impl PluginManager {
         context: serde_json::Value,
     ) -> Option<anyhow::Result<serde_json::Value>> {
         // Find the single active plugin that declared this tool. Hold the
-        // outer lock only long enough to clone its handle.
-        type InvocationSlot = Arc<std::sync::RwLock<Option<super::host::InvocationContext>>>;
-        // (name, plugin cell, invocation slot, has `ssh`, has `ssh_keys`)
-        type PluginTarget = (String, Arc<Mutex<PluginCell>>, InvocationSlot, bool, bool);
+        // outer lock only long enough to clone its pool handle.
+        // (name, instance pool, has `ssh`, has `ssh_keys`)
+        type PluginTarget = (String, Arc<PluginPool>, bool, bool);
         let target: Option<PluginTarget> = {
             let plugins = self.plugins.lock().await;
             plugins
@@ -2588,8 +2787,7 @@ impl PluginManager {
                 .map(|p| {
                     (
                         p.name.clone(),
-                        p.plugin.clone(),
-                        p.invocation.clone(),
+                        p.pool.clone(),
                         p.manifest
                             .permissions
                             .iter()
@@ -2601,7 +2799,7 @@ impl PluginManager {
                     )
                 })
         };
-        let (name, plugin, invocation, has_ssh, has_ssh_keys) = target?;
+        let (name, pool, has_ssh, has_ssh_keys) = target?;
 
         // The *trusted* caller context, parsed once. It comes from `context` —
         // built by `routes/mcp.rs` from the verified `ToolCallContext` — so the
@@ -2632,23 +2830,23 @@ impl PluginManager {
                 "payload": &payload,
             });
 
-            // The instance lock is held only across the guest call — on a
-            // blocking thread (see `with_cell_blocking`). The trusted context
-            // is landed and cleared *inside* the lock so its lifetime matches
-            // exactly this call (see `caller_ctx`).
+            // The instance is checked out only across the guest call — on a
+            // blocking thread (see `with_instance_blocking`). The trusted
+            // context is landed and cleared on the checked-out instance's own
+            // slot, inside the checkout, so its lifetime matches exactly this
+            // call (see `caller_ctx`).
             let output = {
                 let input = call_input.to_string();
-                let plugin = plugin.clone();
-                let invocation = invocation.clone();
+                let pool = pool.clone();
                 let ctx = caller_ctx.clone();
-                with_cell_blocking(plugin, move |cell| {
+                with_instance_blocking(pool, move |inst, cell| {
                     if let Some(ctx) = ctx
-                        && let Ok(mut slot) = invocation.write()
+                        && let Ok(mut slot) = inst.invocation.write()
                     {
                         *slot = Some(ctx);
                     }
                     let out = cell.call_handle(input);
-                    if let Ok(mut slot) = invocation.write() {
+                    if let Ok(mut slot) = inst.invocation.write() {
                         *slot = None;
                     }
                     out
@@ -2975,6 +3173,160 @@ fn error_outcome(status: u16, message: &str) -> PluginHttpOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A `PluginInstance` whose wasm is the minimal empty module. Pool
+    /// checkout/checkin/growth never call into the guest, so an empty module
+    /// is enough to exercise the pool's bookkeeping with real `Plugin`s.
+    fn stub_instance() -> PluginInstance {
+        // wasm magic + version: `(module)`.
+        let empty_wasm: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let plugin = Plugin::new(
+            ExtismManifest::new([Wasm::data(empty_wasm.to_vec())]),
+            Vec::new(),
+            true,
+        )
+        .expect("empty module loads");
+        PluginInstance {
+            cell: Mutex::new(PluginCell {
+                plugin,
+                name: "stub".into(),
+                plugins_dir: std::env::temp_dir(),
+                rebuild: Box::new(|| Err(anyhow::anyhow!("stub: no rebuild"))),
+                stats: Arc::new(PluginRuntimeStats::default()),
+            }),
+            invocation: Arc::new(std::sync::RwLock::new(None)),
+            user: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    fn stub_pool(cap: usize, builds: Arc<std::sync::atomic::AtomicUsize>) -> Arc<PluginPool> {
+        PluginPool::new(
+            cap,
+            stub_instance(),
+            Arc::new(move || {
+                builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(stub_instance())
+            }),
+        )
+    }
+
+    /// Default (cap 1): a second checkout waits for the first to check in —
+    /// exactly the pre-pool serialized behaviour.
+    #[tokio::test]
+    async fn pool_cap_one_serializes() {
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = stub_pool(1, builds.clone());
+        let held = pool.checkout().await;
+        let second = tokio::time::timeout(Duration::from_millis(50), pool.checkout()).await;
+        assert!(
+            second.is_err(),
+            "cap-1 pool must not hand out a second instance"
+        );
+        drop(held);
+        let after = tokio::time::timeout(Duration::from_millis(200), pool.checkout()).await;
+        assert!(after.is_ok(), "check-in must release the waiter");
+        assert_eq!(
+            builds.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cap 1 never grows"
+        );
+    }
+
+    /// Opt-in (cap 2): contention builds a second instance — concurrent
+    /// checkouts hold two distinct instances — and the pool reuses them
+    /// afterwards instead of building more.
+    #[tokio::test]
+    async fn pool_grows_on_contention_and_reuses() {
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = stub_pool(2, builds.clone());
+        let a = pool.checkout().await;
+        let b = pool.checkout().await; // contended -> grows
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            !Arc::ptr_eq(&a.instance(), &b.instance()),
+            "concurrent checkouts must hold distinct instances"
+        );
+        // Cap reached: a third checkout waits.
+        let third = tokio::time::timeout(Duration::from_millis(50), pool.checkout()).await;
+        assert!(
+            third.is_err(),
+            "cap-2 pool must not hand out a third instance"
+        );
+        drop(a);
+        drop(b);
+        // Reuse, not growth.
+        let c = pool.checkout().await;
+        let d = pool.checkout().await;
+        assert_eq!(
+            builds.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "idle instances are reused"
+        );
+        drop(c);
+        drop(d);
+    }
+
+    /// A failed growth build falls back to waiting for an existing instance
+    /// instead of failing the dispatch.
+    #[tokio::test]
+    async fn pool_build_failure_falls_back_to_waiting() {
+        let pool = PluginPool::new(
+            2,
+            stub_instance(),
+            Arc::new(|| Err(anyhow::anyhow!("boom"))),
+        );
+        let held = pool.checkout().await;
+        let waiter = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.checkout().await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "failed build must wait, not error");
+        drop(held);
+        let got = tokio::time::timeout(Duration::from_millis(500), waiter).await;
+        assert!(
+            got.is_ok_and(|j| j.is_ok()),
+            "waiter gets the returned instance"
+        );
+    }
+
+    /// Each pooled instance owns its context slots — landing a context on one
+    /// never shows up on the other. This is the invariant that makes
+    /// concurrent scoped dispatch safe.
+    #[tokio::test]
+    async fn pool_instances_have_isolated_context_slots() {
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = stub_pool(2, builds.clone());
+        let a = pool.checkout().await;
+        let b = pool.checkout().await;
+        *a.instance().user.write().unwrap() = Some(super::super::host::UserContext {
+            user_id: "u1".into(),
+            folder_id: None,
+            project_id: None,
+            session_id: None,
+        });
+        assert!(
+            b.instance().user.read().unwrap().is_none(),
+            "context landed on one instance must be invisible on the other"
+        );
+        *a.instance().user.write().unwrap() = None;
+    }
+
+    /// The manifest `concurrency` field parses, defaults to None, and
+    /// unknown manifest fields stay tolerated — the compatibility story for
+    /// plugins declaring `concurrency` on cores that predate it.
+    #[test]
+    fn manifest_concurrency_parses_and_unknown_fields_ignored() {
+        let m: PluginManifest = serde_json::from_str(
+            r#"{"description":"d","version":"1","repository":"r","hooks":[],"concurrency":4}"#,
+        )
+        .unwrap();
+        assert_eq!(m.concurrency, Some(4));
+        let m: PluginManifest = serde_json::from_str(
+            r#"{"description":"d","version":"1","repository":"r","hooks":[],"some_future_field":true}"#,
+        )
+        .unwrap();
+        assert_eq!(m.concurrency, None);
+    }
 
     /// The hook allowlist is a security boundary (see the doc comment on
     /// `ALLOWED_HOOKS`): only hooks listed here ever run plugin code.
@@ -3157,6 +3509,7 @@ mod tests {
             folder_items: Vec::new(),
             permissions,
             call_timeout_secs: None,
+            concurrency: None,
             settings: Vec::new(),
         }
     }

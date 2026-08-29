@@ -17,6 +17,33 @@ The Extism runtime is compiled into the Peckboard binary. Plugins are the only e
 3. Plugins declare which hooks they want to handle via a manifest function
 4. On shutdown, all plugin instances are torn down
 
+## Concurrency Model
+
+By default every call into a plugin serializes: one wasm instance per
+plugin, checked out per call. A plugin may opt in to concurrent calls by
+declaring `"concurrency": N` in its manifest (clamped to 1–4; cores older
+than 0.0.189 ignore the field). The host then keeps a pool of up to N
+instances of that plugin and runs calls on them in parallel — grown lazily
+on contention, each instance built and `init`-ed like the first.
+
+What opting in means for a plugin author:
+
+- **Guest memory is per-instance and ephemeral.** It already was — a
+  trapped call heals by rebuilding the instance — but with a pool two
+  consecutive calls routinely land on different instances. Durable state
+  must go through the store host functions.
+- **Store writes can interleave.** Two concurrent `handle` calls doing
+  load → modify → save on the same document will lose one update. Opt in
+  only if your same-document writes are last-write-wins tolerant or
+  guarded by your own scheme.
+- **Trusted contexts stay isolated.** Each pooled instance carries its own
+  invocation/user context slots; a call only ever observes the context of
+  the dispatch that checked its instance out.
+- **The `provider.*` family is never pooled.** Provider hooks run on a
+  dedicated single instance with the provider-send budget: one turn at a
+  time per plugin, and `provider.interrupt` deliberately lands only after
+  the in-flight send returns.
+
 ## Hook Model
 
 Every hookable operation follows the same pattern:

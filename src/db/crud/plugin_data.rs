@@ -51,6 +51,66 @@ impl Db {
             Ok(())
         })
     }
+    /// Insert one document only if its key is absent — or if the existing
+    /// row is older than `ttl_secs` (0 = never steal). Runs as one blocking
+    /// DB call on the shared connection, so concurrent callers serialize and
+    /// exactly one acquires. This is the primitive behind the
+    /// `peckboard_store_put_if_absent` host function — the cross-instance
+    /// mutex/lease for plugins that opt in to manifest `concurrency`, whose
+    /// pooled instances share no guest memory to lock with. The TTL exists
+    /// so a holder that dies mid-critical-section (trap, timeout) leaks the
+    /// lease for at most `ttl_secs`.
+    pub(crate) fn plugin_store_put_if_absent_blocking(
+        &self,
+        plugin_id: &str,
+        collection: &str,
+        key: &str,
+        data: &str,
+        ttl_secs: u64,
+    ) -> anyhow::Result<bool> {
+        let now = chrono::Utc::now();
+        let row = PluginDataRow {
+            plugin_id: plugin_id.to_string(),
+            collection: collection.to_string(),
+            key: key.to_string(),
+            data: data.to_string(),
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+        };
+        self.with_conn_blocking(move |conn| {
+            let inserted = diesel::insert_into(plugin_data::table)
+                .values(&row)
+                .on_conflict((
+                    plugin_data::plugin_id,
+                    plugin_data::collection,
+                    plugin_data::key,
+                ))
+                .do_nothing()
+                .execute(conn)?;
+            if inserted > 0 {
+                return Ok(true);
+            }
+            if ttl_secs == 0 {
+                return Ok(false);
+            }
+            // Steal only a stale row. `to_rfc3339` always renders UTC with
+            // the same offset format, so the lexicographic comparison is a
+            // chronological one.
+            let cutoff = (now - chrono::Duration::seconds(ttl_secs.min(i64::MAX as u64) as i64))
+                .to_rfc3339();
+            let n = diesel::update(
+                plugin_data::table
+                    .find((&row.plugin_id, &row.collection, &row.key))
+                    .filter(plugin_data::updated_at.lt(&cutoff)),
+            )
+            .set((
+                plugin_data::data.eq(&row.data),
+                plugin_data::updated_at.eq(&row.updated_at),
+            ))
+            .execute(conn)?;
+            Ok(n > 0)
+        })
+    }
 
     /// Read one document's raw JSON, or `None` if absent.
     pub(crate) fn plugin_store_get_blocking(
@@ -216,6 +276,62 @@ mod tests {
             db.plugin_store_get_blocking("other", "decisions", "d1")
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn store_put_if_absent_acquires_once_and_steals_only_stale() {
+        let db = Db::in_memory().unwrap();
+        assert!(
+            db.plugin_store_put_if_absent_blocking("p", "locks", "orch-1", r#"{"t":1}"#, 60)
+                .unwrap(),
+            "absent key acquires"
+        );
+        assert!(
+            !db.plugin_store_put_if_absent_blocking("p", "locks", "orch-1", r#"{"t":2}"#, 60)
+                .unwrap(),
+            "fresh holder is not displaced"
+        );
+        assert!(
+            !db.plugin_store_put_if_absent_blocking("p", "locks", "orch-1", r#"{"t":3}"#, 0)
+                .unwrap(),
+            "ttl 0 never steals"
+        );
+        // The winner's payload survives the losing attempts.
+        assert_eq!(
+            db.plugin_store_get_blocking("p", "locks", "orch-1")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"t":1}"#)
+        );
+        // A stale row (holder died) is stolen once its ttl passes — backdate
+        // the row instead of sleeping.
+        {
+            use diesel::prelude::*;
+            let old = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+            db.with_conn_blocking(move |conn| {
+                diesel::update(
+                    crate::db::schema::plugin_data::table.find(("p", "locks", "orch-1")),
+                )
+                .set(crate::db::schema::plugin_data::updated_at.eq(&old))
+                .execute(conn)?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(
+            db.plugin_store_put_if_absent_blocking("p", "locks", "orch-1", r#"{"t":4}"#, 60)
+                .unwrap(),
+            "stale holder is stolen"
+        );
+        // Released (deleted) locks acquire cleanly again.
+        assert!(
+            db.plugin_store_delete_blocking("p", "locks", "orch-1")
+                .unwrap()
+        );
+        assert!(
+            db.plugin_store_put_if_absent_blocking("p", "locks", "orch-1", r#"{"t":5}"#, 60)
+                .unwrap()
         );
     }
 

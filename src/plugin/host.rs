@@ -752,6 +752,16 @@ struct StorePutRequest {
 }
 
 #[derive(Deserialize)]
+struct StorePutIfAbsentRequest {
+    collection: String,
+    key: String,
+    data: serde_json::Value,
+    /// Steal an existing row older than this many seconds (0 = never).
+    #[serde(default)]
+    ttl_secs: u64,
+}
+
+#[derive(Deserialize)]
 struct StoreKeyRequest {
     collection: String,
     key: String,
@@ -829,6 +839,36 @@ pub(crate) fn store_put_impl(db: &Db, plugin_id: &str, input: &str) -> String {
     };
     match db.plugin_store_put_blocking(plugin_id, req.collection.trim(), req.key.trim(), &data) {
         Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+        Err(e) => error_json(e),
+    }
+}
+
+/// Atomic put-if-absent — the cross-instance mutex/lease for plugins that
+/// opt in to manifest `concurrency` (pooled instances share no guest memory
+/// to lock with). `acquired: true` means this caller owns the key until it
+/// deletes it or, when `ttl_secs > 0`, a later caller steals it stale.
+pub(crate) fn store_put_if_absent_impl(db: &Db, plugin_id: &str, input: &str) -> String {
+    let req: StorePutIfAbsentRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    for (label, v) in [("collection", &req.collection), ("key", &req.key)] {
+        if let Err(e) = validate_id(label, v) {
+            return error_json(e);
+        }
+    }
+    let data = match encode_doc(&req.data) {
+        Ok(d) => d,
+        Err(e) => return error_json(e),
+    };
+    match db.plugin_store_put_if_absent_blocking(
+        plugin_id,
+        req.collection.trim(),
+        req.key.trim(),
+        &data,
+        req.ttl_secs,
+    ) {
+        Ok(acquired) => serde_json::json!({ "acquired": acquired }).to_string(),
         Err(e) => error_json(e),
     }
 }
@@ -3479,6 +3519,12 @@ host_fn!(peckboard_store_put(user_data: HostState; input: String) -> String {
     Ok(store_put_impl(&db, &plugin_id, &input))
 });
 
+host_fn!(peckboard_store_put_if_absent(user_data: HostState; input: String) -> String {
+    let (db, plugin_id, ok) = state_and_permission(&user_data, "data_store")?;
+    if !ok { return Ok(error_json("plugin lacks the 'data_store' permission")); }
+    Ok(store_put_if_absent_impl(&db, &plugin_id, &input))
+});
+
 host_fn!(peckboard_store_get(user_data: HostState; input: String) -> String {
     let (db, plugin_id, ok) = state_and_permission(&user_data, "data_store")?;
     if !ok { return Ok(error_json("plugin lacks the 'data_store' permission")); }
@@ -4154,6 +4200,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_store_put,
+        ),
+        Function::new(
+            "peckboard_store_put_if_absent",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_store_put_if_absent,
         ),
         Function::new(
             "peckboard_store_get",
