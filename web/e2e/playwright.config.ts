@@ -60,9 +60,28 @@ const pluginsSrcRoots = [
   path.resolve(e2eDir, '..', '..', 'peck-plugins'),
   path.resolve(e2eDir, '..', '..', '..', 'peck-plugins'),
 ]
-for (const plugin of ['openai-compat', 'chicken-coop', 'app-manager', 'project-planner']) {
+// A JS-toolchain plugin ships `dist/plugin.wasm`; a Rust plugin's artifact
+// is `target/wasm32-unknown-unknown/release/peckboard_<id>_plugin.wasm`.
+const artifactCandidates = (plugin: string) => [
+  path.join(plugin, 'dist', 'plugin.wasm'),
+  path.join(
+    plugin,
+    'target',
+    'wasm32-unknown-unknown',
+    'release',
+    `peckboard_${plugin.replace(/-/g, '_')}_plugin.wasm`,
+  ),
+]
+for (const plugin of [
+  'openai-compat',
+  'chicken-coop',
+  'app-manager',
+  'project-planner',
+  'session-control',
+  'ui-gauge',
+]) {
   const wasm = pluginsSrcRoots
-    .map((root) => path.join(root, plugin, 'dist', 'plugin.wasm'))
+    .flatMap((root) => artifactCandidates(plugin).map((rel) => path.join(root, rel)))
     .find((candidate) => existsSync(candidate))
   if (wasm) {
     const pluginsDir = path.join(DATA_DIR, 'plugins')

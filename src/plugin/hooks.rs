@@ -415,6 +415,11 @@ pub const PROJECT_PAUSED_HOOK: &str = "project.paused";
 /// 200 characters of the question text.
 pub const QUESTION_PENDING_HOOK: &str = "question.pending";
 
+/// Fired periodically (every ~30s, alongside the repeating-task scheduler
+/// tick) so a plugin can run its own scheduled work — check due timers,
+/// watchdogs, and deadlines — without core knowing about any of them.
+/// Notification only. Payload: `{ now }` (RFC 3339).
+pub const TIMER_TICK_HOOK: &str = "timer.tick";
 /// Dispatched (per declaring plugin) when core wants the plugin to register
 /// its AI provider: at startup after plugins load, and again whenever the
 /// plugin set changes (approve/deny, install, uninstall). The plugin responds

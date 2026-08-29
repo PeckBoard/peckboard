@@ -143,7 +143,10 @@ test('plugin UI panel opens its plugin-served page in a sandboxed iframe', async
   // Sandboxed WITHOUT allow-same-origin: the plugin page can't reach the
   // host app's session token. This is the trust boundary for embedded
   // plugin pages — pin it so it can't silently regress.
-  await expect(frameEl).toHaveAttribute('sandbox', 'allow-scripts allow-forms allow-popups')
+  await expect(frameEl).toHaveAttribute(
+    'sandbox',
+    'allow-scripts allow-forms allow-popups allow-downloads',
+  )
 
   // The plugin-served page actually loads inside the iframe.
   const frame = page.frameLocator('[data-testid="plugin-panel-frame"]')

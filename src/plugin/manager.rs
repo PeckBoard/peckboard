@@ -104,6 +104,7 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "session.prehatch.cancel",
     "session.reference.resolve",
     "session.user.answer",
+    "timer.tick",
     "todo",
     "worker.blocked",
 ];
@@ -134,8 +135,9 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "ssh_keys", // peckboard_ssh_key_list, and Auth::KeyRef in peckboard_ssh_* — list vault-key METADATA and use a vault key by id; never exposes private key material, ciphertext, nonce, or passphrase
     "session_dispatch", // peckboard_dispatch_capture / resume_session
     "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — same-folder free; cross-folder needs Always/Once
-    "session_read",    // peckboard_get_session / list_sessions
-    "session_write",   // peckboard_create_session / update_session
+    "session_orchestrate", // peckboard_orchestrate_send / _create_session / _set_prompt / _session_state — unattended session control from lifecycle dispatches (timer.tick, session.agent.ended): folder-blind, no per-call approval; the user grants it once at plugin approval
+    "session_read",        // peckboard_get_session / list_sessions
+    "session_write",       // peckboard_create_session / update_session
     "session_prompt_write", // peckboard_set_session_system_prompt — set/clear a visible session's standing instructions
     "user_authority",       // serve authenticated UI + act under the user (ui_routes)
     "worker_questions", // peckboard_session_questions / peckboard_answer_question — read pending user questions (full payloads) and resolve them under user authority
@@ -2994,7 +2996,7 @@ mod tests {
             "card.priorities.list",
             "http.request.before",
             "mcp.tool.call.before",
-            "mcp.tool.call.before",
+            "mcp.tool.invoke",
             "provider.interrupt",
             "provider.models",
             "provider.register",
@@ -3004,6 +3006,7 @@ mod tests {
             "session.message.before",
             "session.prehatch.cancel",
             "session.reference.resolve",
+            "timer.tick",
             "todo",
             "worker.blocked",
         ] {
@@ -3017,6 +3020,7 @@ mod tests {
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_REGISTER_HOOK));
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_SEND_HOOK));
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_MODELS_HOOK));
+        assert!(ALLOWED_HOOKS.contains(&crate::plugin::hooks::TIMER_TICK_HOOK));
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_INTERRUPT_HOOK));
     }
 

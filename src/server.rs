@@ -268,6 +268,9 @@ pub async fn run_server(
                     auditor: &sched_state.run_auditor,
                 };
                 sched_state.repeating_task_manager.run_due_tasks(ctx).await;
+                // Give plugins their scheduler tick on the same cadence
+                // (`timer.tick` — notification only, fire-and-forget).
+                crate::plugin::notify::fire_timer_tick(chrono::Utc::now());
             }
         });
         tracing::info!("Repeating-task scheduler started (30s interval)");

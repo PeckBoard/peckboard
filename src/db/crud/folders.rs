@@ -82,6 +82,17 @@ impl Db {
         })
         .await
     }
+    /// Synchronous twin of [`Db::list_folders`] for the WASM plugin host
+    /// functions.
+    pub(crate) fn list_folders_blocking(&self) -> anyhow::Result<Vec<Folder>> {
+        self.with_conn_blocking(move |conn| {
+            folders::table
+                .select(Folder::as_select())
+                .order(folders::name.asc())
+                .load(conn)
+                .map_err(Into::into)
+        })
+    }
 
     pub async fn delete_folder(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();

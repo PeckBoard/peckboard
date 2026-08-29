@@ -6,7 +6,7 @@
 
 use serde_json::json;
 
-use super::hooks::{CARD_STEP_AFTER_HOOK, SESSION_AGENT_ENDED_HOOK};
+use super::hooks::{CARD_STEP_AFTER_HOOK, SESSION_AGENT_ENDED_HOOK, TIMER_TICK_HOOK};
 use super::manager::notify;
 
 // ── card.step.after ─────────────────────────────────────────────────────────
@@ -121,6 +121,15 @@ pub fn project_paused_payload(
     })
 }
 
+// ── timer.tick ─────────────────────────────────────────────────────────────────
+
+pub fn timer_tick_payload(now: chrono::DateTime<chrono::Utc>) -> serde_json::Value {
+    json!({ "now": now.to_rfc3339() })
+}
+
+pub fn fire_timer_tick(now: chrono::DateTime<chrono::Utc>) {
+    notify(TIMER_TICK_HOOK, timer_tick_payload(now));
+}
 // ── question.pending ─────────────────────────────────────────────────────────
 
 pub fn question_pending_payload(
@@ -209,5 +218,12 @@ mod tests {
         let v = question_pending_payload("s1", "Chat", "What should I do?");
         assert_eq!(v["session_id"], "s1");
         assert_eq!(v["preview"], "What should I do?");
+    }
+
+    #[test]
+    fn timer_tick_payload_shape() {
+        let now = chrono::Utc::now();
+        let v = timer_tick_payload(now);
+        assert_eq!(v["now"], now.to_rfc3339());
     }
 }

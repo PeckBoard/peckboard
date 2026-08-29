@@ -406,6 +406,22 @@ pub(crate) fn list_projects_impl(db: &Db) -> String {
     }
 }
 
+/// Folder metadata for pickers (id, name, path). Ungated like
+/// `list_projects_impl` — folder rows carry no secrets and every loaded
+/// plugin is already trusted to run in-process.
+pub(crate) fn list_folders_impl(db: &Db) -> String {
+    match db.list_folders_blocking() {
+        Ok(folders) => {
+            let folders: Vec<serde_json::Value> = folders
+                .into_iter()
+                .map(|f| serde_json::json!({ "id": f.id, "name": f.name, "path": f.path }))
+                .collect();
+            serde_json::json!({ "folders": folders }).to_string()
+        }
+        Err(e) => error_json(e),
+    }
+}
+
 /// `peckboard_list_models` — the model catalog a plugin may offer for
 /// session creation, across every non-hidden provider. THINKING MODELS ONLY,
 /// filtered server-side: a non-thinking model must not be selectable at all,
@@ -2063,6 +2079,172 @@ pub(crate) fn send_message_impl(
     serde_json::json!({ "ok": true, "session_id": sid, "attachments": count }).to_string()
 }
 
+// ── Orchestrate: unattended session control (gated, context-free) ────
+//
+// `session_orchestrate` is a STANDING grant: approving a plugin that
+// requests it authorizes these actions with no caller context at all, so
+// they work from lifecycle dispatches (`timer.tick`, `session.agent.ended`)
+// where the context-checked twins above refuse. Folder-blind by design — an
+// orchestrating plugin acts on sessions the user configured, not on a
+// caller's behalf — so there is no per-call cross-folder gate; the
+// permission itself is the approval surface. Deliberately a separate,
+// minimal quartet rather than a relaxation of the existing gates: the
+// context-checked functions stay context-checked.
+
+#[derive(Deserialize)]
+struct OrchestrateSendRequest {
+    session_id: String,
+    text: String,
+}
+
+pub(crate) fn orchestrate_send_impl(
+    db: &Db,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    let req: OrchestrateSendRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    if req.text.trim().is_empty() {
+        return error_json("orchestrate_send requires non-empty text");
+    }
+    let target = match require_session(db, &req.session_id) {
+        Ok(s) => s,
+        Err(e) => return error_json(e),
+    };
+    let Some(live) = live else {
+        return error_json("live control unavailable");
+    };
+    live.send_message(target.id.clone(), req.text, Vec::new());
+    serde_json::json!({ "ok": true, "session_id": target.id }).to_string()
+}
+
+#[derive(Deserialize)]
+struct OrchestrateCreateSessionRequest {
+    folder_id: String,
+    name: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+}
+
+pub(crate) fn orchestrate_create_session_impl(db: &Db, input: &str) -> String {
+    let req: OrchestrateCreateSessionRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    if req.name.trim().is_empty() {
+        return error_json("name is required");
+    }
+    // The folder must be named explicitly (no caller scope to inherit) and
+    // must exist — a typo'd id would otherwise create an unreachable session.
+    match db.get_folder_blocking(req.folder_id.trim()) {
+        Ok(Some(_)) => {}
+        Ok(None) => return error_json(format!("folder not found: {}", req.folder_id.trim())),
+        Err(e) => return error_json(e.to_string()),
+    }
+    // Mirror create_session_impl's cap so a runaway prompt can't bloat the row.
+    if let Some(ref sp) = req.system_prompt
+        && sp.len() > 100_000
+    {
+        return error_json(format!(
+            "system_prompt too long ({} > 100000 chars)",
+            sp.len()
+        ));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let new = crate::db::models::NewSession {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: req.name,
+        folder_id: req.folder_id.trim().to_string(),
+        model: req.model,
+        effort: req.effort,
+        system_prompt: req.system_prompt,
+        created_at: now.clone(),
+        last_activity: now,
+        // No caller session to inherit from: the sole user on single-user
+        // installs, else NULL.
+        user_id: db.resolve_spawned_session_owner_blocking(None),
+        ..Default::default()
+    };
+    match db.create_session_blocking(new) {
+        Ok(session) => serde_json::json!({ "session": session }).to_string(),
+        Err(e) => error_json(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct OrchestrateSetPromptRequest {
+    session_id: String,
+    #[serde(default)]
+    system_prompt: Option<String>,
+}
+
+pub(crate) fn orchestrate_set_prompt_impl(db: &Db, input: &str) -> String {
+    const MAX_LEN: usize = 100_000;
+    let req: OrchestrateSetPromptRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    if let Some(ref p) = req.system_prompt
+        && p.len() > MAX_LEN
+    {
+        return error_json(format!(
+            "system_prompt too long ({} > {MAX_LEN} chars)",
+            p.len()
+        ));
+    }
+    if let Err(e) = require_session(db, &req.session_id) {
+        return error_json(e);
+    }
+    let was_set = req.system_prompt.is_some();
+    match db.set_session_system_prompt_blocking(req.session_id.trim(), req.system_prompt, None) {
+        Ok(Some(session)) => serde_json::json!({
+            "session_id": session.id,
+            "session_name": session.name,
+            "system_prompt_set": was_set,
+        })
+        .to_string(),
+        Ok(None) => error_json("session not found"),
+        Err(e) => error_json(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct OrchestrateSessionStateRequest {
+    session_id: String,
+}
+
+pub(crate) fn orchestrate_session_state_impl(db: &Db, input: &str) -> String {
+    let req: OrchestrateSessionStateRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let id = req.session_id.trim();
+    if id.is_empty() {
+        return error_json("session_id is required");
+    }
+    match db.get_session_blocking(id) {
+        Ok(Some(s)) => serde_json::json!({
+            "exists": true,
+            "session": {
+                "id": s.id,
+                "name": s.name,
+                "folder_id": s.folder_id,
+                "model": s.model,
+                "is_worker": s.is_worker,
+                "last_activity": s.last_activity,
+            },
+        })
+        .to_string(),
+        Ok(None) => serde_json::json!({ "exists": false }).to_string(),
+        Err(e) => error_json(e.to_string()),
+    }
+}
 // ── Outbound HTTP fetch (gated, SSRF-contained) ───────────────────────
 //
 // `peckboard_http_fetch` lets a plugin tool pull a public web page. The host
@@ -3213,6 +3395,10 @@ host_fn!(peckboard_list_projects(user_data: HostState; _input: String) -> String
     Ok(list_projects_impl(&db))
 });
 
+host_fn!(peckboard_list_folders(user_data: HostState; _input: String) -> String {
+    let (db, _plugin_id) = state_from(&user_data)?;
+    Ok(list_folders_impl(&db))
+});
 // `peckboard_list_models` — the selectable (thinking-only) model catalog,
 // metadata only; see `list_models_impl`.
 host_fn!(peckboard_list_models(user_data: HostState; _input: String) -> String {
@@ -3481,6 +3667,32 @@ host_fn!(peckboard_list_all_sessions(user_data: HostState; input: String) -> Str
     Ok(list_all_sessions_impl(&db, &input))
 });
 
+// The orchestrate quartet — see the impls' section comment: standing grant,
+// context-free on purpose, so lifecycle dispatches (timer.tick,
+// session.agent.ended) can act. Only the permission gates them.
+host_fn!(peckboard_orchestrate_send(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_orchestrate")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_orchestrate' permission")); }
+    Ok(orchestrate_send_impl(&db, &input, live))
+});
+
+host_fn!(peckboard_orchestrate_create_session(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_orchestrate")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_orchestrate' permission")); }
+    Ok(orchestrate_create_session_impl(&db, &input))
+});
+
+host_fn!(peckboard_orchestrate_set_prompt(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_orchestrate")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_orchestrate' permission")); }
+    Ok(orchestrate_set_prompt_impl(&db, &input))
+});
+
+host_fn!(peckboard_orchestrate_session_state(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_orchestrate")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_orchestrate' permission")); }
+    Ok(orchestrate_session_state_impl(&db, &input))
+});
 host_fn!(peckboard_http_fetch(user_data: HostState; input: String) -> String {
     let (_db, _plugin_id, ok) = state_and_permission(&user_data, "http_fetch")?;
     if !ok { return Ok(error_json("plugin lacks the 'http_fetch' permission")); }
@@ -3874,6 +4086,13 @@ pub(crate) fn host_functions(
             peckboard_list_projects,
         ),
         Function::new(
+            "peckboard_list_folders",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_list_folders,
+        ),
+        Function::new(
             "peckboard_list_models",
             [PTR],
             [PTR],
@@ -4124,6 +4343,34 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_list_all_sessions,
+        ),
+        Function::new(
+            "peckboard_orchestrate_send",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_orchestrate_send,
+        ),
+        Function::new(
+            "peckboard_orchestrate_create_session",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_orchestrate_create_session,
+        ),
+        Function::new(
+            "peckboard_orchestrate_set_prompt",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_orchestrate_set_prompt,
+        ),
+        Function::new(
+            "peckboard_orchestrate_session_state",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_orchestrate_session_state,
         ),
         Function::new(
             "peckboard_http_fetch",
@@ -5534,6 +5781,17 @@ mod tests {
                 .unwrap()
                 .push(format!("recycle:{session_id}"));
         }
+        fn send_message(
+            &self,
+            session_id: String,
+            text: String,
+            _attachments: Vec<LiveAttachment>,
+        ) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("send:{session_id}:{text}"));
+        }
     }
 
     #[tokio::test]
@@ -6625,5 +6883,77 @@ mod tests {
         assert!(ok, "models_read granted");
         let (_, _, ok, _) = ctx_for(&["session_read", "ssh"]);
         assert!(!ok, "unrelated permissions don't grant models_read");
+    }
+
+    #[tokio::test]
+    async fn orchestrate_impls_work_without_caller_context() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "fO".into(),
+            name: "Repo".into(),
+            path: ".".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "sO".into(),
+            name: "Brain".into(),
+            folder_id: "fO".into(),
+            created_at: ts.clone(),
+            last_activity: ts,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // send: unknown target refuses before touching live.
+        let rec = std::sync::Arc::new(RecordingLive::default());
+        let r = orchestrate_send_impl(
+            &db,
+            r#"{"session_id":"nope","text":"go"}"#,
+            Some(rec.clone()),
+        );
+        assert!(r.contains("error"), "unknown target: {r}");
+        assert!(rec.calls.lock().unwrap().is_empty());
+        // Blank text refuses; no live host refuses; the happy path records.
+        let r = orchestrate_send_impl(&db, r#"{"session_id":"sO","text":"  "}"#, Some(rec.clone()));
+        assert!(r.contains("error"), "blank text: {r}");
+        let r = orchestrate_send_impl(&db, r#"{"session_id":"sO","text":"go"}"#, None);
+        assert!(r.contains("live control unavailable"), "no live: {r}");
+        let r = orchestrate_send_impl(&db, r#"{"session_id":"sO","text":"go"}"#, Some(rec.clone()));
+        assert!(r.contains("\"ok\":true"), "send ok: {r}");
+        assert_eq!(rec.calls.lock().unwrap().as_slice(), ["send:sO:go"]);
+
+        // create: unknown folder refuses; a real folder creates the session.
+        let r = orchestrate_create_session_impl(&db, r#"{"folder_id":"nope","name":"W"}"#);
+        assert!(r.contains("folder not found"), "bad folder: {r}");
+        let r = orchestrate_create_session_impl(
+            &db,
+            r#"{"folder_id":"fO","name":"Worker","system_prompt":"wear the QA hat"}"#,
+        );
+        assert!(r.contains("\"session\""), "create ok: {r}");
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        let created_id = v["session"]["id"].as_str().unwrap().to_string();
+        let created = db.get_session_blocking(&created_id).unwrap().unwrap();
+        assert_eq!(created.folder_id, "fO");
+        assert_eq!(created.system_prompt.as_deref(), Some("wear the QA hat"));
+
+        // set_prompt: set then clear.
+        let r = orchestrate_set_prompt_impl(
+            &db,
+            r#"{"session_id":"sO","system_prompt":"you are the orchestrator"}"#,
+        );
+        assert!(r.contains("\"system_prompt_set\":true"), "set: {r}");
+        let r = orchestrate_set_prompt_impl(&db, r#"{"session_id":"sO"}"#);
+        assert!(r.contains("\"system_prompt_set\":false"), "clear: {r}");
+
+        // session_state: exists both ways, no error envelope for a miss.
+        let r = orchestrate_session_state_impl(&db, r#"{"session_id":"sO"}"#);
+        assert!(r.contains("\"exists\":true"), "state: {r}");
+        assert!(r.contains("\"folder_id\":\"fO\""), "state folder: {r}");
+        let r = orchestrate_session_state_impl(&db, r#"{"session_id":"gone"}"#);
+        assert!(r.contains("\"exists\":false"), "miss: {r}");
     }
 }
