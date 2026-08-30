@@ -8,10 +8,27 @@ on:
 permissions:
   contents: write
 
+# Two Linux artifacts: the CLI binary has no WebKitGTK runtime dep so a
+# VPS can still `./peckboard`. The desktop artifact links wry. They build
+# as parallel matrix jobs — sequential builds on one runner cost ~16 min
+# of wall-clock (10m CLI + 6m desktop, measured on 0.0.190).
 jobs:
   build:
-    name: Build release binary (x86_64-unknown-linux-gnu)
+    name: Build ${{ matrix.variant }} binary (x86_64-unknown-linux-gnu)
     runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cli
+            asset: peckboard-linux-x86_64
+            cargo_flags: --no-default-features
+            webkit: false
+          - variant: desktop
+            asset: peckboard-linux-x86_64-desktop
+            cargo_flags: ""
+            webkit: true
 
     env:
       CARGO_TERM_COLOR: always
@@ -41,42 +58,35 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
+      # Key must match warm-release-cache.yml: tag-ref caches are scoped to
+      # their own tag, so releases restore the cache main pushes save.
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          key: linux-x86_64
+          key: linux-x86_64-${{ matrix.variant }}
 
       - name: Install WebKitGTK (desktop artifact)
+        if: matrix.webkit
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config
 
-      # Two Linux artifacts: the CLI binary has no WebKitGTK runtime dep so a
-      # VPS can still `./peckboard`. The desktop artifact links wry.
-      - name: Build CLI binary
-        run: cargo build --release --no-default-features --target x86_64-unknown-linux-gnu
+      - name: Build binary
+        run: cargo build --release ${{ matrix.cargo_flags }} --target x86_64-unknown-linux-gnu
 
-      - name: Stage CLI asset
-        run: cp target/x86_64-unknown-linux-gnu/release/peckboard peckboard-linux-x86_64
-
-      - name: Build desktop binary
-        run: cargo build --release --target x86_64-unknown-linux-gnu
-
-      - name: Stage desktop asset
-        run: cp target/x86_64-unknown-linux-gnu/release/peckboard peckboard-linux-x86_64-desktop
+      - name: Stage asset
+        run: cp target/x86_64-unknown-linux-gnu/release/peckboard ${{ matrix.asset }}
 
       - name: Checksum
-        run: |
-          sha256sum peckboard-linux-x86_64 > peckboard-linux-x86_64.sha256
-          sha256sum peckboard-linux-x86_64-desktop > peckboard-linux-x86_64-desktop.sha256
+        run: sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: peckboard-linux-x86_64
+          name: ${{ matrix.asset }}
           path: |
-            peckboard-linux-x86_64
-            peckboard-linux-x86_64-desktop
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
           if-no-files-found: error
 
       - name: Publish to release
@@ -84,7 +94,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            peckboard-linux-x86_64
-            peckboard-linux-x86_64.sha256
-            peckboard-linux-x86_64-desktop
-            peckboard-linux-x86_64-desktop.sha256
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256

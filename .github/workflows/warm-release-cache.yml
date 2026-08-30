@@ -1,0 +1,103 @@
+name: Warm Release Cache
+
+# Release builds trigger on tag pushes, and GitHub scopes a cache saved on a
+# tag ref to that ref alone — so every release started cold (the 0.0.190
+# Linux builder restored nothing and compiled 16 minutes from scratch).
+# Caches saved on the DEFAULT branch are readable from every ref, so this
+# workflow runs the same cargo builds on pushes to main with the same
+# rust-cache keys the release workflows use. The normal flow — push main,
+# then tag — means a release restores the cache warmed by the previous
+# release's main push, which is current unless dependencies changed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "src/**"
+      - "migrations/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-release-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Warm ${{ matrix.key }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Mirrors the ACTIVE release workflows (runner, target, cache key,
+          # cargo flags). Keep in sync when enabling another builder.
+          - key: linux-x86_64-cli
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            cargo_flags: --no-default-features
+            webkit: false
+          - key: linux-x86_64-desktop
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            cargo_flags: ""
+            webkit: true
+          - key: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            cargo_flags: ""
+            webkit: false
+          - key: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            cargo_flags: ""
+            webkit: false
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      # rust-embed pulls web/dist into the release binary at compile time,
+      # so the warm build needs the same bundle the release build embeds.
+      - name: Build web bundle
+        working-directory: web
+        run: npm run build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.key }}
+
+      - name: Install WebKitGTK (desktop variant)
+        if: matrix.webkit
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config
+
+      - name: Build (populate cache)
+        run: cargo build --release ${{ matrix.cargo_flags }} --target ${{ matrix.target }}
