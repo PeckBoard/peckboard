@@ -447,6 +447,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // open dialog.
                             | "env-unlock-request"
                             | "env-unlock-resolved"
+                            // plugin-data announces "plugin X's collection Y
+                            // changed" — identifiers only, never stored
+                            // values — so any client with that plugin's page
+                            // open can refresh it. Global because plugin
+                            // pages are not tied to a session subscription.
+                            | "plugin-data"
                     );
 
                     let should_send = if is_global {

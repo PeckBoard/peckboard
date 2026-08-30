@@ -363,6 +363,22 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             .await;
         });
     }
+
+    fn notify_plugin_data(&self, plugin_id: String, collection: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        // Identifiers only — never the stored value. Broadcast as a global
+        // frame (see the WS handler's allowlist) so any open plugin page can
+        // refresh on change instead of polling.
+        state
+            .broadcaster
+            .broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "plugin-data".to_string(),
+                session_id: String::new(),
+                data: serde_json::json!({ "plugin_id": plugin_id, "collection": collection }),
+            });
+    }
 }
 
 /// Append an event to `session_id` and broadcast it to live subscribers, in

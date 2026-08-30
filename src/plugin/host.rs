@@ -206,6 +206,12 @@ pub trait LiveHost: Send + Sync {
         _user_id: String,
     ) {
     }
+    /// A row in the plugin's own data store changed (effective put / delete).
+    /// The live app broadcasts this to WebSocket clients as a `plugin-data`
+    /// frame so open plugin pages refresh on change instead of polling. The
+    /// payload is identifiers only — never the stored value. Fire-and-forget;
+    /// no-op default.
+    fn notify_plugin_data(&self, _plugin_id: String, _collection: String) {}
 }
 
 /// The verified caller scope of an in-flight `mcp.tool.invoke` — the keys the
@@ -823,7 +829,19 @@ fn decode_doc(raw: Option<String>) -> serde_json::Value {
     }
 }
 
-pub(crate) fn store_put_impl(db: &Db, plugin_id: &str, input: &str) -> String {
+/// Announce an effective store write through the late-bound [`LiveHost`]
+/// (if any), so open plugin pages can refresh on change instead of polling.
+fn notify_store_changed(live: Option<&dyn LiveHost>, plugin_id: &str, collection: &str) {
+    if let Some(live) = live {
+        live.notify_plugin_data(plugin_id.to_string(), collection.to_string());
+    }
+}
+pub(crate) fn store_put_impl(
+    db: &Db,
+    plugin_id: &str,
+    input: &str,
+    live: Option<&dyn LiveHost>,
+) -> String {
     let req: StorePutRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
@@ -838,7 +856,10 @@ pub(crate) fn store_put_impl(db: &Db, plugin_id: &str, input: &str) -> String {
         Err(e) => return error_json(e),
     };
     match db.plugin_store_put_blocking(plugin_id, req.collection.trim(), req.key.trim(), &data) {
-        Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+        Ok(()) => {
+            notify_store_changed(live, plugin_id, req.collection.trim());
+            serde_json::json!({ "ok": true }).to_string()
+        }
         Err(e) => error_json(e),
     }
 }
@@ -847,7 +868,12 @@ pub(crate) fn store_put_impl(db: &Db, plugin_id: &str, input: &str) -> String {
 /// opt in to manifest `concurrency` (pooled instances share no guest memory
 /// to lock with). `acquired: true` means this caller owns the key until it
 /// deletes it or, when `ttl_secs > 0`, a later caller steals it stale.
-pub(crate) fn store_put_if_absent_impl(db: &Db, plugin_id: &str, input: &str) -> String {
+pub(crate) fn store_put_if_absent_impl(
+    db: &Db,
+    plugin_id: &str,
+    input: &str,
+    live: Option<&dyn LiveHost>,
+) -> String {
     let req: StorePutIfAbsentRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
@@ -868,7 +894,12 @@ pub(crate) fn store_put_if_absent_impl(db: &Db, plugin_id: &str, input: &str) ->
         &data,
         req.ttl_secs,
     ) {
-        Ok(acquired) => serde_json::json!({ "acquired": acquired }).to_string(),
+        Ok(acquired) => {
+            if acquired {
+                notify_store_changed(live, plugin_id, req.collection.trim());
+            }
+            serde_json::json!({ "acquired": acquired }).to_string()
+        }
         Err(e) => error_json(e),
     }
 }
@@ -901,13 +932,23 @@ pub(crate) fn store_list_impl(db: &Db, plugin_id: &str, input: &str) -> String {
     }
 }
 
-pub(crate) fn store_delete_impl(db: &Db, plugin_id: &str, input: &str) -> String {
+pub(crate) fn store_delete_impl(
+    db: &Db,
+    plugin_id: &str,
+    input: &str,
+    live: Option<&dyn LiveHost>,
+) -> String {
     let req: StoreKeyRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
     match db.plugin_store_delete_blocking(plugin_id, req.collection.trim(), req.key.trim()) {
-        Ok(deleted) => serde_json::json!({ "deleted": deleted }).to_string(),
+        Ok(deleted) => {
+            if deleted {
+                notify_store_changed(live, plugin_id, req.collection.trim());
+            }
+            serde_json::json!({ "deleted": deleted }).to_string()
+        }
         Err(e) => error_json(e),
     }
 }
@@ -3181,6 +3222,29 @@ fn state_and_permission(
     Ok((state.db.clone(), state.plugin_id.clone(), granted))
 }
 
+/// Like [`state_and_permission`] but also clones the late-bound [`LiveHost`]
+/// (if any). The store host functions use it to announce effective writes as
+/// `plugin-data` WS frames (see [`LiveHost::notify_plugin_data`]).
+fn state_permission_and_live(
+    user_data: &UserData<HostState>,
+    permission: &str,
+) -> Result<(Db, String, bool, Option<Arc<dyn LiveHost>>), Error> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    let granted = state
+        .permissions
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin permission set poisoned"))?
+        .contains(permission);
+    let live = state
+        .live
+        .read()
+        .map_err(|_| anyhow::anyhow!("plugin live host poisoned"))?
+        .clone();
+    Ok((state.db.clone(), state.plugin_id.clone(), granted, live))
+}
 /// Like [`state_and_permission`] but also returns the **trusted** invocation
 /// context. Scoped host functions (sessions, events, project files) call this:
 /// they derive the caller's session/project/folder from the returned
@@ -3514,15 +3578,15 @@ host_fn!(peckboard_list_plugin_settings(user_data: HostState; _input: String) ->
 // ── Generic plugin storage (gated) ────────────────────────────────────
 
 host_fn!(peckboard_store_put(user_data: HostState; input: String) -> String {
-    let (db, plugin_id, ok) = state_and_permission(&user_data, "data_store")?;
+    let (db, plugin_id, ok, live) = state_permission_and_live(&user_data, "data_store")?;
     if !ok { return Ok(error_json("plugin lacks the 'data_store' permission")); }
-    Ok(store_put_impl(&db, &plugin_id, &input))
+    Ok(store_put_impl(&db, &plugin_id, &input, live.as_deref()))
 });
 
 host_fn!(peckboard_store_put_if_absent(user_data: HostState; input: String) -> String {
-    let (db, plugin_id, ok) = state_and_permission(&user_data, "data_store")?;
+    let (db, plugin_id, ok, live) = state_permission_and_live(&user_data, "data_store")?;
     if !ok { return Ok(error_json("plugin lacks the 'data_store' permission")); }
-    Ok(store_put_if_absent_impl(&db, &plugin_id, &input))
+    Ok(store_put_if_absent_impl(&db, &plugin_id, &input, live.as_deref()))
 });
 
 host_fn!(peckboard_store_get(user_data: HostState; input: String) -> String {
@@ -3538,9 +3602,9 @@ host_fn!(peckboard_store_list(user_data: HostState; input: String) -> String {
 });
 
 host_fn!(peckboard_store_delete(user_data: HostState; input: String) -> String {
-    let (db, plugin_id, ok) = state_and_permission(&user_data, "data_store")?;
+    let (db, plugin_id, ok, live) = state_permission_and_live(&user_data, "data_store")?;
     if !ok { return Ok(error_json("plugin lacks the 'data_store' permission")); }
-    Ok(store_delete_impl(&db, &plugin_id, &input))
+    Ok(store_delete_impl(&db, &plugin_id, &input, live.as_deref()))
 });
 
 host_fn!(peckboard_session_meta_set(user_data: HostState; input: String) -> String {
@@ -4570,6 +4634,18 @@ mod tests {
 
     #[test]
     fn store_impls_roundtrip_and_validate() {
+        // Records `notify_plugin_data` so the test can assert exactly which
+        // store writes announce themselves to plugin pages.
+        struct NotifyRecorder(std::sync::Mutex<Vec<(String, String)>>);
+        impl LiveHost for NotifyRecorder {
+            fn dispatch_capture(&self, _session_id: String, _prompt: String) {}
+            fn resume_session(&self, _session_id: String, _text: String) {}
+            fn notify_plugin_data(&self, plugin_id: String, collection: String) {
+                self.0.lock().unwrap().push((plugin_id, collection));
+            }
+        }
+        let recorder = NotifyRecorder(std::sync::Mutex::new(Vec::new()));
+        let live: Option<&dyn LiveHost> = Some(&recorder);
         let db = Db::in_memory().unwrap();
         let pid = "experts";
         // put → get → list → delete via the host-fn impls (JSON in/out).
@@ -4577,19 +4653,42 @@ mod tests {
             &db,
             pid,
             r#"{"collection":"decisions","key":"d1","data":{"q":"why"}}"#,
+            live,
         );
         assert!(out.contains("\"ok\":true"), "put: {out}");
         let got = store_get_impl(&db, pid, r#"{"collection":"decisions","key":"d1"}"#);
         assert!(got.contains("\"why\""), "get: {got}");
         let list = store_list_impl(&db, pid, r#"{"collection":"decisions"}"#);
         assert!(list.contains("\"d1\""), "list: {list}");
-        let del = store_delete_impl(&db, pid, r#"{"collection":"decisions","key":"d1"}"#);
+        // A contended put-if-absent (key taken, no TTL steal) must not notify.
+        let contended = store_put_if_absent_impl(
+            &db,
+            pid,
+            r#"{"collection":"decisions","key":"d1","data":1}"#,
+            live,
+        );
+        assert!(
+            contended.contains("\"acquired\":false"),
+            "contended: {contended}"
+        );
+        let del = store_delete_impl(&db, pid, r#"{"collection":"decisions","key":"d1"}"#, live);
         assert!(del.contains("\"deleted\":true"), "delete: {del}");
+        // Deleting a missing key is a no-op and must not notify.
+        let noop = store_delete_impl(&db, pid, r#"{"collection":"decisions","key":"d1"}"#, live);
+        assert!(noop.contains("\"deleted\":false"), "noop delete: {noop}");
         // Missing/oversized identifiers are rejected, not stored.
-        let bad = store_put_impl(&db, pid, r#"{"collection":"","key":"k","data":1}"#);
+        let bad = store_put_impl(&db, pid, r#"{"collection":"","key":"k","data":1}"#, live);
         assert!(
             bad.contains("error"),
             "empty collection should error: {bad}"
+        );
+        // Exactly the effective writes notified: the put and the real delete.
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![
+                ("experts".to_string(), "decisions".to_string()),
+                ("experts".to_string(), "decisions".to_string()),
+            ]
         );
     }
 

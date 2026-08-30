@@ -204,6 +204,13 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'plugin-data') {
+        // A plugin's data store changed (identifiers only — no values).
+        // PluginFullPage / PluginPanelModal forward it into their sandboxed
+        // iframe so plugin pages refresh on change instead of polling.
+        window.dispatchEvent(new CustomEvent('peckboard:plugin-data', { detail: msg }))
+        return
+      }
       if (msg.type === 'repeating-task-changed') {
         window.dispatchEvent(new CustomEvent('peckboard:repeating-task-changed', { detail: msg }))
         return

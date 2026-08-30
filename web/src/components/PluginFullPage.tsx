@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react'
 import { authedFetch } from '../store/auth'
 import { withPluginTheme } from '../util/appearance'
+import usePluginDataForward from '../hooks/usePluginDataForward'
 
 interface Props {
   /** Human label for the page (shown in the header). */
   title: string
-  /** Plugin that declared this item — only used for stable test ids. */
+  /** Plugin that declared this item — scopes the plugin-data event forward
+   *  to this page's own plugin (and stable test ids). */
   plugin: string
   /** Server-absolute `/plugin-api/*` path the host embeds in the iframe. */
   path: string
@@ -53,6 +55,9 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
     scopeRef.current = scope
   }, [scope])
 
+  // Push "your data changed" notifications into the sandboxed page so it
+  // refreshes on change instead of polling.
+  usePluginDataForward(frameRef, plugin)
   useEffect(() => {
     async function onMessage(e: MessageEvent) {
       const frame = frameRef.current

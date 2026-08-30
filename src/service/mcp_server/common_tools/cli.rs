@@ -236,6 +236,7 @@ fn clear_pending(db: &Db, key: &str) -> Result<(), String> {
         db,
         NS,
         &serde_json::json!({ "collection": PENDING_COLLECTION, "key": key }).to_string(),
+        None,
     );
     parse_envelope(&out)?;
     Ok(())
@@ -246,6 +247,7 @@ fn store_put(db: &Db, collection: &str, key: &str, data: Value) -> Result<(), St
         db,
         NS,
         &serde_json::json!({ "collection": collection, "key": key, "data": data }).to_string(),
+        None,
     );
     parse_envelope(&out)?;
     Ok(())

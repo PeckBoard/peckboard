@@ -2,11 +2,13 @@ import { useEffect, useRef } from 'react'
 import Modal from './Modal'
 import { authedFetch } from '../store/auth'
 import { withPluginTheme } from '../util/appearance'
+import usePluginDataForward from '../hooks/usePluginDataForward'
 
 interface Props {
   /** Human label for the panel (the iframe/page title). */
   title: string
-  /** Plugin that declared this panel — only used for stable test ids. */
+  /** Plugin that declared this panel — scopes the plugin-data event forward
+   *  to this panel's own plugin (and stable test ids). */
   plugin: string
   /** Server-absolute `/plugin-api/*` path the host embeds in the iframe. */
   path: string
@@ -41,6 +43,10 @@ const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
  */
 export default function PluginPanelModal({ title, plugin, path, onClose }: Props) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
+
+  // Push "your data changed" notifications into the sandboxed page so it
+  // refreshes on change instead of polling.
+  usePluginDataForward(frameRef, plugin)
 
   useEffect(() => {
     async function onMessage(e: MessageEvent) {

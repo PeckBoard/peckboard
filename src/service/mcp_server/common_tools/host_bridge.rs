@@ -60,9 +60,9 @@ impl HostCtx<'_> {
             HostFn::ListProjectFiles => list_project_files_impl(self.db, &self.inv),
             HostFn::ReadFile => read_file_impl(self.db, &s, &self.inv),
             HostFn::WriteFile => write_file_impl(self.db, &s, &self.inv),
-            HostFn::StorePut => store_put_impl(self.db, NS, &s),
+            HostFn::StorePut => store_put_impl(self.db, NS, &s, None),
             HostFn::StoreGet => store_get_impl(self.db, NS, &s),
-            HostFn::StoreDelete => store_delete_impl(self.db, NS, &s),
+            HostFn::StoreDelete => store_delete_impl(self.db, NS, &s, None),
         };
         parse_envelope(&out)
     }
