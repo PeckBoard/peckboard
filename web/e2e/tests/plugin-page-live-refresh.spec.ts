@@ -4,13 +4,16 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * Plugin pages refresh on pushed `plugin-data` WS events instead of polling.
+ * Plugin pages hold their own ticket-authed WebSocket — no polling at all.
  *
- * Core broadcasts a `plugin-data` frame when a plugin's data store changes;
- * the app forwards it into the sandboxed iframe via postMessage, and the page
- * refetches. The page's own fallback poll is 60s, so an orchestrator created
- * BEHIND the page's back (direct API call, not through its UI) can only
- * appear quickly via the event path — which is exactly what this asserts.
+ * The page asks its parent for a one-time, plugin-scoped ticket (postMessage;
+ * the JWT never enters the sandboxed iframe), redeems it on /ws/plugin-ui,
+ * and core streams that plugin's data-change notifications (identifiers
+ * only). The page has NO fallback poll, so an orchestrator created BEHIND
+ * the page's back (direct API call, not through its UI) can only appear via
+ * that socket — which is exactly what the first test asserts. The second
+ * test locks the refusals: no ticket minting without auth, no socket for a
+ * bogus ticket.
  */
 
 const E2E_USER = 'e2e-user'
@@ -92,4 +95,33 @@ test('plugin page picks up an API-side change via pushed plugin-data event', asy
 
   const card = frame.locator('[data-testid="orch-card"]', { hasText: name })
   await expect(card).toBeVisible({ timeout: 20_000 })
+})
+
+test('plugin WS tickets: unauthed mint and bogus ticket are refused', async ({
+  page,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+
+  // Minting a ticket requires a logged-in user.
+  const unauthed = await request.post('/api/plugin-ws/ticket', {
+    data: { plugin_id: 'session-control' },
+  })
+  expect(unauthed.status()).toBe(401)
+
+  // A garbage ticket never upgrades — the handshake is refused before any
+  // socket exists, so the browser reports close without open.
+  await page.goto(baseURL!)
+  const outcome = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+        const ws = new WebSocket(`${proto}//${location.host}/ws/plugin-ui?ticket=bogus`)
+        ws.onopen = () => resolve('open')
+        ws.onclose = () => resolve('refused')
+        setTimeout(() => resolve('timeout'), 8000)
+      }),
+  )
+  expect(outcome).toBe('refused')
 })

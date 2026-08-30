@@ -113,6 +113,29 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
         )
         return
       }
+      // The page asking for a one-time /ws/plugin-ui ticket. The parent mints
+      // it for its OWN plugin (the `plugin` prop — a page cannot request a
+      // foreign scope) over the authed fetch; the JWT never enters the iframe.
+      if (msg.type === 'plugin-ui-ws-ticket') {
+        try {
+          const res = await authedFetch('/api/plugin-ws/ticket', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ plugin_id: plugin }),
+          })
+          const body = res.ok ? ((await res.json()) as { ticket?: string }) : {}
+          frame.contentWindow?.postMessage(
+            { type: 'plugin-ui-ws-ticket-result', ticket: body.ticket ?? null },
+            '*',
+          )
+        } catch {
+          frame.contentWindow?.postMessage(
+            { type: 'plugin-ui-ws-ticket-result', ticket: null },
+            '*',
+          )
+        }
+        return
+      }
       if (msg.type !== 'plugin-ui-fetch' || typeof msg.requestId !== 'number') return
       const reply = (status: number, body: string) =>
         frame.contentWindow?.postMessage(
@@ -154,7 +177,7 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [])
+  }, [plugin])
 
   return (
     <div className="plugin-fullpage" data-testid="plugin-fullpage" data-plugin={plugin}>

@@ -80,6 +80,16 @@ pub async fn origin_check(request: Request, next: Next) -> Response {
         return next.run(request).await;
     }
 
+    // The plugin-page WS (`/ws/plugin-ui`) is authenticated by a one-time,
+    // plugin-scoped ticket minted seconds earlier by the logged-in app — no
+    // cookies, no ambient credentials — so Origin-based CSRF defense adds
+    // nothing, and the sandboxed opaque-origin iframe that legitimately holds
+    // the socket sends `Origin: null`, which this check would 403. See
+    // src/ws/plugin_ui.rs for the ticket model.
+    if request.uri().path() == "/ws/plugin-ui" {
+        return next.run(request).await;
+    }
+
     let origin = request.headers().get(header::ORIGIN).cloned();
     let host = request.headers().get(header::HOST).cloned();
 

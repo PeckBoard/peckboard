@@ -19,6 +19,7 @@ pub mod ollama;
 pub mod plans;
 pub mod plugin_api;
 pub mod plugin_ui;
+pub mod plugin_ws;
 pub mod plugins;
 pub mod projects;
 pub mod repeating_tasks;
@@ -35,6 +36,7 @@ pub mod workflows;
 use crate::frontend::static_handler;
 use crate::state::AppState;
 use crate::ws::handler::ws_handler;
+use crate::ws::plugin_ui::plugin_ws_handler;
 use axum::{Router, routing::get};
 use std::sync::Arc;
 
@@ -42,6 +44,11 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/health", get(health))
         .route("/ws", get(ws_handler))
+        // Restricted plugin-page WS: authenticated by a one-time ticket the
+        // logged-in app minted seconds earlier (POST /api/plugin-ws/ticket),
+        // not by JWT — the sandboxed iframe holding the socket never sees
+        // the user's token. See src/ws/plugin_ui.rs.
+        .route("/ws/plugin-ui", get(plugin_ws_handler))
         // Sudo askpass bridge -- /api/askpass is token-authed (called by the
         // generated helper from inside sessions), the answer route is JWT'd.
         .merge(askpass::router(state.clone()))
@@ -79,6 +86,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Authenticated plugin app-UI surface (behind `require_auth`); the
         // plugin acts under the logged-in user's authority.
         .merge(plugin_ui::router(state.clone()))
+        // One-time tickets for the restricted plugin-page WS (JWT'd; the
+        // ticket itself is what the sandboxed iframe redeems on /ws/plugin-ui).
+        .merge(plugin_ws::router(state.clone()))
         .merge(usage::router(state.clone()))
         .merge(usage::trends::router(state.clone()))
         .merge(update::router(state.clone()))

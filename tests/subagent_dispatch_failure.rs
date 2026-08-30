@@ -45,6 +45,7 @@ async fn build_state() -> Arc<AppState> {
     std::mem::forget(tmp);
 
     Arc::new(AppState {
+        plugin_ws_tickets: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
         config,
         db,

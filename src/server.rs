@@ -161,6 +161,7 @@ pub async fn run_server(
     let push_service = PushService::new(&config.data_dir);
 
     let state = Arc::new(AppState {
+        plugin_ws_tickets: Default::default(),
         config,
         db,
         plugins,

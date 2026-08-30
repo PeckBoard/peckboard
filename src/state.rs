@@ -151,6 +151,9 @@ pub struct AppState {
     /// user-defined encrypted env vars. See `service::env_vars`.
     pub env_unlock: std::sync::Arc<crate::service::env_vars::EnvUnlockRegistry>,
     pub push_service: PushService,
+    /// One-time, plugin-scoped tickets for the restricted plugin-page
+    /// WebSocket (`/ws/plugin-ui`). See [`crate::ws::plugin_ui`].
+    pub plugin_ws_tickets: crate::ws::plugin_ui::PluginWsTickets,
     pub tls: Arc<TlsState>,
 }
 
