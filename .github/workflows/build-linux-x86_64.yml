@@ -1,8 +1,9 @@
 name: Build Linux x86_64
 
+# Dispatch-only backstop: releases are published by release-promote.yml
+# from artifacts built on main (build-main.yml). Run this manually
+# against a tag ref if a release ever needs a from-scratch rebuild.
 on:
-  push:
-    tags: ["*"]
   workflow_dispatch:
 
 permissions:

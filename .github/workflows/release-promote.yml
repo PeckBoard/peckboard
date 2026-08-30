@@ -1,0 +1,63 @@
+name: Publish Release
+
+# The sub-minute release path: a tag does not build anything. It finds the
+# "Build Main" run for the tagged commit, downloads its artifacts, and
+# attaches them to the release. Building already happened on the main push
+# (see build-main.yml). If the tag lands while that build is still running,
+# this job waits for it — worst case it degrades to the old wall-clock, it
+# never publishes a stale or missing asset.
+#
+# A tag containing '-' (0.0.191-rc1) publishes as a prerelease, which
+# `releases/latest` — what self-update reads — ignores.
+on:
+  push:
+    tags: ["*"]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  promote:
+    name: Promote main-build artifacts to release
+    runs-on: ubuntu-24.04
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Wait for the tagged commit's Build Main run
+        id: find
+        run: |
+          for i in $(seq 90); do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/build-main.yml/runs?head_sha=$GITHUB_SHA&per_page=5" \
+              --jq '.workflow_runs | sort_by(.run_started_at) | reverse | first // empty')
+            if [ -z "$run" ]; then
+              echo "no Build Main run for $GITHUB_SHA yet — was main pushed before tagging?"
+            else
+              status=$(jq -r '.status' <<<"$run")
+              conclusion=$(jq -r '.conclusion // ""' <<<"$run")
+              id=$(jq -r '.id' <<<"$run")
+              echo "Build Main run $id: status=$status conclusion=$conclusion"
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" != "success" ]; then
+                  echo "Build Main for $GITHUB_SHA concluded '$conclusion' — refusing to promote its artifacts."
+                  exit 1
+                fi
+                echo "run_id=$id" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 20
+          done
+          echo "Timed out waiting for Build Main of $GITHUB_SHA (30 min)."
+          exit 1
+
+      - name: Download artifacts
+        run: gh run download "${{ steps.find.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --dir assets
+
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: assets/*/*
