@@ -267,9 +267,11 @@ mod tests {
 
     #[test]
     fn peckboard_version_is_stamped_not_blank() {
-        // build.rs stamps PECKBOARD_VERSION from the git tag; it must never be
-        // empty (env! would fail to compile) and, in this repo, must not be the
-        // drifted Cargo.toml value that the bug reported.
+        // build.rs stamps PECKBOARD_VERSION from the exact release tag or,
+        // since 0.0.192, the maintained Cargo.toml version. It must never be
+        // empty (env! would fail to compile) and must never regress to the
+        // old drifted "0.1.0" — the 0.0.191 binaries shipped stamped 0.1.0,
+        // which compares newer than every release and killed self-update.
         let v = peckboard_version();
         assert!(!v.is_empty());
         assert_ne!(

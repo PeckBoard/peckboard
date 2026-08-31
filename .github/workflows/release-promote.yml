@@ -26,6 +26,22 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The binaries were stamped from Cargo.toml on the main push (shallow
+      # branch clones carry no tags, so build.rs cannot see a future tag).
+      # Refuse to publish a tag that disagrees with that stamp — shipping the
+      # mismatch breaks self-update on every installed copy (0.0.191 shipped
+      # stamped 0.1.0, which compares newer than every real release).
+      - name: Tag must match Cargo.toml version
+        run: |
+          want="${GITHUB_REF_NAME%%-*}"
+          have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$have" != "$want" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $have — bump Cargo.toml in the release commit before tagging."
+            exit 1
+          fi
       - name: Wait for the tagged commit's Build Main run
         id: find
         run: |

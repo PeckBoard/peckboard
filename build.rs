@@ -23,16 +23,19 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-/// Stamp the crate with the real release version (the git tag) via
-/// `PECKBOARD_VERSION`, so `env!("PECKBOARD_VERSION")` reports e.g. `0.0.19`
-/// instead of the `Cargo.toml` value. The two had drifted — releases are
-/// git-tagged `0.0.x` while `Cargo.toml` reads `0.1.0` — which made the
-/// plugin-compatibility check (`registry::peckboard_version`) compare against
-/// the wrong number. Resolution order:
-///   1. `PECKBOARD_VERSION` env override (a release pipeline can pin the tag).
-///   2. `git describe --tags` — release builds check out the tag, so this is
-///      exactly the tag (`0.0.19`); dev builds get `0.0.19-N-gSHA`.
-///   3. `CARGO_PKG_VERSION` as a last resort (loud, since it's the drift).
+/// Stamp the crate with the release version via `PECKBOARD_VERSION`, so
+/// `env!("PECKBOARD_VERSION")` reports e.g. `0.0.192`. Since 0.0.192 the
+/// `Cargo.toml` version IS the source of truth (bumped on every release, and
+/// release-promote.yml refuses a tag that disagrees with it) — necessary
+/// because release binaries are built on the MAIN push (build-main.yml),
+/// before the tag exists, where `actions/checkout`'s shallow clone carries no
+/// tags at all. The 0.0.191 binaries shipped stamped `0.1.0` for exactly that
+/// reason, which broke their self-update (`0.1.0` compares newer than every
+/// real release). Resolution order:
+///   1. `PECKBOARD_VERSION` env override (a release pipeline can pin a tag).
+///   2. `git describe --tags --exact-match` — a backstop rebuild on the tag
+///      ref itself (the dispatch-only build-*.yml workflows) stamps the tag.
+///   3. `CARGO_PKG_VERSION` — the maintained source of truth.
 fn stamp_version() {
     println!("cargo:rerun-if-env-changed=PECKBOARD_VERSION");
     // Re-resolve when HEAD moves or tags change.
@@ -53,19 +56,18 @@ fn resolve_version() -> String {
     if let Some(v) = git_described_version() {
         return v;
     }
-    let cargo = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
-    println!(
-        "cargo:warning=PECKBOARD_VERSION: no git tag or env override found; falling back to \
-         Cargo version {cargo}. The binary will report this instead of the release tag."
-    );
-    cargo
+    std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into())
 }
 
-/// `git describe --tags` (no `v` prefix on this repo's tags), or `None` when
-/// git/the tag isn't available (e.g. a source tarball with no `.git`).
+/// `git describe --tags --exact-match` (no `v` prefix on this repo's tags):
+/// the checked-out commit's own tag, or `None` when HEAD isn't tagged —
+/// including every on-main build, whose shallow clone has no tags. Never the
+/// suffixed `describe` form (`0.0.191-3-gSHA`): a suffixed stamp would
+/// compare against releases unpredictably, and `Cargo.toml` is the right
+/// answer for untagged builds.
 fn git_described_version() -> Option<String> {
     let out = Command::new("git")
-        .args(["describe", "--tags"])
+        .args(["describe", "--tags", "--exact-match"])
         .output()
         .ok()?;
     if !out.status.success() {

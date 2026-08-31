@@ -2,7 +2,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "peckboard", about = "Remote Claude Code control panel")]
+#[command(
+    name = "peckboard",
+    version = env!("PECKBOARD_VERSION"),
+    about = "Remote Claude Code control panel"
+)]
 pub struct CliArgs {
     /// HTTP port
     #[arg(long, default_value = "3344")]
