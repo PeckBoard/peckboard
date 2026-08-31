@@ -111,3 +111,58 @@ test('ui-gauge page: categories, bar override, and a ranked baseline', async ({
   // History starts empty with its explainer.
   await expect(frame.locator('#evals')).toContainText('ui_gauge_score')
 })
+
+test('ui-gauge never auto-refreshes: external writes light the stale chip and in-progress edits survive', async ({
+  page,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const auth = await authenticate(request)
+
+  const catalogRes = await request.get('/api/plugins', { headers: auth })
+  const catalog = catalogRes.ok() ? await catalogRes.json() : { plugins: [] }
+  test.skip(
+    !JSON.stringify(catalog).includes('ui-gauge'),
+    'ui-gauge wasm not built/staged — run peck-plugins/ui-gauge/build.sh',
+  )
+
+  await loginUi(page, baseURL!)
+  await page.getByTestId('plugin-sidebar-ui-gauge-ui-gauge').click()
+  const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
+  await expect(frame.locator('[data-cat-key="0"]')).toBeVisible({ timeout: 15_000 })
+
+  // Start an in-progress edit the page must not lose.
+  await frame.locator('[data-cat-key="0"]').fill('wip_edit_must_survive')
+
+  // An external write, like agents make via the ui_gauge_* tools. The page's
+  // WebSocket may still be connecting, so retry until the chip lights.
+  const stateRes = await request.get('/api/plugin-ui/ui-gauge/state', { headers: auth })
+  expect(stateRes.ok(), await stateRes.text()).toBeTruthy()
+  const state = (await stateRes.json()) as {
+    categories: { key: string; label: string; bar_override: number | null }[]
+  }
+  const categories = state.categories.map((c) => ({
+    key: c.key,
+    label: c.key === 'visual_hierarchy' ? 'Visual hierarchy (edited elsewhere)' : c.label,
+    bar_override: c.bar_override,
+  }))
+  await expect(async () => {
+    const res = await request.post('/api/plugin-ui/ui-gauge/categories', {
+      headers: auth,
+      data: { categories },
+    })
+    expect(res.ok(), await res.text()).toBeTruthy()
+    await expect(frame.getByTestId('gauge-stale')).toBeVisible({ timeout: 2_000 })
+  }).toPass({ timeout: 20_000 })
+
+  // No auto-refresh happened: the typed value is still in the input.
+  await expect(frame.locator('[data-cat-key="0"]')).toHaveValue('wip_edit_must_survive')
+
+  // Manual Refresh loads the external change and clears the chip.
+  await frame.getByTestId('gauge-refresh').click()
+  await expect(frame.getByTestId('gauge-stale')).toBeHidden()
+  await expect(frame.locator('[data-cat-key="0"]')).toHaveValue('visual_hierarchy', {
+    timeout: 10_000,
+  })
+})
