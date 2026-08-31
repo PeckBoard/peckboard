@@ -114,7 +114,15 @@ test('slideshow page: start → thinking → watchdog verdict on a tool-less run
   const select = frame.locator('.model-select')
   await expect(select).toBeVisible()
   await select.selectOption({ label: 'Mock: plan review (thinking)' })
+  // Optional steer: a starting topic rides along in the start request.
+  const topic = frame.locator('.topic-input')
+  await expect(topic).toBeVisible()
+  const startReq = page.waitForRequest(
+    (r) => r.url().includes('/api/plugin-ui/project-planner/start') && r.method() === 'POST',
+  )
+  await topic.fill('game rules')
   await frame.getByRole('button', { name: 'Begin the interview' }).click()
+  expect(((await startReq).postDataJSON() as { topic: string }).topic).toBe('game rules')
 
   // The interview is live: a real temp session was created and dispatched.
   await expect(frame.locator('.dots')).toBeVisible({ timeout: 15_000 })
