@@ -31,7 +31,11 @@ const DESCRIPTION =
   "and any install/remove command it proposes is stored as a SUGGESTION that only " +
   "becomes runnable when someone accepts it in the dashboard.";
 
-const VERSION = "0.8.1";
+// Single source of truth for the version: package.json (bundled in by
+// esbuild/vitest via resolveJsonModule). Never hardcode a version here — a
+// manifest that self-reports an old version makes the registry's
+// "upgrade available" chip permanent (project-planner 0.3.0 shipped that way).
+import { version as VERSION } from "../package.json";
 const REPOSITORY = "https://github.com/PeckBoard/app-manager";
 
 // Inline SVG (lucide "package") for the sidebar entry; rendered sandboxed.

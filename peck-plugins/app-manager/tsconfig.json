@@ -5,6 +5,7 @@
     "target": "es2020",
     "module": "es2020",
     "moduleResolution": "bundler",
+    "resolveJsonModule": true,
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
