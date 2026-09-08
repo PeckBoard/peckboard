@@ -161,11 +161,25 @@ impl AppLiveHost {
 }
 
 impl crate::plugin::host::LiveHost for AppLiveHost {
-    fn dispatch_capture(&self, session_id: String, prompt: String) {
+    fn dispatch_capture(&self, session_id: String, prompt: String, clear_first: bool) {
         let Some(state) = self.state.upgrade() else {
             return; // app is shutting down — nothing to dispatch to
         };
         self.rt.spawn(async move {
+            if clear_first {
+                // Wipe INSIDE the same task, before the dispatch: a separate
+                // clear_session spawn is unordered against this one, and its
+                // cancel_and_wait + event wipe can kill the run we are about
+                // to start. On failure, dispatch anyway — stale context beats
+                // a session left waiting for a run that never starts.
+                if let Err(e) =
+                    crate::routes::sessions::clear_session_core(&state, &session_id).await
+                {
+                    tracing::warn!(
+                        "plugin dispatch_capture clear_first for {session_id} failed: {e}"
+                    );
+                }
+            }
             if let Err(e) = AppExpertDispatcher::new(state)
                 .dispatch_capture(&session_id, &prompt)
                 .await

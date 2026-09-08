@@ -32,7 +32,7 @@ struct ApprovalRecorder {
     asks: Mutex<Vec<(String, String)>>,
 }
 impl LiveHost for ApprovalRecorder {
-    fn dispatch_capture(&self, _session_id: String, _prompt: String) {}
+    fn dispatch_capture(&self, _session_id: String, _prompt: String, _clear_first: bool) {}
     fn resume_session(&self, _session_id: String, _text: String) {}
     fn ask_user(
         &self,

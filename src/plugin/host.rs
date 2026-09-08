@@ -140,8 +140,11 @@ pub struct LiveAttachment {
 
 pub trait LiveHost: Send + Sync {
     /// Force a fresh capture run on `session_id` with `prompt` (maps to
-    /// `ExpertDispatcher::dispatch_capture`).
-    fn dispatch_capture(&self, session_id: String, prompt: String);
+    /// `ExpertDispatcher::dispatch_capture`). With `clear_first`, wipe the
+    /// session (the [`Self::clear_session`] wipe) before dispatching, ordered
+    /// inside the same scheduled task — separate clear + dispatch host calls
+    /// are unordered spawns, and the wipe can kill the fresh run.
+    fn dispatch_capture(&self, session_id: String, prompt: String, clear_first: bool);
     /// Deliver `text` to `session_id` and resume it — spawn if idle, queue /
     /// inject if running (maps to `ExpertDispatcher::resume_session`).
     fn resume_session(&self, session_id: String, text: String);
@@ -1783,6 +1786,14 @@ pub(crate) fn write_file_impl(db: &Db, input: &str, inv: &InvocationContext) -> 
 struct DispatchCaptureRequest {
     session_id: String,
     prompt: String,
+    /// Wipe the session first (the [`LiveHost::clear_session`] wipe: events,
+    /// todos, attachments, conversation) and only then dispatch, ordered
+    /// inside one scheduled task. A plugin issuing separate clear + dispatch
+    /// host calls gets two unordered spawns, and the wipe can kill the fresh
+    /// run it just started. Requires the `session_control` permission on top
+    /// of `session_dispatch`.
+    #[serde(default)]
+    clear_first: bool,
 }
 
 #[derive(Deserialize)]
@@ -1800,18 +1811,26 @@ pub(crate) fn dispatch_capture_impl(
     input: &str,
     caller: &TrustedCaller,
     live: Option<Arc<dyn LiveHost>>,
+    clear_allowed: bool,
 ) -> String {
     let req: DispatchCaptureRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
+    if req.clear_first && !clear_allowed {
+        return error_json("clear_first requires the 'session_control' permission");
+    }
     if let Err(e) = fetch_visible_session(db, req.session_id.trim(), caller) {
         return error_json(e);
     }
     let Some(live) = live else {
         return error_json("live dispatch unavailable");
     };
-    live.dispatch_capture(req.session_id.trim().to_string(), req.prompt);
+    live.dispatch_capture(
+        req.session_id.trim().to_string(),
+        req.prompt,
+        req.clear_first,
+    );
     serde_json::json!({ "ok": true }).to_string()
 }
 
@@ -3724,7 +3743,10 @@ host_fn!(peckboard_dispatch_capture(user_data: HostState; input: String) -> Stri
     let (db, _plugin_id, ok, caller, live) = state_permission_trusted_caller_and_live(&user_data, "session_dispatch")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_dispatch' permission")); }
     let Some(caller) = caller else { return Ok(error_json("no trusted caller context; peckboard_dispatch_capture requires a tool invocation or an authenticated plugin-UI request")); };
-    Ok(dispatch_capture_impl(&db, &input, &caller, live))
+    // `clear_first` is destructive (transcript wipe) — it additionally needs
+    // the session-control grant, checked here and enforced in the impl.
+    let (_, _, clear_ok) = state_and_permission(&user_data, "session_control")?;
+    Ok(dispatch_capture_impl(&db, &input, &caller, live, clear_ok))
 });
 
 host_fn!(peckboard_resume_session(user_data: HostState; input: String) -> String {
@@ -4638,7 +4660,7 @@ mod tests {
         // store writes announce themselves to plugin pages.
         struct NotifyRecorder(std::sync::Mutex<Vec<(String, String)>>);
         impl LiveHost for NotifyRecorder {
-            fn dispatch_capture(&self, _session_id: String, _prompt: String) {}
+            fn dispatch_capture(&self, _session_id: String, _prompt: String, _clear_first: bool) {}
             fn resume_session(&self, _session_id: String, _text: String) {}
             fn notify_plugin_data(&self, plugin_id: String, collection: String) {
                 self.0.lock().unwrap().push((plugin_id, collection));
@@ -5902,11 +5924,12 @@ mod tests {
         calls: std::sync::Mutex<Vec<String>>,
     }
     impl LiveHost for RecordingLive {
-        fn dispatch_capture(&self, session_id: String, _prompt: String) {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("dispatch:{session_id}"));
+        fn dispatch_capture(&self, session_id: String, _prompt: String, clear_first: bool) {
+            self.calls.lock().unwrap().push(if clear_first {
+                format!("dispatch-clear:{session_id}")
+            } else {
+                format!("dispatch:{session_id}")
+            });
         }
         fn resume_session(&self, session_id: String, _text: String) {
             self.calls
@@ -6074,6 +6097,7 @@ mod tests {
             &format!(r#"{{"session_id":"{sid}","prompt":"read your scope"}}"#),
             &caller,
             Some(live_dyn.clone()),
+            false,
         );
         assert!(d.contains("\"ok\":true"), "dispatch: {d}");
         let r = resume_session_impl(
@@ -6159,6 +6183,7 @@ mod tests {
             &format!(r#"{{"session_id":"{foreign}","prompt":"x"}}"#),
             &caller,
             Some(live_dyn.clone()),
+            false,
         );
         assert!(refused.contains("not found"), "cross-scope: {refused}");
         assert_eq!(
@@ -6173,10 +6198,57 @@ mod tests {
             &format!(r#"{{"session_id":"{sid}","prompt":"x"}}"#),
             &caller,
             None,
+            false,
         );
         assert!(
             unbound.contains("live dispatch unavailable"),
             "unbound: {unbound}"
+        );
+    }
+    /// `clear_first` on dispatch: refused without the `session_control`
+    /// grant (nothing reaches the live host), and with it the flag rides the
+    /// SAME live call as the dispatch — the ordering guarantee the planner
+    /// relies on (separate clear + dispatch spawns are unordered).
+    #[tokio::test]
+    async fn dispatch_clear_first_needs_session_control_and_rides_the_live_call() {
+        let db = setup().await; // folder f1 / project p1
+        let caller = TrustedCaller(inv(Some("p1"), Some("f1")));
+        let sid = serde_json::from_str::<serde_json::Value>(&create_session_impl(
+            &db,
+            r#"{"name":"planner"}"#,
+            &caller,
+        ))
+        .unwrap()["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let live = Arc::new(RecordingLive::default());
+        let live_dyn: Arc<dyn LiveHost> = live.clone();
+
+        let refused = dispatch_capture_impl(
+            &db,
+            &format!(r#"{{"session_id":"{sid}","prompt":"x","clear_first":true}}"#),
+            &caller,
+            Some(live_dyn.clone()),
+            false,
+        );
+        assert!(refused.contains("session_control"), "gate: {refused}");
+        assert!(
+            live.calls.lock().unwrap().is_empty(),
+            "refused clear_first must not dispatch"
+        );
+
+        let granted = dispatch_capture_impl(
+            &db,
+            &format!(r#"{{"session_id":"{sid}","prompt":"x","clear_first":true}}"#),
+            &caller,
+            Some(live_dyn),
+            true,
+        );
+        assert!(granted.contains("\"ok\":true"), "granted: {granted}");
+        assert_eq!(
+            *live.calls.lock().unwrap(),
+            vec![format!("dispatch-clear:{sid}")]
         );
     }
 
@@ -6910,6 +6982,7 @@ mod tests {
             &format!(r#"{{"session_id":"{sid}","prompt":"install"}}"#),
             &caller,
             Some(live_dyn),
+            false,
         );
         assert!(d.contains("\"ok\":true"), "dispatch under authority: {d}");
         assert_eq!(*live.calls.lock().unwrap(), vec![format!("dispatch:{sid}")]);

@@ -35,7 +35,7 @@ struct Recorder {
     calls: Mutex<Vec<String>>,
 }
 impl LiveHost for Recorder {
-    fn dispatch_capture(&self, session_id: String, _prompt: String) {
+    fn dispatch_capture(&self, session_id: String, _prompt: String, _clear_first: bool) {
         self.calls
             .lock()
             .unwrap()

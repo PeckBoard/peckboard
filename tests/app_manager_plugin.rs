@@ -436,7 +436,7 @@ async fn app_manager_session_install_flow() {
         dispatched: Arc<Mutex<Vec<(String, String)>>>,
     }
     impl LiveHost for RecordingLive {
-        fn dispatch_capture(&self, session_id: String, prompt: String) {
+        fn dispatch_capture(&self, session_id: String, prompt: String, _clear_first: bool) {
             self.dispatched.lock().unwrap().push((session_id, prompt));
         }
         fn resume_session(&self, _session_id: String, _text: String) {}

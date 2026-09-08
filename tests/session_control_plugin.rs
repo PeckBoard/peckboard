@@ -31,7 +31,7 @@ struct ControlRecorder {
     messages: Mutex<Vec<(String, String, usize)>>, // (session, text, attachment_count)
 }
 impl LiveHost for ControlRecorder {
-    fn dispatch_capture(&self, _session_id: String, _prompt: String) {}
+    fn dispatch_capture(&self, _session_id: String, _prompt: String, _clear_first: bool) {}
     fn resume_session(&self, _session_id: String, _text: String) {}
     fn interrupt_session(&self, session_id: String) {
         self.interrupts.lock().unwrap().push(session_id);

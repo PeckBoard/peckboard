@@ -332,7 +332,7 @@ async fn worker_allowed_tools_still_work() {
 
 struct NoopLiveHost;
 impl LiveHost for NoopLiveHost {
-    fn dispatch_capture(&self, _session_id: String, _prompt: String) {}
+    fn dispatch_capture(&self, _session_id: String, _prompt: String, _clear_first: bool) {}
     fn resume_session(&self, _session_id: String, _text: String) {}
 }
 
