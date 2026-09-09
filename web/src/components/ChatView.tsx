@@ -19,12 +19,12 @@ import {
 } from '../store/resources'
 import { useUsageStore } from '../store/usage'
 import { bareModelId, usageCost } from '../util/cost'
-import { fmtInt, fmtTokens, fmtUsd } from '../util/format'
 import { downloadTranscript } from '../util/transcript'
 import InputBar from './InputBar'
 import ToolUseBlock, { CopyButton } from './ToolUseBlock'
 import DiffBlock from './DiffBlock'
 import ConfirmDialog from './ConfirmDialog'
+import ModelSwitchDialog, { type ModelSwitchMode } from './ModelSwitchDialog'
 import Modal from './Modal'
 import RenameModal from './RenameModal'
 import { MenuButton, type MenuItem } from './Dropdown'
@@ -1093,10 +1093,10 @@ export default function ChatView({
   // on a provider/account switch). Cleared on the next successful patch
   // or by the dismiss button.
   const [patchError, setPatchError] = useState<string | null>(null)
-  // Cross-provider/account model switch awaiting the user's choice in the
-  // modal below (hand over a summary / recovery transcript / clear).
+  // Cross-provider/account model switch awaiting the user's choice
+  // (handover / recovery / force / clear).
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null)
-  const [switchMode, setSwitchMode] = useState<'handover' | 'recovery' | 'clear'>('handover')
+  const [switchMode, setSwitchMode] = useState<ModelSwitchMode>('handover')
   const [recoveryPreview, setRecoveryPreview] = useState<RecoveryPreview | null>(null)
   const [recoveryPreviewError, setRecoveryPreviewError] = useState<string | null>(null)
   const [switchBusy, setSwitchBusy] = useState(false)
@@ -1936,8 +1936,11 @@ export default function ChatView({
   }
   const requestModelChange = (id: string) => {
     const crosses = continuityKey(sessionDetail?.model) !== continuityKey(id)
-    if (crosses && events.length > 0 && !sessionDetail?.is_worker) {
-      setSwitchMode('handover')
+    // Workers skip this dialog today and PATCH straight into a 409. Always
+    // confirm a cross-boundary worker switch; force is the only path that
+    // works (handover/recovery are refused).
+    if (crosses && (events.length > 0 || sessionDetail?.is_worker)) {
+      setSwitchMode(sessionDetail?.is_worker ? 'force' : 'handover')
       setSwitchError(null)
       setPendingModelSwitch(id)
     } else {
@@ -1966,7 +1969,9 @@ export default function ChatView({
     try {
       if (switchMode === 'clear') {
         await clearSession(sessionId)
-        await patchSession(patch)
+        await patchSession({ ...patch, force: true })
+      } else if (switchMode === 'force') {
+        await patchSession({ ...patch, force: true })
       } else {
         const url =
           switchMode === 'recovery'
@@ -2645,111 +2650,18 @@ export default function ChatView({
         attachDisabledReason={attachDisabledReason}
       />
       {pendingModelSwitch !== null && (
-        <ConfirmDialog
-          title="Switch model?"
-          message={`Switching to ${modelDisplayName(pendingModelSwitch)} crosses a provider or account boundary — the new model starts with no memory of this conversation.`}
-          wide
-          cancelLabel="Cancel"
-          confirmLabel={
-            switchMode === 'recovery'
-              ? 'Send transcript'
-              : switchMode === 'clear'
-                ? 'Clear & switch'
-                : 'Hand over context'
-          }
-          confirmTestId={
-            switchMode === 'recovery'
-              ? 'model-switch-recovery-confirm'
-              : switchMode === 'clear'
-                ? 'model-switch-clear-confirm'
-                : 'model-switch-handover'
-          }
-          confirmDisabled={switchMode === 'recovery' && recoveryPreview?.fits === false}
-          danger={switchMode === 'recovery' || switchMode === 'clear'}
-          busy={switchBusy}
-          error={switchError}
-          testId="model-switch-prompt"
+        <ModelSwitchDialog
+          targetLabel={modelDisplayName(pendingModelSwitch)}
+          switchMode={switchMode}
+          setSwitchMode={setSwitchMode}
+          switchBusy={switchBusy}
+          switchError={switchError}
+          isWorker={!!sessionDetail?.is_worker}
+          recoveryPreview={recoveryPreview}
+          recoveryPreviewError={recoveryPreviewError}
           onConfirm={() => void runModelSwitch()}
           onCancel={closeSwitchDialog}
-        >
-          <div
-            className="confirm-dialog-choices"
-            role="radiogroup"
-            aria-label="How to pass context"
-          >
-            <label className="confirm-dialog-choice">
-              <input
-                type="radio"
-                name="model-switch-mode"
-                checked={switchMode === 'handover'}
-                disabled={switchBusy}
-                onChange={() => setSwitchMode('handover')}
-              />
-              <span className="confirm-dialog-choice-body">
-                <span className="confirm-dialog-choice-label">Hand over a summary</span>
-                <span className="confirm-dialog-choice-hint">
-                  The current agent writes a handover doc. Won&apos;t work if this account has hit a
-                  usage limit.
-                </span>
-              </span>
-            </label>
-            <label className="confirm-dialog-choice" data-testid="model-switch-recovery">
-              <input
-                type="radio"
-                name="model-switch-mode"
-                checked={switchMode === 'recovery'}
-                disabled={switchBusy}
-                onChange={() => setSwitchMode('recovery')}
-              />
-              <span className="confirm-dialog-choice-body">
-                <span className="confirm-dialog-choice-label">Send full transcript (recovery)</span>
-                <span className="confirm-dialog-choice-hint">
-                  Does not use the current agent. The entire conversation is sent to the new model
-                  as one input — billed to the new account. Use this when the current account has
-                  hit a limit.
-                </span>
-                {recoveryPreviewError ? (
-                  <span className="confirm-dialog-cost-warn">{recoveryPreviewError}</span>
-                ) : recoveryPreview ? (
-                  <>
-                    <span className="confirm-dialog-cost">
-                      <span data-testid="model-switch-recovery-tokens">
-                        ~{fmtInt(recoveryPreview.tokens)} tokens (
-                        {fmtTokens(recoveryPreview.tokens)})
-                      </span>
-                      <span data-testid="model-switch-recovery-cost">
-                        ~{fmtUsd(recoveryPreview.est_cost_usd)} at the new model&apos;s input rate
-                      </span>
-                    </span>
-                    {!recoveryPreview.fits && (
-                      <span className="confirm-dialog-cost-warn">
-                        This exceeds the new model&apos;s ~{fmtInt(recoveryPreview.context_window)}
-                        -token context window. Compact or recap first.
-                      </span>
-                    )}
-                  </>
-                ) : (
-                  <span className="confirm-dialog-choice-hint">Estimating token cost…</span>
-                )}
-              </span>
-            </label>
-            <label className="confirm-dialog-choice" data-testid="model-switch-clear">
-              <input
-                type="radio"
-                name="model-switch-mode"
-                checked={switchMode === 'clear'}
-                disabled={switchBusy}
-                onChange={() => setSwitchMode('clear')}
-              />
-              <span className="confirm-dialog-choice-body">
-                <span className="confirm-dialog-choice-label">Clear context and switch</span>
-                <span className="confirm-dialog-choice-hint">
-                  Start fresh. This conversation is not passed on.
-                </span>
-              </span>
-            </label>
-          </div>
-        </ConfirmDialog>
+        />
       )}
       {confirmAction && (
         <ConfirmDialog

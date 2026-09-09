@@ -166,6 +166,7 @@ test('cross-provider switch prompt is a real dialog: Escape cancels it', async (
   await expect(page.getByTestId('model-switch-clear')).toBeVisible()
   await expect(page.getByTestId('model-switch-handover')).toBeVisible()
   await expect(page.getByTestId('model-switch-recovery')).toBeVisible()
+  await expect(page.getByTestId('model-switch-force')).toBeVisible()
 
   // The hand-rolled copy had no Escape handler at all: a keyboard user was
   // stuck until they found the mouse.
@@ -179,4 +180,66 @@ test('cross-provider switch prompt is a real dialog: Escape cancels it', async (
   const detail = (await after.json()) as { model: string | null; handover_to_model: string | null }
   expect(detail.model).toBe('mock:echo')
   expect(detail.handover_to_model).toBeNull()
+})
+
+test('force switch keeps the transcript and does not park a handover', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+
+  const { token, authHeader } = await authenticate(request)
+  const { sessionId } = await seedSession(request, authHeader, 'mock:echo')
+
+  const send = await request.post(`/api/sessions/${sessionId}/message`, {
+    headers: authHeader,
+    data: { text: 'hello overlay' },
+  })
+  expect(send.ok(), `send failed: ${await send.text()}`).toBeTruthy()
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`/api/sessions/${sessionId}/events?limit=50`, {
+          headers: authHeader,
+        })
+        if (!res.ok()) return 0
+        return ((await res.json()) as unknown[]).length
+      },
+      { timeout: 20_000 },
+    )
+    .toBeGreaterThan(0)
+
+  await loadApp(page, token, `/sessions/${sessionId}`)
+
+  const trigger = page.getByTestId('chat-toolbar-model')
+  await expect(trigger).toBeVisible({ timeout: 10_000 })
+  await trigger.click()
+  await page.getByTestId('chat-toolbar-model-option-claude:claude-opus-4-8').click()
+
+  const dialog = page.getByTestId('model-switch-prompt')
+  await expect(dialog).toBeVisible()
+  await page.getByTestId('model-switch-force').click()
+  await page.getByTestId('model-switch-force-confirm').click()
+  await expect(dialog).toHaveCount(0)
+
+  const after = await request.get(`/api/sessions/${sessionId}`, { headers: authHeader })
+  const detail = (await after.json()) as {
+    model: string | null
+    handover_to_model: string | null
+    conversation_id: string | null
+  }
+  expect(detail.model).toBe('claude:claude-opus-4-8')
+  expect(detail.handover_to_model).toBeNull()
+  expect(detail.conversation_id).toBeNull()
+
+  const eventsRes = await request.get(`/api/sessions/${sessionId}/events?limit=200`, {
+    headers: authHeader,
+  })
+  const events = (await eventsRes.json()) as { kind: string; data: Record<string, unknown> }[]
+  expect(events.some((e) => e.kind === 'handover-start' || e.kind === 'handover')).toBeFalsy()
+  expect(events.some((e) => e.kind === 'user')).toBeTruthy()
+  expect(
+    events.some((e) => e.kind === 'model-switch' && e.data && e.data.force === true),
+  ).toBeTruthy()
 })

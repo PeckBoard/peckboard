@@ -236,12 +236,27 @@ async fn patch_model_on(
     session_id: &str,
     model: &str,
 ) -> (StatusCode, serde_json::Value) {
+    patch_session_on(
+        state,
+        token,
+        session_id,
+        &format!(r#"{{"model":"{model}"}}"#),
+    )
+    .await
+}
+
+async fn patch_session_on(
+    state: &Arc<AppState>,
+    token: &str,
+    session_id: &str,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method("PATCH")
         .uri(format!("/api/sessions/{session_id}"))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(format!(r#"{{"model":"{model}"}}"#)))
+        .body(Body::from(body.to_string()))
         .unwrap();
     let resp = router(state.clone())
         .with_state(state.clone())
@@ -255,8 +270,6 @@ async fn patch_model_on(
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
     (status, body)
 }
-
-/// Seed the event shapes the guards read: prior agent activity, with or
 /// without a closing agent-end.
 async fn seed_turn(db: &Db, closed: bool) {
     db.append_event("s1", "agent-start", serde_json::json!({ "model": "m" }))
@@ -358,6 +371,116 @@ async fn second_switch_during_handover_is_refused() {
 }
 
 /// The regression this file exists for: the handover must FINISH. The PATCH
+/// Force skips the worker 409, writes the model, and drops the resume link
+/// so the incoming provider is not asked to `--resume` a foreign conversation.
+#[tokio::test]
+async fn worker_cross_boundary_force_switch_is_applied() {
+    let (state, token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+
+    let (status, body) = patch_session_on(
+        &state,
+        &token,
+        "w1",
+        r#"{"model":"mock:echo@acct2","force":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:echo@acct2"));
+    assert_eq!(s.handover_to_model, None);
+    assert_eq!(s.conversation_id, None);
+    assert_eq!(s.pending_handover_doc, None);
+
+    let events = state.db.list_events_by_session("w1", None).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "model-switch" && e.data.contains("\"force\":true")),
+        "missing force model-switch event: {:?}",
+        events.iter().map(|e| &e.kind).collect::<Vec<_>>(),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "system" && e.data.contains("Forced model switch")),
+        "missing force system notice",
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "handover-start" || e.kind == "handover"),
+        "force must not dispatch a handover",
+    );
+
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert_eq!(
+        card.model.as_deref(),
+        Some("mock:echo@acct2"),
+        "worker force must stamp the card so a later spawn does not revert",
+    );
+}
+
+/// Same-provider `force` is a no-op on the resume link — `--resume` still works.
+#[tokio::test]
+async fn force_switch_same_key_keeps_conversation_id() {
+    let (state, token) = build_state("mock:echo").await;
+    seed_worker(&state).await;
+
+    let (status, body) = patch_session_on(
+        &state,
+        &token,
+        "w1",
+        r#"{"model":"mock:happy-path","force":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let s = state.db.get_session("w1").await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:happy-path"));
+    assert_eq!(s.conversation_id.as_deref(), Some("conv-1"));
+    assert_eq!(s.handover_to_model, None);
+}
+
+/// Chat force: write the new model immediately, drop resume, no handover turn.
+#[tokio::test]
+async fn chat_force_switch_drops_resume_and_skips_handover() {
+    let (state, token) = build_state("mock:echo").await;
+    seed_turn(&state.db, true).await;
+    state
+        .db
+        .update_session(
+            "s1",
+            UpdateSession {
+                conversation_id: Some(Some("conv-chat".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = patch_session_on(
+        &state,
+        &token,
+        "s1",
+        r#"{"model":"mock:echo@acct2","force":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let s = state.db.get_session("s1").await.unwrap().unwrap();
+    assert_eq!(s.model.as_deref(), Some("mock:echo@acct2"));
+    assert_eq!(s.handover_to_model, None);
+    assert_eq!(s.conversation_id, None);
+
+    let events = state.db.list_events_by_session("s1", None).await.unwrap();
+    assert!(events.iter().any(|e| e.kind == "agent-text"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "handover-start" || e.kind == "handover")
+    );
+    assert!(events.iter().any(|e| e.kind == "model-switch"));
+}
+
 /// parks the target and dispatches the doc turn; the doc turn's completion
 /// must arrive on the completion channel (for Claude that only happens
 /// because begin_handover requests shutdown_after_turn — per-turn providers

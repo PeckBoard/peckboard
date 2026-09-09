@@ -7,10 +7,8 @@
 mod dispatch;
 mod events;
 
-pub(crate) use dispatch::dismiss_pending_questions;
-
 use crate::auth::middleware::{AuthUser, require_auth, require_session_access};
-use crate::db::models::{NewSession, UpdateSession};
+use crate::db::models::{NewSession, UpdateCard, UpdateSession};
 use crate::routes::misc::explicit_null;
 use crate::state::AppState;
 use axum::{
@@ -21,6 +19,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+pub(crate) use dispatch::dismiss_pending_questions;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -96,6 +95,13 @@ struct UpdateSessionRequest {
     /// Set/clear the temp flag. `Some(false)` is the "Keep session" action —
     /// it converts a temp session into a regular one that outlives its tab.
     is_temp: Option<bool>,
+    /// Cold-switch across a provider/account boundary without calling either
+    /// model. Drops the resume link (`conversation_id` and any parked
+    /// handover) so the incoming provider starts fresh. No-op when the
+    /// requested model stays on the same continuity key — same-provider
+    /// force must not kill `--resume`.
+    #[serde(default)]
+    force: bool,
 }
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -348,19 +354,34 @@ async fn update_session(
 ) -> impl IntoResponse {
     tracing::info!(session_id = %id, "Updating session");
 
+    // Snapshot first: a force switch needs the current continuity key
+    // without going through `maybe_handover_target` (which 409s workers).
+    let requested_model = body.model.clone().flatten();
+    let requested_effort = body.effort.clone();
+    let prior = state.db.get_session(&id).await.ok().flatten();
+
+    let app_default = crate::routes::settings::default_model_setting(&state).await;
+    let current = effective_model(
+        prior.as_ref().and_then(|s| s.model.as_deref()),
+        &app_default,
+    );
+    // `force` is a no-op on same-provider switches — dropping
+    // `conversation_id` there would needlessly kill `--resume`.
+    let force_cold = body.force
+        && requested_model
+            .as_deref()
+            .is_some_and(|m| crate::handover::needs_handover(current, m));
+
     // A model change that crosses a provider/account boundary needs a
     // handover: the outgoing model writes a context doc the incoming model
     // reads (see `crate::handover`). Decide that here, before applying the
     // patch, because a handover defers the actual `model` write until the
-    // doc-generation turn completes.
-    let requested_model = body.model.clone().flatten();
-    let requested_effort = body.effort.clone();
-    let handover_target = maybe_handover_target(&state, &id, requested_model.as_deref()).await?;
-
-    // Snapshot the pre-patch model/effort: a plain (same provider+account)
-    // switch must recycle any live child process below, and "did it actually
-    // change" is decided against these.
-    let prior = state.db.get_session(&id).await.ok().flatten();
+    // doc-generation turn completes. Force skips this — no provider call.
+    let handover_target = if force_cold {
+        None
+    } else {
+        maybe_handover_target(&state, &id, requested_model.as_deref()).await?
+    };
 
     // When handing over, don't write the new `model` yet — the outgoing
     // provider must stay selected so its doc-generation turn routes to it.
@@ -401,7 +422,14 @@ async fn update_session(
         effort: body.effort,
         project_id: body.project_id,
         card_id: body.card_id,
-        conversation_id: body.conversation_id,
+        conversation_id: if force_cold {
+            Some(None)
+        } else {
+            body.conversation_id
+        },
+        handover_to_model: if force_cold { Some(None) } else { None },
+        pending_handover_doc: if force_cold { Some(None) } else { None },
+        handover_run_id: if force_cold { Some(None) } else { None },
         model_autoswitch: body.model_autoswitch,
         last_activity: body.last_activity,
         system_prompt: system_prompt_update,
@@ -423,7 +451,9 @@ async fn update_session(
         || update.model_autoswitch.is_some()
         || update.system_prompt.is_some()
         || update.system_prompt_name.is_some()
-        || update.is_temp.is_some();
+        || update.is_temp.is_some()
+        || update.handover_to_model.is_some()
+        || update.handover_run_id.is_some();
 
     let session = if has_updates {
         state.db.update_session(&id, update).await
@@ -460,16 +490,16 @@ async fn update_session(
         let model_changed = requested_model.is_some() && requested_model != prior.model;
         let effort_changed = matches!(&requested_effort, Some(e) if *e != prior.effort);
         if model_changed || effort_changed {
-            if prior.is_worker {
-                // A worker's in-flight turn can span the rest of its card,
+            if prior.is_worker || force_cold {
+                // Workers: an in-flight turn can span the rest of the card,
                 // so winding down after the turn would land only when the
-                // work is essentially done — the switch would never be
-                // seen. Hard-cancel instead: the completion listener treats
-                // the interrupted run as a non-counting crash, releases the
-                // card's claim, and check_and_spawn_workers resumes this
-                // same session right away — `--resume` carries the
-                // conversation and the fresh spawn reads the new
-                // model/effort from the row just written.
+                // work is essentially done. Force: the current model may be
+                // dead (credits/quota), so waiting on it is the bug.
+                // Hard-cancel; the completion listener treats the interrupted
+                // run as a non-counting crash. Workers: the orchestrator
+                // resumes this same session — without `--resume` after a
+                // force drop of `conversation_id`, with it after a same-key
+                // switch.
                 state.session_manager.cancel(&id).await;
             } else {
                 crate::provider::manager::shutdown_after_turn_via_registry(
@@ -513,6 +543,87 @@ async fn update_session(
         }
     }
 
+    if force_cold {
+        let from = prior
+            .as_ref()
+            .and_then(|s| s.model.clone())
+            .unwrap_or_else(|| current.to_string());
+        let to = requested_model.clone().unwrap_or_default();
+        if let Ok(event) = state
+            .db
+            .append_event(
+                &id,
+                "model-switch",
+                serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "force": true,
+                }),
+            )
+            .await
+        {
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "event".into(),
+                    session_id: id.clone(),
+                    data: serde_json::json!({
+                        "id": event.id,
+                        "seq": event.seq,
+                        "ts": event.ts,
+                        "kind": event.kind,
+                        "data": serde_json::from_str::<serde_json::Value>(&event.data)
+                            .unwrap_or_default(),
+                    }),
+                });
+        }
+        if let Ok(event) = state
+            .db
+            .append_event(
+                &id,
+                "system",
+                serde_json::json!({
+                    "text": format!(
+                        "Forced model switch from {from} to {to}. The new model starts with no memory of this conversation."
+                    ),
+                }),
+            )
+            .await
+        {
+            state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "event".into(),
+                session_id: id.clone(),
+                data: serde_json::json!({
+                    "id": event.id,
+                    "seq": event.seq,
+                    "ts": event.ts,
+                    "kind": event.kind,
+                    "data": serde_json::from_str::<serde_json::Value>(&event.data)
+                        .unwrap_or_default(),
+                }),
+            });
+        }
+        // Keep the card's model in sync so a later spawn (resume severed)
+        // does not revert to the old provider.
+        if let Some(prior) = &prior
+            && prior.is_worker
+            && let (Some(card_id), Some(model)) =
+                (prior.card_id.as_deref(), requested_model.as_deref())
+        {
+            let _ = state
+                .db
+                .update_card(
+                    card_id,
+                    UpdateCard {
+                        model: Some(Some(model.to_string())),
+                        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+    }
+
     Ok(Json(serde_json::json!(session)))
 }
 
@@ -541,6 +652,7 @@ fn effective_model<'a>(session_model: Option<&'a str>, app_default: &'a Option<S
 /// - any cross-boundary switch on a worker session (nothing would dispatch
 ///   the doc turn mid-card, and a silent plain switch would strand the
 ///   card's resume on a conversation the incoming provider can't open).
+/// Pass `force: true` on the PATCH to skip this function and cold-switch.
 async fn maybe_handover_target(
     state: &Arc<AppState>,
     session_id: &str,

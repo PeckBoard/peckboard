@@ -185,3 +185,78 @@ test('cross-account model switch generates a handover the new model reads', asyn
     expect(userEvent?.data.text).toBe('continue please')
   }
 })
+
+test('force cross-account switch skips handover and starts cold', async ({ request }) => {
+  const { authHeader } = await authenticate(request)
+
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-force-switch-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: authHeader,
+    data: { name: 'e2e-force-switch', path: folderPath },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'force-switch', folder_id: folder.id, model: 'mock:echo' },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const session = (await sessionRes.json()) as { id: string }
+
+  {
+    const send = await request.post(`/api/sessions/${session.id}/message`, {
+      headers: authHeader,
+      data: { text: 'first message' },
+    })
+    expect(send.ok(), `first send failed: ${await send.text()}`).toBeTruthy()
+  }
+  const afterFirst = maxSeq(
+    await waitForEvent(request, authHeader, session.id, 'agent-end', 0, 15_000),
+  )
+
+  const patchRes = await request.patch(`/api/sessions/${session.id}`, {
+    headers: authHeader,
+    data: { model: 'mock:echo@acct2', force: true },
+  })
+  expect(patchRes.ok(), `force patch failed: ${await patchRes.text()}`).toBeTruthy()
+  const after = (await patchRes.json()) as {
+    model: string | null
+    handover_to_model: string | null
+    conversation_id: string | null
+  }
+  expect(after.model).toBe('mock:echo@acct2')
+  expect(after.handover_to_model).toBeNull()
+  expect(after.conversation_id).toBeNull()
+
+  const kinds = (
+    (await (
+      await request.get(`/api/sessions/${session.id}/events?limit=1000`, { headers: authHeader })
+    ).json()) as WsEvent[]
+  )
+    .filter((e) => e.seq > afterFirst)
+    .map((e) => e.kind)
+  expect(kinds).toContain('model-switch')
+  expect(kinds).not.toContain('handover-start')
+  expect(kinds).not.toContain('handover')
+
+  {
+    const send = await request.post(`/api/sessions/${session.id}/message`, {
+      headers: authHeader,
+      data: { text: 'continue please' },
+    })
+    expect(send.ok(), `post-force send failed: ${await send.text()}`).toBeTruthy()
+    const events = await waitForEvent(
+      request,
+      authHeader,
+      session.id,
+      'agent-end',
+      afterFirst,
+      15_000,
+    )
+    const fresh = events.filter((e) => e.seq > afterFirst && e.kind === 'agent-text')
+    const joined = fresh.map((e) => String(e.data.text)).join('')
+    expect(joined).not.toContain('[Handover context')
+    expect(joined).toContain('continue please')
+  }
+})
