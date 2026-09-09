@@ -94,6 +94,7 @@ test('MCP server editor: add, import, validate, toggle, delete', async ({
   expect(body.supported_providers).toContain('cursor')
   expect(body.supported_providers).toContain('grok')
   expect(body.supported_providers).toContain('ollama')
+  expect(body.supported_providers).toContain('codex')
 
   // ── Import JSON (the snippet shape MCP READMEs ship) ─────────────
   await page.getByTestId('mcp-import-json').click()

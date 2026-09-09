@@ -43,10 +43,26 @@ test('bareModelId strips any provider prefix and @account suffix', () => {
   expect(bareModelId('claude:opus[1m]@work')).toBe('opus[1m]')
   expect(bareModelId('grok-4.6')).toBe('grok-4.6')
 })
+
 test('contextWindowInfo: grok 4.5/4.6 are 500K, known, even with prefix/@account', () => {
   const ids = ['grok-4.5', 'grok:grok-4.5', 'grok:grok-4.5@acc', 'grok-4.6', 'grok:grok-4.6']
   for (const id of ids) {
     expect(contextWindowInfo(id, table)).toEqual({ limit: 500_000, known: true })
+  }
+})
+
+test('contextWindowInfo: codex GPT-5.6 / GPT-6 seed ids are 1.05M, known', () => {
+  const ids = [
+    'codex:gpt-5.6-luna',
+    'gpt-5.6-luna',
+    'codex:gpt-5.6-terra',
+    'codex:gpt-5.6-sol',
+    'codex:gpt-6-astra@acc',
+    'gpt-6-astra',
+    'codex:gpt-5.6',
+  ]
+  for (const id of ids) {
+    expect(contextWindowInfo(id, table)).toEqual({ limit: 1_050_000, known: true })
   }
 })
 

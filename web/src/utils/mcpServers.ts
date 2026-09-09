@@ -120,7 +120,7 @@ export interface CommandCheckResult {
   suggested_folder_path: string
 }
 
-/** Ask the server whether a stdio `command` exists on its PATH. */
+/** Ask the server whether `command` exists on its PATH. */
 export async function checkMcpCommand(command: string): Promise<CommandCheckResult | null> {
   try {
     const res = await authedFetch('/api/settings/mcp-servers/check-command', {
@@ -142,6 +142,9 @@ export async function checkMcpCommand(command: string): Promise<CommandCheckResu
     return null
   }
 }
+
+/** Same host-PATH probe; used by provider CLIs (Codex) as well as MCP. */
+export const checkHostCommand = checkMcpCommand
 
 /** Connection status for one OAuth-connected server (token values stay server-side). */
 export interface McpOauthTokenInfo {

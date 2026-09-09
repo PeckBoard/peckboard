@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { authedFetch, useAuthStore } from '../store/auth'
+import { HostCliMissingBanner } from './MissingCommandWarning'
 
 /**
  * Renders the inputs for a single built-in plugin's settings, driven by
@@ -260,6 +261,9 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
     }
   }
 
+  const cliPathRaw = form.values.cli_path
+  const cliPath = typeof cliPathRaw === 'string' && cliPathRaw.trim() ? cliPathRaw.trim() : 'codex'
+
   return (
     <div className="plugin-settings" data-testid={`plugin-settings-${pluginId}`}>
       <fieldset disabled={!isAdmin} className="plugin-settings-fields">
@@ -278,6 +282,15 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
           />
         ))}
       </fieldset>
+      {pluginId === 'codex' && (
+        <HostCliMissingBanner
+          command={cliPath}
+          requiredBy="the Codex provider"
+          doneHint="go back to Settings → Providers and confirm the Codex CLI warning is gone"
+          consequence="This provider will fail to spawn until it is installed."
+          testIdPrefix="codex"
+        />
+      )}
       {!isAdmin && <p className="form-hint">Only an admin can change plugin settings.</p>}
       <div className="plugin-settings-actions" aria-live="polite">
         <span className="plugin-settings-autosave">Changes save automatically.</span>

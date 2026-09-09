@@ -196,9 +196,9 @@ pub fn estimate_tokens(text: &str) -> i64 {
 
 /// Usable context-window size (tokens) for a model id. Matches the
 /// frontend's `contextWindowInfo`: `[1m]` aliases are 1M, grok-4.5/4.6
-/// are 500K, everything else is the 200K default. Recovery uses this
-/// only as a `fits` check — a miss is labelled as an estimate, not a
-/// hard provider limit.
+/// are 500K, the Codex GPT-5.6 / GPT-6 seed ids are 1.05M, everything
+/// else is the 200K default. Recovery uses this only as a `fits` check
+/// — a miss is labelled as an estimate, not a hard provider limit.
 pub fn context_window_for(model: &str) -> i64 {
     let (model, _acct) = split_model_account(model);
     let id = model.rsplit(':').next().unwrap_or(model);
@@ -206,6 +206,11 @@ pub fn context_window_for(model: &str) -> i64 {
         1_000_000
     } else if id == "grok-4.5" || id == "grok-4.6" {
         500_000
+    } else if matches!(
+        id,
+        "gpt-5.6-luna" | "gpt-5.6-terra" | "gpt-5.6-sol" | "gpt-6-astra" | "gpt-5.6"
+    ) {
+        1_050_000
     } else {
         200_000
     }
@@ -1742,6 +1747,10 @@ mod tests {
         assert_eq!(context_window_for("mock:echo@acct2"), 200_000);
         assert_eq!(context_window_for("grok:grok-4.5"), 500_000);
         assert_eq!(context_window_for("grok:grok-4.6@acct"), 500_000);
+        assert_eq!(context_window_for("codex:gpt-5.6-luna"), 1_050_000);
+        assert_eq!(context_window_for("gpt-6-astra"), 1_050_000);
+        assert_eq!(context_window_for("codex:gpt-5.6@acct"), 1_050_000);
+        assert_eq!(context_window_for("codex:gpt-5.5"), 200_000);
     }
 
     #[test]

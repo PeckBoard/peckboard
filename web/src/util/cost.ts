@@ -28,13 +28,19 @@ export const LONG_CONTEXT_WINDOW = 1_000_000
 
 /** Per-model context-window overrides, keyed by bare model id. Standard
  *  Claude tiers share the 200K default and long-context tiers are matched
- *  by their `[1m]` suffix; Grok 4.5/4.6 advertise a 500K window. */
+ *  by their `[1m]` suffix; Grok 4.5/4.6 advertise a 500K window; Codex
+ *  GPT-5.6 / GPT-6 advertise a 1.05M window. */
 const CONTEXT_WINDOWS: Record<string, number> = {
   'grok-4.5': 500_000,
   'grok-4.6': 500_000,
   // Legacy CLI ids still stored on old sessions; same window as 4.5.
   'grok-build': 500_000,
   'grok-build-0.1': 500_000,
+  'gpt-5.6-luna': 1_050_000,
+  'gpt-5.6-terra': 1_050_000,
+  'gpt-5.6-sol': 1_050_000,
+  'gpt-6-astra': 1_050_000,
+  'gpt-5.6': 1_050_000,
 }
 
 /** Normalize a model id to its bare form: usage rows and `sessions.model`

@@ -2,8 +2,8 @@ import { authedFetch } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 
 /**
- * Kick off a temporary "install this binary" session for a stdio MCP
- * server whose `command` is missing on the Peckboard host:
+ * Kick off a temporary "install this binary" session for a missing host
+ * command (stdio MCP server, Codex CLI, …):
  *
  *  1. register (or reuse) a working folder at the server-suggested path
  *     (`~/peckboard-installs/<command>`), creating the directory on disk;
@@ -17,11 +17,14 @@ import { useFoldersStore } from '../store/folders'
  */
 export async function startInstallSession(opts: {
   command: string
-  serverName: string
+  /** Noun phrase after "required by", e.g. `the MCP server "github"` or `the Codex provider`. */
+  requiredBy: string
   steps: string[]
   suggestedFolderPath: string
+  /** Completes "When done, tell me to …". */
+  doneHint: string
 }): Promise<string> {
-  const { command, serverName, steps, suggestedFolderPath } = opts
+  const { command, requiredBy, steps, suggestedFolderPath, doneHint } = opts
 
   const foldersStore = useFoldersStore.getState()
   await foldersStore.fetchFolders()
@@ -48,7 +51,7 @@ export async function startInstallSession(opts: {
   const msg = await authedFetch(`/api/sessions/${session.id}/message`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: buildInstallPrompt(command, serverName, steps) }),
+    body: JSON.stringify({ text: buildInstallPrompt(command, requiredBy, steps, doneHint) }),
   })
   if (!msg.ok) {
     const err = await msg.json().catch(() => ({ error: 'Failed to send install prompt' }))
@@ -61,7 +64,12 @@ export async function startInstallSession(opts: {
   return session.id
 }
 
-function buildInstallPrompt(command: string, serverName: string, steps: string[]): string {
+function buildInstallPrompt(
+  command: string,
+  requiredBy: string,
+  steps: string[],
+  doneHint: string,
+): string {
   const stepsBlock =
     steps.length > 0
       ? `Known install steps (verify they fit this machine before running):\n${steps
@@ -69,12 +77,12 @@ function buildInstallPrompt(command: string, serverName: string, steps: string[]
           .join('\n')}\n\n`
       : ''
   return (
-    `Install the \`${command}\` binary required by the MCP server "${serverName}" so it is available on PATH for the Peckboard server.\n\n` +
+    `Install the \`${command}\` binary required by ${requiredBy} so it is available on PATH for the Peckboard server.\n\n` +
     stepsBlock +
     `Rules:\n` +
     `- Prefer a user-level install that needs no root when one exists.\n` +
     `- If a step needs root, run it as \`sudo -A <cmd>\`. The \`-A\` flag routes sudo's password prompt to a masked dialog in the Peckboard UI. Plain \`sudo\` will fail here (no TTY). Never put the password on a command line and never echo it.\n` +
     `- Finish by verifying: run \`${command} --version\` (or the closest equivalent) and report the installed version.\n` +
-    `- When done, tell me to go back to Settings → MCP Servers and press "Test connection" on "${serverName}".`
+    `- When done, tell me to ${doneHint}.`
   )
 }

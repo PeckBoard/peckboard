@@ -108,6 +108,18 @@ test.describe('first-run setup wizard', () => {
 
       await page.getByTestId('setup-next').click()
 
+      // Codex is enabled by default; a missing CLI asks whether to install.
+      // Decline so the rest of the walk continues (Yes is covered in
+      // codex-cli-install.spec.ts).
+      const installAsk = page.getByTestId('codex-install-dialog')
+      await expect(installAsk.or(page.getByTestId('setup-default-model'))).toBeVisible({
+        timeout: 10_000,
+      })
+      if (await installAsk.isVisible()) {
+        await expect(installAsk).toContainText('Codex CLI is not installed')
+        await page.getByTestId('confirm-dialog-cancel').click()
+      }
+
       // ── Step 3: searchable model picker, filtered to enabled providers ─
       await page.getByTestId('setup-default-model').click()
       const search = page.getByTestId('setup-default-model-search')

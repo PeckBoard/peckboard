@@ -183,7 +183,7 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
       {
         id: 'providers',
         title: 'Providers & Accounts',
-        blurb: 'Claude, Grok and Kimi accounts, Ollama servers, Cursor CLI, keep-alive',
+        blurb: 'Claude, Grok and Kimi accounts, Ollama servers, Cursor CLI, Codex CLI, keep-alive',
       },
       {
         id: 'mcp',
@@ -364,6 +364,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'local remote server pull model',
   },
   { page: 'providers', section: 'Cursor', anchor: 'cursor', keywords: 'cli binary discovery' },
+  {
+    page: 'providers',
+    section: 'Codex',
+    anchor: 'codex',
+    keywords: 'cli binary openai install',
+  },
   {
     page: 'providers',
     section: 'Provider Keep-Alive',
@@ -1410,6 +1416,20 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                   The cursor-agent CLI provider: binary path, default model, and model discovery.
                 </p>
                 <PluginSettingsForm pluginId="cursor" />
+              </section>
+            )}
+
+            {providerVisibility.find((p) => p.id === 'codex')?.hidden !== true && (
+              <section
+                className="settings-section"
+                data-testid="codex-settings-section"
+                data-settings-anchor="codex"
+              >
+                <h3>Codex</h3>
+                <p className="form-hint">
+                  The OpenAI Codex CLI provider: binary path, API key, and model discovery.
+                </p>
+                <PluginSettingsForm pluginId="codex" />
               </section>
             )}
 

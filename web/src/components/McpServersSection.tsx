@@ -19,6 +19,7 @@ import {
   type UrlOption,
 } from '../utils/mcpServers'
 import { startInstallSession } from '../utils/installSession'
+import { MissingCommandWarning } from './MissingCommandWarning'
 import SecretInput from './SecretInput'
 import { fetchRegistry, type RegistryMcpServer } from '../utils/pluginApproval'
 
@@ -872,9 +873,10 @@ export function ServerModal({
     try {
       await startInstallSession({
         command: cmd,
-        serverName: draft.name.trim() || cmd,
+        requiredBy: `the MCP server "${draft.name.trim() || cmd}"`,
         steps: installSteps && installSteps.length > 0 ? installSteps : checkForCmd.hints,
         suggestedFolderPath: checkForCmd.suggested_folder_path,
+        doneHint: `go back to Settings → MCP Servers and press "Test connection" on "${draft.name.trim() || cmd}"`,
       })
       setInstallMsg('Install session opened — watch its tab, then re-test the connection.')
     } catch (e) {
@@ -992,40 +994,19 @@ export function ServerModal({
               />
             </label>
             {missing && (
-              <div className="mcp-cmd-warning" data-testid="mcp-cmd-warning">
-                <div className="mcp-cmd-warning-head">
-                  <code>{cmd}</code> was not found on the Peckboard host&apos;s PATH. This server
-                  will fail to launch until it is installed.
-                </div>
-                {(() => {
-                  const steps =
-                    installSteps && installSteps.length > 0
-                      ? installSteps
-                      : (checkForCmd?.hints ?? [])
-                  return steps.length > 0 ? (
-                    <ul className="mcp-cmd-warning-steps">
-                      {steps.map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  ) : null
-                })()}
-                <div className="mcp-cmd-warning-actions">
-                  <button
-                    type="button"
-                    className="mcp-btn mcp-btn--primary"
-                    disabled={installing}
-                    data-testid="mcp-install-in-session"
-                    onClick={runInstall}
-                  >
-                    {installing ? 'Opening…' : 'Install in a session'}
-                  </button>
-                  <span className="mcp-cmd-warning-hint">
-                    Opens a temporary session that installs it for you (sudo prompts appear here).
-                  </span>
-                </div>
-                {installMsg && <div className="mcp-cmd-warning-msg">{installMsg}</div>}
-              </div>
+              <MissingCommandWarning
+                command={cmd}
+                consequence="This server will fail to launch until it is installed."
+                steps={
+                  installSteps && installSteps.length > 0
+                    ? installSteps
+                    : (checkForCmd?.hints ?? [])
+                }
+                installing={installing}
+                installMsg={installMsg}
+                onInstall={() => void runInstall()}
+                testIdPrefix="mcp"
+              />
             )}
             <div className="plugin-setting-field">
               <span className="plugin-setting-label">Arguments</span>

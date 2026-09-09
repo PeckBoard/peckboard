@@ -117,8 +117,8 @@ async fn list_plugins_returns_builtin_catalog() {
     let plugins = json["plugins"].as_array().expect("plugins array");
     assert_eq!(
         plugins.len(),
-        6,
-        "expected built-in claude-code + mock + ollama + cursor + kimi + grok; got {plugins:?}",
+        7,
+        "expected built-in claude-code + mock + ollama + cursor + codex + kimi + grok; got {plugins:?}",
     );
 
     // The catalog also carries the plugin-contributed UI panels (from
@@ -200,6 +200,33 @@ async fn list_plugins_returns_builtin_catalog() {
             "cursor missing requested permission {required}: {cursor_perms:?}",
         );
     }
+
+    let codex = plugins
+        .iter()
+        .find(|p| p["id"] == "codex")
+        .expect("codex plugin present");
+    assert_eq!(codex["display_name"], "Codex (CLI)");
+    assert_eq!(codex["built_in"], true);
+    let codex_fields = codex["settings_schema"]["fields"]
+        .as_array()
+        .expect("codex settings schema fields");
+    let codex_keys: Vec<&str> = codex_fields
+        .iter()
+        .map(|f| f["key"].as_str().unwrap())
+        .collect();
+    for required in [
+        "cli_path",
+        "discover_models",
+        "api_key",
+        "additional_models",
+    ] {
+        assert!(
+            codex_keys.contains(&required),
+            "codex missing setting {required}: {codex_keys:?}",
+        );
+    }
+    let api_key = codex_fields.iter().find(|f| f["key"] == "api_key").unwrap();
+    assert_eq!(api_key["secret"], true);
 
     // Each permission entry must carry a human label + description for
     // the UI; an empty string would mean the UI renders a blank row.

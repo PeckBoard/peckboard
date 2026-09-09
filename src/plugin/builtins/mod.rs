@@ -1,6 +1,6 @@
 //! Built-in plugins that ship with Peckboard.
 //!
-//! Each submodule defines one plugin (`claude-code`, `mock`, `ollama`,
+//! Each submodule defines one plugin (`claude-code`, `codex`, `mock`, `ollama`,
 //! `cursor`, `grok`, `kimi`). They are registered with the [`BuiltinPluginRegistry`] at
 //! startup via [`register_all`], which is the single seam every binary
 //! entry point (`main.rs`, integration tests) should use to wire the
@@ -13,6 +13,7 @@ use crate::db::Db;
 use crate::provider::registry::ProviderRegistry;
 
 pub mod claude_code;
+pub mod codex;
 pub mod cursor;
 pub mod grok;
 pub mod kimi;
@@ -51,6 +52,13 @@ pub async fn register_all(
     catalog
         .register_and_init(
             Arc::new(cursor::CursorPlugin),
+            provider_registry.clone(),
+            db.clone(),
+        )
+        .await;
+    catalog
+        .register_and_init(
+            Arc::new(codex::CodexPlugin),
             provider_registry.clone(),
             db.clone(),
         )

@@ -10,9 +10,11 @@
 //! provider copies the extra entries into the workspace `.cursor/mcp.json`
 //! (see `provider::cursor::mcp`); the Grok provider mirrors them into the
 //! workspace `.mcp.json`, which Grok Build loads as a compatibility source
-//! (see `provider::grok::mcp`); the Ollama provider connects a native MCP
-//! client and folds the servers' tools into its inline tool loop (see
-//! `service::mcp_client`). Only Mock has no external-MCP hook.
+//! (see `provider::grok::mcp`); the Codex provider writes a managed block
+//! into the workspace `.codex/config.toml` (see `provider::codex::mcp`); the
+//! Ollama provider connects a native MCP client and folds the servers' tools
+//! into its inline tool loop (see `service::mcp_client`). Only Mock has no
+//! external-MCP hook.
 //!
 //! Values (env vars, headers) are stored and returned verbatim — the editor
 //! round-trips them, same trust model as a hand-written `.mcp.json`.
@@ -23,7 +25,7 @@ use crate::db::Db;
 use crate::routes::settings::{SETTINGS_COLLECTION, SETTINGS_NS};
 
 /// Providers whose sessions can consume user-defined MCP servers.
-pub const MCP_SUPPORTED_PROVIDERS: &[&str] = &["claude", "cursor", "grok", "ollama"];
+pub const MCP_SUPPORTED_PROVIDERS: &[&str] = &["claude", "codex", "cursor", "grok", "ollama"];
 
 /// Plugin-store key under [`SETTINGS_NS`]/[`SETTINGS_COLLECTION`].
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
@@ -410,8 +412,8 @@ pub fn disallowed_tool_names(servers: &[UserMcpServer], provider_id: &str) -> Ve
 /// Non-peckboard `mcpServers` entries from a per-session worker-mcp config
 /// file (read AFTER the dispatch-time merge, so already provider-filtered).
 /// Empty on any read or shape problem — consumers run without extras rather
-/// than fail the turn. Shared by the Grok (workspace mirror) and Ollama
-/// (native client) providers.
+/// than fail the turn. Shared by the Grok (workspace mirror), Codex
+/// (`.codex/config.toml` managed block), and Ollama (native client) providers.
 pub fn extra_entries_from_session_config(path: &str) -> Vec<(String, serde_json::Value)> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();

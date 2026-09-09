@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod auth_recovery;
 pub mod claude;
+pub mod codex;
 pub mod cursor;
 pub mod grok;
 pub mod kimi;

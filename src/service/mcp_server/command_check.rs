@@ -11,9 +11,27 @@ pub struct CommandCheck {
     pub resolved_path: Option<PathBuf>,
 }
 
-/// Locate `command` the way `spawn` will: a bare name is searched on PATH,
+/// Locate `command` the way `spawn` will: a bare name is searched on PATH
+/// and then on the shared CLI fallback dirs
+/// (`turn::COMMON_CLI_FALLBACK_DIRS`, which `resolve_cli_path` uses),
 /// anything containing a separator is checked as a filesystem path.
 pub fn check_command(command: &str) -> CommandCheck {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").ok();
+    check_command_in(
+        command,
+        &path_var,
+        home.as_deref(),
+        crate::provider::turn::COMMON_CLI_FALLBACK_DIRS,
+    )
+}
+
+fn check_command_in(
+    command: &str,
+    path_var: &str,
+    home: Option<&str>,
+    fallback_dirs: &[&str],
+) -> CommandCheck {
     let cmd = command.trim();
     if cmd.is_empty() {
         return CommandCheck {
@@ -28,11 +46,26 @@ pub fn check_command(command: &str) -> CommandCheck {
             resolved_path: is_executable(p).then(|| p.to_path_buf()),
         };
     }
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
+    for dir in std::env::split_paths(path_var) {
         if dir.as_os_str().is_empty() {
             continue;
         }
+        let candidate = dir.join(cmd);
+        if is_executable(&candidate) {
+            return CommandCheck {
+                found: true,
+                resolved_path: Some(candidate),
+            };
+        }
+    }
+    for dir in fallback_dirs {
+        let dir = match dir.strip_prefix("~/") {
+            Some(rest) => match home {
+                Some(home) => Path::new(home).join(rest),
+                None => continue,
+            },
+            None => PathBuf::from(*dir),
+        };
         let candidate = dir.join(cmd);
         if is_executable(&candidate) {
             return CommandCheck {
@@ -94,6 +127,10 @@ pub fn install_hints(command: &str) -> Vec<String> {
             "Debian/Ubuntu: sudo apt-get install -y python3 python3-pip",
         ],
         "deno" => &["Install Deno: curl -fsSL https://deno.land/install.sh | sh"],
+        "codex" => &[
+            "Install Codex CLI: curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+            "Docs: https://learn.chatgpt.com/docs/codex/cli",
+        ],
         "bun" | "bunx" => &["Install Bun: curl -fsSL https://bun.sh/install | bash"],
         "" => &[],
         _ => {
@@ -158,6 +195,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn finds_a_bare_name_in_a_fallback_dir_when_path_misses() {
+        use std::os::unix::fs::PermissionsExt;
+        // Mirrors a user-level `codex` install into `~/.local/bin` while the
+        // server's PATH predates it — spawn resolves it, so the probe must too.
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("codex");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let home_str = home.path().to_str();
+        let hit = check_command_in("codex", "", home_str, &["~/.local/bin"]);
+        assert!(hit.found);
+        assert_eq!(hit.resolved_path.as_deref(), Some(exe.as_path()));
+
+        // PATH miss + fallback miss stays a miss.
+        assert!(!check_command_in("codex", "", home_str, &["~/.nowhere"]).found);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn path_form_requires_the_exec_bit() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -174,6 +233,7 @@ mod tests {
         assert!(install_hints("npx")[0].contains("Node.js"));
         assert!(install_hints("uvx")[0].contains("uv"));
         assert!(install_hints("/usr/bin/docker")[0].contains("Docker"));
+        assert!(install_hints("codex")[0].contains("chatgpt.com/codex/install.sh"));
         let generic = install_hints("weird-tool");
         assert_eq!(generic.len(), 1);
         assert!(generic[0].contains("weird-tool"));

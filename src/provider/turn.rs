@@ -790,6 +790,17 @@ pub fn compose_system_prompt(config: &SpawnConfig) -> String {
     prompt
 }
 
+/// Directories the CLI providers fall back to when a bare binary name is
+/// missing from the server's PATH. Shared so the host install probe
+/// (`crate::service::mcp_server::command_check`) looks exactly where spawn
+/// will — otherwise a user-level install (`~/.local/bin/codex`) works for
+/// spawn while the UI still reports the CLI as missing.
+pub const COMMON_CLI_FALLBACK_DIRS: &[&str] = &[
+    "~/.local/bin",
+    "~/.npm-global/bin",
+    "~/.bun/bin",
+    "/usr/local/bin",
+];
 /// Resolve the executable to spawn. A configured path containing a `/` is
 /// used verbatim. A bare name is kept when it resolves on the server's
 /// PATH; otherwise the first `fallback_dirs` entry holding an executable of

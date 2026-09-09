@@ -4,6 +4,9 @@ import ModelPicker from './ModelPicker'
 import PathAutocomplete from './PathAutocomplete'
 import TlsSettingsSection from './TlsSettingsSection'
 import FieldError from './FieldError'
+import ConfirmDialog from './ConfirmDialog'
+import { startInstallSession } from '../utils/installSession'
+import { checkHostCommand, type CommandCheckResult } from '../utils/mcpServers'
 import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import { useResourcesStore } from '../store/resources'
@@ -74,6 +77,11 @@ export default function SetupWizard({ onDone }: Props) {
 
   // ── Step 2: providers ────────────────────────────────────────────
   const [providers, setProviders] = useState<ProviderVisibility[] | null>(null)
+  const [codexInstallAsk, setCodexInstallAsk] = useState(false)
+  const [codexCheck, setCodexCheck] = useState<CommandCheckResult | null>(null)
+  const [codexInstallBusy, setCodexInstallBusy] = useState(false)
+  const [codexInstallError, setCodexInstallError] = useState<string | null>(null)
+  const [providersBusy, setProvidersBusy] = useState(false)
   const [providersError, setProvidersError] = useState('')
 
   useEffect(() => {
@@ -200,10 +208,73 @@ export default function SetupWizard({ onDone }: Props) {
     }
   }
 
-  const nextLabel = step === STEPS.length - 1 ? (finishBusy ? 'Finishing…' : 'Finish') : 'Next'
-  const nextDisabled = step === 0 ? pwBusy || (!pwDone && !pwValid) : step === 4 && finishBusy
+  const nextLabel =
+    step === STEPS.length - 1
+      ? finishBusy
+        ? 'Finishing…'
+        : 'Finish'
+      : providersBusy
+        ? 'Checking…'
+        : 'Next'
+  const nextDisabled =
+    step === 0
+      ? pwBusy || (!pwDone && !pwValid)
+      : step === 1
+        ? providersBusy || codexInstallBusy
+        : step === 4 && finishBusy
+
+  const advanceFromProviders = () => {
+    setCodexInstallAsk(false)
+    setCodexInstallError(null)
+    setStep(2)
+  }
+
+  const confirmCodexInstall = async () => {
+    if (!codexCheck) {
+      advanceFromProviders()
+      return
+    }
+    setCodexInstallBusy(true)
+    setCodexInstallError(null)
+    try {
+      await startInstallSession({
+        command: 'codex',
+        requiredBy: 'the Codex provider',
+        steps: codexCheck.hints,
+        suggestedFolderPath: codexCheck.suggested_folder_path,
+        doneHint: 'go back to Settings → Providers and confirm the Codex CLI warning is gone',
+      })
+      advanceFromProviders()
+    } catch (e) {
+      setCodexInstallError(e instanceof Error ? e.message : 'Could not start install session.')
+    } finally {
+      setCodexInstallBusy(false)
+    }
+  }
 
   const onNext = () => {
+    if (step === 1) {
+      void (async () => {
+        const codexOn = providers?.some((p) => p.id === 'codex' && !p.hidden) ?? false
+        if (!codexOn) {
+          setStep(2)
+          return
+        }
+        setProvidersBusy(true)
+        try {
+          const check = await checkHostCommand('codex')
+          if (check && !check.found) {
+            setCodexCheck(check)
+            setCodexInstallAsk(true)
+            return
+          }
+        } finally {
+          setProvidersBusy(false)
+        }
+        setStep(2)
+      })()
+      return
+    }
     if (step === STEPS.length - 1) {
       void finish()
     } else {
@@ -464,6 +535,19 @@ export default function SetupWizard({ onDone }: Props) {
           <span className="form-actions-reason">Set a new admin password to continue.</span>
         )}
       </div>
+      {codexInstallAsk && (
+        <ConfirmDialog
+          title="Codex CLI is not installed"
+          message="Codex CLI is not installed. Install it now?"
+          confirmLabel="Yes"
+          cancelLabel="No"
+          testId="codex-install-dialog"
+          busy={codexInstallBusy}
+          error={codexInstallError}
+          onConfirm={() => void confirmCodexInstall()}
+          onCancel={advanceFromProviders}
+        />
+      )}
     </Modal>
   )
 }

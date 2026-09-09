@@ -404,7 +404,7 @@ async function mockAggregateRegistry(page: Page) {
         contentType: 'application/json',
         body: JSON.stringify({
           servers: state.mcpServers,
-          supported_providers: ['claude', 'cursor', 'grok', 'ollama'],
+          supported_providers: ['claude', 'codex', 'cursor', 'grok', 'ollama'],
         }),
       })
     }

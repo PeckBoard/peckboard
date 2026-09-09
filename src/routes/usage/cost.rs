@@ -7,10 +7,11 @@
 //! from `GET /api/usage/costs` and prices client-side trends with the same
 //! numbers — so Rust and TS never hardcode rates independently.
 //!
-//! When the Claude registry (`crate::provider::claude::discover_models`) or
-//! the Grok seed (`crate::provider::grok::default_models`) gains or renames
-//! a model, update [`rates_for`] here. The `every_registry_model_is_priced`
-//! test fails if a registry model is left without an explicit tier.
+//! When the Claude registry (`crate::provider::claude::discover_models`), the
+//! Grok seed (`crate::provider::grok::default_models`), or the Codex seed
+//! (`crate::provider::codex::default_models`) gains or renames a model, update
+//! [`known_rates_for`] here. The `every_registry_model_is_priced` test fails if
+//! a registry model is left without an explicit tier.
 
 use std::collections::BTreeMap;
 
@@ -86,6 +87,35 @@ const GROK_45: ModelRates = ModelRates {
     cache_creation_per_mtok: 2.0,
 };
 
+// OpenAI published short-context rates (USD per million tokens). Cache-read
+// is 10% of input; cache-creation (cache write) is 1.25× input. Long-context
+// (≥272k on this family) doubles these; we price the common short-context
+// tier. Source: https://developers.openai.com/api/docs/pricing (2026-09-09).
+const CODEX_LUNA: ModelRates = ModelRates {
+    input_per_mtok: 0.20,
+    output_per_mtok: 1.20,
+    cache_read_per_mtok: 0.02,
+    cache_creation_per_mtok: 0.25,
+};
+const CODEX_TERRA: ModelRates = ModelRates {
+    input_per_mtok: 2.0,
+    output_per_mtok: 12.0,
+    cache_read_per_mtok: 0.20,
+    cache_creation_per_mtok: 2.50,
+};
+const CODEX_SOL: ModelRates = ModelRates {
+    input_per_mtok: 4.0,
+    output_per_mtok: 20.0,
+    cache_read_per_mtok: 0.40,
+    cache_creation_per_mtok: 5.0,
+};
+const CODEX_ASTRA: ModelRates = ModelRates {
+    input_per_mtok: 10.0,
+    output_per_mtok: 50.0,
+    cache_read_per_mtok: 1.0,
+    cache_creation_per_mtok: 12.50,
+};
+
 /// Fallback for an unrecognized model id (a renamed/removed registry model
 /// or a non-Claude provider). Priced at the Opus tier so an unknown model
 /// is never silently free — the most expensive tier keeps cost estimates
@@ -115,6 +145,10 @@ pub fn known_rates_for(model: &str) -> Option<ModelRates> {
         "claude-haiku-4-5" => Some(HAIKU),
         "grok-4.6" => Some(GROK_46),
         "grok-4.5" | "grok-build" | "grok-build-0.1" => Some(GROK_45),
+        "gpt-5.6-luna" => Some(CODEX_LUNA),
+        "gpt-5.6-terra" | "gpt-5.6" => Some(CODEX_TERRA),
+        "gpt-5.6-sol" => Some(CODEX_SOL),
+        "gpt-6-astra" => Some(CODEX_ASTRA),
         _ => None,
     }
 }
@@ -167,6 +201,9 @@ pub fn cost_table() -> CostTable {
         rates.insert(m.id.clone(), rates_for(Some(&m.id)));
     }
     for m in crate::provider::grok::default_models() {
+        rates.insert(m.id.clone(), rates_for(Some(&m.id)));
+    }
+    for m in crate::provider::codex::default_models() {
         rates.insert(m.id.clone(), rates_for(Some(&m.id)));
     }
     CostTable { rates }
@@ -236,6 +273,7 @@ mod tests {
         for model in crate::provider::claude::discover_models()
             .into_iter()
             .chain(crate::provider::grok::default_models())
+            .chain(crate::provider::codex::default_models())
         {
             let rates = table
                 .rates
@@ -249,5 +287,7 @@ mod tests {
         }
         assert_eq!(table.rates["grok-4.5"].output_per_mtok, 6.0);
         assert_eq!(table.rates["grok-4.6"].cache_read_per_mtok, 0.50);
+        assert_eq!(table.rates["gpt-5.6-luna"].output_per_mtok, 1.20);
+        assert_eq!(table.rates["gpt-6-astra"].input_per_mtok, 10.0);
     }
 }
