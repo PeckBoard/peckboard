@@ -23,8 +23,8 @@ pub use gates::ToolGate;
 pub use handlers::autoswitch_enabled;
 pub(crate) use handlers::summarize_event;
 pub use schemas::{
-    PRE_HATCHER_EXPERT_KIND, chat_hidden_tool_names, pre_hatcher_allowed_tool_names, tool_names,
-    worker_hidden_tool_names,
+    PRE_HATCHER_EXPERT_KIND, chat_hidden_tool_names, pre_hatcher_allowed_tool_names,
+    tool_annotations, tool_names, worker_hidden_tool_names,
 };
 pub use spawn::{AppExpertDispatcher, AppLiveHost};
 

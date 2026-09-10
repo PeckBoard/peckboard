@@ -203,6 +203,10 @@ async fn mcp_handler(
                         "name": t.name,
                         "description": t.description,
                         "inputSchema": t.input_schema,
+                        // Hints, not gates. A client that decides whether a
+                        // call needs human approval reads these; a tool
+                        // shipping none reads as "unknown, assume a write".
+                        "annotations": crate::service::mcp_server::tool_annotations(&t.name),
                     })
                 })
                 .collect();
@@ -230,6 +234,9 @@ async fn mcp_handler(
                     "name": t.name,
                     "description": t.description,
                     "inputSchema": t.input_schema,
+                    // No annotations for plugin tools: only the plugin knows
+                    // whether its tool writes, and inventing a hint here
+                    // would advertise a guess as fact.
                 }));
             }
 

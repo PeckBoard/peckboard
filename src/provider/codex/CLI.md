@@ -26,15 +26,14 @@ Setting: `cli_path` (bare name or absolute).
 ## Spawn Argv — First Turn
 
 Per-turn process, like grok/cursor — not a long-lived duplex child.
-
 ```text
-codex exec --json --sandbox workspace-write --skip-git-repo-check \
-    -c approval_policy=never \
+codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
     [-c model_reasoning_effort=low|medium|high|xhigh] \
     [-m MODEL] \
     [--image PATH]... \
     [-C WORKDIR] \
     PROMPT
+```
 ```
 
 Capture command from the card (tmp git repo, unattended):
@@ -53,8 +52,8 @@ codex exec --json --sandbox workspace-write --skip-git-repo-check --ephemeral \
 
 Default exec sandbox is **read-only**. Unattended writes need `--sandbox workspace-write`. Values: `read-only` | `workspace-write` | `danger-full-access`.
 
-`-c approval_policy=never` — unattended; never pause for approval. Other values: `untrusted` | `on-request` | `never`. (`on-failure` deprecated.)
-
+`-c approval_policy=never` means "never ASK" — **not** "auto-approve". Any call codex decides needs approval is hard-errored (`MCP tool call requires approval, but approval policy is never`), which breaks every MCP tool call from an unattended session. Other values: `untrusted` | `on-request` | `never`. (`on-failure` deprecated.) There is no per-server pre-approval key: `mcp_servers.<name>.tool_approval` / `.trusted` / `.auto_approve` and `mcp_tool_approval` are all rejected by `--strict-config`. Peckboard therefore passes `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` + `approval_policy=never` — see `mod.rs::build_cli_args`. The two are mutually exclusive.
+`-c approval_policy=never` means "never ASK" — **not** "auto-approve". Any call codex decides needs approval is hard-errored (`MCP tool call requires approval, but approval policy is never`), which breaks every MCP tool call from an unattended session, read-only ones included. Other values: `untrusted` | `on-request` | `never`. (`on-failure` deprecated.) There is no narrower, per-server pre-approval key — probed under `--strict-config` on codex-cli 0.153.4, all rejected as unknown fields: `mcp_servers.<name>.{tool_approval,trusted,auto_approve,approval_policy,auto_approve_tools,always_allow}`, `mcp_tool_approval`, `mcp_approval_policy`, `trusted_mcp_servers`, `tools.auto_approve_mcp`, `tools.mcp.*`, `experimental_auto_approve_mcp`. Peckboard therefore passes `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` + `approval_policy=never` — see `mod.rs::build_cli_args`. The two parse together, but the flag forces `danger-full-access`, so `--sandbox` alongside it is dead config.
 `--full-auto` is deprecated (warning). Prefer `--sandbox workspace-write`.
 
 `--cd` / `-C DIR` — workspace root. Also `--add-dir DIR` for extra writable roots.
@@ -76,11 +75,12 @@ codex exec resume <thread_id> --json \
 ```
 
 Also valid: flags **before** `resume` inherit onto the subcommand:
-
 ```text
-codex exec --json --sandbox workspace-write --skip-git-repo-check \
-    -c approval_policy=never \
+codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
     resume <thread_id> PROMPT
+```
+
+This before-`resume` form is what Peckboard builds.
 ```
 
 `--json`, `--skip-git-repo-check`, `--ephemeral`, `-c`/`--config`, `-m`/`--model` are **global** on `codex exec`. `--sandbox` is **not** global — `codex exec resume ID --sandbox workspace-write` is invalid. On resume, pass `--sandbox` before `resume`, or `-c sandbox_mode=workspace-write` after.
@@ -272,7 +272,7 @@ Other commands Peckboard may probe: `codex debug models [--bundled]`, `codex log
 
 - One process per turn. Capture `thread_id` from `thread.started`. Next user message: `codex exec resume <thread_id> --json …`.
 - `supports_mid_stream_injection() == false` (same as grok/cursor).
-- Do not use `--yolo` / `--dangerously-bypass-approvals-and-sandbox`.
+- `--dangerously-bypass-approvals-and-sandbox` is what Peckboard passes: it is the only switch that clears codex's MCP approval path, and it drops codex's sandbox with it (the session's folder scope is then the only boundary on agent-run commands).
 - Workspace: session folder (git) via `-C` / spawn cwd. Never `~/.peckboard`.
 - Model discovery: `codex debug models --bundled` (JSON stdout, no auth). Live catalog needs auth.
 - Fixture `fixtures/hello.jsonl` is **synthetic**. Last two lines (`error` + `turn.failed`) exist so the parser card covers auth/fail shapes; a happy-path parser should stop at `turn.completed`.

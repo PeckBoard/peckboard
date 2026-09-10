@@ -5,17 +5,17 @@
 //! Argv and JSONL match `CLI.md` (captured from `openai/codex` main):
 //!
 //! ```text
-//! codex exec --json --sandbox workspace-write --skip-git-repo-check \
-//!     -c approval_policy=never [-m MODEL] [-c model_reasoning_effort=…] \
+//! codex exec --json --dangerously-bypass-approvals-and-sandbox \
+//!     --skip-git-repo-check [-m MODEL] [-c model_reasoning_effort=…] \
 //!     [--image PATH]… PROMPT
 //! ```
 //!
-//! Resume puts global flags *before* `resume` because `--sandbox` is not a
-//! global on the `resume` subcommand:
+//! Resume puts global flags *before* `resume`, matching the sandbox flag's
+//! old placement rule (not a global on the `resume` subcommand):
 //!
 //! ```text
-//! codex exec --json --sandbox workspace-write --skip-git-repo-check \
-//!     -c approval_policy=never resume <thread_id> [--image PATH]… PROMPT
+//! codex exec --json --dangerously-bypass-approvals-and-sandbox \
+//!     --skip-git-repo-check resume <thread_id> [--image PATH]… PROMPT
 //! ```
 //!
 //! `thread_id` comes from the first JSONL line (`thread.started`). First
@@ -559,16 +559,25 @@ fn build_cli_args(
     image_paths: &[String],
     mcp_overrides: &[String],
 ) -> Vec<String> {
-    // `--sandbox` is NOT global on `codex exec resume`, so the sandbox /
-    // json / skip-git flags sit *before* `resume`. See CLI.md.
+    // Approvals: `approval_policy=never` means "never ASK", NOT
+    // "auto-approve" — codex hard-errors any call that needs approval with
+    // "MCP tool call requires approval, but approval policy is never", which
+    // killed EVERY peckboard MCP tool call from a codex session (read-only
+    // ones included; there is no per-server pre-approval config key —
+    // `mcp_servers.<name>.{tool_approval,trusted,auto_approve}` and
+    // `mcp_tool_approval` are all rejected by `--strict-config`). The only
+    // switch codex offers that actually clears the MCP approval path is
+    // `--dangerously-bypass-approvals-and-sandbox`, which also drops codex's
+    // own sandbox — so the agent's shell commands run unsandboxed, gated by
+    // the session's folder scope alone.
+    //
+    // The flag supersedes `--sandbox` (it forces danger-full-access), so
+    // passing both would just be contradictory config — `--sandbox` is gone.
     let mut args = vec![
         "exec".into(),
         "--json".into(),
-        "--sandbox".into(),
-        "workspace-write".into(),
+        "--dangerously-bypass-approvals-and-sandbox".into(),
         "--skip-git-repo-check".into(),
-        "-c".into(),
-        "approval_policy=never".into(),
     ];
     for over in mcp_overrides {
         args.push("-c".into());
@@ -803,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn build_args_sets_json_sandbox_approval_skip_git_and_model() {
+    fn build_args_sets_json_bypass_skip_git_and_model() {
         let args = build_cli_args(
             "gpt-5.6-terra",
             "hello",
@@ -815,11 +824,12 @@ mod tests {
         );
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"--json".into()));
-        let sandbox = args.iter().position(|a| a == "--sandbox").unwrap();
-        assert_eq!(args[sandbox + 1], "workspace-write");
+        // The bypass flag replaces `--sandbox` + `approval_policy=never`:
+        // `never` hard-errors every MCP tool call that wants approval.
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+        assert!(!args.contains(&"--sandbox".into()));
+        assert!(!args.iter().any(|a| a.contains("approval_policy")));
         assert!(args.contains(&"--skip-git-repo-check".into()));
-        assert!(args.contains(&"approval_policy=never".into()));
-        assert!(args.contains(&"-m".into()));
         assert!(args.contains(&"gpt-5.6-terra".into()));
         assert!(args.contains(&"model_reasoning_effort=high".into()));
         assert!(!args.contains(&"resume".into()));
@@ -848,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_puts_sandbox_before_resume_and_skips_working_style() {
+    fn resume_puts_global_flags_before_resume_and_skips_working_style() {
         let args = build_cli_args(
             "gpt-6-astra",
             "follow up",
@@ -860,8 +870,11 @@ mod tests {
         );
         let resume_at = args.iter().position(|a| a == "resume").unwrap();
         assert_eq!(args[resume_at + 1], "0199a213-81c0-7800-8aa1-bbab2a035a53");
-        let sandbox_at = args.iter().position(|a| a == "--sandbox").unwrap();
-        assert!(sandbox_at < resume_at, "--sandbox must precede resume");
+        let bypass_at = args
+            .iter()
+            .position(|a| a == "--dangerously-bypass-approvals-and-sandbox")
+            .unwrap();
+        assert!(bypass_at < resume_at, "global flags must precede resume");
         assert_eq!(args.last().unwrap(), "follow up");
         assert!(!args.iter().any(|a| a.contains("# Working style")));
     }

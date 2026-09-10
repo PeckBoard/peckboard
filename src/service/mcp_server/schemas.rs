@@ -111,6 +111,111 @@ pub fn pre_hatcher_allowed_tool_names() -> &'static [&'static str] {
     ]
 }
 
+/// Tools that only READ state: no writes, no spawns, no external side
+/// effects beyond fetching the thing asked for. Drives
+/// `annotations.readOnlyHint` in [`tool_annotations`].
+///
+/// Advisory metadata, NOT a gate — the enforcement points stay
+/// [`pre_hatcher_allowed_tool_names`] and the per-handler scope checks. A
+/// tool missing from this list is only advertised as "may write".
+fn read_only_tool_names() -> &'static [&'static str] {
+    &[
+        "get_review_doc",
+        "list_cards",
+        "list_card_dependencies",
+        "get_card_dependency_tree",
+        "list_projects",
+        "list_workflows",
+        "list_folders",
+        "list_models",
+        "list_system_prompts",
+        "get_model_guidance",
+        "list_sessions",
+        "search_sessions",
+        "list_worker_sessions",
+        "read_worker_session",
+        "list_project_reports",
+        "read_report",
+        "get_finding_details",
+        "list_repeating_tasks",
+        "list_variables",
+        "math",
+        "fetch_url",
+        "fetch_web",
+        "web_get_part",
+        "parse_web",
+        "search_web",
+        "search_files",
+        "list_files",
+        "read_file",
+        "file_outline",
+        "read_symbol",
+        "browser_outline",
+        "browser_find",
+        "browser_pages",
+        "browser_screenshot",
+    ]
+}
+
+/// Tools whose effects a client should treat as destructive — data a user
+/// can't get back, or an arbitrary command. Drives
+/// `annotations.destructiveHint`. State transitions that stay recoverable
+/// (`move_card_to_wont_do`, `pause_project`, …) are deliberately absent.
+fn destructive_tool_names() -> &'static [&'static str] {
+    &[
+        "delete_plan",
+        "delete_card",
+        "delete_project",
+        "delete_repeating_task",
+        "delete_variable",
+        "write_file",
+        "edit_file",
+        "run_command",
+        "git",
+        "upgrade_plugin",
+        "browser_act",
+    ]
+}
+
+/// Tools that reach outside Peckboard — the network, a live browser, or an
+/// arbitrary subprocess. Drives `annotations.openWorldHint`.
+fn open_world_tool_names() -> &'static [&'static str] {
+    &[
+        "fetch_url",
+        "fetch_web",
+        "web_get_part",
+        "parse_web",
+        "search_web",
+        "run_command",
+        "run_tests",
+        "git",
+        "browser_open",
+        "browser_outline",
+        "browser_find",
+        "browser_act",
+        "browser_screenshot",
+        "browser_pages",
+        "browser_close",
+    ]
+}
+
+/// The MCP `annotations` object advertised for `name` in `tools/list`.
+///
+/// Not decoration: a client may decide whether a call needs human approval
+/// from these hints, and a tool that ships none reads as "unknown, assume
+/// the worst". Every core tool gets all three so a read-only call is
+/// recognisable as one.
+pub fn tool_annotations(name: &str) -> serde_json::Value {
+    let read_only = read_only_tool_names().contains(&name);
+    serde_json::json!({
+        "readOnlyHint": read_only,
+        // A read-only tool can't be destructive; saying otherwise would be
+        // contradictory metadata.
+        "destructiveHint": !read_only && destructive_tool_names().contains(&name),
+        "openWorldHint": open_world_tool_names().contains(&name),
+    })
+}
+
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
         McpToolDef {
@@ -1633,6 +1738,48 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every annotation list must name real tools — a renamed tool would
+    /// otherwise silently lose its `readOnlyHint` and read as "may write"
+    /// to any client that gates on the hint.
+    #[test]
+    fn annotation_lists_only_name_real_tools() {
+        let names = tool_names();
+        for list in [
+            read_only_tool_names(),
+            destructive_tool_names(),
+            open_world_tool_names(),
+        ] {
+            for tool in list {
+                assert!(
+                    names.iter().any(|n| n == tool),
+                    "annotated tool {tool} is not a core tool"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn annotations_mark_reads_read_only_and_never_contradict() {
+        for read in ["math", "read_file", "list_files", "search_files"] {
+            let a = tool_annotations(read);
+            assert_eq!(a["readOnlyHint"], serde_json::json!(true), "{read}");
+            assert_eq!(a["destructiveHint"], serde_json::json!(false), "{read}");
+        }
+        for write in ["write_file", "edit_file", "run_command", "delete_card"] {
+            let a = tool_annotations(write);
+            assert_eq!(a["readOnlyHint"], serde_json::json!(false), "{write}");
+            assert_eq!(a["destructiveHint"], serde_json::json!(true), "{write}");
+        }
+        // Every core tool carries all three hints, so "no annotation" never
+        // means "unknown" for a Peckboard tool.
+        for name in tool_names() {
+            let a = tool_annotations(&name);
+            for hint in ["readOnlyHint", "destructiveHint", "openWorldHint"] {
+                assert!(a[hint].is_boolean(), "{name} missing {hint}");
+            }
+        }
+    }
 
     #[test]
     fn worker_hidden_tools_exist_and_spare_worker_essentials() {

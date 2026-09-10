@@ -179,6 +179,34 @@ async fn http_transport_serves_full_mcp_lifecycle_without_a_proxy() {
         names.contains(&"create_card"),
         "missing create_card: {names:?}"
     );
+    // Annotations ride along with every core tool. A client that decides
+    // whether a call needs human approval reads these, so a tool shipping
+    // none reads as "unknown, assume a write" — which is what stalled
+    // codex sessions on read-only tools.
+    let by_name = |want: &str| -> serde_json::Value {
+        body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == want)
+            .unwrap_or_else(|| panic!("missing {want}"))
+            .clone()
+    };
+    let math = by_name("math");
+    assert_eq!(math["annotations"]["readOnlyHint"], serde_json::json!(true));
+    assert_eq!(
+        math["annotations"]["destructiveHint"],
+        serde_json::json!(false)
+    );
+    let write = by_name("write_file");
+    assert_eq!(
+        write["annotations"]["readOnlyHint"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        write["annotations"]["destructiveHint"],
+        serde_json::json!(true)
+    );
 
     // 4. tools/call — a real tool round-trips end to end over HTTP. Use a
     // worker-allowed tool: the admin tools in `worker_hidden_tool_names()`
