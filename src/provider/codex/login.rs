@@ -250,18 +250,22 @@ fn extract_user_code(text: &str) -> Option<String> {
     }
     None
 }
-
+/// Codex device codes are uppercase alphanumeric groups joined by a hyphen —
+/// `4UWK-LDLPZ` on codex 0.153.4. Group lengths have shifted between releases
+/// (an earlier build used 4-4), so match the shape rather than exact lengths.
+/// Requiring uppercase keeps hyphenated prose (`command-line`, `one-time`) out.
 fn is_device_code(s: &str) -> bool {
     let mut parts = s.split('-');
     let (Some(a), Some(b), None) = (parts.next(), parts.next(), parts.next()) else {
         return false;
     };
-    a.len() == 4
-        && b.len() == 4
-        && a.chars().all(|c| c.is_ascii_alphanumeric())
-        && b.chars().all(|c| c.is_ascii_alphanumeric())
+    let group_ok = |p: &str| {
+        (3..=8).contains(&p.len())
+            && p.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    };
+    group_ok(a) && group_ok(b)
 }
-
 /// Whether a `device` account has completed its login: `codex login
 /// --device-auth` writes a non-empty `auth.json` into its `CODEX_HOME`.
 pub fn device_authenticated(config_dir: Option<&str>) -> bool {
@@ -281,16 +285,29 @@ mod tests {
 
     #[test]
     fn extract_device_login_from_codex_prompt() {
-        // Shape from openai/codex `device_code_prompt` (ANSI wrapping the
-        // URL and code). Version string is irrelevant.
-        let prompt = "\nWelcome to Codex [v\x1b[90m0.1.0\x1b[0m]\n\
+        // Verbatim capture from codex 0.153.4 `login --device-auth` (ANSI
+        // wrapping the URL and code). Note the 4-5 code shape.
+        let prompt = "\nWelcome to Codex [v\x1b[90m0.153.4\x1b[0m]\n\
 \x1b[90mOpenAI's command-line coding agent\x1b[0m\n\
 \nFollow these steps to sign in with ChatGPT using device code authorization:\n\
 \n1. Open this link in your browser and sign in to your account\n   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n\
-\n2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n   \x1b[94mABCD-EFGH\x1b[0m\n";
+\n2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n   \x1b[94m4UWK-LDLPZ\x1b[0m\n";
         let got = extract_device_login(prompt).expect("prompt should parse");
         assert_eq!(got.url, "https://auth.openai.com/codex/device");
+        assert_eq!(got.user_code, "4UWK-LDLPZ");
+    }
+
+    #[test]
+    fn extract_device_login_accepts_older_four_four_code() {
+        let text = "https://auth.openai.com/codex/device\nABCD-EFGH\n";
+        let got = extract_device_login(text).expect("4-4 codes still parse");
         assert_eq!(got.user_code, "ABCD-EFGH");
+    }
+
+    #[test]
+    fn extract_user_code_ignores_hyphenated_prose() {
+        assert!(extract_user_code("OpenAI's command-line coding agent\n").is_none());
+        assert!(extract_user_code("Enter this one-time code\n").is_none());
     }
 
     #[test]

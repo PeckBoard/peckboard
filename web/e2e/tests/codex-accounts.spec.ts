@@ -1,4 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { chmodSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 /**
  * UI e2e for multi-account Codex ChatGPT sign-in (Settings → Codex Accounts).
@@ -11,6 +14,9 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  *     sign-in modal surfaces the `…/codex/device` link and one-time code.
  *     The real login spawns the `codex` CLI, so `login/start` is stubbed;
  *     the URL scraper + login manager are unit-tested separately.
+ *  3. The same flow with the real `login/start` route, against a fake `codex`
+ *     binary that reprints codex 0.153.4's device prompt verbatim — end-to-end
+ *     coverage of spawn → scrape → modal that a stubbed route cannot give.
  */
 
 const E2E_USER = 'e2e-user'
@@ -150,4 +156,72 @@ test('device sign-in flow: add account then surface the ChatGPT device link', as
   const row = section.locator('[data-testid^="codex-acct-row-"]')
   await expect(row).toContainText('E2E Codex Sub')
   await expect(section.locator('[data-testid^="codex-acct-unauth-"]')).toBeVisible()
+})
+
+/**
+ * Verbatim `codex login --device-auth` prompt from codex 0.153.4, ANSI and
+ * all. The one-time code is `XXXX-XXXXX` (4-5); an earlier scraper only
+ * matched 4-4 codes and every sign-in died on "timed out waiting for `codex
+ * login --device-auth` to produce a ChatGPT sign-in URL".
+ */
+const FAKE_CODEX = `#!/bin/sh
+printf '\\nWelcome to Codex [v\\033[90m0.153.4\\033[0m]\\n'
+printf '\\033[90mOpenAI'"'"'s command-line coding agent\\033[0m\\n\\n'
+printf 'Follow these steps to sign in with ChatGPT using device code authorization:\\n\\n'
+printf '1. Open this link in your browser and sign in to your account\\n'
+printf '   \\033[94mhttps://auth.openai.com/codex/device\\033[0m\\n\\n'
+printf '2. Enter this one-time code \\033[90m(expires in 15 minutes)\\033[0m\\n'
+printf '   \\033[94m4UWK-LDLPZ\\033[0m\\n'
+# Real codex blocks here polling OpenAI; exit before the suite does.
+sleep 20
+`
+
+test('device sign-in flow: real login/start scrapes the codex CLI prompt', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+
+  const fakeCli = join(tmpdir(), `peckboard-fake-codex-${process.pid}-${Date.now()}.sh`)
+  writeFileSync(fakeCli, FAKE_CODEX)
+  chmodSync(fakeCli, 0o755)
+
+  const put = await request.put('/api/plugins/codex/settings', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { updates: { cli_path: fakeCli } },
+  })
+  expect(put.ok(), `setting cli_path failed: ${await put.text()}`).toBeTruthy()
+
+  await loadApp(page, token)
+  const settings = await openSettings(page)
+  const section = settings.getByTestId('codex-accounts-section')
+  await section.getByTestId('codex-acct-add').click()
+  const modal = page.getByTestId('codex-account-modal')
+  await expect(modal).toBeVisible()
+  await modal.getByTestId('codex-acct-name').fill('E2E Codex CLI')
+  await modal.getByTestId('codex-acct-save').click()
+  await expect(modal).toBeHidden()
+
+  // No route stub: this hits the server, which spawns the fake CLI and
+  // scrapes its output.
+  const signIn = page.getByTestId('codex-signin-modal')
+  await expect(signIn).toBeVisible()
+  await signIn.getByTestId('codex-signin-start').click()
+
+  const link = signIn.getByTestId('codex-signin-url')
+  await expect(link).toBeVisible({ timeout: 15_000 })
+  await expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
+  await expect(signIn.getByTestId('codex-signin-code')).toContainText('4UWK-LDLPZ')
+
+  await signIn.getByTestId('codex-signin-close').click()
+  // Deleting the account cancels the spawned login process. Other specs share
+  // this server, so scope the row by name rather than "the only row".
+  const row = section
+    .locator('[data-testid^="codex-acct-row-"]')
+    .filter({ hasText: 'E2E Codex CLI' })
+  await row.locator('[data-testid^="codex-acct-delete-"]').click()
+  const confirm = page.locator('.confirm-dialog')
+  await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: 'Delete' }).click()
+  await expect(row).toHaveCount(0)
 })
