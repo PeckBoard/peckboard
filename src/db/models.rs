@@ -931,6 +931,60 @@ pub struct KimiAccountChanges {
     pub critical_threshold: Option<f64>,
     pub updated_at: Option<i64>,
 }
+
+/// One OpenAI Codex CLI account the spawned `codex` CLI can run as.
+/// Mirrors [`KimiAccount`]; see the `codex_accounts` migration. Kind is
+/// always `"device"` (ChatGPT sign-in via `codex login --device-auth`).
+/// The `credential` is the non-secret marker `"device"` — the real OAuth
+/// tokens live inside `config_dir/auth.json` (the per-account CODEX_HOME).
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = codex_accounts)]
+pub struct CodexAccount {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub credential: String,
+    pub config_dir: Option<String>,
+    pub budget_window_hours: Option<i32>,
+    pub budget_limit_usd: Option<f64>,
+    pub budget_limit_tokens: Option<i64>,
+    pub warn_threshold: f64,
+    pub critical_threshold: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = codex_accounts)]
+pub struct NewCodexAccount {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub credential: String,
+    pub config_dir: Option<String>,
+    pub budget_window_hours: Option<i32>,
+    pub budget_limit_usd: Option<f64>,
+    pub budget_limit_tokens: Option<i64>,
+    pub warn_threshold: f64,
+    pub critical_threshold: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Mutable fields of a Codex account. `None` leaves a field unchanged; the
+/// doubly-wrapped budget fields distinguish "leave as-is" (outer `None`)
+/// from "clear the budget" (`Some(None)`). Mirrors [`KimiAccountChanges`].
+#[derive(AsChangeset, Debug, Default)]
+#[diesel(table_name = codex_accounts)]
+pub struct CodexAccountChanges {
+    pub name: Option<String>,
+    pub budget_window_hours: Option<Option<i32>>,
+    pub budget_limit_usd: Option<Option<f64>>,
+    pub budget_limit_tokens: Option<Option<i64>>,
+    pub warn_threshold: Option<f64>,
+    pub critical_threshold: Option<f64>,
+    pub updated_at: Option<i64>,
+}
 // ── System Prompts ────────────────────────────────────
 
 /// A named, reusable system prompt in the library. `name` is the stable

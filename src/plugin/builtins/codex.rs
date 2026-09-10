@@ -14,9 +14,9 @@
 //!   (`codex debug models --bundled`) for its catalog and show those in the
 //!   picker. Falls back to the built-in seed plus `additional_models` when
 //!   discovery is off or fails.
-//! * `api_key` (secret string) — injected as `CODEX_API_KEY` at spawn time.
-//!   The zero-config path is signing in on the host with `codex login`
-//!   (writes `~/.codex/auth.json`).
+//! * ChatGPT sign-in is managed under Settings → Codex Accounts (`codex login
+//!   --device-auth` into a per-account CODEX_HOME). Host `codex login` still
+//!   covers the implicit Default account (`~/.codex/auth.json`).
 //! * `additional_models` (string list) — extra model ids to surface in the
 //!   picker, merged on top of the discovered/seed list as `codex:<id>`.
 
@@ -33,7 +33,9 @@ use crate::provider::registry::{
 pub struct CodexPlugin;
 
 impl CodexPlugin {
-    fn schema() -> SettingsSchema {
+    /// Also used by the `/api/codex-accounts` login route to resolve the
+    /// `cli_path` setting for spawning `codex login --device-auth`.
+    pub(crate) fn schema() -> SettingsSchema {
         SettingsSchema::new(vec![
             SettingField {
                 key: "cli_path".into(),
@@ -66,22 +68,6 @@ impl CodexPlugin {
                 kind: FieldKind::Boolean { default: true },
             },
             SettingField {
-                key: "api_key".into(),
-                title: "API Key".into(),
-                description: Some(
-                    "Optional OpenAI API key, injected as CODEX_API_KEY. The zero-config \
-                     path is signing in on the host with `codex login` (writes \
-                     ~/.codex/auth.json)."
-                        .into(),
-                ),
-                required: false,
-                kind: FieldKind::String {
-                    secret: true,
-                    default: None,
-                    placeholder: Some("sk-...".into()),
-                },
-            },
-            SettingField {
                 key: "additional_models".into(),
                 title: "Additional Models".into(),
                 description: Some(
@@ -105,14 +91,13 @@ impl BuiltinPlugin for CodexPlugin {
             id: "codex".into(),
             display_name: "Codex (CLI)".into(),
             description: "Drives sessions via the OpenAI Codex CLI (`codex exec --json`). \
-                          Sign in on the host with `codex login`, or set an API key here."
+                          Sign in with ChatGPT under Settings → Codex Accounts."
                 .into(),
             version: env!("PECKBOARD_VERSION").into(),
             author: "Peckboard".into(),
             built_in: true,
         }
     }
-
     fn requested_permissions(&self) -> Vec<Permission> {
         vec![
             Permission::RegisterProvider,
@@ -132,7 +117,11 @@ impl BuiltinPlugin for CodexPlugin {
         ctx.require(Permission::SpawnProcess)?;
 
         let store = ctx.settings_store(Self::schema());
-        let provider = Arc::new(CodexProvider::new().with_settings(store));
+        let provider = Arc::new(
+            CodexProvider::new()
+                .with_settings(store)
+                .with_db(ctx.db.clone()),
+        );
 
         ctx.provider_registry
             .register(

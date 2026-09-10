@@ -37,6 +37,7 @@ import ClaudeAccountsSection from './ClaudeAccountsSection'
 import GrokAccountsSection from './GrokAccountsSection'
 import KimiAccountsSection from './KimiAccountsSection'
 import ApprovedCommandsSection from './ApprovedCommandsSection'
+import CodexAccountsSection from './CodexAccountsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 import CustomWorkflowsSection from './CustomWorkflowsSection'
 import PluginSettingsForm from './PluginSettingsForm'
@@ -369,6 +370,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'Codex',
     anchor: 'codex',
     keywords: 'cli binary openai install',
+  },
+  {
+    page: 'providers',
+    section: 'Codex Accounts',
+    anchor: 'codex-accounts',
+    keywords: 'openai chatgpt login',
   },
   {
     page: 'providers',
@@ -1420,19 +1427,24 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
             )}
 
             {providerVisibility.find((p) => p.id === 'codex')?.hidden !== true && (
-              <section
-                className="settings-section"
-                data-testid="codex-settings-section"
-                data-settings-anchor="codex"
-              >
-                <h3>Codex</h3>
-                <p className="form-hint">
-                  The OpenAI Codex CLI provider: binary path, API key, and model discovery.
-                </p>
-                <PluginSettingsForm pluginId="codex" />
-              </section>
+              <>
+                <div data-settings-anchor="codex-accounts">
+                  <CodexAccountsSection />
+                </div>
+                <section
+                  className="settings-section"
+                  data-testid="codex-settings-section"
+                  data-settings-anchor="codex"
+                >
+                  <h3>Codex</h3>
+                  <p className="form-hint">
+                    The OpenAI Codex CLI provider: binary path and model discovery. Sign in with
+                    ChatGPT under Codex Accounts above.
+                  </p>
+                  <PluginSettingsForm pluginId="codex" />
+                </section>
+              </>
             )}
-
             <section
               className="settings-section"
               data-testid="keepalive-section"

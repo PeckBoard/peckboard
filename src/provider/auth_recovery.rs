@@ -439,6 +439,12 @@ async fn credential_version(db: &Db, model: &str) -> i64 {
             .ok()
             .flatten()
             .map(|a| a.updated_at),
+        "codex" => db
+            .get_codex_account(account_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|a| a.updated_at),
         _ => db
             .get_claude_account(account_id)
             .await

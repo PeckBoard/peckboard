@@ -450,6 +450,56 @@ export interface KimiAccountInput {
   critical_threshold: number
 }
 
+/** How a Codex account authenticates the spawned CLI: ChatGPT device-code
+ *  sign-in (`codex login --device-auth`). API-key login is not offered. */
+export type CodexAccountKind = 'device'
+
+export interface CodexAccountUsage {
+  total_tokens: number
+  est_cost_usd: number
+  turns: number
+  used_fraction: number | null
+  level: WarnLevel
+}
+
+/** One OpenAI Codex CLI account. The credential is never returned;
+ *  `authenticated` reports whether ChatGPT sign-in has finished. */
+export interface CodexAccount {
+  id: string
+  name: string
+  kind: CodexAccountKind
+  authenticated: boolean
+  config_dir: string | null
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+  created_at: number
+  updated_at: number
+  usage: CodexAccountUsage
+}
+
+/** Device-login URL + one-time code from
+ *  `POST /api/codex-accounts/{id}/login/start`. The user opens the URL,
+ *  enters the code, and the `codex` CLI completes sign-in on the server. */
+export interface CodexLoginStart {
+  url: string
+  user_code: string
+}
+
+/** Body for creating/updating a Codex account. Kind is always ChatGPT
+ *  device sign-in. */
+export interface CodexAccountInput {
+  name: string
+  kind: CodexAccountKind
+  budget_window_hours: number | null
+  budget_limit_usd: number | null
+  budget_limit_tokens: number | null
+  warn_threshold: number
+  critical_threshold: number
+}
+
 export interface PushSubscription {
   endpoint: string
   p256dh: string

@@ -5,6 +5,7 @@ pub mod attachments;
 pub mod auth;
 pub mod backup;
 pub mod claude_accounts;
+pub mod codex_accounts;
 pub mod doc_reviews;
 pub mod env_vars;
 pub mod folders;
@@ -60,6 +61,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(auth::router(state.clone()))
         .merge(claude_accounts::router(state.clone()))
         .merge(grok_accounts::router(state.clone()))
+        .merge(codex_accounts::router(state.clone()))
         .merge(kimi_accounts::router(state.clone()))
         .merge(folders::router(state.clone()))
         .merge(sessions::router(state.clone()))

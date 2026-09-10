@@ -8,6 +8,7 @@ mod auth_sessions;
 mod cards;
 mod cascades;
 mod claude_accounts;
+mod codex_accounts;
 mod custom_workflows;
 mod dependencies;
 mod doc_review_anchors;

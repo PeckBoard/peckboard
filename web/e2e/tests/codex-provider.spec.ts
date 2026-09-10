@@ -75,7 +75,7 @@ test('codex provider is registered with seed models and settings surface', async
   const plugin = plugins.plugins.find((p) => p.id === 'codex')
   expect(plugin, 'codex plugin missing from /api/plugins').toBeTruthy()
   const keys = plugin!.settings_schema.fields.map((f) => f.key)
-  for (const key of ['cli_path', 'discover_models', 'api_key', 'additional_models']) {
+  for (const key of ['cli_path', 'discover_models', 'additional_models']) {
     expect(keys, `codex settings schema missing ${key}`).toContain(key)
   }
 

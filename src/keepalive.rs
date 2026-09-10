@@ -44,7 +44,7 @@ const AUTH_PROVIDERS: &[&str] = &["claude", "grok", "cursor", "kimi"];
 
 /// Providers whose logins are multi-account (a login per stored account plus
 /// the host default). Others get a single default ping.
-const MULTI_ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok", "kimi"];
+const MULTI_ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok", "kimi", "codex"];
 
 /// Per-login cap: how long to wait for the "hi" turn before force-killing the
 /// run and cleaning up. A hung/unauthenticated CLI is bounded by this.
@@ -222,6 +222,10 @@ async fn collect_targets(db: &Db, registry: &ProviderRegistry) -> Vec<Target> {
                 .map(|v| v.into_iter().map(|a| (a.id, a.name)).collect::<Vec<_>>()),
             "kimi" => db
                 .list_kimi_accounts()
+                .await
+                .map(|v| v.into_iter().map(|a| (a.id, a.name)).collect::<Vec<_>>()),
+            "codex" => db
+                .list_codex_accounts()
                 .await
                 .map(|v| v.into_iter().map(|a| (a.id, a.name)).collect::<Vec<_>>()),
             _ => Ok(Vec::new()),

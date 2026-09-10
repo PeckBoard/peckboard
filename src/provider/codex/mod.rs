@@ -20,9 +20,11 @@
 //!
 //! `thread_id` comes from the first JSONL line (`thread.started`). First
 //! turn prepends the shared working-style rules (Cursor-style); resume does
-//! not. Auth is host `~/.codex/auth.json` and/or plugin `api_key` /
-//! `CODEX_API_KEY` — no accounts table.
+//! not. Auth is host `~/.codex/auth.json` (ChatGPT sign-in via `codex login
+//! --device-auth`) and/or per-account `CODEX_HOME` dirs from the Codex
+//! Accounts table. API-key login is not offered.
 
+pub mod login;
 mod mcp;
 mod parser;
 
@@ -49,35 +51,33 @@ use crate::provider::turn::{
 const DEFAULT_CLI: &str = "codex";
 const CLI_FALLBACK_DIRS: &[&str] = turn::COMMON_CLI_FALLBACK_DIRS;
 const MODEL_DISCOVERY_TTL: Duration = Duration::from_secs(60);
-const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
 const API_KEY_ENV: &str = "CODEX_API_KEY";
+const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
+const AUTH_HINT: &str = "Codex isn't signed in. Sign in with ChatGPT in Settings → Codex \
+                         Accounts, or run `codex login --device-auth` on the host.";
 
 const STDERR_MARKERS: &[StderrMarker] = &[
     StderrMarker {
         marker: "Not logged in",
-        message: "Codex isn't signed in. Run `codex login` on the host, or set an API key \
-                  in the Codex plugin settings (CODEX_API_KEY).",
+        message: AUTH_HINT,
         kind: CrashKind::AuthExpired,
         abort: true,
     },
     StderrMarker {
         marker: "Not signed in",
-        message: "Codex isn't signed in. Run `codex login` on the host, or set an API key \
-                  in the Codex plugin settings (CODEX_API_KEY).",
+        message: AUTH_HINT,
         kind: CrashKind::AuthExpired,
         abort: true,
     },
     StderrMarker {
         marker: "no Codex credentials were found",
-        message: "Codex isn't signed in. Run `codex login` on the host, or set an API key \
-                  in the Codex plugin settings (CODEX_API_KEY).",
+        message: AUTH_HINT,
         kind: CrashKind::AuthExpired,
         abort: true,
     },
     StderrMarker {
         marker: "CODEX_API_KEY",
-        message: "Codex isn't signed in. Run `codex login` on the host, or set an API key \
-                  in the Codex plugin settings (CODEX_API_KEY).",
+        message: AUTH_HINT,
         kind: CrashKind::AuthExpired,
         abort: true,
     },
@@ -101,21 +101,35 @@ struct DiscoveryCache {
 /// `AgentProvider` backed by per-turn `codex exec` invocations.
 pub struct CodexProvider {
     runs: Arc<Mutex<HashMap<String, CodexRun>>>,
+    /// DB handle for multi-account support: `dynamic_models` enumerates the
+    /// stored accounts and `send_message` resolves the per-account `CODEX_HOME`
+    /// to inject. `None` in tests / no-DB registrations keeps the
+    /// single-(Default-)account behaviour.
+    db: Option<crate::db::Db>,
     settings: Option<PluginSettingsStore>,
-    discovery_cache: Arc<Mutex<Option<DiscoveryCache>>>,
+    /// Per-scope (`""` = host, else account id) cache of `codex debug models`
+    /// probes.
+    discovery_cache: Arc<Mutex<HashMap<String, DiscoveryCache>>>,
 }
 
 impl CodexProvider {
     pub fn new() -> Self {
         CodexProvider {
             runs: Arc::new(Mutex::new(HashMap::new())),
+            db: None,
             settings: None,
-            discovery_cache: Arc::new(Mutex::new(None)),
+            discovery_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_settings(mut self, settings: PluginSettingsStore) -> Self {
         self.settings = Some(settings);
+        self
+    }
+
+    /// Attach a DB handle so the provider can resolve Codex accounts.
+    pub fn with_db(mut self, db: crate::db::Db) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -141,14 +155,42 @@ impl CodexProvider {
         )
     }
 
+    /// Resolve `account_id` to its `CODEX_HOME` so the spawned CLI runs as
+    /// that ChatGPT login. An account id that no longer exists (deleted out
+    /// from under a live session) is a hard error rather than a silent fall
+    /// back to host credentials — a turn must never bill the wrong account.
+    async fn inject_account_env(
+        &self,
+        account_id: &str,
+        env: &mut HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        let account = db
+            .get_codex_account(account_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("codex account not found: {account_id}"))?;
+        if let Some(dir) = &account.config_dir {
+            std::fs::create_dir_all(dir).ok();
+            env.insert("CODEX_HOME".into(), dir.clone());
+        }
+        // ChatGPT sign-in lives in auth.json; an inherited API-key env would
+        // steal the session onto usage-based billing.
+        env.remove(API_KEY_ENV);
+        env.remove("OPENAI_API_KEY");
+        Ok(())
+    }
+
     async fn discovered_models(
         &self,
         cli_path: &str,
+        scope: &str,
         env: &HashMap<String, String>,
     ) -> Option<Vec<String>> {
         {
             let cache = self.discovery_cache.lock().await;
-            if let Some(entry) = cache.as_ref()
+            if let Some(entry) = cache.get(scope)
                 && entry.fetched_at.elapsed() < MODEL_DISCOVERY_TTL
             {
                 return entry.models.clone();
@@ -156,11 +198,67 @@ impl CodexProvider {
         }
         let result = probe_cli_models(cli_path, env).await;
         let mut cache = self.discovery_cache.lock().await;
-        *cache = Some(DiscoveryCache {
-            fetched_at: Instant::now(),
-            models: result.clone(),
-        });
+        cache.insert(
+            scope.to_string(),
+            DiscoveryCache {
+                fetched_at: Instant::now(),
+                models: result.clone(),
+            },
+        );
         result
+    }
+
+    /// One labelled variant per stored account (`<model>@<account_id>`, shown
+    /// as `[Account] Model`). Each account is probed under its own
+    /// `CODEX_HOME`. Discovery off/failed falls back to mirroring `base`.
+    async fn account_scoped_models(
+        &self,
+        base: &[ModelInfo],
+        cli_path: &str,
+        discover: bool,
+    ) -> Vec<ModelInfo> {
+        let Some(db) = &self.db else {
+            return Vec::new();
+        };
+        let accounts = match db.list_codex_accounts().await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("codex: failed to list accounts for model catalog: {e}");
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for acct in &accounts {
+            let discovered = if discover {
+                let mut env = HashMap::new();
+                match self.inject_account_env(&acct.id, &mut env).await {
+                    Ok(()) => self.discovered_models(cli_path, &acct.id, &env).await,
+                    Err(e) => {
+                        tracing::warn!("codex: skip discovery for account {}: {e}", acct.id);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let acct_base: Vec<ModelInfo> = match discovered {
+                Some(ids) if !ids.is_empty() => ids
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, id)| model_info(id, i as i32))
+                    .collect(),
+                _ => base.to_vec(),
+            };
+            for m in acct_base {
+                out.push(ModelInfo {
+                    id: format!("{}@{}", m.id, acct.id),
+                    display_name: format!("[{}] {}", acct.name, m.display_name),
+                    capabilities: m.capabilities,
+                    tier: m.tier,
+                });
+            }
+        }
+        out
     }
 }
 
@@ -184,13 +282,9 @@ impl AgentProvider for CodexProvider {
         );
         let extras = setting_str_list(&settings, "additional_models");
         let discover = setting_bool(&settings, "discover_models").unwrap_or(true);
-        let mut env = HashMap::new();
-        if let Some(key) = setting_str(&settings, "api_key") {
-            env.insert(API_KEY_ENV.into(), key);
-        }
 
         let base = if discover {
-            match self.discovered_models(&cli_path, &env).await {
+            match self.discovered_models(&cli_path, "", &HashMap::new()).await {
                 Some(ids) if !ids.is_empty() => ids
                     .into_iter()
                     .enumerate()
@@ -202,16 +296,19 @@ impl AgentProvider for CodexProvider {
             default_models()
         };
 
-        Some(merge_additional_models(base, extras))
+        let base = merge_additional_models(base, extras);
+        let account_variants = self.account_scoped_models(&base, &cli_path, discover).await;
+        Some(base.into_iter().chain(account_variants).collect())
     }
 
     async fn auth_configured(&self) -> Option<bool> {
-        let settings = self.load_settings().await;
-        if setting_str(&settings, "api_key").is_some() {
-            return Some(true);
-        }
-        if std::env::var(API_KEY_ENV).is_ok_and(|v| !v.is_empty()) {
-            return Some(true);
+        if let Some(db) = &self.db {
+            match db.list_codex_accounts().await {
+                Ok(accounts) if !accounts.is_empty() => return Some(true),
+                Ok(_) => {}
+                // Can't tell — don't warn on a transient DB error.
+                Err(_) => return None,
+            }
         }
         Some(host_auth_present())
     }
@@ -236,13 +333,19 @@ impl AgentProvider for CodexProvider {
             }
         }
 
-        let settings = self.load_settings().await;
         let cli_path = self.cli_path().await;
         let model = resolve_model(&config.model);
 
+        let stripped = config
+            .model
+            .strip_prefix("codex:")
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| config.model.clone());
+        let (_base_model, account_id) = split_model_account(&stripped);
+
         let mut env = config.env.clone();
-        if let Some(key) = setting_str(&settings, "api_key") {
-            env.insert(API_KEY_ENV.into(), key);
+        if let Some(account_id) = account_id {
+            self.inject_account_env(account_id, &mut env).await?;
         }
 
         let (image_paths, dropped) =

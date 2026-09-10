@@ -59,7 +59,7 @@ Default exec sandbox is **read-only**. Unattended writes need `--sandbox workspa
 
 `--cd` / `-C DIR` — workspace root. Also `--add-dir DIR` for extra writable roots.
 
-Env for API-key auth (exec only): `CODEX_API_KEY`. ChatGPT login lives in `$CODEX_HOME/auth.json` (`codex login`).
+ChatGPT login lives in `$CODEX_HOME/auth.json` (`codex login --device-auth`). Peckboard's in-app path is Settings → Codex Accounts. Env `CODEX_API_KEY` is not injected.
 
 ## Resume Argv
 
@@ -229,9 +229,10 @@ Suggested `STDERR_MARKERS` (abort + `CrashKind::AuthExpired`):
 
 Auth stores:
 
-- ChatGPT OAuth: `$CODEX_HOME/auth.json` via `codex login` (browser) or `codex login --device-auth`.
-- API key: `CODEX_API_KEY` (exec-only env; do not also export `OPENAI_API_KEY` into untrusted child env if avoidable).
-- Status: `codex login status` → `Logged in using an API key - …` / `Logged in using ChatGPT` / `Not logged in`.
+- ChatGPT OAuth (Peckboard in-app path): `$CODEX_HOME/auth.json` via `codex login --device-auth`. Settings → Codex Accounts spawns that command per account.
+- Host Default: `codex login` / `codex login --device-auth` writing `~/.codex/auth.json`.
+- API key (`CODEX_API_KEY`) is not offered in Peckboard; the CLI still accepts it if the host env has it.
+- Status: `codex login status` → `Logged in using ChatGPT` / `Logged in using an API key - …` / `Not logged in`.
 
 ## `codex --help` / `codex exec --help` (from source, not live)
 

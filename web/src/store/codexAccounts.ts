@@ -1,0 +1,108 @@
+import { create } from 'zustand'
+import type { CodexAccount, CodexAccountInput, CodexLoginStart } from '../types/api'
+import { authedFetch } from './auth'
+import { AccountDeleteConflict, type AccountDeleteRefs } from './accountDeleteGuard'
+import { useResourcesStore } from './resources'
+
+interface CodexAccountsState {
+  accounts: CodexAccount[]
+  loaded: boolean
+  loading: boolean
+  error: string | null
+  fetchAccounts: () => Promise<void>
+  createAccount: (input: CodexAccountInput) => Promise<CodexAccount>
+  updateAccount: (id: string, input: CodexAccountInput) => Promise<void>
+  deleteAccount: (id: string, force?: boolean) => Promise<void>
+  /** Surface a mutation failure in the section's inline error slot. */
+  setError: (message: string | null) => void
+  /** Begin a ChatGPT device login; returns the URL + one-time code. */
+  startLogin: (id: string) => Promise<CodexLoginStart>
+}
+
+/** Surface a `{ error }` JSON body (or a generic message) from a non-2xx. */
+async function errorFrom(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json()
+    if (body && typeof body.error === 'string') return body.error
+  } catch {
+    /* non-JSON body */
+  }
+  return fallback
+}
+
+/** Any account mutation can change the model catalogue (each account adds a
+ *  labelled variant per model), so re-pull `/api/models` after a write. */
+function refreshModels() {
+  void useResourcesStore.getState().fetchModels()
+}
+
+export const useCodexAccountsStore = create<CodexAccountsState>((set, get) => ({
+  accounts: [],
+  loaded: false,
+  loading: false,
+  error: null,
+
+  setError: (message) => set({ error: message }),
+
+  fetchAccounts: async () => {
+    set({ loading: true })
+    try {
+      const res = await authedFetch('/api/codex-accounts')
+      if (!res.ok) {
+        set({ error: await errorFrom(res, 'Failed to load accounts'), loading: false })
+        return
+      }
+      const accounts = (await res.json()) as CodexAccount[]
+      set({ accounts, loaded: true, loading: false, error: null })
+    } catch {
+      set({ error: 'Failed to load accounts', loading: false })
+    }
+  },
+
+  createAccount: async (input) => {
+    const res = await authedFetch('/api/codex-accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    if (!res.ok) throw new Error(await errorFrom(res, 'Failed to add account'))
+    const account = (await res.json()) as CodexAccount
+    await get().fetchAccounts()
+    refreshModels()
+    return account
+  },
+
+  updateAccount: async (id, input) => {
+    const res = await authedFetch(`/api/codex-accounts/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    if (!res.ok) throw new Error(await errorFrom(res, 'Failed to update account'))
+    await get().fetchAccounts()
+    refreshModels()
+  },
+
+  deleteAccount: async (id, force) => {
+    const url = `/api/codex-accounts/${id}${force ? '?force=true' : ''}`
+    const res = await authedFetch(url, { method: 'DELETE' })
+    if (res.status === 409) {
+      const body = await res.json().catch(() => null)
+      throw new AccountDeleteConflict(
+        (body && typeof body.error === 'string' && body.error) || 'Account is still referenced',
+        body as AccountDeleteRefs,
+      )
+    }
+    if (!res.ok && res.status !== 204) {
+      throw new Error(await errorFrom(res, 'Failed to delete account'))
+    }
+    await get().fetchAccounts()
+    refreshModels()
+  },
+
+  startLogin: async (id) => {
+    const res = await authedFetch(`/api/codex-accounts/${id}/login/start`, { method: 'POST' })
+    if (!res.ok) throw new Error(await errorFrom(res, 'Failed to start Codex login'))
+    return (await res.json()) as CodexLoginStart
+  },
+}))

@@ -1,0 +1,548 @@
+//! `/api/codex-accounts` — manage the set of ChatGPT / Codex CLI
+//! credentials the spawned `codex` CLI can run as. Mirrors
+//! [`super::kimi_accounts`]; see [`super::claude_accounts`] for the
+//! budget/usage model. The "Default" account (host `~/.codex`) is
+//! implicit and never appears here; a session uses an account by carrying
+//! `@<account_id>` on its model id.
+//!
+//! Codex's login is a ChatGPT device-code flow run by the CLI itself
+//! (`codex login --device-auth`), so — like Grok/Kimi and unlike Claude's
+//! paste-back exchange — an account is created first (in a not-yet-
+//! authenticated state) and then signed in via
+//! `POST /api/codex-accounts/{id}/login/start`, which returns a URL +
+//! one-time code to open. The account reads as authenticated once
+//! `codex login` writes tokens into the account home's `auth.json` (see
+//! [`crate::provider::codex::login`]). API-key login is not offered.
+use std::sync::Arc;
+
+use axum::{
+    Json, Router,
+    extract::{Extension, Path, State},
+    http::StatusCode,
+    middleware,
+    response::IntoResponse,
+    routing::get,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::auth::middleware::{AuthUser, require_admin, require_auth};
+use crate::db::models::{CodexAccount, CodexAccountChanges, NewCodexAccount};
+use crate::plugin::builtins::codex::CodexPlugin;
+use crate::plugin::settings::PluginSettingsStore;
+use crate::provider::codex::login::{self, CODEX_LOGIN};
+use crate::provider::turn;
+use crate::routes::usage::cost::usage_cost;
+use crate::state::AppState;
+
+pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    admin_router()
+        .merge(user_router())
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// Routes that mint, rotate, or delete a shared credential. Accounts carry
+/// no `user_id`, so these are admin-only — same reasoning as
+/// `routes/claude_accounts.rs`.
+///
+/// Layers run outer-to-inner on the request, so `require_admin` is appended
+/// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
+/// into the extensions before this middleware reads it.
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/codex-accounts/{id}",
+            axum::routing::put(update_account).delete(delete_account),
+        )
+        .route(
+            "/api/codex-accounts/{id}/login/start",
+            axum::routing::post(start_login),
+        )
+        .route_layer(middleware::from_fn(require_admin))
+}
+
+/// `/api/codex-accounts` mixes a read (list, any user) with a write (create,
+/// admin only) on the same path, so `create_account` checks
+/// `AuthUser::is_admin()` itself — same idiom as `routes/auth.rs::create_user`.
+fn user_router() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/api/codex-accounts",
+        get(list_accounts).post(create_account),
+    )
+}
+
+type ApiError = (StatusCode, Json<serde_json::Value>);
+
+fn bad_request(msg: &str) -> ApiError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg })),
+    )
+}
+
+fn server_error(msg: impl std::fmt::Display) -> ApiError {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": msg.to_string() })),
+    )
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+// ── Wire shapes ──────────────────────────────────────────────────────
+
+/// Mirrors the Claude/Grok account warn levels so the UI can reuse the same
+/// badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WarnLevel {
+    None,
+    Ok,
+    Warning,
+    Critical,
+    Exceeded,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AccountUsage {
+    total_tokens: i64,
+    est_cost_usd: f64,
+    turns: i64,
+    used_fraction: Option<f64>,
+    level: WarnLevel,
+}
+
+/// One account as returned to the UI. The `credential` is never sent back;
+/// `authenticated` tells the UI whether ChatGPT sign-in has finished.
+#[derive(Debug, Clone, Serialize)]
+struct AccountView {
+    id: String,
+    name: String,
+    kind: String,
+    authenticated: bool,
+    config_dir: Option<String>,
+    budget_window_hours: Option<i32>,
+    budget_limit_usd: Option<f64>,
+    budget_limit_tokens: Option<i64>,
+    warn_threshold: f64,
+    critical_threshold: f64,
+    created_at: i64,
+    updated_at: i64,
+    usage: AccountUsage,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAccountBody {
+    name: String,
+    /// Ignored: Codex accounts are always ChatGPT device sign-in. Accepted
+    /// so the UI can reuse the same payload shape as Grok/Kimi.
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    budget_window_hours: Option<i32>,
+    #[serde(default)]
+    budget_limit_usd: Option<f64>,
+    #[serde(default)]
+    budget_limit_tokens: Option<i64>,
+    #[serde(default)]
+    warn_threshold: Option<f64>,
+    #[serde(default)]
+    critical_threshold: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAccountBody {
+    name: String,
+    #[serde(default)]
+    budget_window_hours: Option<i32>,
+    #[serde(default)]
+    budget_limit_usd: Option<f64>,
+    #[serde(default)]
+    budget_limit_tokens: Option<i64>,
+    #[serde(default)]
+    warn_threshold: Option<f64>,
+    #[serde(default)]
+    critical_threshold: Option<f64>,
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// The non-secret marker stored as a device account's `credential`; the real
+/// tokens live in `config_dir/auth.json`.
+const DEVICE_MARKER: &str = "device";
+
+fn valid_kind(kind: &str) -> bool {
+    kind.is_empty() || kind == "device"
+}
+
+fn is_authenticated(acct: &CodexAccount) -> bool {
+    login::device_authenticated(acct.config_dir.as_deref())
+}
+
+/// The `codex` binary the login flow spawns, from the plugin's `cli_path`
+/// setting (the same one every turn uses), defaulting to `codex` — resolved
+/// through the installer-location fallback so a service PATH that predates
+/// the CLI install still works.
+async fn login_cli_path(state: &AppState) -> String {
+    let store =
+        PluginSettingsStore::new("codex".to_string(), CodexPlugin::schema(), state.db.clone());
+    let configured = match store.load().await {
+        Ok(settings) => settings
+            .get("cli_path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "codex".to_string()),
+        Err(e) => {
+            tracing::warn!("codex: failed to load settings for login cli_path: {e}");
+            "codex".to_string()
+        }
+    };
+    turn::resolve_cli_path(&configured, turn::COMMON_CLI_FALLBACK_DIRS)
+}
+
+/// Thresholds must be ordered fractions in `(0, 1]`. Defaults (0.75 / 0.90).
+fn normalize_thresholds(warn: Option<f64>, critical: Option<f64>) -> Result<(f64, f64), ApiError> {
+    let warn = warn.unwrap_or(0.75);
+    let critical = critical.unwrap_or(0.90);
+    let in_range = |v: f64| v > 0.0 && v <= 1.0;
+    if !in_range(warn) || !in_range(critical) {
+        return Err(bad_request("thresholds must be in the range (0, 1]"));
+    }
+    if warn > critical {
+        return Err(bad_request("warn_threshold must be <= critical_threshold"));
+    }
+    Ok((warn, critical))
+}
+
+fn classify(used_fraction: Option<f64>, warn: f64, critical: f64) -> WarnLevel {
+    match used_fraction {
+        None => WarnLevel::None,
+        Some(f) if f >= 1.0 => WarnLevel::Exceeded,
+        Some(f) if f >= critical => WarnLevel::Critical,
+        Some(f) if f >= warn => WarnLevel::Warning,
+        Some(_) => WarnLevel::Ok,
+    }
+}
+
+/// Compute the rolling-window spend and budget level for one account, off the
+/// shared `usage_events` table. Mirrors the Claude/Grok routes exactly.
+async fn account_usage(state: &AppState, acct: &CodexAccount) -> anyhow::Result<AccountUsage> {
+    let since = match acct.budget_window_hours {
+        Some(h) if h > 0 => now_ms() - (h as i64) * 3_600_000,
+        _ => 0,
+    };
+    let rows = state.db.account_usage_since(&acct.id, since).await?;
+
+    let mut total_tokens = 0i64;
+    let mut est_cost = 0.0f64;
+    let mut turns = 0i64;
+    for r in &rows {
+        total_tokens += r.total_tokens;
+        turns += r.turns;
+        est_cost += usage_cost(
+            r.model.as_deref(),
+            r.input_tokens,
+            r.output_tokens,
+            r.cache_read_tokens,
+            r.cache_creation_tokens,
+        );
+    }
+
+    let has_window = matches!(acct.budget_window_hours, Some(h) if h > 0);
+    let token_frac = acct
+        .budget_limit_tokens
+        .filter(|l| *l > 0)
+        .map(|l| total_tokens as f64 / l as f64);
+    let cost_frac = acct
+        .budget_limit_usd
+        .filter(|l| *l > 0.0)
+        .map(|l| est_cost / l);
+    let used_fraction = if has_window {
+        match (token_frac, cost_frac) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    } else {
+        None
+    };
+
+    let level = classify(used_fraction, acct.warn_threshold, acct.critical_threshold);
+
+    Ok(AccountUsage {
+        total_tokens,
+        est_cost_usd: est_cost,
+        turns,
+        used_fraction,
+        level,
+    })
+}
+
+async fn to_view(state: &AppState, acct: CodexAccount) -> anyhow::Result<AccountView> {
+    let usage = account_usage(state, &acct).await?;
+    Ok(AccountView {
+        authenticated: is_authenticated(&acct),
+        id: acct.id,
+        name: acct.name,
+        kind: acct.kind,
+        config_dir: acct.config_dir,
+        budget_window_hours: acct.budget_window_hours,
+        budget_limit_usd: acct.budget_limit_usd,
+        budget_limit_tokens: acct.budget_limit_tokens,
+        warn_threshold: acct.warn_threshold,
+        critical_threshold: acct.critical_threshold,
+        created_at: acct.created_at,
+        updated_at: acct.updated_at,
+        usage,
+    })
+}
+
+// ── Handlers ─────────────────────────────────────────────────────────
+
+async fn list_accounts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let accounts = match state.db.list_codex_accounts().await {
+        Ok(a) => a,
+        Err(e) => return Err(server_error(e)),
+    };
+    let mut out = Vec::with_capacity(accounts.len());
+    for acct in accounts {
+        match to_view(&state, acct).await {
+            Ok(v) => out.push(v),
+            Err(e) => return Err(server_error(e)),
+        }
+    }
+    Ok(Json(out))
+}
+
+async fn create_account(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(body): Json<CreateAccountBody>,
+) -> impl IntoResponse {
+    if !auth_user.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "admin only" })),
+        ));
+    }
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(bad_request("name is required"));
+    }
+    if !valid_kind(&body.kind) {
+        return Err(bad_request(
+            "kind must be 'device' (ChatGPT sign-in); API-key login is not supported",
+        ));
+    }
+
+    let (warn, critical) = match normalize_thresholds(body.warn_threshold, body.critical_threshold)
+    {
+        Ok(t) => t,
+        Err(e) => return Err(e),
+    };
+
+    // `cacc_<hex>` — deliberately free of `@` so it never collides with the
+    // model-id account separator, and `c`-prefixed to set it apart from a
+    // Claude `acc_` / Grok `gacc_` / Kimi `kacc_` id at a glance.
+    let id = format!("cacc_{}", uuid::Uuid::new_v4().simple());
+    let config_dir = state
+        .config
+        .data_dir
+        .join("codex-accounts")
+        .join(&id)
+        .to_string_lossy()
+        .to_string();
+
+    let now = now_ms();
+    let new = NewCodexAccount {
+        id,
+        name,
+        kind: DEVICE_MARKER.to_string(),
+        credential: DEVICE_MARKER.to_string(),
+        config_dir: Some(config_dir),
+        budget_window_hours: body.budget_window_hours,
+        budget_limit_usd: body.budget_limit_usd,
+        budget_limit_tokens: body.budget_limit_tokens,
+        warn_threshold: warn,
+        critical_threshold: critical,
+        created_at: now,
+        updated_at: now,
+    };
+
+    match state.db.create_codex_account(new).await {
+        Ok(acct) => match to_view(&state, acct).await {
+            Ok(v) => Ok((StatusCode::CREATED, Json(v))),
+            Err(e) => Err(server_error(e)),
+        },
+        Err(e) => Err(server_error(e)),
+    }
+}
+
+async fn update_account(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateAccountBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(bad_request("name is required"));
+    }
+    let (warn, critical) = match normalize_thresholds(body.warn_threshold, body.critical_threshold)
+    {
+        Ok(t) => t,
+        Err(e) => return Err(e),
+    };
+
+    let changes = CodexAccountChanges {
+        name: Some(name),
+        budget_window_hours: Some(body.budget_window_hours),
+        budget_limit_usd: Some(body.budget_limit_usd),
+        budget_limit_tokens: Some(body.budget_limit_tokens),
+        warn_threshold: Some(warn),
+        critical_threshold: Some(critical),
+        updated_at: Some(now_ms()),
+    };
+
+    match state.db.update_codex_account(&id, changes).await {
+        Ok(Some(acct)) => match to_view(&state, acct).await {
+            Ok(v) => Ok(Json(v)),
+            Err(e) => Err(server_error(e)),
+        },
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "account not found" })),
+        )),
+        Err(e) => Err(server_error(e)),
+    }
+}
+
+async fn delete_account(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<
+        crate::routes::account_delete_guard::DeleteAccountQuery,
+    >,
+) -> impl IntoResponse {
+    // Stop any in-flight login before removing the row / its CODEX_HOME.
+    CODEX_LOGIN.cancel(&id).await;
+    let db = state.db.clone();
+    let del_id = id.clone();
+    let result = crate::routes::account_delete_guard::guarded_delete(
+        &state,
+        &id,
+        query.force,
+        move || async move { db.delete_codex_account(&del_id).await },
+    )
+    .await;
+    match result {
+        Ok(config_dir) => {
+            if let Some(dir) = config_dir {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Serialize)]
+struct LoginStartResponse {
+    url: String,
+    user_code: String,
+}
+
+/// Begin a ChatGPT device login for an existing account: spawn
+/// `codex login --device-auth` against the account's CODEX_HOME and
+/// return the sign-in URL + one-time code. The account reads as
+/// `authenticated` once the browser sign-in completes.
+async fn start_login(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let account = match state.db.get_codex_account(&id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "account not found" })),
+            ));
+        }
+        Err(e) => return Err(server_error(e)),
+    };
+    if account.kind != "device" {
+        return Err(bad_request("login is only available for ChatGPT accounts"));
+    }
+    let Some(config_dir) = account.config_dir.as_deref() else {
+        return Err(server_error("account has no config_dir"));
+    };
+    let cli_path = login_cli_path(&state).await;
+    match CODEX_LOGIN.start(&id, config_dir, &cli_path).await {
+        Ok(prompt) => Ok(Json(LoginStartResponse {
+            url: prompt.url,
+            user_code: prompt.user_code,
+        })),
+        Err(e) => {
+            tracing::warn!(account_id = %id, "codex login start failed: {e}");
+            Err(bad_request(&format!("Codex login failed: {e}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_maps_thresholds_in_order() {
+        assert_eq!(classify(None, 0.75, 0.90), WarnLevel::None);
+        assert_eq!(classify(Some(0.50), 0.75, 0.90), WarnLevel::Ok);
+        assert_eq!(classify(Some(0.75), 0.75, 0.90), WarnLevel::Warning);
+        assert_eq!(classify(Some(0.90), 0.75, 0.90), WarnLevel::Critical);
+        assert_eq!(classify(Some(1.0), 0.75, 0.90), WarnLevel::Exceeded);
+    }
+
+    #[test]
+    fn normalize_thresholds_validates_range_and_order() {
+        assert_eq!(normalize_thresholds(None, None).unwrap(), (0.75, 0.90));
+        assert!(normalize_thresholds(Some(0.0), Some(0.9)).is_err());
+        assert!(normalize_thresholds(Some(0.95), Some(0.80)).is_err());
+    }
+
+    #[test]
+    fn valid_kind_accepts_only_device() {
+        assert!(valid_kind("device"));
+        assert!(valid_kind(""));
+        assert!(!valid_kind("api_key"));
+        assert!(!valid_kind("oauth_token"));
+    }
+
+    fn account(config_dir: Option<&str>) -> CodexAccount {
+        CodexAccount {
+            id: "cacc_x".into(),
+            name: "n".into(),
+            kind: "device".into(),
+            credential: "device".into(),
+            config_dir: config_dir.map(str::to_string),
+            budget_window_hours: None,
+            budget_limit_usd: None,
+            budget_limit_tokens: None,
+            warn_threshold: 0.75,
+            critical_threshold: 0.90,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn is_authenticated_needs_auth_json() {
+        assert!(!is_authenticated(&account(None)));
+        assert!(!is_authenticated(&account(Some("/nonexistent/xyz"))));
+    }
+}
