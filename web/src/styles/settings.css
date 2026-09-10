@@ -1193,8 +1193,34 @@ a.wasm-plugin-repo:hover {
   align-items: center;
   gap: 8px;
 }
-.env-var-lock {
-  margin-top: 16px;
+/* Unlock panel: status line + password/duration form + "Lock now". */
+.env-var-unlock {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.env-var-unlock h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.env-var-unlock form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.env-var-unlock .form-actions {
+  justify-content: flex-start;
+  margin-top: 0;
+}
+.env-var-unlock-status {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text2);
 }
 /* ═══════════════════════════════════════════════════
    System prompts library (Settings → System Prompts)

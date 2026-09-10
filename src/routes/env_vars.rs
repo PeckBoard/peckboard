@@ -26,7 +26,7 @@ use std::sync::Arc;
 use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::auth::password::verify_password;
 use crate::db::models::NewEnvVar;
-use crate::service::env_vars::{decrypt_value, encrypt_value};
+use crate::service::env_vars::{UnlockDuration, decrypt_value, encrypt_value};
 use crate::state::AppState;
 
 /// Env var names follow the POSIX identifier shape `^[A-Za-z_][A-Za-z0-9_]*$`.
@@ -59,6 +59,8 @@ fn admin_router() -> Router<Arc<AppState>> {
 fn user_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/env-vars", get(list).post(upsert))
+        .route("/api/env-vars/unlock", post(unlock))
+        .route("/api/env-vars/unlock-status", get(unlock_status))
         .route("/api/env-vars/unlock-answer", post(unlock_answer))
         .route("/api/env-vars/lock", post(lock))
 }
@@ -296,6 +298,9 @@ struct UnlockAnswerBody {
     password: Option<String>,
     #[serde(default)]
     cancel: bool,
+    /// How long the values stay unlocked once the password checks out.
+    #[serde(default)]
+    duration: UnlockDuration,
 }
 
 /// POST /api/env-vars/unlock-answer — the unlock dialog submits here. A
@@ -333,32 +338,17 @@ async fn unlock_answer(State(state): State<Arc<AppState>>, request: Request<Body
         return err(StatusCode::BAD_REQUEST, "password too long");
     }
 
-    let vars = match state.db.list_env_vars_encrypted_by(&pending_uid).await {
-        Ok(v) => v,
-        Err(e) => return internal_err(e),
+    let values = match decrypt_owned_vars(&state, &pending_uid, &password).await {
+        Ok(Some(v)) => v,
+        // Wrong password: leave the request pending (no `resolve`) so the
+        // dialog can retry.
+        Ok(None) => return err(StatusCode::FORBIDDEN, "wrong password"),
+        Err(resp) => return resp,
     };
 
-    // Decrypt every var: any failure means the password is wrong. Leave the
-    // request pending (no `resolve`) so the dialog can retry. Values are
-    // keyed by var id — names are only unique per scope.
-    let mut values = HashMap::new();
-    for v in vars {
-        let (Some(ct), Some(nonce), Some(salt)) = (
-            v.ciphertext.as_deref(),
-            v.nonce.as_deref(),
-            v.kdf_salt.as_deref(),
-        ) else {
-            return err(StatusCode::FORBIDDEN, "wrong password");
-        };
-        match decrypt_value(&password, salt, nonce, ct) {
-            Some(pt) => {
-                values.insert(v.id, pt);
-            }
-            None => return err(StatusCode::FORBIDDEN, "wrong password"),
-        }
-    }
-
-    registry.cache_put(&pending_uid, values.clone()).await;
+    registry
+        .cache_put_for(&pending_uid, values.clone(), body.duration.ttl())
+        .await;
     // Resolve every request waiting on this owner, not just the answered
     // one — the client queues concurrent prompts behind a single dialog, so
     // the later requests would otherwise block until their timeout.
@@ -371,4 +361,127 @@ async fn lock(State(state): State<Arc<AppState>>, request: Request<Body>) -> Res
     let user_id = auth_user(&request).user_id.clone();
     state.env_unlock.lock_user(&user_id).await;
     ok()
+}
+
+/// Decrypt every var `user_id` owns with `password`, keyed by var id (names
+/// are only unique per scope). `Ok(None)` means the password is wrong: any
+/// var that fails to decrypt is a GCM tag mismatch, which *is* the password
+/// check — callers must not treat a partial result as an unlock. `Err` is a
+/// ready-to-return db-error response.
+async fn decrypt_owned_vars(
+    state: &AppState,
+    user_id: &str,
+    password: &str,
+) -> Result<Option<HashMap<String, String>>, Response> {
+    let vars = match state.db.list_env_vars_encrypted_by(user_id).await {
+        Ok(v) => v,
+        Err(e) => return Err(internal_err(e)),
+    };
+    let mut values = HashMap::new();
+    for v in vars {
+        let (Some(ct), Some(nonce), Some(salt)) = (
+            v.ciphertext.as_deref(),
+            v.nonce.as_deref(),
+            v.kdf_salt.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        match decrypt_value(password, salt, nonce, ct) {
+            Some(pt) => {
+                values.insert(v.id, pt);
+            }
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(values))
+}
+
+#[derive(Deserialize)]
+struct UnlockBody {
+    password: String,
+    /// Omitted = the default 1-hour window (see [`UnlockDuration`]).
+    #[serde(default)]
+    duration: UnlockDuration,
+}
+
+#[derive(Serialize)]
+struct UnlockStatusView {
+    unlocked: bool,
+    /// Seconds left in the window. `null` both while locked and while the
+    /// window is "until I lock" — read it together with `unlocked`.
+    expires_in_secs: Option<u64>,
+    /// Encrypted vars the caller owns. 0 = nothing to unlock, and the UI
+    /// hides the controls.
+    var_count: usize,
+}
+
+/// POST /api/env-vars/unlock — unlock the caller's own encrypted vars ahead
+/// of time, for a window they pick. While that window is open, session
+/// dispatch finds a warm cache (`provider::manager::warm_env_unlock_cache`)
+/// and never raises an unlock prompt.
+async fn unlock(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    let user_id = auth_user(&request).user_id.clone();
+    let body: UnlockBody = match parse_body(request).await {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    if body.password.len() > MAX_PASSWORD_LEN {
+        return err(StatusCode::BAD_REQUEST, "password too long");
+    }
+
+    let values = match decrypt_owned_vars(&state, &user_id, &body.password).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return err(StatusCode::FORBIDDEN, "wrong password"),
+        Err(resp) => return resp,
+    };
+    // With no encrypted vars there is nothing to decrypt, so nothing checked
+    // the password — reporting "unlocked" would be a claim the UI then
+    // displays for an hour without a single secret behind it.
+    if values.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "no encrypted variables to unlock");
+    }
+
+    let ttl = body.duration.ttl();
+    let count = values.len();
+    state
+        .env_unlock
+        .cache_put_for(&user_id, values.clone(), ttl)
+        .await;
+    // A session may already be blocked on a prompt for these vars; answer it
+    // from here so its dialog closes instead of waiting out the timeout.
+    let resolved = state
+        .env_unlock
+        .resolve_all_for_user(&user_id, &values)
+        .await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "unlocked": count,
+            "resolved_prompts": resolved,
+            "expires_in_secs": ttl.map(|d| d.as_secs()),
+        })),
+    )
+        .into_response()
+}
+
+/// GET /api/env-vars/unlock-status — the caller's current unlock window, for
+/// the Settings panel's status line and countdown.
+async fn unlock_status(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    let user_id = auth_user(&request).user_id.clone();
+    let var_count = match state.db.list_env_vars_encrypted_by(&user_id).await {
+        Ok(v) => v.len(),
+        Err(e) => return internal_err(e),
+    };
+    let status = state.env_unlock.cache_status(&user_id).await;
+    (
+        StatusCode::OK,
+        Json(UnlockStatusView {
+            unlocked: status.is_some(),
+            expires_in_secs: status.and_then(|s| s.expires_in_secs),
+            var_count,
+        }),
+    )
+        .into_response()
 }

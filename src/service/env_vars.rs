@@ -35,6 +35,57 @@ pub const UNLOCK_CACHE_TTL_SECS: u64 = 30 * 60;
 /// caller gives up. 2 minutes.
 pub const UNLOCK_ANSWER_TIMEOUT_SECS: u64 = 120;
 
+/// How long an unlock keeps the decrypted values in memory. The wire value
+/// is the variant's rename (`15m` … `24h`, `until-lock`); an unknown value
+/// fails deserialization — a 400 — rather than falling back to some default,
+/// so a client can never widen the window by sending garbage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub enum UnlockDuration {
+    #[serde(rename = "15m")]
+    FifteenMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+    #[serde(rename = "4h")]
+    FourHours,
+    #[serde(rename = "8h")]
+    EightHours,
+    #[serde(rename = "24h")]
+    TwentyFourHours,
+    #[serde(rename = "until-lock")]
+    UntilLock,
+}
+
+impl Default for UnlockDuration {
+    /// An omitted field means the 1-hour window — never "until lock", which
+    /// has to be asked for explicitly.
+    fn default() -> Self {
+        Self::OneHour
+    }
+}
+
+impl UnlockDuration {
+    /// The cache TTL this window implies; `None` = keep until the owner locks.
+    pub fn ttl(self) -> Option<Duration> {
+        let secs = match self {
+            Self::FifteenMinutes => 15 * 60,
+            Self::OneHour => 60 * 60,
+            Self::FourHours => 4 * 60 * 60,
+            Self::EightHours => 8 * 60 * 60,
+            Self::TwentyFourHours => 24 * 60 * 60,
+            Self::UntilLock => return None,
+        };
+        Some(Duration::from_secs(secs))
+    }
+}
+
+/// A live unlock window, as reported to the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnlockStatus {
+    /// Seconds left before the values are purged; `None` = until the owner
+    /// locks (or the process exits).
+    pub expires_in_secs: Option<u64>,
+}
+
 /// The decrypted contents of an unlock: var id → plaintext value. Keyed by
 /// id because names are only unique per scope (global vs per-folder).
 type ValueMap = HashMap<String, String>;
@@ -117,10 +168,19 @@ struct Pending {
     tx: oneshot::Sender<Option<ValueMap>>,
 }
 
-/// A user's decrypted values, valid until `expires_at`.
+/// A user's decrypted values, valid until `expires_at`. `None` = no expiry
+/// (the "Until I lock" window): dropped only by an explicit lock or process
+/// exit, never persisted.
 struct CacheEntry {
     values: ValueMap,
-    expires_at: Instant,
+    expires_at: Option<Instant>,
+}
+
+impl CacheEntry {
+    /// Still unlocked at `now`? A `None` expiry never expires.
+    fn is_live(&self, now: Instant) -> bool {
+        self.expires_at.is_none_or(|exp| exp > now)
+    }
 }
 
 #[derive(Default)]
@@ -227,10 +287,35 @@ impl EnvUnlockRegistry {
         self.lock_inner().pending.remove(request_id);
     }
 
-    /// Cache a user's decrypted values for [`UNLOCK_CACHE_TTL_SECS`].
+    /// Cache a user's decrypted values for [`UNLOCK_CACHE_TTL_SECS`] — the
+    /// window used when the caller didn't pick one.
     pub async fn cache_put(&self, user_id: &str, values: ValueMap) {
-        let expires_at = Instant::now() + Duration::from_secs(UNLOCK_CACHE_TTL_SECS);
-        self.cache_put_at(user_id, values, expires_at).await;
+        self.cache_put_for(
+            user_id,
+            values,
+            Some(Duration::from_secs(UNLOCK_CACHE_TTL_SECS)),
+        )
+        .await;
+    }
+
+    /// Cache a user's decrypted values for `ttl`, replacing any existing
+    /// window. `None` keeps them until [`Self::lock_user`] or process exit.
+    pub async fn cache_put_for(&self, user_id: &str, values: ValueMap, ttl: Option<Duration>) {
+        self.cache_put_at(user_id, values, ttl.map(|d| Instant::now() + d))
+            .await;
+    }
+
+    /// The user's live unlock window, or `None` when locked / expired.
+    /// Purges every expired entry as a side effect.
+    pub async fn cache_status(&self, user_id: &str) -> Option<UnlockStatus> {
+        let now = Instant::now();
+        let mut g = self.lock_inner();
+        g.cache.retain(|_, e| e.is_live(now));
+        g.cache.get(user_id).map(|e| UnlockStatus {
+            expires_in_secs: e
+                .expires_at
+                .map(|exp| exp.saturating_duration_since(now).as_secs()),
+        })
     }
 
     /// Fetch a user's cached values, or `None` once expired. Purges every
@@ -246,7 +331,7 @@ impl EnvUnlockRegistry {
 
     // ── time-injectable internals (used directly by tests) ────────────────
 
-    async fn cache_put_at(&self, user_id: &str, values: ValueMap, expires_at: Instant) {
+    async fn cache_put_at(&self, user_id: &str, values: ValueMap, expires_at: Option<Instant>) {
         self.lock_inner()
             .cache
             .insert(user_id.to_string(), CacheEntry { values, expires_at });
@@ -254,7 +339,7 @@ impl EnvUnlockRegistry {
 
     async fn cache_get_at(&self, user_id: &str, now: Instant) -> Option<ValueMap> {
         let mut g = self.lock_inner();
-        g.cache.retain(|_, e| e.expires_at > now);
+        g.cache.retain(|_, e| e.is_live(now));
         g.cache.get(user_id).map(|e| e.values.clone())
     }
 
@@ -265,7 +350,7 @@ impl EnvUnlockRegistry {
     pub fn all_cached_values_blocking(&self) -> HashMap<String, String> {
         let now = Instant::now();
         let mut g = self.lock_inner();
-        g.cache.retain(|_, e| e.expires_at > now);
+        g.cache.retain(|_, e| e.is_live(now));
         let mut out = HashMap::new();
         for entry in g.cache.values() {
             for (k, v) in &entry.values {
@@ -407,13 +492,67 @@ mod tests {
         vals.insert("A".into(), "1".into());
 
         // Already expired (expires_at == now, and the check is strictly `>`).
-        reg.cache_put_at("u1", vals.clone(), now).await;
+        reg.cache_put_at("u1", vals.clone(), Some(now)).await;
         assert!(reg.cache_get_at("u1", now).await.is_none());
 
         // Still valid.
-        reg.cache_put_at("u1", vals.clone(), now + Duration::from_secs(60))
+        reg.cache_put_at("u1", vals.clone(), Some(now + Duration::from_secs(60)))
             .await;
         assert_eq!(reg.cache_get_at("u1", now).await, Some(vals));
+    }
+
+    #[tokio::test]
+    async fn chosen_window_sets_the_expiry_and_status() {
+        let reg = EnvUnlockRegistry::new();
+        let mut vals = ValueMap::new();
+        vals.insert("A".into(), "1".into());
+
+        reg.cache_put_for("u1", vals.clone(), UnlockDuration::FifteenMinutes.ttl())
+            .await;
+        let left = reg
+            .cache_status("u1")
+            .await
+            .unwrap()
+            .expires_in_secs
+            .unwrap();
+        // Within the 15-minute window, and not the 30-minute default.
+        assert!(left > 14 * 60 && left <= 15 * 60, "left: {left}");
+
+        // A later unlock replaces the window rather than extending it.
+        reg.cache_put_for("u1", vals, UnlockDuration::OneHour.ttl())
+            .await;
+        let left = reg
+            .cache_status("u1")
+            .await
+            .unwrap()
+            .expires_in_secs
+            .unwrap();
+        assert!(left > 59 * 60, "left: {left}");
+    }
+
+    #[tokio::test]
+    async fn until_lock_window_never_expires() {
+        let reg = EnvUnlockRegistry::new();
+        let mut vals = ValueMap::new();
+        vals.insert("A".into(), "1".into());
+        assert_eq!(UnlockDuration::UntilLock.ttl(), None);
+        reg.cache_put_for("u1", vals.clone(), UnlockDuration::UntilLock.ttl())
+            .await;
+
+        // A purge far past any bounded window leaves it in place, and the
+        // status reports "no expiry" rather than a countdown.
+        let far_future = Instant::now() + Duration::from_secs(365 * 24 * 60 * 60);
+        assert_eq!(reg.cache_get_at("u1", far_future).await, Some(vals));
+        assert_eq!(
+            reg.cache_status("u1").await,
+            Some(UnlockStatus {
+                expires_in_secs: None
+            })
+        );
+
+        // Only an explicit lock drops it.
+        reg.lock_user("u1").await;
+        assert!(reg.cache_status("u1").await.is_none());
     }
 
     #[tokio::test]

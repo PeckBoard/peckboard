@@ -2,14 +2,22 @@ import { useEffect, useState } from 'react'
 import Modal from './Modal'
 import { authedFetch, useAuthStore } from '../store/auth'
 import { useSessionsStore } from '../store/sessions'
+import {
+  UNLOCK_DURATIONS,
+  loadUnlockDuration,
+  saveUnlockDuration,
+  type UnlockDuration,
+} from '../util/envUnlock'
 
 /**
  * Global dialog prompting the owner of encrypted environment variables for
  * their password when a starting session needs them. Mirrors AskpassDialog:
  * the WS store fans `env-unlock-request` / `env-unlock-resolved` frames out
  * as `peckboard:*` window events; only the tab whose logged-in user owns the
- * vars renders anything — every other tab stays silent. The password is
- * POSTed to `/api/env-vars/unlock-answer` and cleared from component state
+ * POSTed to `/api/env-vars/unlock-answer` with the chosen unlock window and
+ * cleared from component state on every exit path (submit, wrong password,
+ * cancel, resolve). The values then stay unlocked for that window, so later
+ * sessions find a warm cache and this dialog doesn't come back.
  * on every exit path (submit, wrong password, cancel, resolve).
  */
 interface PendingUnlock {
@@ -25,6 +33,9 @@ export default function EnvUnlockDialog() {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // How long the answer keeps the values unlocked. Seeded from the user's
+  // last choice so a long-running unlock preference survives a reload.
+  const [duration, setDuration] = useState<UnlockDuration>(loadUnlockDuration)
   const user = useAuthStore((s) => s.user)
   const sessions = useSessionsStore((s) => s.sessions)
 
@@ -117,7 +128,8 @@ export default function EnvUnlockDialog() {
 
   const submit = () => {
     if (busy) return
-    void respond({ password })
+    saveUnlockDuration(duration)
+    void respond({ password, duration })
   }
   const cancel = () => {
     if (busy) return
@@ -152,9 +164,31 @@ export default function EnvUnlockDialog() {
             onChange={(e) => setPassword(e.target.value)}
           />
         </div>
+        <div className="form-field">
+          <label className="form-label" htmlFor="env-unlock-duration">
+            Keep unlocked for
+          </label>
+          <select
+            id="env-unlock-duration"
+            className="form-input"
+            value={duration}
+            data-testid="env-unlock-duration"
+            onChange={(e) => setDuration(e.target.value as UnlockDuration)}
+          >
+            {UNLOCK_DURATIONS.map((d) => (
+              <option key={d.value} value={d.value}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <p className="form-hint">
           Used once to decrypt your variables on the server and not stored. It never enters the
-          session transcript.
+          session transcript. Sessions started during this window use the unlocked values instead of
+          asking again
+          {duration === 'until-lock'
+            ? ' — the values stay in server memory until you lock them or the server restarts.'
+            : '.'}
         </p>
         {error && <p className="form-error">{error}</p>}
         <div className="form-actions">
