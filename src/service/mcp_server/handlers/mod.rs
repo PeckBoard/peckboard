@@ -19,3 +19,6 @@ mod variables;
 mod workers;
 
 pub use model_control::autoswitch_enabled;
+// The one event summarizer: `read_worker_session` and the plugin host's
+// `peckboard_read_session_events` return the same event shape.
+pub(crate) use workers::summarize_event;

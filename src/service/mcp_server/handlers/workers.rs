@@ -8,7 +8,7 @@ use crate::service::mcp_server::context::ToolCallContext;
 /// `read_worker_session` / `search_worker_session`. Keeps the
 /// debug-relevant fields per kind and drops the rest so a reader doesn't
 /// have to wade through full provider payloads.
-fn summarize_event(e: &Event) -> Value {
+pub(crate) fn summarize_event(e: &Event) -> Value {
     let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
     let mut entry = serde_json::json!({
         "seq": e.seq,

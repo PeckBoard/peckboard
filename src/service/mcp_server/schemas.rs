@@ -835,7 +835,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "read_worker_session".into(),
-            description: "Read the recent event tail of another same-scope session — see what a worker did and its tool calls. For specific events (errors, a keyword) without the whole transcript, use search_sessions.".into(),
+            description: "Read the recent event tail of another same-scope session — see what a worker did and its tool calls. For specific events (errors, a keyword) without the whole transcript, use search_sessions. A session outside your scope reads as not found; reach those with the session-control tool read_session, which asks the user for approval.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -249,6 +249,171 @@ async fn session_control_plugin_drives_tools_end_to_end() {
     );
 }
 
+/// `read_session`: the read twin of the control tools. Same cross-folder
+/// approval gate, plus an ownership boundary the mutating tools don't have —
+/// a read discloses transcript content, so one user's approval must not hand
+/// an agent another user's private chat.
+#[tokio::test]
+async fn read_session_respects_the_folder_gate_and_session_ownership() {
+    let Some(wasm) = plugin_wasm() else {
+        eprintln!(
+            "SKIP read_session_respects_the_folder_gate_and_session_ownership: plugin wasm \
+             not built (run peck-plugins/session-control/build.sh)"
+        );
+        return;
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let plugins_dir = data_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::copy(&wasm, plugins_dir.join(format!("{PLUGIN_ID}.wasm"))).unwrap();
+
+    let db = Db::open(data_dir).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    for f in ["f1", "f2"] {
+        db.create_folder(NewFolder {
+            id: f.into(),
+            name: f.into(),
+            path: data_dir.join(f).to_string_lossy().to_string(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    for u in ["u1", "u2"] {
+        db.create_user(peckboard::db::models::NewUser {
+            id: u.into(),
+            username: u.into(),
+            email: None,
+            password_hash: "h".into(),
+            role: "user".into(),
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    // caller + mate: same folder, same owner. other: another folder, same
+    // owner. private: another folder AND another owner.
+    for (id, folder, owner) in [
+        ("caller", "f1", "u1"),
+        ("mate", "f1", "u1"),
+        ("other", "f2", "u1"),
+        ("private", "f2", "u2"),
+    ] {
+        db.create_session(NewSession {
+            id: id.into(),
+            name: id.into(),
+            folder_id: folder.into(),
+            user_id: Some(owner.into()),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        db.append_event(id, "user", json!({ "text": format!("secret of {id}") }))
+            .await
+            .unwrap();
+    }
+
+    let plugins = PluginManager::new(data_dir, db.clone());
+    plugins.load_all().await.unwrap();
+    plugins.set_live_host(Arc::new(ControlRecorder::default()));
+    let info = plugins
+        .decide(PLUGIN_ID, true)
+        .await
+        .unwrap()
+        .expect("session-control plugin should be loaded");
+    assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
+
+    let ctx = json!({ "sessionId": "caller", "folderId": "f1" });
+
+    // Same folder → the summarized event tail, no approval needed.
+    let same = invoke(
+        &plugins,
+        "read_session",
+        json!({ "session_id": "mate" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(same["session_id"], json!("mate"), "same folder: {same}");
+    assert!(
+        same.to_string().contains("secret of mate"),
+        "same-folder read returns events: {same}"
+    );
+
+    // Unknown id → clean not found.
+    let err = try_invoke(
+        &plugins,
+        "read_session",
+        json!({ "session_id": "nope" }),
+        &ctx,
+    )
+    .await
+    .expect_err("unknown session must error");
+    assert!(err.contains("not found"), "got: {err}");
+
+    // Cross-folder without a grant: asks, and leaks nothing.
+    let pending = invoke(
+        &plugins,
+        "read_session",
+        json!({ "session_id": "other" }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        pending["status"],
+        json!("awaiting_approval"),
+        "cross-folder read must ask: {pending}"
+    );
+    assert!(
+        !pending.to_string().contains("secret of other"),
+        "nothing leaks before approval: {pending}"
+    );
+
+    // Always grant → the cross-folder read goes through.
+    peckboard::plugin::session_control_auth::grant_always(&db, PLUGIN_ID, "caller").unwrap();
+    let granted = invoke(
+        &plugins,
+        "read_session",
+        json!({ "session_id": "other" }),
+        &ctx,
+    )
+    .await;
+    assert!(
+        granted.to_string().contains("secret of other"),
+        "granted cross-folder read returns events: {granted}"
+    );
+
+    // Another user's plain chat stays unreadable even WITH the grant, in
+    // not-found framing so ids can't be probed.
+    let denied = try_invoke(
+        &plugins,
+        "read_session",
+        json!({ "session_id": "private" }),
+        &ctx,
+    )
+    .await
+    .expect_err("another user's chat must stay unreadable");
+    assert!(denied.contains("not found"), "got: {denied}");
+    assert!(
+        !denied.contains("secret of private"),
+        "no content leaks: {denied}"
+    );
+
+    // last_n caps the tail.
+    let capped = invoke(
+        &plugins,
+        "read_session",
+        json!({ "session_id": "mate", "last_n": 1 }),
+        &ctx,
+    )
+    .await;
+    assert_eq!(capped["event_count"], json!(1), "last_n honoured: {capped}");
+}
+
 async fn invoke(plugins: &PluginManager, tool: &str, args: Value, ctx: &Value) -> Value {
     plugins
         .invoke_mcp_tool(tool, args, ctx.clone())

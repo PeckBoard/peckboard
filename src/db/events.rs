@@ -154,6 +154,27 @@ impl Db {
         })
     }
 
+    /// Synchronous twin of [`events_tail`], for WASM plugin host functions
+    /// running inside a blocking extism call. Returns the session's last
+    /// `limit` events, oldest-first.
+    pub(crate) fn events_tail_blocking(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Event>> {
+        let session_id = session_id.to_string();
+        self.with_conn_blocking(move |conn| {
+            let mut events_vec: Vec<Event> = events::table
+                .filter(events::session_id.eq(&session_id))
+                .select(Event::as_select())
+                .order(events::seq.desc())
+                .limit(limit)
+                .load(conn)?;
+            events_vec.reverse();
+            Ok(events_vec)
+        })
+    }
+
     /// Get events since a specific seq number (exclusive).
     pub async fn events_since(
         &self,

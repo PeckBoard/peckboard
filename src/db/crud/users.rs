@@ -28,6 +28,19 @@ impl Db {
         })
         .await
     }
+    /// Synchronous admin check, for WASM plugin host functions running inside
+    /// a blocking extism call. Unknown user → `false`.
+    pub(crate) fn user_is_admin_blocking(&self, id: &str) -> anyhow::Result<bool> {
+        let id = id.to_string();
+        self.with_conn_blocking(move |conn| {
+            let role: Option<String> = users::table
+                .find(&id)
+                .select(users::role)
+                .first(conn)
+                .optional()?;
+            Ok(role.as_deref() == Some("admin"))
+        })
+    }
 
     pub async fn get_user_by_username(&self, username: &str) -> anyhow::Result<Option<User>> {
         let username = username.to_string();

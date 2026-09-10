@@ -21,6 +21,7 @@ pub use config::{delete_mcp_config, write_mcp_config};
 pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
 pub use gates::ToolGate;
 pub use handlers::autoswitch_enabled;
+pub(crate) use handlers::summarize_event;
 pub use schemas::{
     PRE_HATCHER_EXPERT_KIND, chat_hidden_tool_names, pre_hatcher_allowed_tool_names, tool_names,
     worker_hidden_tool_names,

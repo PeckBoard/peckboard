@@ -2179,6 +2179,102 @@ pub(crate) fn send_message_impl(
     serde_json::json!({ "ok": true, "session_id": sid, "attachments": count }).to_string()
 }
 
+#[derive(serde::Deserialize)]
+struct ReadSessionEventsRequest {
+    session_id: String,
+    /// Events to return from the tail (default 50, capped at 200).
+    #[serde(default)]
+    last_n: Option<i64>,
+}
+
+/// `peckboard_read_session_events` — the READ twin of the control actions
+/// above: a session's recent event tail, in the same summarized shape the
+/// core `read_worker_session` MCP tool returns.
+///
+/// Two boundaries, both required:
+///
+/// 1. `session_control_auth::authorize` — same folder free, cross-folder
+///    needs the Always/Once grant the session-control plugin writes after
+///    the user approves. Re-checked here, not just in wasm.
+/// 2. `auth::access::may_access_session` — the caller's *user* must already
+///    be allowed at the target (owner / admin / board-attached session).
+///    A read discloses transcript content, so unlike interrupt/terminate it
+///    cannot be unlocked by a cross-folder approval alone: one user's
+///    approval must not hand an agent another user's private chat.
+///
+/// Every rejection of boundary 2 uses "not found" framing, matching
+/// `read_worker_session`, so a caller can't probe for ids it may not read.
+pub(crate) fn read_session_events_impl(
+    db: &Db,
+    plugin_id: &str,
+    inv: &InvocationContext,
+    input: &str,
+) -> String {
+    let req: ReadSessionEventsRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let target = match require_session(db, &req.session_id) {
+        Ok(s) => s,
+        Err(e) => return error_json(e),
+    };
+    if let Err(e) = crate::plugin::session_control_auth::authorize(db, plugin_id, inv, &target) {
+        return error_json(e);
+    }
+    if !caller_may_read_session(db, inv, &target) {
+        return error_json(format!("session not found: {}", target.id));
+    }
+
+    let limit = req.last_n.unwrap_or(50).clamp(1, 200);
+    let events = match db.events_tail_blocking(&target.id, limit) {
+        Ok(e) => e,
+        Err(e) => return error_json(e.to_string()),
+    };
+    let items: Vec<serde_json::Value> = events
+        .iter()
+        .map(crate::service::mcp_server::summarize_event)
+        .collect();
+    serde_json::json!({
+        "ok": true,
+        "session_id": target.id,
+        "session_name": target.name,
+        "is_worker": target.is_worker,
+        "event_count": items.len(),
+        "events": items,
+    })
+    .to_string()
+}
+
+/// Whether the user behind the *caller* session may read `target`, per the
+/// same rule the HTTP/WS layers enforce. A caller session with no owner
+/// (legacy / system row) only ever reaches board-attached sessions.
+fn caller_may_read_session(
+    db: &Db,
+    inv: &InvocationContext,
+    target: &crate::db::models::Session,
+) -> bool {
+    let Some(caller_id) = inv.session_id.as_deref().filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    if caller_id == target.id {
+        return true;
+    }
+    let caller_user = match db.get_session_blocking(caller_id) {
+        Ok(Some(s)) => s.user_id,
+        _ => None,
+    };
+    let is_admin = caller_user
+        .as_deref()
+        .and_then(|uid| db.user_is_admin_blocking(uid).ok())
+        .unwrap_or(false);
+    crate::auth::access::may_access_session(
+        is_admin,
+        caller_user.as_deref().unwrap_or(""),
+        target.user_id.as_deref(),
+        target.project_id.as_deref(),
+    )
+}
+
 // ── Orchestrate: unattended session control (gated, context-free) ────
 //
 // `session_orchestrate` is a STANDING grant: approving a plugin that
@@ -3793,6 +3889,13 @@ host_fn!(peckboard_send_message(user_data: HostState; input: String) -> String {
     Ok(send_message_impl(&db, &plugin_id, &inv, &input, live))
 });
 
+host_fn!(peckboard_read_session_events(user_data: HostState; input: String) -> String {
+    let (db, plugin_id, ok, inv) = state_permission_and_invocation(&user_data, "session_control")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_read_session_events is only callable during a tool invocation")); };
+    Ok(read_session_events_impl(&db, &plugin_id, &inv, &input))
+});
+
 host_fn!(peckboard_list_all_sessions(user_data: HostState; input: String) -> String {
     let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_control")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
@@ -4470,6 +4573,13 @@ pub(crate) fn host_functions(
             peckboard_clear_session,
         ),
         Function::new(
+            "peckboard_read_session_events",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_read_session_events,
+        ),
+        Function::new(
             "peckboard_send_message",
             [PTR],
             [PTR],
@@ -4889,6 +4999,101 @@ mod tests {
             None,
         );
         assert!(bad.contains("invalid base64"), "{bad}");
+    }
+
+    #[tokio::test]
+    async fn read_session_events_enforces_folder_grant_and_ownership() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        for f in ["f1", "f2"] {
+            db.create_folder(NewFolder {
+                id: f.into(),
+                name: f.into(),
+                path: format!("/tmp/{f}"),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        for u in ["u1", "u2"] {
+            db.create_user(crate::db::models::NewUser {
+                id: u.into(),
+                username: u.into(),
+                email: None,
+                password_hash: "h".into(),
+                role: "user".into(),
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        // caller + same: caller's folder. other: another folder, same owner.
+        // private: another folder, ANOTHER owner (plain chat, no project).
+        for (id, folder, owner) in [
+            ("caller", "f1", "u1"),
+            ("same", "f1", "u1"),
+            ("other", "f2", "u1"),
+            ("private", "f2", "u2"),
+        ] {
+            db.create_session(crate::db::models::NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: folder.into(),
+                user_id: Some(owner.into()),
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            db.append_event(
+                id,
+                "user",
+                serde_json::json!({ "text": format!("hello {id}") }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let inv = InvocationContext {
+            session_id: Some("caller".into()),
+            project_id: None,
+            folder_id: Some("f1".into()),
+            authority: false,
+        };
+        let pid = "session-control";
+        let read = |target: &str| {
+            read_session_events_impl(
+                &db,
+                pid,
+                &inv,
+                &serde_json::json!({ "session_id": target }).to_string(),
+            )
+        };
+
+        // Same folder → the summarized tail, no approval needed.
+        let ok = read("same");
+        assert!(ok.contains("hello same"), "{ok}");
+
+        // Unknown id → not found.
+        assert!(read("nope").contains("not found"));
+
+        // Cross-folder without a grant → approval refusal, no content.
+        let xf = read("other");
+        assert!(xf.contains("user approval"), "{xf}");
+        assert!(!xf.contains("hello other"), "{xf}");
+
+        // Always grant unlocks the cross-folder read.
+        crate::plugin::session_control_auth::grant_always(&db, pid, "caller").unwrap();
+        let ok2 = read("other");
+        assert!(ok2.contains("hello other"), "{ok2}");
+
+        // Another user's plain chat stays unreadable even WITH the grant:
+        // one user's approval can't hand over another user's transcript.
+        let denied = read("private");
+        assert!(denied.contains("not found"), "{denied}");
+        assert!(!denied.contains("hello private"), "{denied}");
     }
 
     #[tokio::test]
