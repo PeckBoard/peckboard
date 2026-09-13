@@ -12,6 +12,8 @@ pub mod mock;
 pub mod ollama;
 pub mod plugin_provider;
 pub mod registry;
+pub mod resume;
+pub mod resume_recovery;
 pub mod stream;
 pub mod turn;
 

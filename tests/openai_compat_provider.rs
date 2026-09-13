@@ -177,7 +177,10 @@ async fn run_turn(
             ..Default::default()
         },
         run_id: peckboard::provider::agent::next_run_id(),
-        conversation_id,
+        conversation_id: conversation_id.and_then(|cid| {
+            let model = format!("{PROVIDER_ID}:{MODEL_ID}");
+            peckboard::provider::resume::ResumeHandle::for_model(cid, &model, &model)
+        }),
         completion_tx,
         plugins: plugins.clone(),
     };

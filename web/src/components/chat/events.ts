@@ -801,6 +801,19 @@ function foldEvent(st: FoldState, ev: Event): void {
       items.push({ type: 'system', text, key: ev.id, ts: ev.ts })
       break
     }
+    case 'conversation-reset': {
+      // The provider refused to resume the conversation this session was
+      // on (its store no longer has it), so the turn was re-run cold. The
+      // transcript above is intact; the model's memory of it is not.
+      flushAssistant(st)
+      items.push({
+        type: 'system',
+        text: 'The earlier conversation could not be resumed, so this session continues in a fresh one. Everything above is still here, but the agent no longer remembers it.',
+        key: ev.id,
+        ts: ev.ts,
+      })
+      break
+    }
     case 'interrupt': {
       flushAssistant(st)
       closeOpenTools(items, st.openTools, 'interrupted', ev.ts)

@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
 use crate::provider::message::UserMessage;
+use crate::provider::resume::ResumeHandle;
 use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, SpawnConfig};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
@@ -84,7 +85,10 @@ pub struct SendMessageContext {
     pub db: Db,
     pub broadcaster: Arc<Broadcaster>,
     pub config: SpawnConfig,
-    pub conversation_id: Option<String>,
+    /// The conversation this turn resumes, when one survives — already
+    /// proven to belong to this provider+account (see [`ResumeHandle`]).
+    /// `None` means start cold.
+    pub conversation_id: Option<ResumeHandle>,
     /// Id allocated for this dispatch by `SessionManager` — providers copy
     /// it into the [`ProcessCompletion`] they emit for it. See
     /// [`ProcessCompletion::run_id`].
@@ -238,6 +242,25 @@ pub trait AgentProvider: Send + Sync + 'static {
     async fn shutdown(&self);
 }
 
+/// Stamp `ownerModel` — the session's full model id, provider prefix and
+/// `@account` suffix intact — onto an event carrying a conversationId, so a
+/// later reader can tell whose conversation it is. Leaves the payload
+/// untouched when the session has no model set (a legacy row running the
+/// app default); an unstamped event is simply not resumable from the event
+/// log, which is the safe direction.
+async fn stamp_owner_model(
+    mut data: serde_json::Value,
+    db: &Db,
+    session_id: &str,
+) -> serde_json::Value {
+    let Ok(Some(session)) = db.get_session(session_id).await else {
+        return data;
+    };
+    if let (Some(model), Some(obj)) = (session.model.as_deref(), data.as_object_mut()) {
+        obj.insert("ownerModel".into(), serde_json::json!(model));
+    }
+    data
+}
 /// Persist a `ProviderEvent` to the database and broadcast it via WebSocket.
 ///
 /// Shared by all providers so the event log + broadcast path is identical
@@ -265,6 +288,26 @@ pub async fn emit_event(
             .await
         }
         _ => event.event_data(),
+    };
+
+    // Attribute a conversationId to the model that produced it. The id
+    // itself is an opaque uuid usable only by the CLI whose store it lives
+    // in, and nothing downstream can tell that from the id — which is how a
+    // Claude session uuid once reached `codex exec resume` and wedged a
+    // session for good. `model` on the event is the CLI's own reported name
+    // (`claude-opus-4-7`), so the session's full model id is stamped
+    // alongside it; [`crate::provider::manager::resume_conversation_id_from_tail`]
+    // resumes nothing it can't attribute this way.
+    let data = match &event {
+        ProviderEvent::Started {
+            conversation_id: Some(_),
+            ..
+        }
+        | ProviderEvent::Completed {
+            conversation_id: Some(_),
+            ..
+        } => stamp_owner_model(data, db, session_id).await,
+        _ => data,
     };
 
     match db.append_event(session_id, &kind, data).await {

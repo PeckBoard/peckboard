@@ -582,7 +582,7 @@ impl AgentProvider for PluginProviderAdapter {
             "provider_id": self.provider_id,
             "spawn_config": ctx.config,
             "message": message_payload(&ctx.message),
-            "conversation_id": ctx.conversation_id,
+            "conversation_id": ctx.conversation_id.as_ref().map(|h| h.id()),
         });
 
         let manager = self.manager.clone();

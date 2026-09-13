@@ -36,7 +36,13 @@ pub enum CrashKind {
     Interrupted,
     /// The CLI / child process never started.
     SpawnFailed,
-    /// The child died after the turn began but before it settled.
+    /// The CLI refused the conversation it was asked to resume — the id
+    /// names nothing in its store (wrong provider, wrong account, or a
+    /// conversation the user deleted). Retrying the same id fails
+    /// identically forever; the turn is only recoverable cold, which
+    /// [`crate::provider::resume_recovery`] does.
+    ResumeFailed,
+    /// The CLI / child process never started.
     ExitedMidTurn,
     /// The process exited without ever producing usable output.
     NoOutput,
@@ -55,6 +61,7 @@ impl CrashKind {
             CrashKind::Interrupted => "interrupted",
             CrashKind::SpawnFailed => "spawn_failed",
             CrashKind::ExitedMidTurn => "exited_mid_turn",
+            CrashKind::ResumeFailed => "resume_failed",
             CrashKind::NoOutput => "no_output",
             CrashKind::Unknown => "unknown",
         }
@@ -68,7 +75,22 @@ impl CrashKind {
     pub fn classify(text: &str) -> CrashKind {
         let text = text.to_ascii_lowercase();
         let has = |needles: &[&str]| needles.iter().any(|n| text.contains(n));
-        // Rate limiting first: a 429 body often also names the API key.
+        // Resume rejections first, and they have to be: the CLI reports one
+        // as a failure to start ("thread/resume failed", "error: no
+        // conversation found"), wording the auth and spawn buckets below
+        // would otherwise swallow — and those buckets prescribe exactly the
+        // wrong remedy, since re-login can't fix an id that names nothing.
+        if has(&[
+            "no rollout found",
+            "thread/resume",
+            "no conversation found",
+            "no session found",
+            "session not found",
+            "conversation not found",
+        ]) {
+            return CrashKind::ResumeFailed;
+        }
+        // Rate limiting next: a 429 body often also names the API key.
         if has(&[
             "429",
             "rate limit",
@@ -675,6 +697,18 @@ mod tests {
             // Every cancel path, whatever emitted it.
             ("interrupted", CrashKind::Interrupted),
             // A plugin provider that reports something opaque.
+            // A conversation the CLI can't find. Each of these used to
+            // classify as something with the wrong remedy — the Codex one
+            // says "failed", the Claude one names a session — and none of
+            // them is fixed by retrying with the same id.
+            (
+                "thread/resume: thread/resume failed: no rollout found for thread id 365eac68 (code -32600)",
+                CrashKind::ResumeFailed,
+            ),
+            (
+                "No conversation found with session ID: 8f2c1b40",
+                CrashKind::ResumeFailed,
+            ),
             ("upstream returned an unexpected body", CrashKind::Unknown),
         ];
         for (text, expected) in cases {

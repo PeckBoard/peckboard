@@ -108,7 +108,10 @@ async fn run_turn(
             mcp_config_path: Some("/tmp/pt-mcp.json".into()),
             ..Default::default()
         },
-        conversation_id,
+        conversation_id: conversation_id.and_then(|cid| {
+            let model = format!("{PROVIDER_ID}:echo-1");
+            peckboard::provider::resume::ResumeHandle::for_model(cid, &model, &model)
+        }),
         run_id: peckboard::provider::agent::next_run_id(),
         completion_tx,
         plugins: plugins.clone(),

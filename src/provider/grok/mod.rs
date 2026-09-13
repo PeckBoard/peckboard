@@ -439,7 +439,7 @@ impl AgentProvider for GrokProvider {
         let args = build_cli_args(
             &model,
             &message.text,
-            conversation_id.as_deref(),
+            conversation_id.as_ref().map(|h| h.id()),
             config.effort.as_deref(),
             &turn::compose_system_prompt(&config),
             &config,

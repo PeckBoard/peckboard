@@ -385,7 +385,7 @@ impl AgentProvider for CodexProvider {
         let args = build_cli_args(
             model.as_deref().unwrap_or(""),
             &message.text,
-            conversation_id.as_deref(),
+            conversation_id.as_ref().map(|h| h.id()),
             config.effort.as_deref(),
             &system_prompt,
             &image_paths,

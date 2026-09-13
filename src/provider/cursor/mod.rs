@@ -211,7 +211,7 @@ impl AgentProvider for CursorProvider {
         let args = build_cli_args(
             &model,
             &message.text,
-            conversation_id.as_deref(),
+            conversation_id.as_ref().map(|h| h.id()),
             auto_approve,
             &system_prompt,
         );

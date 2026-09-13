@@ -38,9 +38,16 @@ use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent, ToolImage};
 ///   Completed whose result-meta carries `error` + `errorKind:
 ///   auth_expired`, the shape an expired login produces
 /// * `auth-error-once` — the same failure on the session's first turn
+/// * `auth-error-once` — the same failure on the session's first turn
 ///   only, succeeding on every turn after; drives the automatic replay in
 ///   [`crate::provider::auth_recovery`]
-/// * `doc-review` — the document-review loop, driven through the REAL MCP
+/// * `resume-error` — fails whenever it is handed a conversation to resume
+///   and succeeds whenever it isn't, the shape of a CLI whose stored
+///   conversation is gone (`no rollout found for thread id …`). Turn 1
+///   establishes an id and works; turn 2 is dispatched with it and fails;
+///   [`crate::provider::resume_recovery`] drops the id and replays the turn
+///   cold, which succeeds — so an e2e can watch a wedged session heal
+///   itself with no user action.
 ///   tools (`get_review_doc` / `submit_review_revision` / `ask_user`) via
 ///   [`call_mcp_tool`]. Branch chosen by a marker in the turn text:
 ///   `[mock:ask]` asks a clarifying question, `[mock:chat]` answers without
@@ -114,7 +121,7 @@ impl AgentProvider for MockProvider {
             broadcaster,
             config,
             run_id,
-            conversation_id: _,
+            conversation_id,
             completion_tx,
             plugins,
         } = ctx;
@@ -147,6 +154,9 @@ impl AgentProvider for MockProvider {
         // engine only inspects the text body, matching the
         // pre-multimodal contract for per-turn providers.
         let message_text = message.text;
+        // The id this turn was asked to resume, if any. Only `resume-error`
+        // reads it; every other scenario is stateless across turns.
+        let resume = conversation_id.map(|h| h.id().to_string());
         let handle = tokio::spawn(async move {
             let completed = run_scenario(
                 &scenario,
@@ -157,6 +167,7 @@ impl AgentProvider for MockProvider {
                 &db,
                 &broadcaster,
                 &plugins,
+                resume.as_deref(),
                 stdin_rx,
                 cancel_for_task,
             )
@@ -341,6 +352,7 @@ async fn run_scenario(
     db: &crate::db::Db,
     broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
     plugins: &crate::plugin::manager::PluginManager,
+    resume: Option<&str>,
     mut stdin_rx: mpsc::Receiver<String>,
     cancel: Arc<Notify>,
 ) -> bool {
@@ -1103,6 +1115,40 @@ async fn run_scenario(
                 session_id,
                 ProviderEvent::Text {
                     text: "Authenticated on the retry.".into(),
+                },
+            )
+            .await;
+        }
+        "resume-error" => {
+            // Fails exactly when it is handed a conversation to resume, the
+            // way a CLI reports an id that names nothing in its store. The
+            // trigger is the dispatched id itself, not a turn counter, so
+            // the scenario also proves the replay really went out COLD: if
+            // resume recovery left the id in place — on the row or
+            // reachable from the event log — the replay fails again here
+            // instead of succeeding.
+            if let Some(dead) = resume {
+                emit_event(
+                    db,
+                    broadcaster,
+                    session_id,
+                    ProviderEvent::Completed {
+                        conversation_id: None,
+                        result_meta: serde_json::json!({
+                            "error": format!("no rollout found for thread id {dead}"),
+                            "errorKind": "resume_failed",
+                        }),
+                    },
+                )
+                .await;
+                return false;
+            }
+            emit_event(
+                db,
+                broadcaster,
+                session_id,
+                ProviderEvent::Text {
+                    text: "Started a fresh conversation.".into(),
                 },
             )
             .await;

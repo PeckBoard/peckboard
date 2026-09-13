@@ -408,7 +408,7 @@ impl AgentProvider for KimiProvider {
         let args = build_cli_args(
             model.as_deref(),
             &message.text,
-            conversation_id.as_deref(),
+            conversation_id.as_ref().map(|h| h.id()),
             &system_prompt,
         );
 

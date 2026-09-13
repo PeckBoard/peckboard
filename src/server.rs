@@ -569,6 +569,17 @@ pub async fn run_server(
                     )
                     .await;
 
+                    // 1.65 Resume recovery. A provider that refused the
+                    // conversation it was handed drops it here and re-queues
+                    // the turn to run cold — before auth recovery, which
+                    // forgets the replay snapshot for every outcome it
+                    // doesn't own, and before the drain that delivers it.
+                    crate::provider::resume_recovery::handle_completion(
+                        &orchestrator_state,
+                        &completion,
+                    )
+                    .await;
+
                     // 1.7 Auth recovery. A turn that failed to authenticate
                     // parks its message and — once per credential version —
                     // releases it again immediately, so the drain below

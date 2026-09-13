@@ -12,6 +12,7 @@ use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{ProcessCompletion, SendMessageContext};
 use crate::provider::message::UserMessage;
 use crate::provider::registry::ProviderRegistry;
+use crate::provider::resume::ResumeHandle;
 use crate::provider::stream::SpawnConfig;
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
@@ -414,11 +415,10 @@ impl SessionManager {
             resolve_working_dir(&config.working_dir, &folder.path)
         };
 
-        let conversation_id = if session.conversation_id.is_some() {
-            session.conversation_id.clone()
-        } else {
-            self.find_conversation_id_from_events(db, session_id).await
-        };
+        // Resume resolution is deliberately BELOW `final_model` — the
+        // handle has to be checked against the model this dispatch will
+        // actually spawn, not the one the session row happened to name.
+        // See the block after `final_model`.
 
         // Precedence: request body > session > card > project > "default"
         // (see routes/sessions/dispatch.rs). `config.model` is the caller's
@@ -468,6 +468,14 @@ impl SessionManager {
         } else {
             requested_model
         };
+        // The conversation this turn may resume. Two sources, both gated on
+        // `final_model` through [`ResumeHandle::for_model`] — an id whose
+        // owning provider/account isn't the one about to be spawned names a
+        // conversation the incoming CLI cannot see, and handing it over
+        // fails the spawn on every turn forever (see `provider::resume`).
+        let resume = self
+            .resolve_resume_handle(db, session_id, &session, &final_model)
+            .await;
 
         let (provider_id, _model_id) =
             ProviderRegistry::parse_model_id(&final_model, DEFAULT_PROVIDER);
@@ -639,7 +647,7 @@ impl SessionManager {
             db: db.clone(),
             broadcaster: broadcaster.clone(),
             config: final_config,
-            conversation_id,
+            conversation_id: resume,
             completion_tx: self.completion_tx.clone(),
             // Stamp for this dispatch. The provider copies it into the
             // `ProcessCompletion` it emits, which is how the completion
@@ -1221,13 +1229,49 @@ impl SessionManager {
         }
     }
 
-    /// Scan the event tail for a conversation_id in agent-start or agent-end
-    /// events. Used as a fallback when `session.conversation_id` is empty.
-    async fn find_conversation_id_from_events(&self, db: &Db, session_id: &str) -> Option<String> {
-        let tail = db.events_tail(session_id, 50).await.ok()?;
-        resume_conversation_id_from_tail(&tail)
+    /// Resolve the conversation `final_model` may resume, or `None` for a
+    /// cold start.
+    ///
+    /// Two sources, in order:
+    ///
+    /// 1. `sessions.conversation_id` — written by whichever model the
+    ///    session ran last, so its owner is `session.model`.
+    /// 2. The event tail, when the column is empty: a run can die between
+    ///    establishing a conversation and persisting the id, and the
+    ///    `agent-start` / `agent-end` events still carry it.
+    ///
+    /// Both go through [`ResumeHandle::for_model`], so a handle only comes
+    /// back when the id's owner shares `final_model`'s provider+account.
+    /// That check is what the second source needs most: the column is
+    /// cleared on every continuity break (handover, force switch, clear),
+    /// but the events of the *outgoing* provider's runs stay in the log, and
+    /// an ungated scan happily serves one of those ids to whatever provider
+    /// dispatches next.
+    async fn resolve_resume_handle(
+        &self,
+        db: &Db,
+        session_id: &str,
+        session: &crate::db::models::Session,
+        final_model: &str,
+    ) -> Option<ResumeHandle> {
+        if let Some(cid) = session.conversation_id.as_deref() {
+            let owner = session.model.as_deref().unwrap_or(final_model);
+            return ResumeHandle::for_model(cid, owner, final_model);
+        }
+        let tail = db
+            .events_tail(session_id, EVENT_TAIL_FOR_RESUME)
+            .await
+            .ok()?;
+        let (cid, owner) = resume_conversation_id_from_tail(&tail)?;
+        ResumeHandle::for_model(cid, &owner, final_model)
     }
 }
+
+/// How many trailing events the resume scan reads. Only the newest run's
+/// `agent-start` / `agent-end` can win (see
+/// [`resume_conversation_id_from_tail`]), but a busy turn puts hundreds of
+/// tool events after them, so the window has to clear one turn's worth.
+const EVENT_TAIL_FOR_RESUME: i64 = 400;
 /// Default working directory for a dispatch whose caller left `working_dir`
 /// blank: the card's existing worktree when the session belongs to a card on
 /// a `worktree_isolation` project, otherwise the shared folder.
@@ -1298,29 +1342,54 @@ pub(crate) fn resolve_working_dir(requested: &str, folder_path: &str) -> String 
     }
 }
 
-/// Newest-first scan of an event tail for a resumable conversationId.
+/// Newest-first scan of an event tail for a resumable conversationId and
+/// the id of the model that produced it.
 ///
-/// A `handover` event marks a conversation reset (model switch or
-/// compaction) — anything older belongs to the pre-reset conversation and
-/// must never be resumed, so the scan stops there. In particular, the
-/// doc-generation turn that precedes the `handover` event carries the OLD
-/// conversationId in its agent-start/agent-end events; resuming it would
-/// silently restore the entire pre-compaction history.
+/// The owner is half the answer, not a bonus: a conversationId is an opaque
+/// uuid that says nothing about which CLI's store it lives in, so a caller
+/// cannot decide whether resuming it is safe without knowing who wrote it.
+/// `ownerModel` — the session's full model id, stamped onto every
+/// `agent-start` / `agent-end` by [`crate::provider::agent::emit_event`] —
+/// is that attribution. `model` on `agent-start` is NOT: providers fill it
+/// with whatever their CLI reported (Claude writes the resolved model name,
+/// `claude-opus-4-7`), which carries no account and no provider prefix.
+///
+/// An event with no `ownerModel` (written before the field existed) yields
+/// nothing: an unattributed id is exactly the one that must not be
+/// dispatched. The cost is a cold start in the rare window this fallback
+/// covers at all — `emit_event` writes `sessions.conversation_id` from the
+/// same event, so the column is the normal path.
+///
+/// Two event kinds stop the scan, because both mark a conversation reset —
+/// anything older belongs to a conversation this session has abandoned:
+///
+/// - `handover` (model switch or compaction). The doc-generation turn right
+///   before it carries the OLD conversationId; resuming that would silently
+///   restore the entire pre-compaction history.
+/// - `conversation-reset`, written by [`crate::provider::resume_recovery`]
+///   when a provider rejected a resume. Without the stop, the scan would
+///   keep re-serving the very id the CLI just refused.
 pub(crate) fn resume_conversation_id_from_tail(
     events: &[crate::db::models::Event],
-) -> Option<String> {
+) -> Option<(String, String)> {
     for event in events.iter().rev() {
-        if event.kind == "handover" {
+        if event.kind == "handover" || event.kind == "conversation-reset" {
             return None;
         }
-        if event.kind == "agent-start" || event.kind == "agent-end" {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                if let Some(cid) = data.get("conversationId").and_then(|v| v.as_str()) {
-                    if !cid.is_empty() {
-                        return Some(cid.to_string());
-                    }
-                }
-            }
+        if event.kind != "agent-start" && event.kind != "agent-end" {
+            continue;
+        }
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+            continue;
+        };
+        let field = |k: &str| {
+            data.get(k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        if let (Some(cid), Some(owner)) = (field("conversationId"), field("ownerModel")) {
+            return Some((cid, owner));
         }
     }
 
@@ -1617,13 +1686,29 @@ mod tests {
     #[test]
     fn resume_scan_finds_latest_conversation_id() {
         let events = vec![
-            make_event("agent-start", r#"{"conversationId":"conv-old"}"#),
-            make_event("agent-end", r#"{"conversationId":"conv-new"}"#),
+            make_event(
+                "agent-start",
+                r#"{"conversationId":"conv-old","ownerModel":"claude:opus"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"conversationId":"conv-new","ownerModel":"claude:opus"}"#,
+            ),
         ];
         assert_eq!(
             resume_conversation_id_from_tail(&events),
-            Some("conv-new".into())
+            Some(("conv-new".into(), "claude:opus".into()))
         );
+    }
+
+    #[test]
+    fn resume_scan_ignores_unattributed_ids() {
+        // An id with no `ownerModel` (written before the field existed)
+        // names a conversation we cannot place in any CLI's store. Handing
+        // it to the wrong one wedges the session for good, so it is worth
+        // less than a cold start.
+        let events = vec![make_event("agent-end", r#"{"conversationId":"conv-old"}"#)];
+        assert_eq!(resume_conversation_id_from_tail(&events), None);
     }
 
     #[test]
@@ -1633,12 +1718,41 @@ mod tests {
         // The `handover` event that follows them must act as a barrier —
         // resuming past it restores the entire pre-compaction history.
         let events = vec![
-            make_event("agent-start", r#"{"conversationId":"conv-old"}"#),
-            make_event("agent-end", r#"{"conversationId":"conv-old"}"#),
+            make_event(
+                "agent-start",
+                r#"{"conversationId":"conv-old","ownerModel":"claude:opus"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"conversationId":"conv-old","ownerModel":"claude:opus"}"#,
+            ),
             make_event("handover-start", r#"{"compaction":true}"#),
-            make_event("agent-start", r#"{"conversationId":"conv-old"}"#),
-            make_event("agent-end", r#"{"conversationId":"conv-old"}"#),
+            make_event(
+                "agent-start",
+                r#"{"conversationId":"conv-old","ownerModel":"claude:opus"}"#,
+            ),
+            make_event(
+                "agent-end",
+                r#"{"conversationId":"conv-old","ownerModel":"claude:opus"}"#,
+            ),
             make_event("handover", r#"{"compaction":true}"#),
+        ];
+        assert_eq!(resume_conversation_id_from_tail(&events), None);
+    }
+
+    #[test]
+    fn resume_scan_stops_at_conversation_reset() {
+        // The id a provider just refused must not come back off the log —
+        // that is the loop `resume_recovery` exists to break.
+        let events = vec![
+            make_event(
+                "agent-end",
+                r#"{"conversationId":"conv-dead","ownerModel":"codex:gpt-6"}"#,
+            ),
+            make_event(
+                crate::provider::resume_recovery::CONVERSATION_RESET_KIND,
+                r#"{"model":"codex:gpt-6"}"#,
+            ),
         ];
         assert_eq!(resume_conversation_id_from_tail(&events), None);
     }
@@ -1646,13 +1760,19 @@ mod tests {
     #[test]
     fn resume_scan_finds_post_handover_conversation() {
         let events = vec![
-            make_event("agent-end", r#"{"conversationId":"conv-old"}"#),
+            make_event(
+                "agent-end",
+                r#"{"conversationId":"conv-old","ownerModel":"claude:opus"}"#,
+            ),
             make_event("handover", r#"{"compaction":true}"#),
-            make_event("agent-start", r#"{"conversationId":"conv-fresh"}"#),
+            make_event(
+                "agent-start",
+                r#"{"conversationId":"conv-fresh","ownerModel":"claude:opus"}"#,
+            ),
         ];
         assert_eq!(
             resume_conversation_id_from_tail(&events),
-            Some("conv-fresh".into())
+            Some(("conv-fresh".into(), "claude:opus".into()))
         );
     }
 
@@ -1850,5 +1970,117 @@ mod tests {
         assert!(matches!(outcome, SendOutcome::Queued));
         let queued = db.next_queued_message("s1").await.unwrap().unwrap();
         assert_eq!(queued.attachment_ids.as_deref(), Some("[\"att-42\"]"));
+    }
+
+    /// The incident this guard exists for: a handover from Claude to Codex
+    /// failed at dispatch, the route applied the target model anyway and
+    /// cleared `conversation_id`, and the event-log fallback then handed
+    /// Codex the Claude session uuid still sitting in the transcript. Codex
+    /// answered `no rollout found for thread id …` on every turn after,
+    /// including every retry, because the scan re-derived the same id.
+    #[tokio::test]
+    async fn resume_is_refused_after_an_aborted_handover_switched_providers() {
+        let m = manager_with(vec![claude_stub(true), mock_stub(true)]).await;
+        let db = crate::db::Db::in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            // Where the session ended up: the target model, applied by the
+            // route's fallback when the doc turn failed to dispatch.
+            model: Some("codex:gpt-6-astra@cacc_1".into()),
+            created_at: now.clone(),
+            last_activity: now,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // The Claude conversation, still in the transcript, and the aborted
+        // handover that did NOT reset it (an abort deliberately leaves the
+        // conversation alone — it just didn't stay on Claude here).
+        db.append_event(
+            "s1",
+            "agent-end",
+            serde_json::json!({
+                "conversationId": "365eac68-b3db-4b63-91d8-414674557d5a",
+                "ownerModel": "claude:claude-opus-5@acc_1",
+            }),
+        )
+        .await
+        .unwrap();
+        db.append_event(
+            "s1",
+            "handover-aborted",
+            serde_json::json!({ "reason": "Refresh token expired" }),
+        )
+        .await
+        .unwrap();
+
+        let session = db.get_session("s1").await.unwrap().unwrap();
+        assert!(
+            m.resolve_resume_handle(&db, "s1", &session, "codex:gpt-6-astra@cacc_1")
+                .await
+                .is_none(),
+            "a Claude conversation must never be dispatched to codex"
+        );
+
+        // Same log, same session — but dispatching the model that owns the
+        // conversation resumes it, which is the behaviour the guard must not
+        // cost us.
+        assert_eq!(
+            m.resolve_resume_handle(&db, "s1", &session, "claude:claude-opus-5@acc_1")
+                .await
+                .map(|h| h.id().to_string()),
+            Some("365eac68-b3db-4b63-91d8-414674557d5a".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_conversation_id_is_refused_across_a_provider_change() {
+        let m = manager_with(vec![claude_stub(true), mock_stub(true)]).await;
+        let db = crate::db::Db::in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            model: Some("claude:claude-opus-5@acc_1".into()),
+            conversation_id: Some("conv-1".into()),
+            created_at: now.clone(),
+            last_activity: now,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let session = db.get_session("s1").await.unwrap().unwrap();
+
+        assert!(
+            m.resolve_resume_handle(&db, "s1", &session, "mock:echo")
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            m.resolve_resume_handle(&db, "s1", &session, "claude:claude-sonnet-5@acc_1")
+                .await
+                .map(|h| h.id().to_string()),
+            Some("conv-1".into())
+        );
     }
 }

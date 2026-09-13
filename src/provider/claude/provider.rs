@@ -442,7 +442,7 @@ impl AgentProvider for ClaudeProvider {
                     let process = process::spawn_claude(
                         &session_id,
                         &cli_config,
-                        conversation_id.as_deref(),
+                        conversation_id.as_ref().map(|h| h.id()),
                     )?;
 
                     let (tx, rx) = mpsc::channel::<StdinMsg>(64);
