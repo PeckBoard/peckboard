@@ -23,6 +23,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 
+use crate::provider::login_stash::CredentialStash;
+
 /// How long we wait for kimi to print the device URL before giving up.
 const URL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Overall lifetime of a login attempt. Kimi device codes expire after
@@ -56,6 +58,12 @@ impl KimiLoginManager {
     /// running (polling Moonshot) until it exits — a clean exit writes the
     /// OAuth tokens into `config_dir/config.toml`, which is how the account
     /// later reads as authenticated.
+    ///
+    /// This always forces a genuine re-login: any existing `config.toml` is
+    /// stashed before the CLI runs (see [`CredentialStash`]) so stale or
+    /// broken credentials can neither short-circuit the CLI nor keep the
+    /// account reading as signed in. An attempt that produces nothing
+    /// puts them back.
     pub async fn start(
         &self,
         account_id: &str,
@@ -69,6 +77,9 @@ impl KimiLoginManager {
         }
 
         std::fs::create_dir_all(config_dir).ok();
+        // Force a real sign-in even when the account already has (possibly
+        // broken) credentials: move them aside for the duration.
+        let stash = CredentialStash::stash(config_dir, "config.toml");
 
         let mut cmd = Command::new(cli_path);
         cmd.arg("login")
@@ -80,14 +91,19 @@ impl KimiLoginManager {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn `{cli_path} login`: {e}"))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                stash.settle();
+                anyhow::bail!("failed to spawn `{cli_path} login`: {e}");
+            }
+        };
 
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("no stderr handle on `kimi login`"))?;
+        let Some(stderr) = child.stderr.take() else {
+            let _ = child.start_kill();
+            stash.settle();
+            anyhow::bail!("no stderr handle on `kimi login`");
+        };
         let mut lines = BufReader::new(stderr).lines();
 
         // Read stderr until kimi prints the device URL (or we give up).
@@ -105,6 +121,7 @@ impl KimiLoginManager {
             Ok(Some(url)) => url,
             _ => {
                 let _ = child.start_kill();
+                stash.settle();
                 anyhow::bail!("timed out waiting for `kimi login` to produce a sign-in URL");
             }
         };
@@ -139,6 +156,9 @@ impl KimiLoginManager {
                 }
             }
             let _ = child.wait().await;
+            // Cancelled, expired, or exited: keep whatever credentials the
+            // login wrote, otherwise restore the ones we stashed.
+            stash.settle();
             map.lock().await.remove(&id);
         });
 

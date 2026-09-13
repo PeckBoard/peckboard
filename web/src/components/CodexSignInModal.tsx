@@ -14,26 +14,48 @@ interface Props {
  * the `codex` CLI, which returns a `…/codex/device` URL plus a one-time
  * code; the user opens the URL, enters the code, and authorises while the
  * CLI polls. We poll the account list until it reads as `authenticated`.
+ *
+ * An account that already reads as authenticated can still be re-signed in:
+ * its stored credentials may be stale or broken, and "authenticated" here
+ * only means an `auth.json` exists. So when the dialog opens on such an
+ * account we show the start screen, not a success screen — success is only
+ * claimed once *this* attempt completes. The server stashes the old
+ * credentials when the attempt starts, so the flip back to authenticated is
+ * a real one.
  */
 export default function CodexSignInModal({ account, onClose }: Props) {
   const startLogin = useCodexAccountsStore((s) => s.startLogin)
   const fetchAccounts = useCodexAccountsStore((s) => s.fetchAccounts)
   const live = useCodexAccountsStore((s) => s.accounts.find((a) => a.id === account.id))
   const authenticated = live?.authenticated ?? account.authenticated
+  // Whether this dialog opened on an already-signed-in account (a re-sign-in).
+  const [openedAuthenticated] = useState(authenticated)
 
   const [url, setUrl] = useState('')
   const [userCode, setUserCode] = useState('')
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
+  const [attempted, setAttempted] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Only call it signed in once this dialog's own attempt has landed —
+  // otherwise a re-sign-in would open straight onto "✓ Signed in" with no
+  // way to start one.
+  const signedIn = authenticated && (attempted || !openedAuthenticated)
 
   const begin = async () => {
     setError('')
     setStarting(true)
     try {
       const prompt = await startLogin(account.id)
+      // Starting a login stashes the account's old credentials server-side,
+      // so re-read the list before flipping `attempted` — otherwise the
+      // stale "authenticated" still in the store would read as success and
+      // park the dialog on "✓ Signed in" (which also stops the poll below).
+      await fetchAccounts()
       setUrl(prompt.url)
       setUserCode(prompt.user_code)
+      setAttempted(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start Codex login')
     } finally {
@@ -42,14 +64,14 @@ export default function CodexSignInModal({ account, onClose }: Props) {
   }
 
   useEffect(() => {
-    if (!url || authenticated) return
+    if (!url || signedIn) return
     pollRef.current = setInterval(() => {
       void fetchAccounts()
     }, 3000)
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [url, authenticated, fetchAccounts])
+  }, [url, signedIn, fetchAccounts])
 
   return (
     <Modal onClose={onClose} data-testid="codex-signin-modal">
@@ -58,7 +80,7 @@ export default function CodexSignInModal({ account, onClose }: Props) {
         Account: <strong>{account.name}</strong>
       </p>
 
-      {authenticated ? (
+      {signedIn ? (
         <div className="form-field" data-testid="codex-signin-done">
           <p className="form-success">✓ Signed in. This account is ready to use.</p>
         </div>
@@ -97,6 +119,12 @@ export default function CodexSignInModal({ account, onClose }: Props) {
         </div>
       ) : (
         <div className="form-field">
+          {openedAuthenticated && (
+            <p className="form-hint" data-testid="codex-signin-resign-hint">
+              This account is already signed in. Re-signing in replaces its current credentials —
+              use it if Codex is failing with an authentication error.
+            </p>
+          )}
           <button
             type="button"
             className="btn-secondary"
@@ -105,7 +133,11 @@ export default function CodexSignInModal({ account, onClose }: Props) {
             autoFocus
             data-testid="codex-signin-start"
           >
-            {starting ? 'Starting…' : 'Sign in with ChatGPT'}
+            {starting
+              ? 'Starting…'
+              : openedAuthenticated
+                ? 'Re-sign in with ChatGPT'
+                : 'Sign in with ChatGPT'}
           </button>
         </div>
       )}
@@ -117,7 +149,7 @@ export default function CodexSignInModal({ account, onClose }: Props) {
           onClick={onClose}
           data-testid="codex-signin-close"
         >
-          {authenticated ? 'Done' : 'Close'}
+          {signedIn ? 'Done' : 'Close'}
         </button>
       </div>
     </Modal>

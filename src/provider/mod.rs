@@ -5,6 +5,7 @@ pub mod codex;
 pub mod cursor;
 pub mod grok;
 pub mod kimi;
+pub mod login_stash;
 pub mod manager;
 pub mod message;
 pub mod mock;

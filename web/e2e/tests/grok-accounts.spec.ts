@@ -154,3 +154,74 @@ test('device sign-in flow: add account then surface the grok device link', async
   await expect(row).toContainText('E2E Grok Sub')
   await expect(section.locator('[data-testid^="grok-acct-unauth-"]')).toBeVisible()
 })
+
+/**
+ * "Re-sign in" on an account that already reads as signed in must open a
+ * fresh login, not a "✓ Signed in" dead end — stale or broken credentials
+ * still satisfy the server's "a credential file exists" check, and that used
+ * to be the only way out of a stuck session (delete the account and start
+ * over).
+ *
+ * No real `grok login` runs here: the list is rewritten on the wire to look
+ * authenticated, and `login/start` flips it back the way the server does
+ * (it stashes the old credentials when a re-login starts).
+ */
+test('re-sign in: an authenticated account opens a fresh login', async ({ request, page }) => {
+  const token = await authenticate(request)
+  await loadApp(page, token)
+
+  let hasCredentials = true
+  await page.route('**/api/grok-accounts', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+    const res = await route.fetch()
+    const accounts = (await res.json()) as { authenticated: boolean }[]
+    await route.fulfill({
+      response: res,
+      json: accounts.map((a) => ({ ...a, authenticated: hasCredentials })),
+    })
+  })
+  await page.route('**/api/grok-accounts/*/login/start', async (route) => {
+    hasCredentials = false
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ url: 'https://accounts.x.ai/oauth2/device?user_code=RESIGN-99' }),
+    })
+  })
+
+  const settings = await openSettings(page)
+  const section = settings.getByTestId('grok-accounts-section')
+  await section.getByTestId('grok-acct-add').click()
+  const modal = page.getByTestId('grok-account-modal')
+  await expect(modal).toBeVisible()
+  await modal.getByTestId('grok-acct-name').fill('E2E Grok Resign')
+  await modal.getByTestId('grok-acct-save').click()
+  await expect(modal).toBeHidden()
+  await page.getByTestId('grok-signin-close').click()
+
+  const row = section
+    .locator('[data-testid^="grok-acct-row-"]')
+    .filter({ hasText: 'E2E Grok Resign' })
+  const signInButton = row.locator('[data-testid^="grok-acct-signin-"]')
+  await expect(signInButton).toHaveText('Re-sign in')
+
+  await signInButton.click()
+  const signIn = page.getByTestId('grok-signin-modal')
+  await expect(signIn).toBeVisible()
+  await expect(signIn.getByTestId('grok-signin-resign-hint')).toBeVisible()
+  await expect(signIn.getByTestId('grok-signin-done')).toHaveCount(0)
+
+  await signIn.getByTestId('grok-signin-start').click()
+  await expect(signIn.getByTestId('grok-signin-url')).toHaveAttribute('href', /RESIGN-99/)
+  await expect(signIn.getByTestId('grok-signin-waiting')).toBeVisible()
+
+  await signIn.getByTestId('grok-signin-close').click()
+  await row.locator('[data-testid^="grok-acct-delete-"]').click()
+  const confirm = page.locator('.confirm-dialog')
+  await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: 'Delete' }).click()
+  await expect(row).toHaveCount(0)
+})

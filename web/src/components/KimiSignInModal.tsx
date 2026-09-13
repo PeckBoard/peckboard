@@ -15,6 +15,12 @@ interface Props {
  * and authorises in the browser while the CLI polls. We poll the account list
  * until it reads as `authenticated`, then show success. Mirrors
  * {@link GrokSignInModal}.
+ *
+ * An account that already reads as authenticated can still be re-signed in:
+ * "authenticated" only means a credential file exists, which a stale or
+ * broken login also satisfies. So when the dialog opens on such an account
+ * we show the start screen, not a success screen — success is only claimed
+ * once *this* attempt completes.
  */
 export default function KimiSignInModal({ account, onClose }: Props) {
   const startLogin = useKimiAccountsStore((s) => s.startLogin)
@@ -22,18 +28,32 @@ export default function KimiSignInModal({ account, onClose }: Props) {
   // Re-read the live row so we notice the moment it flips to authenticated.
   const live = useKimiAccountsStore((s) => s.accounts.find((a) => a.id === account.id))
   const authenticated = live?.authenticated ?? account.authenticated
+  // Whether this dialog opened on an already-signed-in account (a re-sign-in).
+  const [openedAuthenticated] = useState(authenticated)
 
   const [url, setUrl] = useState('')
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
+  const [attempted, setAttempted] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Only call it signed in once this dialog's own attempt has landed —
+  // otherwise a re-sign-in would open straight onto "✓ Signed in" with no
+  // way to start one.
+  const signedIn = authenticated && (attempted || !openedAuthenticated)
 
   const begin = async () => {
     setError('')
     setStarting(true)
     try {
       const { url } = await startLogin(account.id)
+      // Starting a login stashes the account's old credentials server-side,
+      // so re-read the list before flipping `attempted` — otherwise the
+      // stale "authenticated" still in the store would read as success and
+      // park the dialog on "✓ Signed in" (which also stops the poll below).
+      await fetchAccounts()
       setUrl(url)
+      setAttempted(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start Kimi login')
     } finally {
@@ -44,14 +64,14 @@ export default function KimiSignInModal({ account, onClose }: Props) {
   // While waiting on a URL (login in flight) and not yet authenticated, poll
   // the account list so the dialog flips to success on its own.
   useEffect(() => {
-    if (!url || authenticated) return
+    if (!url || signedIn) return
     pollRef.current = setInterval(() => {
       void fetchAccounts()
     }, 3000)
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [url, authenticated, fetchAccounts])
+  }, [url, signedIn, fetchAccounts])
 
   return (
     <Modal onClose={onClose} data-testid="kimi-signin-modal">
@@ -59,8 +79,7 @@ export default function KimiSignInModal({ account, onClose }: Props) {
       <p className="form-hint">
         Account: <strong>{account.name}</strong>
       </p>
-
-      {authenticated ? (
+      {signedIn ? (
         <div className="form-field" data-testid="kimi-signin-done">
           <p className="form-success">✓ Signed in. This account is ready to use.</p>
         </div>
@@ -94,6 +113,12 @@ export default function KimiSignInModal({ account, onClose }: Props) {
         </div>
       ) : (
         <div className="form-field">
+          {openedAuthenticated && (
+            <p className="form-hint" data-testid="kimi-signin-resign-hint">
+              This account is already signed in. Re-signing in replaces its current credentials —
+              use it if Kimi is failing with an authentication error.
+            </p>
+          )}
           <button
             type="button"
             className="btn-secondary"
@@ -102,7 +127,11 @@ export default function KimiSignInModal({ account, onClose }: Props) {
             autoFocus
             data-testid="kimi-signin-start"
           >
-            {starting ? 'Starting…' : 'Sign in with Kimi'}
+            {starting
+              ? 'Starting…'
+              : openedAuthenticated
+                ? 'Re-sign in with Kimi'
+                : 'Sign in with Kimi'}
           </button>
         </div>
       )}
@@ -114,7 +143,7 @@ export default function KimiSignInModal({ account, onClose }: Props) {
           onClick={onClose}
           data-testid="kimi-signin-close"
         >
-          {authenticated ? 'Done' : 'Close'}
+          {signedIn ? 'Done' : 'Close'}
         </button>
       </div>
     </Modal>

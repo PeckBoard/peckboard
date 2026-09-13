@@ -225,3 +225,113 @@ test('device sign-in flow: real login/start scrapes the codex CLI prompt', async
   await confirm.getByRole('button', { name: 'Delete' }).click()
   await expect(row).toHaveCount(0)
 })
+
+/**
+ * One fake CLI that behaves differently across its two runs against the same
+ * CODEX_HOME. First run: writes credentials immediately, so the account reads
+ * as authenticated (a non-empty `auth.json` is all the server checks) and the
+ * row offers "Re-sign in". Second run: prints a *different* one-time code and
+ * writes nothing — so "still signed in" afterwards can only mean the stale
+ * credentials survived the re-login.
+ */
+const FAKE_CODEX_TWO_RUNS = `#!/bin/sh
+printf '   https://auth.openai.com/codex/device\\n'
+if [ -f "$CODEX_HOME/.ran-once" ]; then
+  printf '   9ZZZ-QQQQQ\\n'
+else
+  : > "$CODEX_HOME/.ran-once"
+  printf '{"tokens":{"fake":true}}\\n' > "$CODEX_HOME/auth.json"
+  printf '   4UWK-LDLPZ\\n'
+fi
+sleep 20
+`
+
+/**
+ * Point the codex plugin at a fake CLI. `discover_models: false` matters:
+ * model discovery spawns the same binary with each account's CODEX_HOME, and
+ * a fake that changes behaviour per run would otherwise burn its first run on
+ * discovery instead of on the login under test.
+ */
+async function useFakeCodexCli(request: APIRequestContext, token: string, cliPath: string) {
+  const put = await request.put('/api/plugins/codex/settings', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { updates: { cli_path: cliPath, discover_models: false } },
+  })
+  expect(put.ok(), `setting cli_path failed: ${await put.text()}`).toBeTruthy()
+}
+
+function writeFakeCli(tag: string, body: string): string {
+  const path = join(tmpdir(), `peckboard-fake-codex-${tag}-${process.pid}-${Date.now()}.sh`)
+  writeFileSync(path, body)
+  chmodSync(path, 0o755)
+  return path
+}
+
+/**
+ * "Re-sign in" must force a fresh login on an account that already reads as
+ * signed in. Both halves used to be broken: the dialog opened straight onto
+ * "✓ Signed in" with no way to start one, and the server left the old
+ * `auth.json` in place, so a stuck/expired ChatGPT session could never be
+ * replaced from the UI.
+ */
+test('re-sign in forces a fresh device login on an authenticated account', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const cli = writeFakeCli('tworuns', FAKE_CODEX_TWO_RUNS)
+  await useFakeCodexCli(request, token, cli)
+
+  await loadApp(page, token)
+  const settings = await openSettings(page)
+  const section = settings.getByTestId('codex-accounts-section')
+  await section.getByTestId('codex-acct-add').click()
+  const modal = page.getByTestId('codex-account-modal')
+  await expect(modal).toBeVisible()
+  await modal.getByTestId('codex-acct-name').fill('E2E Codex Resign')
+  await modal.getByTestId('codex-acct-save').click()
+  await expect(modal).toBeHidden()
+
+  // First login: the fake CLI writes auth.json, so the account ends up
+  // authenticated and the row offers "Re-sign in".
+  const signIn = page.getByTestId('codex-signin-modal')
+  await expect(signIn).toBeVisible()
+  await signIn.getByTestId('codex-signin-start').click()
+  await expect(signIn.getByTestId('codex-signin-done')).toBeVisible({ timeout: 20_000 })
+  await signIn.getByTestId('codex-signin-close').click()
+
+  const row = section
+    .locator('[data-testid^="codex-acct-row-"]')
+    .filter({ hasText: 'E2E Codex Resign' })
+  const signInButton = row.locator('[data-testid^="codex-acct-signin-"]')
+  await expect(signInButton).toHaveText('Re-sign in')
+
+  // Second login: the same CLI now prints a different code and writes no
+  // credentials — so "still signed in" can only mean the stale auth.json
+  // survived.
+  await signInButton.click()
+  await expect(signIn).toBeVisible()
+  await expect(signIn.getByTestId('codex-signin-resign-hint')).toBeVisible()
+  await expect(signIn.getByTestId('codex-signin-done')).toHaveCount(0)
+
+  await signIn.getByTestId('codex-signin-start').click()
+  await expect(signIn.getByTestId('codex-signin-code')).toContainText('9ZZZ-QQQQQ', {
+    timeout: 20_000,
+  })
+  // Starting the re-login stashed the old credentials, so the row is honest
+  // about the account being signed out until the new login lands.
+  await expect(row.locator('[data-testid^="codex-acct-unauth-"]')).toBeVisible({ timeout: 15_000 })
+
+  await signIn.getByTestId('codex-signin-close').click()
+  await row.locator('[data-testid^="codex-acct-delete-"]').click()
+  const confirm = page.locator('.confirm-dialog')
+  await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: 'Delete' }).click()
+  await expect(row).toHaveCount(0)
+
+  // Specs share this server: put model discovery back the way we found it.
+  await request.put('/api/plugins/codex/settings', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { updates: { discover_models: true } },
+  })
+})

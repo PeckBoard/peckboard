@@ -20,6 +20,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 
+use crate::provider::login_stash::CredentialStash;
+
 /// How long we wait for grok to print the device URL before giving up.
 const URL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Overall lifetime of a login attempt (xAI device codes expire; after this
@@ -53,6 +55,12 @@ impl GrokLoginManager {
     /// running (polling xAI) until it exits — a clean exit writes
     /// `config_dir/auth.json`, which is how the account later reads as
     /// authenticated.
+    ///
+    /// This always forces a genuine re-login: any existing `auth.json` is
+    /// stashed before the CLI runs (see [`CredentialStash`]) so stale or
+    /// broken credentials can neither short-circuit the CLI nor keep the
+    /// account reading as signed in. An attempt that produces nothing
+    /// puts them back.
     pub async fn start(&self, account_id: &str, config_dir: &str) -> anyhow::Result<String> {
         // Cancel any prior attempt for this account so we never leak a
         // polling process or hand back a stale URL.
@@ -61,6 +69,9 @@ impl GrokLoginManager {
         }
 
         std::fs::create_dir_all(config_dir).ok();
+        // Force a real sign-in even when the account already has (possibly
+        // broken) credentials: move them aside for the duration.
+        let stash = CredentialStash::stash(config_dir, "auth.json");
 
         let mut cmd = Command::new("grok");
         cmd.args(["login", "--device-auth"])
@@ -72,14 +83,19 @@ impl GrokLoginManager {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn `grok login`: {e}"))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                stash.settle();
+                anyhow::bail!("failed to spawn `grok login`: {e}");
+            }
+        };
 
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("no stderr handle on `grok login`"))?;
+        let Some(stderr) = child.stderr.take() else {
+            let _ = child.start_kill();
+            stash.settle();
+            anyhow::bail!("no stderr handle on `grok login`");
+        };
         let mut lines = BufReader::new(stderr).lines();
 
         // Read stderr until grok prints the device URL (or we give up).
@@ -97,6 +113,7 @@ impl GrokLoginManager {
             Ok(Some(url)) => url,
             _ => {
                 let _ = child.start_kill();
+                stash.settle();
                 anyhow::bail!("timed out waiting for `grok login` to produce a sign-in URL");
             }
         };
@@ -130,6 +147,9 @@ impl GrokLoginManager {
                 }
             }
             let _ = child.wait().await;
+            // Cancelled, expired, or exited: keep whatever credentials the
+            // login wrote, otherwise restore the ones we stashed.
+            stash.settle();
             map.lock().await.remove(&id);
         });
 

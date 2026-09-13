@@ -21,6 +21,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 
+use crate::provider::login_stash::CredentialStash;
 /// How long we wait for codex to print the device URL + code before giving up.
 const URL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Overall lifetime of a login attempt. Codex device codes expire after
@@ -61,6 +62,12 @@ impl CodexLoginManager {
     /// first. The spawned process keeps running (polling OpenAI) until it
     /// exits — a clean exit writes `config_dir/auth.json`, which is how
     /// the account later reads as authenticated.
+    ///
+    /// This always forces a genuine re-login: any existing `auth.json` is
+    /// stashed before the CLI runs (see [`CredentialStash`]) so stale or
+    /// broken credentials can neither short-circuit the CLI nor keep the
+    /// account reading as signed in. An attempt that produces nothing
+    /// puts them back.
     pub async fn start(
         &self,
         account_id: &str,
@@ -74,6 +81,9 @@ impl CodexLoginManager {
         }
 
         std::fs::create_dir_all(config_dir).ok();
+        // Force a real sign-in even when the account already has (possibly
+        // broken) credentials: move them aside for the duration.
+        let stash = CredentialStash::stash(config_dir, "auth.json");
 
         let mut cmd = Command::new(cli_path);
         cmd.args(["login", "--device-auth"])
@@ -89,18 +99,19 @@ impl CodexLoginManager {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| {
-            anyhow::anyhow!("failed to spawn `{cli_path} login --device-auth`: {e}")
-        })?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                stash.settle();
+                anyhow::bail!("failed to spawn `{cli_path} login --device-auth`: {e}");
+            }
+        };
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("no stdout handle on `codex login`"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("no stderr handle on `codex login`"))?;
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.start_kill();
+            stash.settle();
+            anyhow::bail!("no stdout/stderr handle on `codex login`");
+        };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         spawn_line_forwarder(stdout, tx.clone());
@@ -124,6 +135,7 @@ impl CodexLoginManager {
             Ok(Some(p)) => p,
             _ => {
                 let _ = child.start_kill();
+                stash.settle();
                 anyhow::bail!(
                     "timed out waiting for `codex login --device-auth` to produce a ChatGPT sign-in URL"
                 );
@@ -158,6 +170,10 @@ impl CodexLoginManager {
                     }
                 }
             }
+            let _ = child.wait().await;
+            // Cancelled, expired, or exited: keep whatever credentials the
+            // login wrote, otherwise restore the ones we stashed.
+            stash.settle();
             let _ = child.wait().await;
             map.lock().await.remove(&id);
         });
