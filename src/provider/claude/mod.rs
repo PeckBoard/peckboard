@@ -210,7 +210,16 @@ pub(crate) fn model_discovery_enabled() -> bool {
 /// line, and reads the matching `control_response`, whose `models` array
 /// carries value/displayName/description per model. `None` on any failure so
 /// the caller falls back to the static [`discover_models`] seed.
-pub(crate) async fn probe_cli_models() -> Option<Vec<ModelInfo>> {
+///
+/// `env` is layered onto the probe process's environment so the catalog is
+/// scoped to the credential it is asked about — the CLI's catalog is
+/// entitlement-gated (an unauthenticated probe omits `claude-fable-5[1m]`
+/// that a logged-in account offers), so a per-account listing MUST probe
+/// with that account's `CLAUDE_CONFIG_DIR` / token rather than reuse the
+/// host's answer. Empty map = the host environment, i.e. the Default account.
+pub(crate) async fn probe_cli_models(
+    env: &std::collections::HashMap<String, String>,
+) -> Option<Vec<ModelInfo>> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     const REQUEST_ID: &str = "peckboard-model-discovery";
@@ -230,6 +239,7 @@ pub(crate) async fn probe_cli_models() -> Option<Vec<ModelInfo>> {
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::null())
     .kill_on_drop(true);
+    cmd.envs(env);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

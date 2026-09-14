@@ -53,9 +53,10 @@ struct ClaudeRun {
     credential_fingerprint: Option<String>,
 }
 
-/// TTL cache for the CLI model-discovery probe. Success and failure are
-/// cached alike so a broken or slow `claude` binary stalls at most one
-/// model-list request per [`super::MODEL_DISCOVERY_TTL`] window.
+/// TTL cache entry for ONE credential scope's CLI model-discovery probe.
+/// Success and failure are cached alike so a broken or slow `claude` binary
+/// stalls at most one model-list request per [`super::MODEL_DISCOVERY_TTL`]
+/// window, per scope.
 struct DiscoveryCache {
     fetched_at: std::time::Instant,
     models: Option<Vec<crate::provider::stream::ModelInfo>>,
@@ -81,8 +82,11 @@ pub struct ClaudeProvider {
     /// credential to inject. `None` in tests / no-DB registrations, which
     /// keeps the single-(Default-)account behaviour.
     db: Option<crate::db::Db>,
-    /// TTL cache for the CLI-probed model catalog (see `discovered_models`).
-    discovery_cache: Arc<Mutex<Option<DiscoveryCache>>>,
+    /// TTL cache for the CLI-probed model catalog, keyed by credential
+    /// scope (`""` = the host environment, else a stored Claude account id).
+    /// Scoped because the CLI's catalog is entitlement-gated — see
+    /// `account_scoped_models`.
+    discovery_cache: Arc<Mutex<HashMap<String, DiscoveryCache>>>,
 }
 
 impl ClaudeProvider {
@@ -90,7 +94,7 @@ impl ClaudeProvider {
         ClaudeProvider {
             runs: Arc::new(Mutex::new(HashMap::new())),
             db: None,
-            discovery_cache: Arc::new(Mutex::new(None)),
+            discovery_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -202,56 +206,96 @@ impl ClaudeProvider {
         Ok(Some(credential_fingerprint(&secret)))
     }
 
-    /// CLI-probed base catalog through the TTL cache. `None` when discovery
-    /// is disabled (`PECKBOARD_CLAUDE_MODEL_DISCOVERY=0`) or the last probe
+    /// CLI-probed catalog for ONE credential scope, through the TTL cache.
+    /// `scope` is `""` for the host environment (the Default account) or a
+    /// stored account id, whose `env` carries that account's credentials;
+    /// each scope is cached separately because the CLI only advertises what
+    /// the credential it ran under is entitled to. `None` when discovery is
+    /// disabled (`PECKBOARD_CLAUDE_MODEL_DISCOVERY=0`) or the last probe
     /// failed — the caller then seeds from the static list. Failures are
     /// cached for the full TTL too, so a missing/broken CLI costs one probe
     /// timeout per window, not one per model-list request.
-    async fn discovered_models(&self) -> Option<Vec<crate::provider::stream::ModelInfo>> {
+    async fn discovered_models(
+        &self,
+        scope: &str,
+        env: &HashMap<String, String>,
+    ) -> Option<Vec<crate::provider::stream::ModelInfo>> {
         if !super::model_discovery_enabled() {
             return None;
         }
         {
             let cache = self.discovery_cache.lock().await;
-            if let Some(entry) = cache.as_ref()
+            if let Some(entry) = cache.get(scope)
                 && entry.fetched_at.elapsed() < super::MODEL_DISCOVERY_TTL
             {
                 return entry.models.clone();
             }
         }
-        let result = super::probe_cli_models().await;
+        let result = super::probe_cli_models(env).await;
         let mut cache = self.discovery_cache.lock().await;
-        *cache = Some(DiscoveryCache {
-            fetched_at: std::time::Instant::now(),
-            models: result.clone(),
-        });
+        cache.insert(
+            scope.to_string(),
+            DiscoveryCache {
+                fetched_at: std::time::Instant::now(),
+                models: result.clone(),
+            },
+        );
         result
+    }
+
+    /// One scope's picker list: its probed catalog topped up with the pinned
+    /// ids the CLI only covers as family aliases, or `fallback` when the
+    /// probe yielded nothing (discovery off, no CLI, failed handshake).
+    async fn scope_models(
+        &self,
+        scope: &str,
+        env: &HashMap<String, String>,
+        fallback: &[crate::provider::stream::ModelInfo],
+    ) -> Vec<crate::provider::stream::ModelInfo> {
+        match self.discovered_models(scope, env).await {
+            Some(mut models) if !models.is_empty() => {
+                super::merge_always_offered(&mut models);
+                models
+            }
+            _ => fallback.to_vec(),
+        }
     }
 
     /// Fill the discovery cache ahead of the first model-list request — the
     /// `claude-code` builtin calls this from a background task at init so
-    /// the first model-picker open never waits on the CLI spawn.
+    /// the first model-picker open never waits on the CLI spawn. Primes
+    /// every scope (host + one per stored account), since that is the whole
+    /// set a model-list request resolves.
     pub async fn prime_model_cache(&self) {
-        let _ = self.discovered_models().await;
+        let _ = self.account_scoped_models().await;
     }
 
-    /// The model catalog the picker shows: the base models (CLI-probed when
-    /// possible, static seed otherwise — bare ids, Default-account) plus one
-    /// labelled variant per stored account (`<model>@<account_id>`, shown as
-    /// `[Account] Model`). Returns just the base list when there are no
-    /// accounts or no DB handle.
+    /// The model catalog the picker shows: the base models (CLI-probed under
+    /// the host environment, static seed otherwise — bare ids,
+    /// Default-account) plus one labelled variant per stored account
+    /// (`<model>@<account_id>`, shown as `[Account] Model`). Returns just the
+    /// base list when there are no accounts or no DB handle.
+    ///
+    /// Each account's variants come from ITS OWN probe, run under the very
+    /// env a spawn for that account would inject. The catalog is
+    /// entitlement-gated, so the host answer cannot stand in for an
+    /// account's: a host with no login omits `claude-fable-5[1m]` that a
+    /// logged-in account offers, and mirroring the host list hid Fable from
+    /// every account. An account whose probe fails falls back to the base
+    /// list — the old mirrored behaviour, never an empty picker.
     ///
     /// A probed catalog is topped up with
-    /// [`always_offered_models`](super::always_offered_models) first: the CLI
+    /// [`always_offered_models`](super::always_offered_models): the CLI
     /// advertises family aliases (`opus[1m]`, `sonnet`), not the pinned
     /// snapshots (`claude-opus-4-8`, `claude-opus-4-7`, …), and dropping
     /// those here would hide models the user can still run.
+    ///
+    /// Account probes run concurrently — serially, a cold model-list request
+    /// would pay one full CLI spawn (~2-4s) per stored account.
     async fn account_scoped_models(&self) -> Vec<crate::provider::stream::ModelInfo> {
-        let mut base = match self.discovered_models().await {
-            Some(models) if !models.is_empty() => models,
-            _ => super::discover_models(),
-        };
-        super::merge_always_offered(&mut base);
+        let base = self
+            .scope_models("", &HashMap::new(), &super::discover_models())
+            .await;
         let Some(db) = &self.db else {
             return base;
         };
@@ -265,9 +309,25 @@ impl ClaudeProvider {
         if accounts.is_empty() {
             return base;
         }
+        let probed = futures_util::future::join_all(accounts.iter().map(|acct| {
+            let base = &base;
+            async move {
+                let mut env = HashMap::new();
+                if let Err(e) = self.inject_account_env(&acct.id, &mut env).await {
+                    // Credential unreachable (deleted row, refresh failure):
+                    // the account still belongs in the picker, behind the
+                    // base catalog.
+                    tracing::warn!("claude: model probe for account {} skipped: {e}", acct.id);
+                    return base.clone();
+                }
+                self.scope_models(&acct.id, &env, base).await
+            }
+        }))
+        .await;
+
         let mut out = base.clone();
-        for acct in &accounts {
-            for m in &base {
+        for (acct, models) in accounts.iter().zip(probed) {
+            for m in models {
                 out.push(crate::provider::stream::ModelInfo {
                     id: format!("{}@{}", m.id, acct.id),
                     display_name: format!("[{}] {}", acct.name, m.display_name),
@@ -1145,23 +1205,26 @@ mod tests {
     #[tokio::test]
     async fn dynamic_models_tops_up_a_probed_catalog_with_pinned_ids() {
         let provider = ClaudeProvider::new();
-        *provider.discovery_cache.lock().await = Some(DiscoveryCache {
-            fetched_at: std::time::Instant::now(),
-            models: Some(vec![
-                crate::provider::stream::ModelInfo {
-                    id: "opus[1m]".into(),
-                    display_name: "Opus 5 with 1M context".into(),
-                    capabilities: vec!["code".into()],
-                    tier: 3,
-                },
-                crate::provider::stream::ModelInfo {
-                    id: "sonnet".into(),
-                    display_name: "Sonnet 5".into(),
-                    capabilities: vec!["code".into()],
-                    tier: 2,
-                },
-            ]),
-        });
+        provider.discovery_cache.lock().await.insert(
+            String::new(),
+            DiscoveryCache {
+                fetched_at: std::time::Instant::now(),
+                models: Some(vec![
+                    crate::provider::stream::ModelInfo {
+                        id: "opus[1m]".into(),
+                        display_name: "Opus 5 with 1M context".into(),
+                        capabilities: vec!["code".into()],
+                        tier: 3,
+                    },
+                    crate::provider::stream::ModelInfo {
+                        id: "sonnet".into(),
+                        display_name: "Sonnet 5".into(),
+                        capabilities: vec!["code".into()],
+                        tier: 2,
+                    },
+                ]),
+            },
+        );
 
         let models = provider.dynamic_models().await.unwrap();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
@@ -1180,6 +1243,73 @@ mod tests {
                 "claude-sonnet-4-6",
                 "claude-haiku-4-5",
             ]
+        );
+    }
+
+    /// Per-account entries come from that account's OWN probe, not a mirror
+    /// of the host list. The CLI's catalog is entitlement-gated, so a model
+    /// only the account is entitled to (here the `claude-fable-5[1m]` alias)
+    /// must reach the picker as `<id>@<account>` — and must NOT leak into
+    /// the bare, Default-account list.
+    #[tokio::test]
+    async fn dynamic_models_probes_each_account_scope_separately() {
+        let db = crate::db::Db::in_memory().unwrap();
+        db.create_claude_account(account("acc_key", "api_key", "sk-test", None))
+            .await
+            .unwrap();
+        let provider = ClaudeProvider::new().with_db(db);
+
+        let opus = crate::provider::stream::ModelInfo {
+            id: "opus[1m]".into(),
+            display_name: "Opus 5 with 1M context".into(),
+            capabilities: vec!["code".into()],
+            tier: 3,
+        };
+        let fable = crate::provider::stream::ModelInfo {
+            id: "claude-fable-5[1m]".into(),
+            display_name: "Fable 5 with 1M context".into(),
+            capabilities: vec!["code".into()],
+            tier: 3,
+        };
+        {
+            let mut cache = provider.discovery_cache.lock().await;
+            // Host scope: no Fable — an unauthenticated host isn't offered it.
+            cache.insert(
+                String::new(),
+                DiscoveryCache {
+                    fetched_at: std::time::Instant::now(),
+                    models: Some(vec![opus.clone()]),
+                },
+            );
+            // The stored account's own credential is entitled to it.
+            cache.insert(
+                "acc_key".into(),
+                DiscoveryCache {
+                    fetched_at: std::time::Instant::now(),
+                    models: Some(vec![opus.clone(), fable.clone()]),
+                },
+            );
+        }
+
+        let ids: Vec<String> = provider
+            .dynamic_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+
+        assert!(
+            ids.contains(&"claude-fable-5[1m]@acc_key".to_string()),
+            "the account's own catalog must reach the picker: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"claude-fable-5[1m]".to_string()),
+            "an account-only model must not appear as a bare Default-account id: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"opus[1m]".to_string()) && ids.contains(&"opus[1m]@acc_key".to_string()),
+            "a model both scopes carry stays in both lists: {ids:?}"
         );
     }
 
