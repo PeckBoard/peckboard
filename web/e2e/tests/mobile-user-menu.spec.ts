@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 /**
  * Mobile user-menu (avatar dropdown) regression test.

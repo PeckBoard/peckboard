@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 /**
  * UI e2e for multi-account Kimi support (Settings → Kimi Accounts).

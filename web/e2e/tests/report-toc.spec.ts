@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 

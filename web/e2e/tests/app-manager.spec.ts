@@ -1,10 +1,4 @@
-import {
-  test,
-  expect,
-  type APIRequestContext,
-  type FrameLocator,
-  type Page,
-} from '@playwright/test'
+import { test, expect, type APIRequestContext, type FrameLocator, type Page } from '../harness'
 
 /**
  * UI e2e for the app-manager plugin's App Manager page (sidebar →

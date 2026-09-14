@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 /**
  * UI e2e for MCP-server OAuth sign-in (Settings → MCP Servers).

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from '../harness'
 import { appendEventOrdered, nextLastSeq } from '../../src/store/eventOrder'
 import { latestTodoSnapshot } from '../../src/types/todo'
 import type { Event } from '../../src/types/api'

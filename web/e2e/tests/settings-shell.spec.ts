@@ -11,7 +11,7 @@
  *    jump-and-highlight, and shows an empty state for a miss.
  */
 
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 const E2E_USER = 'e2e-user'
 const E2E_PASS = 'e2e-password-1234'

@@ -355,6 +355,9 @@ pub async fn run_server(
     crate::routes::sessions::sweep_orphan_temp_sessions(&state).await;
     let app = api_router(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
+        // No-op unless PECKBOARD_E2E_ROUTE_LOG is set; feeds the e2e impact
+        // map (see src/impact_log.rs).
+        .layer(middleware::from_fn(crate::impact_log::record_route))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(origin_check))
         .layer(TraceLayer::new_for_http())
@@ -568,7 +571,6 @@ pub async fn run_server(
                         &sid,
                     )
                     .await;
-
                     // 1.65 Resume recovery. A provider that refused the
                     // conversation it was handed drops it here and re-queues
                     // the turn to run cold — before auth recovery, which

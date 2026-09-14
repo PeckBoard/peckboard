@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Locator, type Page } from '../harness'
 
 /**
  * E2E for the usage trend chart's series encoding.

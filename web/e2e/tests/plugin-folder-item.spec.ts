@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test'
+import { test, expect, type APIRequestContext } from '../harness'
 
 /**
  * UI e2e for folder-scoped plugin pages (manifest `folder_items`).

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from '../harness'
 
 /**
  * Regression tests for the stale-socket guard in `src/store/ws.ts`.

@@ -5,7 +5,7 @@
  * The download endpoint is intercepted so no real archive is served.
  */
 
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 const E2E_USER = 'e2e-user'
 const E2E_PASS = 'e2e-password-1234'

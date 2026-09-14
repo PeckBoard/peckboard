@@ -30,11 +30,50 @@ Run from the repo root unless noted.
 | Web build                     | `cd web && npm run build`                      |
 | Web lint                      | `cd web && npm run lint`                       |
 | Web format                    | `cd web && npm run format` (or `format:check`) |
-| Playwright e2e                | `cd web && npm run e2e`                        |
+| Playwright e2e (sharded)      | `scripts/e2e-shards.sh 4`                      |
+| Playwright e2e (single)       | `cd web && npm run e2e`                        |
+| Playwright e2e (impacted)     | `scripts/e2e-impacted.sh`                      |
+| Rebuild the e2e impact map    | `scripts/e2e-impact-map.sh`                    |
 | Playwright install (one-time) | `cd web && npm run e2e:install`                |
 
 The Playwright `webServer` block boots `target/release/peckboard` with a
 fresh `mktemp -d` data dir, so each run starts from a clean state.
+
+### Why the Suite Is Sharded
+
+Specs mutate shared server state, so the suite runs `workers: 1` and
+cannot share one server. Serialising ~480 tests costs ~14 minutes.
+`scripts/e2e-shards.sh N` instead runs N Playwright processes side by
+side, each `workers: 1` against its **own** server, port block, and data
+dir — so every isolation assumption the specs already make still holds,
+and a full run takes ~4 minutes. Playwright splits by spec file, so a
+given spec runs in exactly one shard and fixed-path artifacts can't
+collide.
+
+### Running Only the Impacted Specs
+
+`scripts/e2e-impacted.sh` runs just the specs a change can affect, using
+`web/e2e/impact-map.json` (source file → spec files). e2e specs never
+_import_ app source — they drive a browser — so that map cannot be
+derived statically; it is recorded from a real run by
+`scripts/e2e-impact-map.sh` (V8 coverage traced through the bundle
+sourcemap for `web/src/**`, plus the server's route log joined to each
+test's wall-clock window for `src/**`).
+
+**This is the default for iterating; the merge gate is the full suite**
+(see Definition of Done). Selection rules:
+
+- Only build inputs count as changes (`src/**`, `web/src/**`,
+  `web/e2e/**`, `migrations/**`, the build manifests) — scratch files,
+  logs, docs, and scripts can never force a run.
+- A changed spec file selects exactly itself.
+- Everything else goes through the map, and the selector falls back to
+  the whole suite whenever it cannot prove a narrower set is safe — an
+  unmapped source file, a shared primitive, a schema or build change, or
+  no map on disk — and prints what it skipped and why.
+
+Regenerate and commit the map after adding or substantially reworking
+specs.
 
 ## Running the Binary While Iterating
 
@@ -71,24 +110,34 @@ that one. Do not run `pkill peckboard` / `killall peckboard` /
 
 ## Definition of Done
 
-**After making code changes, run the full verification cycle and fix
-anything it surfaces before reporting done — use the script, do not run
-the steps by hand:**
+**After making code changes, run the verification cycle and fix anything
+it surfaces before reporting done — use the script, do not run the steps
+by hand:**
 
 ```bash
-scripts/verify.sh          # everything, including release build + Playwright e2e
-scripts/verify.sh --fast   # skip the release build + e2e (quick inner-loop check)
+scripts/verify.sh --impacted  # DEFAULT per change: full checks, e2e narrowed to what the change can reach
+scripts/verify.sh --fast      # skip the release build + e2e (quick inner-loop check)
+scripts/verify.sh             # the full suite — required before a commit / release
 ```
 
 It runs, in order: `cargo fmt --check`, `cargo clippy --all-targets
 --no-deps`, `cargo test`, `cd web && npm run lint`, `npm run
 format:check`, then `cargo build --release` (the binary Playwright
-boots) and `npm run e2e`. Every step runs even if an earlier one fails,
-and it exits non-zero with a per-step summary if anything failed.
+boots) and the e2e suite via `scripts/e2e-shards.sh 4`. Every step runs
+even if an earlier one fails, and it exits non-zero with a per-step
+summary if anything failed.
 
-If a step fails because of something _unrelated_ to the current change
-(pre-existing backlog), call it out explicitly rather than silently
-ignoring it.
+**Use `--impacted` for every intermediate change** — running all ~480
+specs per edit is the wall-clock sink, and the selector already falls
+back to the whole suite whenever it cannot prove a narrower set is safe
+(shared primitive, schema/build change, unmapped source file). A changed
+spec file selects just itself. The narrowing only ever applies to step 8;
+every Rust/web check always runs in full.
+
+**Before a commit or release, run one full `scripts/verify.sh`** — the
+map is recorded evidence, not proof, so the merge gate stays the whole
+suite. Regenerate the map (`scripts/e2e-impact-map.sh`) after adding or
+substantially reworking specs, and commit `web/e2e/impact-map.json`.
 
 ## Tests for New Features
 

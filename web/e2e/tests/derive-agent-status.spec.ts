@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from '../harness'
 import { deriveAgentStatus } from '../../src/components/chat/events'
 import type { Event } from '../../src/types/api'
 

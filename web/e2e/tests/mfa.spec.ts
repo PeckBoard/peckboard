@@ -4,7 +4,7 @@
  */
 
 import { createHmac } from 'node:crypto'
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 const ADMIN_USER = 'e2e-user'
 const ADMIN_PASS = 'e2e-password-1234'

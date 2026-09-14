@@ -8,18 +8,26 @@
 #   5. web format:check           — prettier clean
 #   6. web build                  — the bundle rust-embed compiles in
 #   7. cargo build --release      — binary the e2e suite boots
-#   8. web e2e                    — Playwright suite
+#   8. web e2e                    — Playwright suite, sharded
 #
 # Every step runs even if an earlier one fails, so one invocation reports
-# the whole picture; the exit code is non-zero if ANY step failed. Pass
-# --fast to skip the web/release builds + Playwright suite (steps 6-8).
+# the whole picture; the exit code is non-zero if ANY step failed.
+#
+#   --fast       skip the web/release builds + Playwright suite (steps 6-8)
+#   --impacted   run only the specs the current change can affect (step 8),
+#                falling back to the whole suite whenever that cannot be
+#                proven safe. INNER LOOP ONLY — the full suite is the gate.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
 
 FAST=0
-[[ "${1:-}" == "--fast" ]] && FAST=1
+IMPACTED=0
+case "${1:-}" in
+--fast) FAST=1 ;;
+--impacted) IMPACTED=1 ;;
+esac
 
 declare -a NAMES=()
 declare -a RESULTS=()
@@ -58,7 +66,15 @@ if [[ "$FAST" -eq 0 ]]; then
   # release binary must be rebuilt or the suite tests stale code.
   run_step "cargo build --release" cargo build --release
   cd "$ROOT/web"
-  run_step "web e2e" npm run e2e
+  # Both builds just ran; don't let the shard runner redo them.
+  export PECKBOARD_E2E_SKIP_BUILD=1
+  if [[ "$IMPACTED" -eq 1 ]]; then
+    run_step "web e2e (impacted)" "$ROOT/scripts/e2e-impacted.sh"
+  else
+    # Sharded: one server + data dir per shard, still workers:1 inside each,
+    # so every isolation assumption the specs make still holds.
+    run_step "web e2e (4 shards)" "$ROOT/scripts/e2e-shards.sh" 4
+  fi
 else
   echo ""
   echo "(--fast: skipping web/release builds + Playwright e2e)"
