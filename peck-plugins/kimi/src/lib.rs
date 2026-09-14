@@ -1,23 +1,15 @@
-//! Peckboard AI-provider plugin (WASM / Extism).
-//!
-//! Registers a provider on `provider.register`, then drives one turn per
-//! `provider.send` call. Send is a stub: it emits Started, Text("not
-//! implemented"), and Completed. `provider.models` and `provider.interrupt`
-//! skip so core serves the registered catalog and the cooperative stop flag.
-//!
-//! ## Plugin interface
-//!
-//! Core expects four exports (`peckboard/src/plugin/manager.rs`):
-//! - `manifest` — hooks, permissions, settings.
-//! - `init` — called once on load; a no-op here.
-//! - `handle` — called per hook with `{ "hook", "payload" }`; returns a Verdict.
-//! - `shutdown` — teardown; a no-op here.
+//! Peckboard Kimi Code CLI provider plugin (WASM / Extism).
 
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
+mod argv;
+mod event;
 mod host;
 mod manifest;
+mod mcp;
 mod models;
+mod parser;
+mod send;
 
 use serde::Deserialize;
 
@@ -48,7 +40,6 @@ mod entry {
     }
 }
 
-/// The `{ "hook", "payload" }` envelope core passes to `handle`.
 #[derive(Debug, Deserialize)]
 struct HookCall {
     hook: String,
@@ -60,10 +51,7 @@ fn dispatch_hook(hook: &str, payload: serde_json::Value) -> String {
     match hook {
         "provider.register" => handle_register(),
         "provider.send" => handle_send(payload),
-        // Serve the catalog captured at register; a later implementation
-        // can Allow a fresh list here.
         "provider.models" => skip(),
-        // Cooperative stop is the host-side flag; this hook is cleanup only.
         "provider.interrupt" => skip(),
         _ => skip(),
     }
@@ -74,7 +62,22 @@ fn handle_register() -> String {
         "id": models::PROVIDER_ID,
         "display_name": models::DISPLAY_NAME,
         "models": models::seed_models(),
-        "effort_levels": [],
+        "effort_levels": [
+            { "id": "low", "label": "Low" },
+            { "id": "medium", "label": "Medium" },
+            { "id": "high", "label": "High" },
+            { "id": "xhigh", "label": "Extra high" },
+            { "id": "max", "label": "Max" },
+        ],
+        "capabilities": {
+            "supports_thinking": false,
+            "supports_images_in": false,
+            "supports_usage": true,
+            "supports_resume": true,
+            "interrupt_kind": "hard_kill",
+            "supports_mid_stream_injection": false,
+            "answer_transport": "new_turn",
+        },
     });
     match host::call_host(host::HostFn::RegisterProvider, &body) {
         Ok(_) => allow(serde_json::json!({ "ok": true })),
@@ -83,50 +86,10 @@ fn handle_register() -> String {
 }
 
 fn handle_send(payload: serde_json::Value) -> String {
-    let session_id = payload
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if session_id.is_empty() {
-        return cancel("provider.send payload missing session_id");
+    match send::run(&payload) {
+        Ok(()) => allow(serde_json::json!({ "ok": true })),
+        Err(e) => cancel(&e),
     }
-    let model = payload
-        .get("spawn_config")
-        .and_then(|c| c.get("model"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let conversation_id = payload.get("conversation_id").cloned();
-
-    let emit = |event: serde_json::Value| {
-        host::call_host(
-            host::HostFn::EmitProviderEvent,
-            &serde_json::json!({
-                "session_id": session_id,
-                "event": event,
-            }),
-        )
-    };
-
-    if let Err(e) = emit(serde_json::json!({
-        "kind": "started",
-        "model": model,
-        "conversation_id": conversation_id,
-    })) {
-        return cancel(&e);
-    }
-    if let Err(e) = emit(serde_json::json!({
-        "kind": "text",
-        "text": "not implemented",
-    })) {
-        return cancel(&e);
-    }
-    if let Err(e) = emit(serde_json::json!({
-        "kind": "completed",
-        "conversation_id": conversation_id,
-    })) {
-        return cancel(&e);
-    }
-    allow(serde_json::json!({ "ok": true }))
 }
 
 fn allow(value: serde_json::Value) -> String {

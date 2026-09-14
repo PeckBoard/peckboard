@@ -1,6 +1,6 @@
 # Peckboard Cursor Plugin
 
-Drives sessions through the cursor-agent CLI in print mode. WASM Extism plugin that registers the `cursor` AI provider with the built-in seed catalog (`auto`, Composer, Opus/Sonnet thinking, …); send is a stub that emits Started / Text("not implemented") / Completed.
+Drives sessions through the cursor-agent CLI in print mode. WASM Extism plugin that registers the `cursor` AI provider with the built-in seed catalog (`auto`, Composer, Opus/Sonnet thinking, …); Send drives a real turn: CLI spawn (or HTTP for Ollama) via host ABI, stream parse, ProviderEvent emit.
 
 ## Build
 

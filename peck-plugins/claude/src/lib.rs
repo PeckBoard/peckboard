@@ -1,23 +1,16 @@
-//! Peckboard AI-provider plugin (WASM / Extism).
-//!
-//! Registers a provider on `provider.register`, then drives one turn per
-//! `provider.send` call. Send is a stub: it emits Started, Text("not
-//! implemented"), and Completed. `provider.models` and `provider.interrupt`
-//! skip so core serves the registered catalog and the cooperative stop flag.
-//!
-//! ## Plugin interface
-//!
-//! Core expects four exports (`peckboard/src/plugin/manager.rs`):
-//! - `manifest` — hooks, permissions, settings.
-//! - `init` — called once on load; a no-op here.
-//! - `handle` — called per hook with `{ "hook", "payload" }`; returns a Verdict.
-//! - `shutdown` — teardown; a no-op here.
+//! Peckboard Claude CLI provider plugin (WASM / Extism).
 
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
+mod argv;
+mod event;
 mod host;
 mod manifest;
 mod models;
+mod parser;
+mod sandbox;
+mod send;
+mod usage;
 
 use serde::Deserialize;
 
@@ -81,58 +74,27 @@ fn handle_register() -> String {
             { "id": "xhigh", "label": "Extra high" },
             { "id": "max", "label": "Max" },
         ],
+        "supports_mid_stream_injection": true,
+        "capabilities": {
+            "supports_thinking": true,
+            "supports_images_in": true,
+            "supports_usage": true,
+            "supports_resume": true,
+            "interrupt_kind": "soft",
+            "supports_mid_stream_injection": true,
+            "answer_transport": "stdin",
+        },
     });
     match host::call_host(host::HostFn::RegisterProvider, &body) {
         Ok(_) => allow(serde_json::json!({ "ok": true })),
         Err(e) => cancel(&e),
     }
 }
-
 fn handle_send(payload: serde_json::Value) -> String {
-    let session_id = payload
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if session_id.is_empty() {
-        return cancel("provider.send payload missing session_id");
+    match send::run(&payload) {
+        Ok(()) => allow(serde_json::json!({ "ok": true })),
+        Err(e) => cancel(&e),
     }
-    let model = payload
-        .get("spawn_config")
-        .and_then(|c| c.get("model"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let conversation_id = payload.get("conversation_id").cloned();
-
-    let emit = |event: serde_json::Value| {
-        host::call_host(
-            host::HostFn::EmitProviderEvent,
-            &serde_json::json!({
-                "session_id": session_id,
-                "event": event,
-            }),
-        )
-    };
-
-    if let Err(e) = emit(serde_json::json!({
-        "kind": "started",
-        "model": model,
-        "conversation_id": conversation_id,
-    })) {
-        return cancel(&e);
-    }
-    if let Err(e) = emit(serde_json::json!({
-        "kind": "text",
-        "text": "not implemented",
-    })) {
-        return cancel(&e);
-    }
-    if let Err(e) = emit(serde_json::json!({
-        "kind": "completed",
-        "conversation_id": conversation_id,
-    })) {
-        return cancel(&e);
-    }
-    allow(serde_json::json!({ "ok": true }))
 }
 
 fn allow(value: serde_json::Value) -> String {

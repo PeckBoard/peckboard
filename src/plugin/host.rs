@@ -2675,7 +2675,7 @@ pub(crate) fn http_fetch_impl(input: &str) -> String {
 // verbatim, and the body shares the 5 MiB cap.
 
 const HTTP_REQUEST_DEFAULT_TIMEOUT_SECS: u64 = 30;
-const HTTP_REQUEST_MAX_TIMEOUT_SECS: u64 = 120;
+const HTTP_REQUEST_MAX_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Deserialize)]
 struct HttpRequestRequest {
@@ -4189,6 +4189,18 @@ host_fn!(peckboard_provider_kill(user_data: HostState; input: String) -> String 
     Ok(runtime.kill_json(&plugin_id, &input))
 });
 
+host_fn!(peckboard_provider_account_env(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.account_env_json(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_write_file(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.write_file_json(&plugin_id, &input))
+});
+
 /// Shared accessor for the browser-run host functions: permission check +
 /// the app data dir where `service::browser_runs` records runs.
 fn state_permission_and_data_dir(
@@ -4356,6 +4368,20 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_provider_kill,
+        ),
+        Function::new(
+            "peckboard_provider_account_env",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_account_env,
+        ),
+        Function::new(
+            "peckboard_provider_write_file",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_write_file,
         ),
         Function::new(
             "peckboard_browser_runs",

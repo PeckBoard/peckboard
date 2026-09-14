@@ -54,9 +54,10 @@ use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::message::UserMessage;
 use crate::provider::registry::{
-    AnswerTransport, EffortLevel, InterruptKind, ProviderCapabilities,
+    AnswerTransport, EffortLevel, InterruptKind, ProviderCapabilities, split_model_account,
 };
 use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent};
+use crate::provider::turn::compose_system_prompt;
 use crate::ws::broadcaster::Broadcaster;
 
 /// What a plugin hands `peckboard_register_provider`: the provider identity
@@ -440,6 +441,12 @@ impl PluginProviderRuntime {
             args: Vec<String>,
             #[serde(default)]
             env: HashMap<String, String>,
+            /// Keys stripped from the inherited environment before `env` is
+            /// applied. Account-scoped CLI spawns use this to drop a host
+            /// `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` that would otherwise
+            /// outrank the injected account credential.
+            #[serde(default)]
+            env_remove: Vec<String>,
             #[serde(default)]
             cwd: Option<String>,
         }
@@ -477,6 +484,11 @@ impl PluginProviderRuntime {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for k in &req.env_remove {
+            if !k.is_empty() && !k.contains('\0') {
+                cmd.env_remove(k);
+            }
+        }
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
@@ -861,8 +873,96 @@ impl PluginProviderRuntime {
             Err(e) => return error_json(format!("invalid request: {e}")),
         };
         match self.owned_turn(plugin_id, &req.session_id) {
-            Ok(turn) => serde_json::json!({ "path": turn.snapshot.mcp_config_path }).to_string(),
+            Ok(turn) => {
+                let path = turn.snapshot.mcp_config_path.clone();
+                let contents = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+                serde_json::json!({
+                    "path": path,
+                    "contents": contents,
+                    "core_tools": crate::service::mcp_server::tool_names(),
+                    "pre_hatcher_tools": crate::service::mcp_server::pre_hatcher_allowed_tool_names(),
+                })
+                .to_string()
+            }
             Err(e) => error_json(e),
+        }
+    }
+
+    /// `peckboard_provider_account_env {session_id, model?}` — env the CLI
+    /// child must inherit to authenticate as the session's stored account.
+    /// Empty `env` when the model has no `@account` suffix (Default/host
+    /// credentials). Missing account id is a hard error.
+    pub fn account_env_json(&self, plugin_id: &str, input: &str) -> String {
+        #[derive(Deserialize)]
+        struct AccountEnvRequest {
+            session_id: String,
+            #[serde(default)]
+            model: Option<String>,
+        }
+        let req: AccountEnvRequest = match serde_json::from_str(input) {
+            Ok(r) => r,
+            Err(e) => return error_json(format!("invalid account_env request: {e}")),
+        };
+        let turn = match self.owned_turn(plugin_id, &req.session_id) {
+            Ok(t) => t,
+            Err(e) => return error_json(e),
+        };
+        match turn.rt.block_on(account_env_for(
+            &turn.db,
+            plugin_id,
+            &req.session_id,
+            req.model.as_deref(),
+        )) {
+            Ok(v) => v.to_string(),
+            Err(e) => error_json(e),
+        }
+    }
+
+    /// `peckboard_provider_write_file {session_id, path, contents}` — write
+    /// a UTF-8 file under the session folder. `path` is relative; `..` and
+    /// absolute paths are rejected. Used for workspace MCP config and the
+    /// Claude subagent-context file.
+    pub fn write_file_json(&self, plugin_id: &str, input: &str) -> String {
+        #[derive(Deserialize)]
+        struct WriteFileRequest {
+            session_id: String,
+            path: String,
+            contents: String,
+        }
+        let req: WriteFileRequest = match serde_json::from_str(input) {
+            Ok(r) => r,
+            Err(e) => return error_json(format!("invalid write_file request: {e}")),
+        };
+        if req.contents.len() > 1024 * 1024 {
+            return error_json("file too large (max 1 MiB)");
+        }
+        let turn = match self.owned_turn(plugin_id, &req.session_id) {
+            Ok(t) => t,
+            Err(e) => return error_json(e),
+        };
+        let folder = Path::new(&turn.snapshot.folder_path);
+        let rel = Path::new(&req.path);
+        if rel.is_absolute()
+            || req.path.is_empty()
+            || req.path.contains('\0')
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return error_json("path must be a relative file under the session folder");
+        }
+        let dest = folder.join(rel);
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return error_json(format!("create_dir: {e}"));
+            }
+        }
+        match std::fs::write(&dest, req.contents.as_bytes()) {
+            Ok(()) => serde_json::json!({ "ok": true, "path": dest.to_string_lossy() }).to_string(),
+            Err(e) => error_json(format!("write: {e}")),
         }
     }
 }
@@ -884,6 +984,103 @@ fn message_payload(message: &UserMessage) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({ "text": message.text, "attachments": attachments })
+}
+
+/// Resolve CLI env for `plugin_id` + optional `@account` on `model`.
+/// Proof token: caller holds an in-flight turn (see `account_env_json`).
+async fn account_env_for(
+    db: &Db,
+    plugin_id: &str,
+    session_id: &str,
+    model: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let model = match model {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => db
+            .get_session(session_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .and_then(|s| s.model)
+            .unwrap_or_default(),
+    };
+    let (_base, account_id) = split_model_account(&model);
+    let Some(account_id) = account_id else {
+        return Ok(serde_json::json!({ "env": {}, "env_remove": [] }));
+    };
+
+    let mut env = HashMap::<String, String>::new();
+    let mut env_remove: Vec<String> = Vec::new();
+
+    match plugin_id {
+        "claude" => {
+            let account = db
+                .get_claude_account(account_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("claude account not found: {account_id}"))?;
+            env_remove.extend(["ANTHROPIC_API_KEY".into(), "CLAUDE_CODE_OAUTH_TOKEN".into()]);
+            match account.kind.as_str() {
+                "api_key" => {
+                    env.insert("ANTHROPIC_API_KEY".into(), account.credential.clone());
+                }
+                "oauth_token" => {
+                    let token =
+                        crate::accounts::claude_token_refresh::fresh_credential(db, &account)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), token);
+                }
+                other => return Err(format!("unknown claude account kind: {other}")),
+            }
+            if let Some(dir) = &account.config_dir {
+                std::fs::create_dir_all(dir).ok();
+                env.insert("CLAUDE_CONFIG_DIR".into(), dir.clone());
+            }
+        }
+        "grok" => {
+            let account = db
+                .get_grok_account(account_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("grok account not found: {account_id}"))?;
+            if let Some(dir) = &account.config_dir {
+                std::fs::create_dir_all(dir).ok();
+                env.insert("GROK_HOME".into(), dir.clone());
+            }
+            if account.kind == "api_key" {
+                env.insert("XAI_API_KEY".into(), account.credential.clone());
+            }
+        }
+        "kimi" => {
+            let account = db
+                .get_kimi_account(account_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("kimi account not found: {account_id}"))?;
+            if let Some(dir) = &account.config_dir {
+                std::fs::create_dir_all(dir).ok();
+                env.insert("KIMI_CODE_HOME".into(), dir.clone());
+            }
+            if account.kind == "api_key" {
+                env.insert("KIMI_API_KEY".into(), account.credential.clone());
+            }
+        }
+        "codex" => {
+            let account = db
+                .get_codex_account(account_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("codex account not found: {account_id}"))?;
+            if let Some(dir) = &account.config_dir {
+                std::fs::create_dir_all(dir).ok();
+                env.insert("CODEX_HOME".into(), dir.clone());
+            }
+            env_remove.extend(["CODEX_API_KEY".into(), "OPENAI_API_KEY".into()]);
+        }
+        _ => {}
+    }
+
+    Ok(serde_json::json!({ "env": env, "env_remove": env_remove }))
 }
 
 /// [`AgentProvider`] registered on behalf of a WASM plugin. Bridges every
@@ -992,6 +1189,7 @@ impl AgentProvider for PluginProviderAdapter {
             "spawn_config": ctx.config,
             "message": message_payload(&ctx.message),
             "conversation_id": ctx.conversation_id.as_ref().map(|h| h.id()),
+            "system_prompt": compose_system_prompt(&ctx.config),
         });
 
         let manager = self.manager.clone();

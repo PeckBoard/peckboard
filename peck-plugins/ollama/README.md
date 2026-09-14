@@ -1,6 +1,6 @@
 # Peckboard Ollama Plugin
 
-Drives sessions through an Ollama server's /api/chat endpoint. WASM Extism plugin that registers the `ollama` AI provider with the built-in seed catalog (`llama3.1`, `llama3.2`, `qwen2.5-coder`); send is a stub that emits Started / Text("not implemented") / Completed.
+Drives sessions through an Ollama server's /api/chat endpoint. WASM Extism plugin that registers the `ollama` AI provider with the built-in seed catalog (`llama3.1`, `llama3.2`, `qwen2.5-coder`); Send drives a real turn: CLI spawn (or HTTP for Ollama) via host ABI, stream parse, ProviderEvent emit.
 
 ## Build
 

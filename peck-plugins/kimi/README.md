@@ -1,6 +1,6 @@
 # Peckboard Kimi Plugin
 
-Drives sessions through Moonshot AI's Kimi Code CLI in prompt mode. WASM Extism plugin that registers the `kimi` AI provider with the config-default seed model; send is a stub that emits Started / Text("not implemented") / Completed.
+Drives sessions through Moonshot AI's Kimi Code CLI in prompt mode. WASM Extism plugin that registers the `kimi` AI provider with the config-default seed model; Send drives a real turn: CLI spawn (or HTTP for Ollama) via host ABI, stream parse, ProviderEvent emit.
 
 ## Build
 

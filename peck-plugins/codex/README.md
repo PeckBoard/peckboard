@@ -1,6 +1,6 @@
 # Peckboard Codex Plugin
 
-Drives sessions via the OpenAI Codex CLI (`codex exec --json`). Sign in with ChatGPT under Settings → Codex Accounts. WASM Extism plugin that registers the `codex` AI provider with the built-in seed catalog (`gpt-5.6-luna`, `gpt-5.6-terra`, …); send is a stub that emits Started / Text("not implemented") / Completed.
+Drives sessions via the OpenAI Codex CLI (`codex exec --json`). Sign in with ChatGPT under Settings → Codex Accounts. WASM Extism plugin that registers the `codex` AI provider with the built-in seed catalog (`gpt-5.6-luna`, `gpt-5.6-terra`, …); Send drives a real turn: CLI spawn (or HTTP for Ollama) via host ABI, stream parse, ProviderEvent emit.
 
 ## Build
 

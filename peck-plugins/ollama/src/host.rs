@@ -1,6 +1,4 @@
-//! FFI layer: Peckboard core host functions this plugin calls. Same envelope
-//! contract as the other Rust plugins: JSON-string-in / JSON-string-out, an
-//! `{"error": ...}` reply surfaced as `Err(String)`.
+//! FFI layer: Peckboard core host functions this plugin calls.
 
 pub enum HostFn {
     RegisterProvider,
@@ -9,6 +7,13 @@ pub enum HostFn {
     ProviderTakeMessage,
     ProviderGetSession,
     ProviderGetMcpConfig,
+    ProviderAccountEnv,
+    ProviderWriteFile,
+    ProviderSpawn,
+    ProviderReadLine,
+    ProviderWriteStdin,
+    ProviderReadStdin,
+    ProviderKill,
     GetPluginSetting,
     HttpRequest,
     StorePut,
@@ -30,6 +35,13 @@ mod imp {
         fn peckboard_provider_take_message(input: String) -> String;
         fn peckboard_provider_get_session(input: String) -> String;
         fn peckboard_provider_get_mcp_config(input: String) -> String;
+        fn peckboard_provider_account_env(input: String) -> String;
+        fn peckboard_provider_write_file(input: String) -> String;
+        fn peckboard_provider_spawn(input: String) -> String;
+        fn peckboard_provider_read_line(input: String) -> String;
+        fn peckboard_provider_write_stdin(input: String) -> String;
+        fn peckboard_provider_read_stdin(input: String) -> String;
+        fn peckboard_provider_kill(input: String) -> String;
         fn peckboard_get_plugin_setting(input: String) -> String;
         fn peckboard_http_request(input: String) -> String;
         fn peckboard_store_put(input: String) -> String;
@@ -51,6 +63,13 @@ mod imp {
                 HostFn::ProviderTakeMessage => peckboard_provider_take_message(s),
                 HostFn::ProviderGetSession => peckboard_provider_get_session(s),
                 HostFn::ProviderGetMcpConfig => peckboard_provider_get_mcp_config(s),
+                HostFn::ProviderAccountEnv => peckboard_provider_account_env(s),
+                HostFn::ProviderWriteFile => peckboard_provider_write_file(s),
+                HostFn::ProviderSpawn => peckboard_provider_spawn(s),
+                HostFn::ProviderReadLine => peckboard_provider_read_line(s),
+                HostFn::ProviderWriteStdin => peckboard_provider_write_stdin(s),
+                HostFn::ProviderReadStdin => peckboard_provider_read_stdin(s),
+                HostFn::ProviderKill => peckboard_provider_kill(s),
                 HostFn::GetPluginSetting => peckboard_get_plugin_setting(s),
                 HostFn::HttpRequest => peckboard_http_request(s),
                 HostFn::StorePut => peckboard_store_put(s),
