@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 /**
  * A settings mutation the server refuses must never look like it stuck.
@@ -145,7 +145,7 @@ test('a refused plugin approval keeps the modal open; a refused remove keeps the
   await expect(row).toBeVisible()
 })
 
-test('a refused Claude account delete keeps the row and shows the reason', async ({
+test('a refused Claude account delete keeps the row and explains what pins it', async ({
   request,
   page,
   baseURL,
@@ -172,11 +172,23 @@ test('a refused Claude account delete keeps the row and shows the reason', async
   await page.route('**/api/claude-accounts', async (route) => {
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify([account]) })
   })
+  // A 409 from the delete guard carries WHAT still pins the account, not just
+  // a message — the section turns that into a force-delete offer.
   await page.route('**/api/claude-accounts/acct-e2e', async (route) => {
     await route.fulfill({
       status: 409,
       contentType: 'application/json',
-      body: JSON.stringify({ error: 'account is pinned by a running session' }),
+      body: JSON.stringify({
+        error:
+          'account is still referenced; retry with ?force=true to delete anyway ' +
+          '(references are rewritten to the bare model)',
+        sessions: ['sess-pinned'],
+        cards: 0,
+        projects: 0,
+        repeating_tasks: 0,
+        queued_messages: 0,
+        default_model: false,
+      }),
     })
   })
 
@@ -189,11 +201,13 @@ test('a refused Claude account delete keeps the row and shows the reason', async
 
   await row.getByTestId('acct-delete-acct-e2e').click()
   await page.locator('.confirm-dialog').getByRole('button', { name: 'Delete' }).click()
-
-  // The delete was refused: the row is still there and the section says why.
-  await expect(section.locator('.form-error')).toContainText(
-    'account is pinned by a running session',
-  )
+  // The delete was refused: the row is still there and a second dialog says
+  // what pins the account and offers the forced retry.
+  const conflict = page.locator('.confirm-dialog')
+  await expect(conflict).toContainText('Account still in use')
+  await expect(conflict).toContainText('"Work login" is still pinned by 1 session')
+  await expect(conflict.getByRole('button', { name: 'Delete anyway' })).toBeVisible()
+  await page.getByTestId('confirm-dialog-cancel').click()
   await expect(row).toBeVisible()
   await page.screenshot({ path: 'e2e/test-results/claude-account-delete-failed.png' })
 })

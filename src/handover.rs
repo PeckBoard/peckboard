@@ -1322,6 +1322,12 @@ async fn dispatch_deferred_doc_turn(state: &Arc<AppState>, session_id: &str) {
         to = %to_model,
         "Dispatching the handover doc turn deferred while the session was mid-turn"
     );
+    // Mark HERE, not at park time: the marker bounds `extract_doc`'s scan,
+    // and the live turn kept emitting text between the park and this
+    // dispatch. Without it there is no marker at all on the deferred path,
+    // `extract_doc` falls back to the whole tail, and the live turn's own
+    // output is recorded as the handover doc.
+    append_handover_start(state, session_id, &from_model, &to_model).await;
     let result = state
         .session_manager
         .send_message_locked(

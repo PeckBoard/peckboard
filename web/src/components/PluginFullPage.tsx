@@ -188,6 +188,13 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
         <h2 className="plugin-fullpage-title">{title}</h2>
       </div>
       <iframe
+        // Remount per src instead of re-pointing the SAME iframe: changing a
+        // live iframe's `src` pushes an entry onto the JOINT session history,
+        // so the first browser Back after a plugin-to-plugin handoff would
+        // only rewind the frame while the app's URL sat still. A fresh
+        // element's first load adds no entry, so Back lands on the page the
+        // user actually came from.
+        key={src}
         ref={frameRef}
         className="plugin-fullpage-frame"
         data-testid="plugin-fullpage-frame"

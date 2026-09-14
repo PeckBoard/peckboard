@@ -11,7 +11,7 @@ use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::auth::token::{create_token, generate_jwt_secret, hash_token};
 use peckboard::config::Config;
 use peckboard::db::Db;
-use peckboard::db::models::{NewAuthSession, NewUser};
+use peckboard::db::models::{NewAuthSession, NewFolder, NewSession, NewUser};
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
@@ -71,6 +71,36 @@ async fn build_state() -> (Arc<AppState>, AskpassRegistry) {
     });
     std::mem::forget(tmp);
     (state, askpass)
+}
+/// `POST /api/sessions/{id}/askpass-answer` sits behind
+/// `require_session_access`, which answers 404 for a session id it cannot
+/// find — so the round-trip only exercises the askpass code at all if
+/// `sess-1` really exists and `owner` may reach it.
+async fn seed_session(state: &AppState, owner: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    state
+        .db
+        .create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(NewSession {
+            id: "sess-1".into(),
+            name: "sess-1".into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now,
+            user_id: Some(owner.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
 }
 
 async fn mint_user(state: &AppState, user_id: &str) -> String {
@@ -156,6 +186,7 @@ async fn body_string(resp: axum::response::Response) -> String {
 async fn password_round_trip() {
     let (state, askpass) = build_state().await;
     let jwt = mint_user(&state, "u1").await;
+    seed_session(&state, "u1").await;
     let token = askpass.issue_token("sess-1").await;
 
     // Subscribe BEFORE the helper posts — a broadcast receiver only sees
@@ -219,6 +250,7 @@ async fn password_round_trip() {
 async fn cancel_rejects_the_helper() {
     let (state, askpass) = build_state().await;
     let jwt = mint_user(&state, "u1").await;
+    seed_session(&state, "u1").await;
     let token = askpass.issue_token("sess-1").await;
 
     let mut rx = state.broadcaster.subscribe_all();
@@ -252,6 +284,7 @@ async fn cancel_rejects_the_helper() {
 async fn bad_tokens_and_auth_are_rejected() {
     let (state, _askpass) = build_state().await;
     let jwt = mint_user(&state, "u1").await;
+    seed_session(&state, "u1").await;
 
     // Unknown helper token → 401.
     let resp = app(&state)

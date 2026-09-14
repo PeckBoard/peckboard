@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -239,7 +239,8 @@ test.describe('history tab compare picker', () => {
       .locator('.review-version-row__main')
       .click()
 
-    await expect(diffTitle).toContainText('v1 → v2')
-    await expect(diffTitle).toHaveText('v1 → v2')
+    // Anchored, not exact: the heading also carries the diff's `+N−M` stats
+    // span, but the pair must START at v1 → v2 (i.e. v2 → v3 is gone).
+    await expect(diffTitle).toHaveText(/^v1 → v2/)
   })
 })

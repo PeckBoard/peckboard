@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test'
+import { test, expect, type APIRequestContext } from '../harness'
 
 /**
  * One plugin page handing the user off to another plugin's page.
@@ -100,9 +100,14 @@ test('a plugin page opens another plugin page in-app, carrying its query', async
   await expect(target.getByTestId('target-query')).toContainText('from=source')
 
   // Back returns to the asking page, forward restores the deep link.
-  await page.goBack()
+  // Driven through `history` rather than `page.goBack()`: the handoff is an
+  // in-app (pushState) navigation, so no document load ever fires and
+  // `page.goBack()` would wait for one until the test times out.
+  await page.evaluate(() => history.back())
   await expect(page).toHaveURL(/\/plugin-page\/source\/source$/)
-  await page.goForward()
+  await expect(source.getByTestId('ask')).toBeVisible()
+  await page.evaluate(() => history.forward())
   await expect(page).toHaveURL(/\/plugin-page\/target\/target\?install=pip&from=source$/)
+  await expect(target.getByTestId('target-query')).toContainText('install=pip')
   await expect(target.getByTestId('target-query')).toContainText('install=pip')
 })

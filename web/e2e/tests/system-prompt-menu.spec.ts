@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -81,12 +81,13 @@ test('System prompt control lives in the kebab menu', async ({ request, page, ba
   await expect(row).toBeVisible()
   await page.screenshot({ path: 'test-results/system-prompt-menu.png' })
 
-  // Open its submenu (opens on click) — "(none)" plus the two seeded
-  // prompts must appear. `(none)` is matched exactly so it doesn't also
-  // hit the row's "(none)" hint.
+  // Open its submenu (opens on click). It is the SEARCHABLE flyout, so the
+  // rows are listbox `option`s, not `menuitem`s — same primitive the model
+  // picker uses. "(none)" plus the two seeded prompts must appear; the
+  // exact match keeps it off the row's own "(none)" hint.
   await row.click()
-  await expect(page.getByRole('menuitem', { name: '(none)', exact: true })).toBeVisible()
-  await expect(page.getByRole('menuitem', { name: 'research' })).toBeVisible()
-  await expect(page.getByRole('menuitem', { name: 'debug' })).toBeVisible()
+  await expect(page.getByRole('option', { name: '(none)', exact: true })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'research' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'debug' })).toBeVisible()
   await page.screenshot({ path: 'test-results/system-prompt-submenu.png' })
 })

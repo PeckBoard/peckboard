@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Route } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Route } from '../harness'
 
 /**
  * E2E for the API plugin's user-menu key-management flow.
@@ -211,7 +211,12 @@ test('API Keys panel: user-menu link → create, use, and revoke a key', async (
   await expect(page.getByTestId('plugin-panel-modal')).toBeVisible()
   const frameEl = page.getByTestId('plugin-panel-frame')
   await expect(frameEl).toHaveAttribute('src', PANEL_PATH)
-  await expect(frameEl).toHaveAttribute('sandbox', 'allow-scripts allow-forms allow-popups')
+  // `allow-downloads` rides along since "Allow downloads from sandboxed
+  // plugin iframes" — a plugin panel may hand the user a file.
+  await expect(frameEl).toHaveAttribute(
+    'sandbox',
+    'allow-scripts allow-forms allow-popups allow-downloads',
+  )
   const panel = page.frameLocator('[data-testid="plugin-panel-frame"]')
 
   // Create a read-only key; its secret is shown exactly once.

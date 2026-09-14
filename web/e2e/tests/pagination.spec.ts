@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -227,8 +227,19 @@ test('chat view shows "Load older messages" button and prepends a page on click'
   await expect(page.getByText('msg-0')).toHaveCount(0)
 
   await loadOlder.click()
-
-  // After the click, the older page splices in at the top — one of
-  // the original `user` events (msg-0/1/2) must now be in the DOM.
-  await expect(page.getByText('msg-0')).toBeVisible({ timeout: 5_000 })
+  // After the click, the older page splices in at the top. The feed is
+  // virtualized, so the prepended rows only MOUNT once they're near the
+  // viewport — scroll the scroller to the top to bring them in (same probe
+  // `feed-virtualization.spec.ts` uses).
+  await expect
+    .poll(
+      async () => {
+        await page.locator('.chat-messages').evaluate((el) => {
+          el.scrollTop = 0
+        })
+        return page.getByText('msg-0').isVisible()
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true)
 })

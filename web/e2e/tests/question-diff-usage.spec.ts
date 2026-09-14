@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -102,7 +102,12 @@ test('mock:ask question card answers by requestId and the provider sees the answ
     'Question answered',
     { timeout: 10_000 },
   )
-  await expect(page.getByText(/User answered: .*yes go ahead/)).toBeVisible({ timeout: 10_000 })
+  // Scoped to the transcript bubble: while the agent is still mid-turn the
+  // same text is ALSO on the queued-message chip, and an unscoped match
+  // trips strict mode the moment both are on screen.
+  await expect(
+    page.locator('.chat-bubble-user').filter({ hasText: /User answered: .*yes go ahead/ }),
+  ).toBeVisible({ timeout: 10_000 })
 
   // The persisted resolution references the original ControlRequest id.
   const eventsRes = await request.get(`/api/sessions/${sessionId}/events?after_seq=0`, {
@@ -182,9 +187,14 @@ test('usage chip: cost, tokens, context delta, and duration; markdown user bubbl
     timeout: 10_000,
   })
 
-  // Feed a11y: the scroller is a live log region.
-  const feed = page.locator('.chat-messages[role="log"]')
+  // Feed a11y: announcements come from a dedicated, always-mounted region —
+  // NOT from `.chat-messages`, which is the virtualized scroller (rows
+  // mount/unmount on scroll, so a live region there re-announces old
+  // messages and misses text outside the rendered window).
+  const feed = page.getByTestId('chat-live-region')
   await expect(feed).toHaveAttribute('aria-live', 'polite')
+  await expect(page.locator('.chat-messages')).toHaveCount(1)
+  await expect(page.locator('.chat-messages[role="log"]')).toHaveCount(0)
 
   // Markdown user bubble.
   const send1 = await request.post(`/api/sessions/${sessionId}/message`, {

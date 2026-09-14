@@ -145,10 +145,19 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // tabs the server says are gone. Reshuffling the strip out
       // from under the user is jarring.
       set((s) => {
-        if (!s.loaded) {
-          return { tabs: sortByMru(incoming), loaded: true }
-        }
         const incomingKey = (t: Tab) => `${t.itemType}:${t.itemId}`
+        if (!s.loaded) {
+          // Server order verbatim (MRU) — but never at the cost of a tab
+          // the user just opened. A slow first fetch can be snapshotted
+          // BEFORE that tab's POST lands; replacing the strip wholesale
+          // then drops it, and the next poll re-adds it at the END, so
+          // the item the user is looking at sits behind an older tab.
+          // Keep those still-unacknowledged opens where `openTab` put
+          // them: in front.
+          const known = new Set(incoming.map(incomingKey))
+          const pending = s.tabs.filter((t) => !known.has(incomingKey(t)))
+          return { tabs: [...pending, ...sortByMru(incoming)], loaded: true }
+        }
         const incomingSet = new Set(incoming.map(incomingKey))
         const incomingMap = new Map(incoming.map((t) => [incomingKey(t), t]))
         const kept = s.tabs

@@ -214,19 +214,19 @@ async fn list_plugins_returns_builtin_catalog() {
         .iter()
         .map(|f| f["key"].as_str().unwrap())
         .collect();
-    for required in [
-        "cli_path",
-        "discover_models",
-        "api_key",
-        "additional_models",
-    ] {
+    // No `api_key` here: since "Codex CLI login uses ChatGPT sign-in, not
+    // API keys" the credential lives on a stored Codex account, not in a
+    // plugin setting.
+    for required in ["cli_path", "discover_models", "additional_models"] {
         assert!(
             codex_keys.contains(&required),
             "codex missing setting {required}: {codex_keys:?}",
         );
     }
-    let api_key = codex_fields.iter().find(|f| f["key"] == "api_key").unwrap();
-    assert_eq!(api_key["secret"], true);
+    assert!(
+        !codex_keys.contains(&"api_key"),
+        "codex must not re-offer an API-key setting: {codex_keys:?}",
+    );
 
     // Each permission entry must carry a human label + description for
     // the UI; an empty string would mean the UI renders a blank row.

@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -171,9 +171,12 @@ test('project page aggregates worker todos and updates live', async ({
   await expect(page.getByTestId('todo-panel-count')).toHaveText('2 active')
 
   // Per-card progress badge on the kanban card (still tracks done/total).
-  // The kanban card is collapsed by default — tap its header to reveal the
-  // body where the badge lives.
-  await page.locator('.kanban-card-title', { hasText: 'Ship the parser' }).click()
+  // Per-card progress badge on the kanban card (still tracks done/total).
+  // The card is collapsed by default and the title button now OPENS the card,
+  // so the body comes from the expand toggle — same affordance
+  // `kanban-card-markdown.spec.ts` uses.
+  const kanbanCard = page.locator('.kanban-card', { hasText: 'Ship the parser' })
+  await kanbanCard.getByTestId('card-expand-toggle').click()
   await expect(page.getByTestId('card-todo-badge')).toHaveText('1/3')
 
   // Grouped by card — one section per card with active work, titled with the
