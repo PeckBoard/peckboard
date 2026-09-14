@@ -11,8 +11,8 @@
 //! `POST /api/kimi-accounts/{id}/login/start`, which returns a URL to open.
 //! The account reads as authenticated once `kimi login` writes its OAuth
 //! tokens into the account home's `config.toml` (see
-//! [`crate::provider::kimi::login`]). An `api_key` account instead gets a
-//! PeckBoard-written `config.toml` (providers + model aliases) the moment
+//! tokens into the account home's `config.toml` (see
+//! [`crate::accounts::kimi_login`]). An `api_key` account instead gets a
 //! its key is set.
 use std::sync::Arc;
 
@@ -26,11 +26,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::kimi_login::{self as login, KIMI_LOGIN};
 use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::db::models::{KimiAccount, KimiAccountChanges, NewKimiAccount};
-use crate::plugin::builtins::kimi::KimiPlugin;
 use crate::plugin::settings::PluginSettingsStore;
-use crate::provider::kimi::login::{self, KIMI_LOGIN};
 use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
 
@@ -201,8 +200,12 @@ fn is_authenticated(acct: &KimiAccount) -> bool {
 /// through the installer-location fallback so a service PATH that predates
 /// the CLI install still works.
 async fn login_cli_path(state: &AppState) -> String {
-    let store =
-        PluginSettingsStore::new("kimi".to_string(), KimiPlugin::schema(), state.db.clone());
+    let schema = state
+        .plugins
+        .settings_schema_for("kimi")
+        .await
+        .unwrap_or_else(|| crate::plugin::settings::SettingsSchema::new(vec![]));
+    let store = PluginSettingsStore::new("kimi".to_string(), schema, state.db.clone());
     let configured = match store.load().await {
         Ok(settings) => settings
             .get("cli_path")
@@ -216,7 +219,15 @@ async fn login_cli_path(state: &AppState) -> String {
             "kimi".to_string()
         }
     };
-    crate::provider::kimi::resolve_cli_path(&configured)
+    crate::provider::turn::resolve_cli_path(
+        &configured,
+        &[
+            "~/.local/bin",
+            "~/.npm-global/bin",
+            "~/.bun/bin",
+            "/usr/local/bin",
+        ],
+    )
 }
 
 /// Thresholds must be ordered fractions in `(0, 1]`. Defaults (0.75 / 0.90).

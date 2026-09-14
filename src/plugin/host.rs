@@ -4159,6 +4159,36 @@ host_fn!(peckboard_provider_get_mcp_config(user_data: HostState; input: String) 
     Ok(runtime.get_mcp_config_json(&plugin_id, &input))
 });
 
+host_fn!(peckboard_provider_spawn(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.spawn_json(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_read_line(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.read_line_json(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_write_stdin(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.write_stdin_json(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_read_stdin(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.take_stdin_json(&plugin_id, &input))
+});
+
+host_fn!(peckboard_provider_kill(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.kill_json(&plugin_id, &input))
+});
+
 /// Shared accessor for the browser-run host functions: permission check +
 /// the app data dir where `service::browser_runs` records runs.
 fn state_permission_and_data_dir(
@@ -4291,6 +4321,41 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_provider_get_mcp_config,
+        ),
+        Function::new(
+            "peckboard_provider_spawn",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_spawn,
+        ),
+        Function::new(
+            "peckboard_provider_read_line",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_read_line,
+        ),
+        Function::new(
+            "peckboard_provider_write_stdin",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_write_stdin,
+        ),
+        Function::new(
+            "peckboard_provider_read_stdin",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_read_stdin,
+        ),
+        Function::new(
+            "peckboard_provider_kill",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_kill,
         ),
         Function::new(
             "peckboard_browser_runs",
@@ -7205,7 +7270,7 @@ mod tests {
         let registry = Arc::new(ProviderRegistry::new());
         registry
             .register(
-                Arc::new(crate::provider::mock::MockProvider::new()),
+                Arc::new(crate::provider::test_double::NoopProvider::new()),
                 ProviderInfo {
                     id: "claude".into(),
                     display_name: "Claude".into(),

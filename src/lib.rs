@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod auth;
 pub mod card_policy;
 pub mod config;

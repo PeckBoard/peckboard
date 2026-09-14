@@ -11,7 +11,7 @@ use peckboard::config::Config;
 use peckboard::db::Db;
 use peckboard::db::models::{NewAuthSession, NewUser};
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
-use peckboard::plugin::builtins::register_all as register_builtin_plugins;
+
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::registry::ProviderRegistry;
@@ -41,7 +41,7 @@ async fn build_state_with_dir(dir: &std::path::Path, role: &str) -> (Arc<AppStat
     let jwt_secret = generate_jwt_secret();
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
-    register_builtin_plugins(&builtin_plugins, provider_registry.clone(), db.clone()).await;
+
     let session_manager = SessionManager::new(provider_registry.clone());
     let push_service = PushService::new(&config.data_dir);
 

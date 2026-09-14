@@ -10,10 +10,14 @@ when changing this repo.
   Built assets in `web/dist/` are embedded into the release binary at
   compile time via `rust-embed`.
 - **Agents**: pluggable via the `AgentProvider` trait in
-  `src/provider/agent.rs`. Built-ins are `ClaudeProvider`
-  (`src/provider/claude/`) and `MockProvider` (`src/provider/mock/`).
-  Sessions pick a backend through the `provider:model` prefix on the
-  model id — e.g. `claude:claude-opus-4-7`, `mock:happy-path`.
+- **Agents**: pluggable via the `AgentProvider` trait in
+  `src/provider/agent.rs`. Product backends are first-party WASM plugins
+  (`peck-plugins/{claude,grok,cursor,kimi,codex,ollama,mock}`), extracted
+  from `peck-plugins-wasm/` and auto-approved at boot. There is no
+  compiled-in `AgentProvider`. Sessions pick a backend through the
+  `provider:model` prefix on the model id — e.g. `claude:claude-opus-4-7`,
+  `mock:happy-path`. Tests that only need a catalog entry may register
+  `src/provider/test_double.rs` (`NoopProvider`); never at boot.
 
 ## Commands
 
@@ -404,10 +408,11 @@ and is required to be idempotent.
   strings default to `claude:` for backward compat with stored
   sessions/cards.
 - Use the shared `crate::provider::agent::emit_event` helper for any
-  new provider — it persists the event, updates `last_activity`, and
-  broadcasts to subscribers in one place.
-- New providers go in `src/provider/<name>/` and register themselves
-  via a `register_<name>_provider(&registry)` function called from
+- Use the shared `crate::provider::agent::emit_event` helper from the
+  host when a plugin-emitted event is persisted.
+- New providers are WASM plugins under `peck-plugins/<id>/`. They register
+  through the `provider.register` hook; do not add a compiled-in
+  `AgentProvider` to `src/provider/` or call it from `main.rs`/`server.rs`.
   `main.rs`.
 - **Markdown headings use Title Case** (AP-leaning). Capitalize
   principal words; always capitalize the first and last word. Keep

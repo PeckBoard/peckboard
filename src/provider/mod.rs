@@ -1,20 +1,16 @@
 pub mod agent;
 pub mod auth_recovery;
-pub mod claude;
-pub mod codex;
-pub mod cursor;
-pub mod grok;
-pub mod kimi;
-pub mod login_stash;
+pub mod login_stash {
+    pub use crate::accounts::login_stash::*;
+}
 pub mod manager;
 pub mod message;
-pub mod mock;
-pub mod ollama;
 pub mod plugin_provider;
 pub mod registry;
 pub mod resume;
 pub mod resume_recovery;
 pub mod stream;
+pub mod test_double;
 pub mod turn;
 
 /// Shared "working style" rules appended to (or, for full-replace providers,

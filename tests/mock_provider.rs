@@ -1,6 +1,6 @@
 //! End-to-end style test that exercises the agent-provider abstraction
 //! through the real dispatcher and the real event-log pipeline, using the
-//! mock provider as the agent backend.
+//! mock WASM plugin as the agent backend.
 //!
 //! Goal: prove that a route or worker calling
 //! `SessionManager::send_message(..., model = "mock:echo")` results in the
@@ -13,21 +13,24 @@ use std::time::Duration;
 
 use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewSession};
-use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::message::UserMessage;
-use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::provider::stream::SpawnConfig;
 use peckboard::ws::broadcaster::Broadcaster;
 
-async fn build_dispatcher() -> (SessionManager, Db, Arc<Broadcaster>) {
-    let registry = Arc::new(ProviderRegistry::new());
-    register_claude_provider(&registry).await;
-    register_mock_provider(&registry).await;
-    let manager = SessionManager::new(registry);
+mod common;
 
+async fn build_dispatcher() -> (SessionManager, Db, Arc<Broadcaster>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
     let db = Db::in_memory().unwrap();
+    let registry = Arc::new(ProviderRegistry::new());
+    let plugins = common::load_first_party_providers(dir.path(), db.clone(), &registry).await;
+    assert!(
+        registry.get_info("mock").await.is_some(),
+        "mock WASM plugin must register"
+    );
+    let manager = SessionManager::new(registry).with_plugins(plugins);
     let broadcaster = Broadcaster::new();
     let ts = chrono::Utc::now().to_rfc3339();
 
@@ -57,19 +60,12 @@ async fn build_dispatcher() -> (SessionManager, Db, Arc<Broadcaster>) {
     .await
     .unwrap();
 
-    (manager, db, broadcaster)
+    (manager, db, broadcaster, dir)
 }
 
-#[tokio::test]
-async fn mock_echo_flows_through_dispatcher() {
-    let (manager, db, broadcaster) = build_dispatcher().await;
-    let mut completion_rx = manager
-        .take_completion_rx()
-        .await
-        .expect("completion rx available");
-
-    let config = SpawnConfig {
-        model: "mock:echo".into(),
+fn spawn_cfg(model: &str) -> SpawnConfig {
+    SpawnConfig {
+        model: model.into(),
         effort: None,
         working_dir: String::new(),
         mcp_config_path: None,
@@ -83,7 +79,16 @@ async fn mock_echo_flows_through_dispatcher() {
         extra_disallowed_tools: Vec::new(),
         is_worker: false,
         is_pre_hatcher: false,
-    };
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mock_echo_flows_through_dispatcher() {
+    let (manager, db, broadcaster, _dir) = build_dispatcher().await;
+    let mut completion_rx = manager
+        .take_completion_rx()
+        .await
+        .expect("completion rx available");
 
     manager
         .send_or_queue(
@@ -91,7 +96,7 @@ async fn mock_echo_flows_through_dispatcher() {
             UserMessage::from_text("hello mock"),
             &db,
             &broadcaster,
-            config,
+            spawn_cfg("mock:echo"),
             peckboard::provider::manager::MidTurnPolicy::Queue,
             true,
         )
@@ -139,30 +144,13 @@ async fn mock_echo_flows_through_dispatcher() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn mock_todo_emits_normalized_todo_event() {
-    let (manager, db, broadcaster) = build_dispatcher().await;
+    let (manager, db, broadcaster, _dir) = build_dispatcher().await;
     let mut completion_rx = manager
         .take_completion_rx()
         .await
         .expect("completion rx available");
-
-    let config = SpawnConfig {
-        model: "mock:todo".into(),
-        effort: None,
-        working_dir: String::new(),
-        mcp_config_path: None,
-        env: Default::default(),
-        permission_mode: None,
-        timeout_ms: None,
-        metadata: serde_json::Value::Null,
-        system_prompt_suffix: None,
-        system_prompt_override: None,
-        extra_allowed_tools: Vec::new(),
-        extra_disallowed_tools: Vec::new(),
-        is_worker: false,
-        is_pre_hatcher: false,
-    };
 
     manager
         .send_or_queue(
@@ -170,7 +158,7 @@ async fn mock_todo_emits_normalized_todo_event() {
             UserMessage::from_text("track some work"),
             &db,
             &broadcaster,
-            config,
+            spawn_cfg("mock:todo"),
             peckboard::provider::manager::MidTurnPolicy::Queue,
             true,
         )

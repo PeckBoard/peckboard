@@ -6,12 +6,9 @@
 //! these helpers directly; the frontend fetches the serialized [`CostTable`]
 //! from `GET /api/usage/costs` and prices client-side trends with the same
 //! numbers — so Rust and TS never hardcode rates independently.
-//!
-//! When the Claude registry (`crate::provider::claude::discover_models`), the
-//! Grok seed (`crate::provider::grok::default_models`), or the Codex seed
-//! (`crate::provider::codex::default_models`) gains or renames a model, update
-//! [`known_rates_for`] here. The `every_registry_model_is_priced` test fails if
-//! a registry model is left without an explicit tier.
+//! When a model id is added to [`known_rates_for`], also add it to
+//! [`cost_table`]. The `every_known_model_is_priced` test fails if a known
+//! model is left without an explicit tier.
 
 use std::collections::BTreeMap;
 
@@ -193,22 +190,31 @@ pub struct CostTable {
 }
 
 /// Build the rate table from the model registry so every advertised model
-/// carries a published rate. The frontend caches this and prices its own
-/// trend lines with it, matching the backend's `est_cost` exactly.
 pub fn cost_table() -> CostTable {
     let mut rates = BTreeMap::new();
-    for m in crate::provider::claude::discover_models() {
-        rates.insert(m.id.clone(), rates_for(Some(&m.id)));
-    }
-    for m in crate::provider::grok::default_models() {
-        rates.insert(m.id.clone(), rates_for(Some(&m.id)));
-    }
-    for m in crate::provider::codex::default_models() {
-        rates.insert(m.id.clone(), rates_for(Some(&m.id)));
+    for id in [
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-fable-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "grok-4.6",
+        "grok-4.5",
+        "grok-build",
+        "grok-build-0.1",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+    ] {
+        rates.insert(id.to_string(), rates_for(Some(id)));
     }
     CostTable { rates }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,23 +272,13 @@ mod tests {
         );
         approx(token_cost(None, TokenKind::Output, 1_000_000), 75.0);
     }
-
     #[test]
-    fn every_registry_model_is_priced() {
+    fn every_known_model_is_priced() {
         let table = cost_table();
-        for model in crate::provider::claude::discover_models()
-            .into_iter()
-            .chain(crate::provider::grok::default_models())
-            .chain(crate::provider::codex::default_models())
-        {
-            let rates = table
-                .rates
-                .get(&model.id)
-                .unwrap_or_else(|| panic!("no rate for registry model {}", model.id));
+        for (id, rates) in &table.rates {
             assert!(
                 rates.input_per_mtok > 0.0 && rates.output_per_mtok > 0.0,
-                "registry model {} priced at zero",
-                model.id
+                "model {id} priced at zero",
             );
         }
         assert_eq!(table.rates["grok-4.5"].output_per_mtok, 6.0);

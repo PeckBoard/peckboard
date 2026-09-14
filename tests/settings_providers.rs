@@ -18,9 +18,9 @@ use peckboard::db::models::{NewAuthSession, NewUser};
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
-use peckboard::provider::mock::MockProvider;
 use peckboard::provider::registry::{ProviderInfo, ProviderRegistry};
 use peckboard::provider::stream::ModelInfo;
+use peckboard::provider::test_double::NoopProvider;
 use peckboard::routes::misc::router as misc_router;
 use peckboard::routes::settings::router as settings_router;
 use peckboard::service::mcp_server::McpTokenRegistry;
@@ -48,7 +48,7 @@ async fn build_state() -> (Arc<AppState>, String) {
 
     provider_registry
         .register(
-            Arc::new(MockProvider::new()),
+            Arc::new(NoopProvider::new()),
             ProviderInfo {
                 id: "mock".into(),
                 display_name: "Mock".into(),

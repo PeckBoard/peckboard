@@ -61,6 +61,17 @@ const MAX_PLUGIN_CONCURRENCY: u32 = 4;
 /// `--provider-send-timeout-secs` / `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`
 /// (see [`PluginManager::with_provider_send_timeout`]).
 const DEFAULT_PROVIDER_SEND_TIMEOUT: Duration = Duration::from_secs(300);
+/// First-party provider plugins shipped in the binary. Extracted into
+/// `<dataDir>/plugins/` on every boot and auto-approved so a fresh install
+/// has models without the operator installing from the registry. There is
+/// no compiled-in `AgentProvider` — these wasm files ARE the providers.
+pub const FIRST_PARTY_PROVIDER_IDS: &[&str] = &[
+    "claude", "grok", "cursor", "kimi", "codex", "ollama", "mock",
+];
+
+#[derive(rust_embed::Embed)]
+#[folder = "peck-plugins-wasm/"]
+struct FirstPartyWasm;
 
 /// A provider plugin's registration staging slot: written by its
 /// `peckboard_register_provider` host function, drained by
@@ -148,7 +159,7 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "project_files_read", // peckboard_list_project_files / read_file / read_file_base64
     "project_files_write", // peckboard_write_file
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
-    "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config — register an AI provider and drive its turns
+    "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config / _provider_spawn / _read_line / _write_stdin / _kill — register an AI provider and drive its turns (HTTP or CLI)
     "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file — connect to remote SSH hosts, run commands, transfer files
     "ssh_keys", // peckboard_ssh_key_list, and Auth::KeyRef in peckboard_ssh_* — list vault-key METADATA and use a vault key by id; never exposes private key material, ciphertext, nonce, or passphrase
     "session_dispatch", // peckboard_dispatch_capture / resume_session
@@ -973,14 +984,8 @@ impl PluginManager {
 
     /// Scan the plugins directory and load all .wasm files.
     pub async fn load_all(&self) -> anyhow::Result<()> {
-        if !self.plugins_dir.exists() {
-            std::fs::create_dir_all(&self.plugins_dir)?;
-            info!(
-                "Created plugins directory at {}",
-                self.plugins_dir.display()
-            );
-            return Ok(());
-        }
+        std::fs::create_dir_all(&self.plugins_dir)?;
+        self.extract_first_party_plugins()?;
 
         let entries = std::fs::read_dir(&self.plugins_dir)?;
         let mut plugins = self.plugins.lock().await;
@@ -1006,7 +1011,38 @@ impl PluginManager {
         }
 
         info!("Loaded {} plugin(s)", plugins.len());
+        drop(plugins);
+        self.approve_first_party().await;
         Ok(())
+    }
+
+    /// Write the first-party provider `.wasm` files into the plugins dir,
+    /// overwriting whatever was there so a binary upgrade refreshes them.
+    fn extract_first_party_plugins(&self) -> anyhow::Result<()> {
+        for name in FirstPartyWasm::iter() {
+            let Some(file) = FirstPartyWasm::get(name.as_ref()) else {
+                continue;
+            };
+            if !name.ends_with(".wasm") {
+                continue;
+            }
+            let dest = self.plugins_dir.join(name.as_ref());
+            std::fs::write(&dest, file.data.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// Auto-approve first-party provider plugins so they register models
+    /// without an operator click. Same grant they had as compiled-in
+    /// builtins.
+    async fn approve_first_party(&self) {
+        for id in FIRST_PARTY_PROVIDER_IDS {
+            match self.decide(id, true).await {
+                Ok(Some(_)) => info!("First-party provider plugin '{id}' approved"),
+                Ok(None) => warn!("First-party provider plugin '{id}' was not loaded"),
+                Err(e) => warn!("First-party provider plugin '{id}' approve failed: {e}"),
+            }
+        }
     }
 
     /// Load a single plugin from a .wasm file.

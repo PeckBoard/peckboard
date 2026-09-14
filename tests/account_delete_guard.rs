@@ -16,8 +16,8 @@ use peckboard::db::models::{NewAuthSession, NewClaudeAccount, NewFolder, NewSess
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
-use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
+use peckboard::provider::test_double::register_mock_provider;
 use peckboard::routes::claude_accounts::router as claude_accounts_router;
 use peckboard::routes::settings::router as settings_router;
 use peckboard::service::mcp_server::McpTokenRegistry;

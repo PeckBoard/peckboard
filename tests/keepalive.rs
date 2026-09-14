@@ -12,9 +12,9 @@ use peckboard::db::Db;
 use peckboard::db::models::NewKimiAccount;
 use peckboard::keepalive;
 use peckboard::provider::manager::SessionManager;
-use peckboard::provider::mock::MockProvider;
 use peckboard::provider::registry::{ProviderInfo, ProviderRegistry};
 use peckboard::provider::stream::ModelInfo;
+use peckboard::provider::test_double::NoopProvider;
 use peckboard::ws::broadcaster::Broadcaster;
 
 #[tokio::test]
@@ -25,7 +25,7 @@ async fn keep_alive_pings_then_cleans_up_after_itself() {
     // "unknown scenario" path, which still emits Started → Text → Completed.
     registry
         .register(
-            Arc::new(MockProvider::new()),
+            Arc::new(NoopProvider::new()),
             ProviderInfo {
                 id: "cursor".into(),
                 display_name: "Cursor (mock)".into(),
@@ -88,7 +88,7 @@ async fn keep_alive_is_noop_when_no_auth_providers_registered() {
     // Only the mock provider under its own id — none of claude/grok/cursor.
     registry
         .register(
-            Arc::new(MockProvider::new()),
+            Arc::new(NoopProvider::new()),
             ProviderInfo {
                 id: "mock".into(),
                 display_name: "Mock".into(),
@@ -121,7 +121,7 @@ async fn keep_alive_pings_kimi_default_and_each_stored_account() {
     // Mock registered under the `kimi` id so the kimi targets dispatch to it.
     registry
         .register(
-            Arc::new(MockProvider::new()),
+            Arc::new(NoopProvider::new()),
             ProviderInfo {
                 id: "kimi".into(),
                 display_name: "Kimi (mock)".into(),

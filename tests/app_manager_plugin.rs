@@ -421,8 +421,8 @@ async fn app_manager_session_install_flow() {
 
     use peckboard::plugin::hooks::PluginHttpOutcome;
     use peckboard::plugin::host::LiveHost;
-    use peckboard::provider::mock::register_mock_provider;
     use peckboard::provider::registry::ProviderRegistry;
+    use peckboard::provider::test_double::register_mock_provider;
 
     let Some(wasm) = plugin_wasm() else {
         eprintln!(

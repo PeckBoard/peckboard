@@ -8,8 +8,8 @@
 use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewRepeatingTask, NewSession};
 use peckboard::provider::manager::SessionManager;
-use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
+use peckboard::provider::test_double::register_mock_provider;
 use peckboard::repeating::{
     RepeatingTaskManager, RunAuditor, RunContext, StartOutcome, initial_next_run_at,
 };

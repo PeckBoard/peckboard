@@ -470,7 +470,7 @@ pub fn split_model_account(model_id: &str) -> (&str, Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::mock::MockProvider;
+    use crate::provider::test_double::NoopProvider;
 
     #[tokio::test]
     async fn test_register_and_list() {
@@ -478,7 +478,7 @@ mod tests {
 
         registry
             .register(
-                Arc::new(MockProvider::new()),
+                Arc::new(NoopProvider::new()),
                 ProviderInfo {
                     id: "claude".into(),
                     display_name: "Claude".into(),
@@ -519,7 +519,7 @@ mod tests {
 
         registry
             .register(
-                Arc::new(MockProvider::new()),
+                Arc::new(NoopProvider::new()),
                 ProviderInfo {
                     id: "claude".into(),
                     display_name: "Claude".into(),
@@ -589,11 +589,11 @@ mod tests {
         let registry = ProviderRegistry::new();
         registry
             .register(
-                Arc::new(MockProvider::new()),
+                Arc::new(NoopProvider::new()),
                 ProviderInfo {
                     id: "mock".into(),
                     display_name: "Mock".into(),
-                    models: crate::provider::mock::mock_model_infos(),
+                    models: crate::provider::test_double::mock_model_infos(),
                     effort_levels: vec![],
                     capabilities: ProviderCapabilities::default(),
                 },
@@ -615,7 +615,7 @@ mod tests {
         let registry = ProviderRegistry::new();
         registry
             .register(
-                Arc::new(MockProvider::new()),
+                Arc::new(NoopProvider::new()),
                 ProviderInfo {
                     id: "claude".into(),
                     display_name: "Claude".into(),
@@ -632,7 +632,7 @@ mod tests {
             .await;
         registry
             .register(
-                Arc::new(MockProvider::new()),
+                Arc::new(NoopProvider::new()),
                 ProviderInfo {
                     id: "ollama".into(),
                     display_name: "Ollama".into(),
@@ -662,7 +662,7 @@ mod tests {
         let registry = ProviderRegistry::new();
         registry
             .register(
-                Arc::new(MockProvider::new()),
+                Arc::new(NoopProvider::new()),
                 ProviderInfo {
                     id: "claude".into(),
                     display_name: "Claude".into(),

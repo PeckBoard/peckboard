@@ -9,7 +9,7 @@
 //! 4. `send_or_queue` does not double-spawn under concurrent callers.
 //! 5. The watchdog respects the grace period and the per-session lock.
 //!
-//! All tests use the mock provider so they're deterministic and don't
+//! All tests use the mock WASM plugin so they're deterministic and don't
 //! depend on the real `claude` CLI.
 
 use std::sync::Arc;
@@ -18,20 +18,24 @@ use std::time::Duration;
 use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewQueuedMessage, NewSession};
 use peckboard::provider::agent::ProcessCompletion;
-use peckboard::provider::claude::register_claude_provider;
 use peckboard::provider::manager::{MidTurnPolicy, SendOutcome, SessionManager};
 use peckboard::provider::message::UserMessage;
-use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
 use peckboard::provider::stream::SpawnConfig;
 use peckboard::ws::broadcaster::Broadcaster;
 
-async fn build_env() -> (SessionManager, Db, Arc<Broadcaster>) {
-    let registry = Arc::new(ProviderRegistry::new());
-    register_claude_provider(&registry).await;
-    register_mock_provider(&registry).await;
-    let manager = SessionManager::new(registry);
+mod common;
+
+async fn build_env() -> (SessionManager, Db, Arc<Broadcaster>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
     let db = Db::in_memory().unwrap();
+    let registry = Arc::new(ProviderRegistry::new());
+    let plugins = common::load_first_party_providers(dir.path(), db.clone(), &registry).await;
+    assert!(
+        registry.get_info("mock").await.is_some(),
+        "mock WASM plugin must register"
+    );
+    let manager = SessionManager::new(registry).with_plugins(plugins);
     let broadcaster = Broadcaster::new();
     let ts = chrono::Utc::now().to_rfc3339();
     db.create_folder(NewFolder {
@@ -42,7 +46,7 @@ async fn build_env() -> (SessionManager, Db, Arc<Broadcaster>) {
     })
     .await
     .unwrap();
-    (manager, db, broadcaster)
+    (manager, db, broadcaster, dir)
 }
 
 async fn make_session(db: &Db, id: &str) {
@@ -98,9 +102,9 @@ async fn wait_for_completion(
 
 // ── 1. Interrupt actually stops the run ─────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn interrupt_aborts_blocking_run_and_delivers_completion() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s1").await;
 
@@ -151,9 +155,9 @@ async fn interrupt_aborts_blocking_run_and_delivers_completion() {
 
 // ── 2. Atomic send-or-queue ────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn send_or_queue_queues_when_agent_already_running() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s2").await;
 
@@ -199,9 +203,9 @@ async fn send_or_queue_queues_when_agent_already_running() {
 
 // ── 3. Queue drains on every termination path ──────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn drain_queued_delivers_after_clean_completion() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s3").await;
 
@@ -270,9 +274,9 @@ async fn drain_queued_delivers_after_clean_completion() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn drain_queued_delivers_after_interrupted_run() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s4").await;
 
@@ -321,9 +325,9 @@ async fn drain_queued_delivers_after_interrupted_run() {
     assert!(second.completed);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn drain_queued_is_noop_when_nothing_queued() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let _rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s5").await;
 
@@ -340,9 +344,9 @@ async fn drain_queued_is_noop_when_nothing_queued() {
     assert!(!drained, "drain on empty queue should be a no-op");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn drain_queued_is_noop_while_already_running() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s6").await;
 
@@ -396,9 +400,9 @@ async fn drain_queued_is_noop_while_already_running() {
 /// is the only copy of the message, and the completion listener merely
 /// logs the error. Regression test for `drain_queued` popping the head
 /// before delivery — every later completion then ate the next row too.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn drain_queued_keeps_row_when_dispatch_fails() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s7").await;
 
@@ -466,9 +470,9 @@ async fn drain_queued_keeps_row_when_dispatch_fails() {
 
 // ── 4. Concurrent send_or_queue does not double-spawn ──────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_send_or_queue_never_double_spawns() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s7").await;
     let manager = Arc::new(manager);
@@ -540,9 +544,9 @@ async fn concurrent_send_or_queue_never_double_spawns() {
 
 // ── 5. Watchdog grace + per-session lock ───────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lock_session_serializes_handlers() {
-    let (manager, _db, _broadcaster) = build_env().await;
+    let (manager, _db, _broadcaster, _dir) = build_env().await;
     let manager = Arc::new(manager);
 
     let g1 = manager.lock_session("sx").await;
@@ -813,9 +817,9 @@ mod midstream {
 
 // ── Default-model setting resolves an unset model at dispatch ───────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn dispatch_resolves_unset_model_to_default_model_setting() {
-    let (manager, db, broadcaster) = build_env().await;
+    let (manager, db, broadcaster, _dir) = build_env().await;
     let mut rx = manager.take_completion_rx().await.unwrap();
     make_session(&db, "s-default").await;
 

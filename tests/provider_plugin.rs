@@ -168,9 +168,9 @@ async fn provider_plugin_registers_catalog_and_prices() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn provider_plugin_cannot_displace_native_provider() {
+async fn provider_plugin_cannot_displace_existing_provider() {
     let Some(_) = plugin_wasm() else {
-        eprintln!("SKIP provider_plugin_cannot_displace_native_provider: wasm not built");
+        eprintln!("SKIP provider_plugin_cannot_displace_existing_provider: wasm not built");
         return;
     };
     let dir = tempfile::tempdir().unwrap();
@@ -185,12 +185,12 @@ async fn provider_plugin_cannot_displace_native_provider() {
     let plugins = Arc::new(PluginManager::new(dir.path(), db));
     plugins.load_all().await.unwrap();
     plugins.decide(PLUGIN_ID, true).await.unwrap();
-
+    // A provider already owns the id the plugin wants.
     // A "native" provider already owns the id the plugin wants.
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register(
-            Arc::new(peckboard::provider::mock::MockProvider::new()),
+            Arc::new(peckboard::provider::test_double::NoopProvider::new()),
             peckboard::provider::registry::ProviderInfo {
                 id: PROVIDER_ID.into(),
                 display_name: "Native".into(),

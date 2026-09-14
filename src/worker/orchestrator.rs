@@ -1894,13 +1894,13 @@ async fn maybe_write_expensive_model_report(state: &Arc<AppState>, session: &Ses
             let (_, acct) = split_model_account(&rest);
             let key = acct
                 .map(str::to_string)
-                .unwrap_or_else(|| crate::provider::claude::plan_usage::DEFAULT_KEY.to_string());
-            if let Some(entry) = crate::provider::claude::plan_usage::snapshot().get(&key)
+                .unwrap_or_else(|| crate::accounts::claude_plan_usage::DEFAULT_KEY.to_string());
+            if let Some(entry) = crate::accounts::claude_plan_usage::snapshot().get(&key)
                 && let Some(usage) = &entry.usage
             {
                 body.push_str("## Plan Usage at Report Time\n\n");
                 let mut push_bucket =
-                    |label: &str, b: &Option<crate::provider::claude::plan_usage::PlanBucket>| {
+                    |label: &str, b: &Option<crate::accounts::claude_plan_usage::PlanBucket>| {
                         if let Some(b) = b {
                             body.push_str(&format!("- {label}: {:.0}%\n", b.utilization));
                         }

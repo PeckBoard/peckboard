@@ -13,7 +13,9 @@
 //!   can render live download progress. Once pulled, the model shows up
 //!   in `/api/models` through the provider's normal autodiscovery.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -59,7 +61,7 @@ async fn pull_model(State(state): State<Arc<AppState>>, Json(body): Json<PullBod
         return err(StatusCode::BAD_REQUEST, "invalid model reference");
     }
 
-    let Some(schema) = state.builtin_plugins.settings_schema_for("ollama").await else {
+    let Some(schema) = state.plugins.settings_schema_for("ollama").await else {
         return err(StatusCode::NOT_FOUND, "ollama plugin is not available");
     };
     let store = PluginSettingsStore::new("ollama", schema, state.db.clone());
@@ -67,8 +69,7 @@ async fn pull_model(State(state): State<Arc<AppState>>, Json(body): Json<PullBod
         Ok(s) => s,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-
-    let resp = match crate::provider::ollama::start_pull(&settings, model).await {
+    let resp = match start_pull(&settings, model).await {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
@@ -99,4 +100,67 @@ async fn pull_model(State(state): State<Arc<AppState>>, Json(body): Json<PullBod
 
 fn err(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+async fn start_pull(
+    settings: &HashMap<String, serde_json::Value>,
+    model_ref: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let (name, alias) = match model_ref.rsplit_once('@') {
+        Some((n, a)) if !n.is_empty() && !a.is_empty() => (n, Some(a)),
+        _ => (model_ref, None),
+    };
+    let base_url = match alias {
+        None => settings
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("ollama plugin: base_url is not configured"))?,
+        Some(alias) => settings
+            .get("servers")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .find_map(|entry| {
+                let k = entry.get("key").and_then(|v| v.as_str())?;
+                let v = entry.get("value").and_then(|v| v.as_str())?;
+                (k == alias).then(|| v.to_string())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ollama plugin: model '{model_ref}' references server '{alias}', which \
+                     is not configured under Additional Servers"
+                )
+            })?,
+    };
+    let trimmed = base_url.trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        anyhow::bail!("ollama base_url must be http or https");
+    }
+    let endpoint = format!("{trimmed}/api/pull");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut req = client.post(&endpoint).json(&serde_json::json!({
+        "model": name,
+        "name": name,
+        "stream": true,
+    }));
+    if let Some(arr) = settings
+        .get("additional_headers")
+        .and_then(|v| v.as_array())
+    {
+        for entry in arr {
+            let Some(k) = entry.get("key").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(v) = entry.get("value").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            req = req.header(k, v);
+        }
+    }
+    Ok(req.send().await?)
 }

@@ -24,10 +24,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::claude_oauth as oauth;
+use crate::accounts::claude_plan_usage as plan_usage;
 use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::db::models::{ClaudeAccount, ClaudeAccountChanges, NewClaudeAccount};
-use crate::provider::claude::oauth;
-use crate::provider::claude::plan_usage;
 use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
 

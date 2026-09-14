@@ -1177,14 +1177,14 @@ fn derive_status(events: &[crate::db::models::Event]) -> &'static str {
 mod resolve_effective_model_tests {
     use super::*;
     use crate::auth::middleware::tests::test_state;
-    use crate::provider::mock::{MockProvider, mock_model_infos};
     use crate::provider::registry::{ProviderCapabilities, ProviderInfo};
+    use crate::provider::test_double::{NoopProvider, mock_model_infos};
 
     async fn register_ollama(state: &Arc<AppState>) {
         state
             .provider_registry
             .register(
-                Arc::new(MockProvider::new()),
+                Arc::new(NoopProvider::new()),
                 ProviderInfo {
                     id: "ollama".into(),
                     display_name: "Ollama".into(),

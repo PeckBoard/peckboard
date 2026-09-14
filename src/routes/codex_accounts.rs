@@ -12,7 +12,7 @@
 //! `POST /api/codex-accounts/{id}/login/start`, which returns a URL +
 //! one-time code to open. The account reads as authenticated once
 //! `codex login` writes tokens into the account home's `auth.json` (see
-//! [`crate::provider::codex::login`]). API-key login is not offered.
+//! `codex login` writes tokens into the account home's `auth.json` (see [`crate::accounts::codex_login`]). API-key login is not offered.
 use std::sync::Arc;
 
 use axum::{
@@ -25,11 +25,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::codex_login::{self as login, CODEX_LOGIN};
 use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::db::models::{CodexAccount, CodexAccountChanges, NewCodexAccount};
-use crate::plugin::builtins::codex::CodexPlugin;
 use crate::plugin::settings::PluginSettingsStore;
-use crate::provider::codex::login::{self, CODEX_LOGIN};
 use crate::provider::turn;
 use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
@@ -188,8 +187,12 @@ fn is_authenticated(acct: &CodexAccount) -> bool {
 /// through the installer-location fallback so a service PATH that predates
 /// the CLI install still works.
 async fn login_cli_path(state: &AppState) -> String {
-    let store =
-        PluginSettingsStore::new("codex".to_string(), CodexPlugin::schema(), state.db.clone());
+    let schema = state
+        .plugins
+        .settings_schema_for("codex")
+        .await
+        .unwrap_or_else(|| crate::plugin::settings::SettingsSchema::new(vec![]));
+    let store = PluginSettingsStore::new("codex".to_string(), schema, state.db.clone());
     let configured = match store.load().await {
         Ok(settings) => settings
             .get("cli_path")

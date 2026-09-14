@@ -11,7 +11,6 @@ use crate::auth::token::load_or_create_jwt_secret;
 use crate::config::{CliArgs, Config};
 use crate::db::Db;
 use crate::plugin::builtin::BuiltinPluginRegistry;
-use crate::plugin::builtins::register_all as register_builtin_plugins;
 use crate::plugin::manager::PluginManager;
 use crate::provider::manager::SessionManager;
 use crate::provider::registry::ProviderRegistry;
@@ -124,12 +123,8 @@ pub async fn run_server(
 
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
-    // Each built-in plugin registers its capabilities (today: an
-    // AgentProvider) through the catalog, replacing the old direct
-    // `register_*_provider` calls. The catalog records the granted
-    // permissions for `/api/plugins` and the Settings UI.
-    register_builtin_plugins(&builtin_plugins, provider_registry.clone(), db.clone()).await;
-    // Sudo askpass bridge: write the helper script and wire the registry so
+    // Providers are WASM plugins (first-party extracted + auto-approved in
+    // `PluginManager::load_all`). No compiled-in AgentProvider remains.
     // interactive sessions can run `sudo -A` with the password typed in the
     // web UI (service::askpass). A write failure only disables sudo support.
     let askpass_registry = crate::service::askpass::AskpassRegistry::new();
@@ -196,7 +191,7 @@ pub async fn run_server(
     // Bind the provider registry and apply any plugin-registered AI
     // providers (plugins declaring the `provider.register` hook). Runs after
     // `set_live_host` so a registering plugin's host functions are fully
-    // wired; models registered here appear in /api/models like native ones.
+    // wired; models registered here appear in /api/models.
     state
         .plugins
         .set_provider_registry(&state.provider_registry);
@@ -310,7 +305,7 @@ pub async fn run_server(
     // Claude plan-usage poller: refresh the `/usage` buckets (5-hour /
     // weekly quotas) for the host login and every stored oauth account, so
     // Settings → Claude Accounts always shows current subscription usage.
-    crate::provider::claude::plan_usage::spawn(state.clone());
+    crate::accounts::claude_plan_usage::spawn(state.clone());
 
     // Scheduled backups: write tar.gz snapshots on a configured interval.
     // No-op unless backupIntervalHours + backupDir are set in config.json.

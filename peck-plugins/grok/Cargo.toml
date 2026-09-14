@@ -1,0 +1,23 @@
+[package]
+name = "peckboard-grok-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Drives sessions via the Grok CLI in streaming-json mode."
+repository = "https://github.com/PeckBoard/grok"
+license = "MIT"
+publish = false
+
+[lib]
+# Extism loads plugins as WASM cdylibs. The compiled artifact is
+# `target/wasm32-unknown-unknown/release/peckboard_grok_plugin.wasm`.
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

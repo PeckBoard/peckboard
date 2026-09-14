@@ -9,7 +9,7 @@
 //! not-yet-authenticated state) and then signed in via
 //! `POST /api/grok-accounts/{id}/login/start`, which returns a URL to open.
 //! The account reads as authenticated once `grok login` writes its
-//! `auth.json` (see [`crate::provider::grok::login`]).
+//! `auth.json` (see [`crate::accounts::grok_login`]).
 use std::sync::Arc;
 
 use axum::{
@@ -22,9 +22,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::grok_login::{self as login, GROK_LOGIN};
 use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::db::models::{GrokAccount, GrokAccountChanges, NewGrokAccount};
-use crate::provider::grok::login::{self, GROK_LOGIN};
 use crate::routes::usage::cost::usage_cost;
 use crate::state::AppState;
 

@@ -11,7 +11,7 @@ use crate::db::models::{NewQueuedMessage, QueuedMessage};
 use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{ProcessCompletion, SendMessageContext};
 use crate::provider::message::UserMessage;
-use crate::provider::registry::ProviderRegistry;
+use crate::provider::registry::{AnswerTransport, ProviderRegistry};
 use crate::provider::resume::ResumeHandle;
 use crate::provider::stream::SpawnConfig;
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
@@ -38,12 +38,13 @@ pub enum MidTurnPolicy {
     /// completes. The default everywhere a human or another agent sends
     /// into a busy session: the working agent is never interrupted.
     Queue,
-    /// Hand the message to the live turn when the provider supports
-    /// mid-stream injection (the Claude CLI consumes stdin envelopes
-    /// mid-run, which steers/interrupts the turn). Falls back to the
-    /// queue when the provider can't inject. Reserved for flows that
-    /// must reach the running agent now: ask_user answers and the
-    /// explicit per-message "send now" force path.
+    /// Hand the message to the live turn when the provider can take it
+    /// mid-run: mid-stream injection (Claude stdin envelopes) or
+    /// `answer_transport: stdin` (mock:ask / a plugin reading
+    /// `peckboard_provider_read_stdin`). Falls back to the queue when the
+    /// provider can do neither. Reserved for flows that must reach the
+    /// running agent now: ask_user answers and the explicit per-message
+    /// "send now" force path.
     Inject,
 }
 
@@ -828,19 +829,31 @@ impl SessionManager {
     ) -> anyhow::Result<SendOutcome> {
         let lock = self.lock_session(session_id).await;
         let was_running = self.is_running(session_id).await;
-        // Only meaningful when a run is live, and it MUST be answered by
-        // the provider that owns that run — `config.model` can still be
-        // unresolved ("default"), which parses to the default provider
-        // regardless of what the session actually runs on.
         let supports_mid_stream = was_running
             && self
                 .supports_mid_stream_for_session(session_id, &config.model)
                 .await;
+        let stdin_answers = was_running
+            && policy == MidTurnPolicy::Inject
+            && self.answer_transport_for_session(session_id).await == AnswerTransport::Stdin;
+
+        if was_running && policy == MidTurnPolicy::Inject && stdin_answers {
+            if self.write_stdin(session_id, &message.text).await {
+                tracing::info!(
+                    session_id = %session_id,
+                    "Mid-turn answer delivered to provider stdin"
+                );
+                return Ok(SendOutcome::Queued);
+            }
+            tracing::warn!(
+                session_id = %session_id,
+                "stdin answer transport failed; falling back to the queue"
+            );
+        }
 
         if was_running && (policy == MidTurnPolicy::Queue || !supports_mid_stream) {
-            // the current run finishes. Attachment ids ride along so a
-            // queued send keeps its images — bytes are re-resolved from
-            // the attachments dir at delivery time.
+            // Attachment ids ride along so a queued send keeps its images —
+            // bytes are re-resolved from the attachments dir at delivery.
             let now = chrono::Utc::now().to_rfc3339();
             let attachment_ids = if message.attachment_ids.is_empty() {
                 if !message.attachments.is_empty() {
@@ -939,10 +952,20 @@ impl SessionManager {
         }
     }
 
+    async fn answer_transport_for_session(&self, session_id: &str) -> AnswerTransport {
+        let Some(p) = self.running_provider(session_id).await else {
+            return AnswerTransport::NewTurn;
+        };
+        self.registry
+            .get_info(p.id())
+            .await
+            .map(|i| i.capabilities.answer_transport)
+            .unwrap_or(AnswerTransport::NewTurn)
+    }
+
     /// Drain the next queued message (oldest first) for `session_id` and
     /// dispatch it as a fresh agent run. Idempotent: if the queue is
     /// empty or an agent is already running, it returns `Ok(false)`
-    /// without side effects. One message per call — the next agent-end
     /// triggers the next drain, so a backlog delivers as separate turns
     /// in FIFO order.
     ///
@@ -1163,11 +1186,13 @@ impl SessionManager {
     /// the synthetic Crashed event from the dying process lands AFTER
     /// the wipe and persists a stale "Agent crashed (interrupted)" line.
     pub async fn cancel_and_wait(&self, session_id: &str) {
-        for info in self.registry.list_providers().await {
-            if let Some(p) = self.registry.get_provider(&info.id).await {
-                p.cancel(session_id).await;
-                p.wait_for_termination(session_id).await;
-            }
+        self.cancel(session_id).await;
+        // Wait only on the provider that still owns the run. Every plugin
+        // adapter shares one runtime, so waiting on each listed provider
+        // would re-check the same `is_active` map N times — and a stuck
+        // turn must not pin the HTTP handler forever.
+        if let Some(p) = self.running_provider(session_id).await {
+            p.wait_for_termination(session_id).await;
         }
     }
 

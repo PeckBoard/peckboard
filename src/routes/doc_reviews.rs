@@ -1370,7 +1370,7 @@ mod tests {
         // module has a real provider behind it — a dispatch failure now
         // errors the route (see `run_pass`), so tests that used to rely on
         // dispatch silently failing need a working one.
-        crate::provider::mock::register_mock_provider(&state.provider_registry).await;
+        crate::provider::test_double::register_mock_provider(&state.provider_registry).await;
         (state, token)
     }
 
@@ -2523,7 +2523,7 @@ mod tests {
         let (state, token) = fixture(dir.path(), workspace.path()).await;
         // `mock:block` parks the resumed turn, so the assertions are about
         // the resume itself rather than how fast a reviewer answers.
-        crate::provider::mock::register_mock_provider(&state.provider_registry).await;
+        crate::provider::test_double::register_mock_provider(&state.provider_registry).await;
         let id = seed_review(&state, &token).await;
         add_annotation(&state, &token, &id, "this is wrong").await;
         let session_id = seed_dead_session(&state, &id, "mock:block").await;
@@ -2627,7 +2627,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let (state, token) = fixture(dir.path(), workspace.path()).await;
-        crate::provider::mock::register_mock_provider(&state.provider_registry).await;
+        crate::provider::test_double::register_mock_provider(&state.provider_registry).await;
         let id = seed_review(&state, &token).await;
         add_annotation(&state, &token, &id, "this is wrong").await;
         let session_id = seed_dead_session(&state, &id, "mock:block").await;

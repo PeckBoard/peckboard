@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use peckboard::db::Db;
 use peckboard::db::models::{NewFolder, NewSession};
-use peckboard::provider::mock::register_mock_provider;
 use peckboard::provider::registry::ProviderRegistry;
+use peckboard::provider::test_double::register_mock_provider;
 use peckboard::service::mcp_server::{McpToolRegistry, ToolCallContext};
 use peckboard::ws::broadcaster::Broadcaster;
 

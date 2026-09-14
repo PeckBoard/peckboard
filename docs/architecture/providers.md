@@ -144,10 +144,10 @@ Discovered from:
 
 ## Plugin Providers
 
-A WASM plugin can register an AI provider (v1 scope: **HTTP-API providers**,
-OpenAI-compatible request/response or chunked HTTP consumed inside the call —
-no subprocess CLIs, no host-side SSE plumbing). Core wraps it in a
-`PluginProviderAdapter` (`src/provider/plugin_provider.rs`) that implements
+A WASM plugin can register an AI provider. HTTP-API providers drive a turn
+with `peckboard_http_request` inside `provider.send`. CLI providers spawn a
+host-owned child via `peckboard_provider_spawn` / `_read_line` / `_write_stdin`
+/ `_kill` (cwd pinned to the session folder). Core wraps either in a
 `AgentProvider` and registers it in the `ProviderRegistry` like any native
 provider, so the `SessionManager` dispatch path, `/api/models`, the MCP
 `list_models` tool, and provider-visibility filtering all work unchanged.
@@ -205,13 +205,15 @@ conversation_id}`. The call runs on a dedicated blocking thread with the
 channel. Mid-stream injection is opt-in — a registration carrying
 `supports_mid_stream_injection: true` promises its turn drains
 `peckboard_provider_take_message`, and core then hands a mid-turn message to
+`write_stdin` delivers control responses two ways: if the plugin spawned a
+CLI child, bytes go to that child's stdin; otherwise they queue on the turn
+and the plugin drains them with `peckboard_provider_read_stdin` (mock ask).
+Mid-stream injection is opt-in — a registration carrying
+`supports_mid_stream_injection: true` promises its turn drains
+`peckboard_provider_take_message`, and core then hands a mid-turn message to
 the live turn instead of persisting it in `queued_messages`. Registrations
 without the flag (every plugin written before it existed) keep the durable
 queue.
-
-### Plugin Provider Host Functions
-
-All gated by the `register_provider` permission; see
 `docs/architecture/plugins.md` for full request/response shapes.
 
 | Function                          | Description                                                                                                                                                                  |
@@ -222,8 +224,11 @@ All gated by the `register_provider` permission; see
 | peckboard_provider_take_message   | Pop a user message core handed to the live turn mid-flight, or `{"message": null}`. Only ever non-empty for a provider registered with `supports_mid_stream_injection: true` |
 | peckboard_provider_get_session    | Get trusted session context (ID, folder path, card, project, is_worker)                                                                                                      |
 | peckboard_provider_get_mcp_config | Get the per-session MCP config path (`worker-mcp/<session_id>.json`)                                                                                                         |
-
-## Hooks
+| peckboard_provider_spawn          | Spawn a host-owned CLI child for this turn (`command`, `args`, `env`, `cwd` must equal the session folder)                                                                   |
+| peckboard_provider_read_line      | One stdout line, or `{eof, exit_code, stderr}` / `{timeout}` / `{stopped}`                                                                                                   |
+| peckboard_provider_write_stdin    | Write text to the CLI child's stdin                                                                                                                                          |
+| peckboard_provider_read_stdin     | Pop text queued by core `write_stdin` when there is no CLI child                                                                                                             |
+| peckboard_provider_kill           | Kill the CLI child for this turn                                                                                                                                             |
 
 Implemented provider hooks (dispatched per declaring plugin):
 

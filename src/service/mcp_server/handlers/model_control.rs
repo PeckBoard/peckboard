@@ -97,8 +97,8 @@ impl McpToolRegistry {
         if provider == "claude" {
             let key = account
                 .clone()
-                .unwrap_or_else(|| crate::provider::claude::plan_usage::DEFAULT_KEY.to_string());
-            let snap = crate::provider::claude::plan_usage::snapshot();
+                .unwrap_or_else(|| crate::accounts::claude_plan_usage::DEFAULT_KEY.to_string());
+            let snap = crate::accounts::claude_plan_usage::snapshot();
             if let Some(entry) = snap.get(&key)
                 && let Some(usage) = &entry.usage
             {

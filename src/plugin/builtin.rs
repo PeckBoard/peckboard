@@ -3,15 +3,13 @@
 //! This is the in-process, statically-linked counterpart to the WASM extism
 //! plugins in [`super::manager`]. A built-in plugin is a Rust module that
 //! ships with Peckboard, declares the [`Permission`]s it needs, and at
-//! startup registers its capabilities (currently: agent providers) through
-//! a [`PluginInitContext`] that gates each action on a permission grant.
+//! startup registers its capabilities through a [`PluginInitContext`] that
+//! gates each action on a permission grant.
 //!
-//! Built-in plugins are always enabled. The grant rule is intentionally
-//! simple: a built-in plugin receives every permission it requests, and
-//! every permission is recorded in the catalog so the Settings UI can
-//! display it. Future plugins (third-party WASM, sideloaded Rust crates)
-//! will reuse the same `Permission` vocabulary with a different grant
-//! policy.
+//! Agent providers are **not** built-in plugins — they ship as first-party
+//! WASM (`peck-plugins-wasm/`) and register through `provider.register`.
+//! This catalog is empty at boot unless a remaining in-process plugin
+//! registers itself.
 //!
 //! The catalog itself ([`BuiltinPluginRegistry`]) is read-only at runtime:
 //! everything is registered once during startup, then the catalog is just
@@ -163,7 +161,7 @@ impl PluginInitContext {
     }
 }
 
-/// One built-in plugin. Implementors live in `src/plugin/builtins/`.
+/// One in-process plugin. Agent providers live in `peck-plugins/`, not here.
 #[async_trait]
 pub trait BuiltinPlugin: Send + Sync + 'static {
     fn metadata(&self) -> PluginMetadata;

@@ -1,0 +1,1036 @@
+//! Sync port of `src/provider/mock/mod.rs::run_scenario`.
+//!
+//! Emits the same `ProviderEvent` JSON the host deserializes
+//! (`#[serde(tag = "kind", rename_all = "snake_case")]`).
+
+use std::cell::Cell;
+
+use serde_json::{Value, json};
+
+use crate::host::{self, HostFn};
+
+pub fn run_scenario(payload: &Value) -> Result<(), String> {
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if session_id.is_empty() {
+        return Err("provider.send payload missing session_id".into());
+    }
+    let model = payload
+        .get("spawn_config")
+        .and_then(|c| c.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let working_dir = payload
+        .get("spawn_config")
+        .and_then(|c| c.get("working_dir"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let message = payload
+        .get("message")
+        .and_then(|m| m.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let resume = payload.get("conversation_id").and_then(|v| v.as_str());
+
+    let raw = model.strip_prefix("mock:").unwrap_or(model);
+    let scenario = raw.split('@').next().unwrap_or(raw);
+
+    let mut ctx = Ctx {
+        session_id,
+        model,
+        working_dir,
+        message,
+        resume,
+        scenario,
+        conv_id: format!("mock-{session_id}-1"),
+        n: 0,
+        aborted: Cell::new(false),
+    };
+    ctx.run()
+}
+
+struct Ctx<'a> {
+    session_id: &'a str,
+    model: &'a str,
+    working_dir: &'a str,
+    message: &'a str,
+    resume: Option<&'a str>,
+    scenario: &'a str,
+    conv_id: String,
+    n: u32,
+    aborted: Cell<bool>,
+}
+
+impl Ctx<'_> {
+    fn emit(&self, event: Value) -> Result<(), String> {
+        host::call_host(
+            HostFn::EmitProviderEvent,
+            &json!({
+                "session_id": self.session_id,
+                "event": event,
+            }),
+        )
+        .map(|_| ())
+    }
+
+    fn tool_id(&mut self) -> String {
+        self.n += 1;
+        format!("tool-{}-{}", self.session_id, self.n)
+    }
+
+    fn should_stop(&self) -> bool {
+        host::call_host(
+            HostFn::ProviderShouldStop,
+            &json!({ "session_id": self.session_id }),
+        )
+        .ok()
+        .and_then(|v| v.get("stop").and_then(|s| s.as_bool()))
+        .unwrap_or(true)
+    }
+
+    fn interrupted(&self) -> Result<(), String> {
+        self.aborted.set(true);
+        self.emit(json!({
+            "kind": "crashed",
+            "reason": "interrupted",
+            "error_kind": "interrupted",
+            "exit_code": null,
+            "stderr": null,
+        }))
+    }
+
+    /// Returns `false` when the turn was aborted (Crashed already emitted).
+    fn tick(&self) -> Result<bool, String> {
+        if self.aborted.get() {
+            return Ok(false);
+        }
+        if self.should_stop() {
+            self.interrupted()?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn emit_text(&self, text: &str) -> Result<(), String> {
+        self.emit(json!({ "kind": "text", "text": text }))
+    }
+
+    fn emit_thinking(&self, text: &str) -> Result<(), String> {
+        self.emit(json!({ "kind": "thinking", "text": text }))
+    }
+
+    fn tool_start(&self, id: &str, name: &str, input: Value) -> Result<(), String> {
+        self.emit(json!({
+            "kind": "tool_start",
+            "tool_use_id": id,
+            "name": name,
+            "input": input,
+        }))
+    }
+
+    fn tool_end(
+        &self,
+        id: &str,
+        output: Option<String>,
+        error: Option<String>,
+        images: Value,
+    ) -> Result<(), String> {
+        self.emit(json!({
+            "kind": "tool_end",
+            "tool_use_id": id,
+            "output": output,
+            "error": error,
+            "images": images,
+        }))
+    }
+
+    fn tool_end_ok(&self, id: &str, output: &str) -> Result<(), String> {
+        self.tool_end(id, Some(output.to_string()), None, json!([]))
+    }
+
+    fn completed(&self, result_meta: Value) -> Result<(), String> {
+        self.emit(json!({
+            "kind": "completed",
+            "conversation_id": self.conv_id,
+            "result_meta": result_meta,
+        }))
+    }
+
+    fn crashed(
+        &self,
+        reason: &str,
+        error_kind: &str,
+        exit_code: Option<i32>,
+        stderr: Option<&str>,
+    ) -> Result<(), String> {
+        self.emit(json!({
+            "kind": "crashed",
+            "reason": reason,
+            "error_kind": error_kind,
+            "exit_code": exit_code,
+            "stderr": stderr,
+        }))
+    }
+
+    /// Host blocks until stdin text or cooperative stop.
+    fn read_stdin(&self) -> Result<Option<String>, String> {
+        let v = host::call_host(
+            HostFn::ProviderReadStdin,
+            &json!({ "session_id": self.session_id }),
+        )?;
+        if v.get("stopped").and_then(|s| s.as_bool()) == Some(true) {
+            return Ok(None);
+        }
+        if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+            return Ok(Some(text.to_string()));
+        }
+        Ok(None)
+    }
+
+    fn wait_until_stop(&self) -> Result<(), String> {
+        loop {
+            match self.read_stdin()? {
+                None => {
+                    self.interrupted()?;
+                    return Ok(());
+                }
+                Some(_) => continue,
+            }
+        }
+    }
+
+    fn scripted_mcp(&mut self, name: &str, args: Value, result: Value) -> Result<bool, String> {
+        let id = self.tool_id();
+        self.tool_start(&id, &format!("mcp__peckboard__{name}"), args)?;
+        if !self.tick()? {
+            return Ok(false);
+        }
+        self.tool_end_ok(&id, &result.to_string())?;
+        Ok(true)
+    }
+
+    fn emit_todo(&self, todos: Value) -> Result<(), String> {
+        self.emit(json!({ "kind": "todo", "todos": todos }))
+    }
+
+    fn run(&mut self) -> Result<(), String> {
+        self.emit(json!({
+            "kind": "started",
+            "model": self.model,
+            "conversation_id": self.conv_id,
+            "metadata": {
+                "scenario": self.scenario,
+                "working_dir": self.working_dir,
+            },
+        }))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+
+        match self.scenario {
+            "echo" => self.echo()?,
+            "happy-path" => self.happy_path()?,
+            "run-command" => self.run_command()?,
+            "subagent" => self.subagent()?,
+            "usage" => self.usage()?,
+            "tool-use" => self.tool_use()?,
+            "cli-tools" => self.cli_tools()?,
+            "tool-error" => self.tool_error()?,
+            "system-blob" => self.system_blob()?,
+            "screenshot" => self.screenshot()?,
+            "diff" => self.diff()?,
+            "thinking" => self.thinking()?,
+            "tool-orphan-crash" => return self.tool_orphan_crash(),
+            "crash" => return self.crash(),
+            "auth-error" => return self.auth_error(),
+            "auth-error-once" => {
+                if self.auth_error_once()? {
+                    return Ok(());
+                }
+            }
+            "resume-error" => {
+                if self.resume_error()? {
+                    return Ok(());
+                }
+            }
+            "markdown" => self.markdown()?,
+            "ask" => return self.ask(),
+            "block" => return self.block(),
+            "plan-review" => self.plan_review()?,
+            "doc-review" => return self.doc_review(),
+            "todo" => self.todo()?,
+            "tasks" => self.tasks()?,
+            "ctx" => self.ctx()?,
+            other => {
+                self.emit_text(&format!("unknown mock scenario: {other}"))?;
+            }
+        }
+
+        if self.aborted.get() {
+            return Ok(());
+        }
+        if self.should_stop() {
+            return self.interrupted();
+        }
+        self.completed(Value::Null)
+    }
+
+    fn echo(&self) -> Result<(), String> {
+        self.emit_text(self.message)
+    }
+
+    fn happy_path(&mut self) -> Result<(), String> {
+        self.emit_text("Working on it...")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        let tool_id = self.tool_id();
+        self.tool_start(
+            &tool_id,
+            "Bash",
+            json!({ "command": "echo hello", "description": "Say hello to prove the shell works." }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(&tool_id, "hello")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("Done.")
+    }
+
+    fn run_command(&mut self) -> Result<(), String> {
+        self.emit_text("Building the release binary...")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        let tool_id = self.tool_id();
+        self.tool_start(
+            &tool_id,
+            "mcp__peckboard__run_command",
+            json!({
+                "command": "cargo",
+                "args": ["build", "--release"],
+                "reason": "Build the release binary to verify the change compiles.",
+            }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(&tool_id, "Finished `release` profile")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("Build complete.")
+    }
+
+    fn subagent(&mut self) -> Result<(), String> {
+        let child_id = self.message.trim();
+        let tool_id = self.tool_id();
+        self.tool_start(
+            &tool_id,
+            "mcp__peckboard__spawn_subagent",
+            json!({ "name": "child", "prompt": "Do the thing." }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(
+            &tool_id,
+            &json!({ "subagent_session_id": child_id }).to_string(),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("Subagent spawned.")
+    }
+
+    fn usage(&mut self) -> Result<(), String> {
+        self.emit_text("Editing a file and consulting an expert...")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        let read_id = self.tool_id();
+        self.tool_start(
+            &read_id,
+            "Read",
+            json!({ "file_path": "/workspace/src/lib.rs" }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(&read_id, "contents")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        let edit_id = self.tool_id();
+        self.tool_start(
+            &edit_id,
+            "Edit",
+            json!({ "file_path": "/workspace/src/lib.rs" }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(&edit_id, "edited")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        let ask_id = self.tool_id();
+        self.tool_start(
+            &ask_id,
+            "mcp__peckboard__ask_expert",
+            json!({
+                "area": "src",
+                "question": "How does the usage rollup work?",
+            }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(&ask_id, "delivered")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit(json!({
+            "kind": "usage",
+            "input_tokens": 1200,
+            "output_tokens": 400,
+            "cache_read_tokens": 800,
+            "cache_creation_tokens": 200,
+            "total_tokens": 2600,
+            "context_tokens": 1500,
+            "model": self.model,
+            "turn_seq": null,
+        }))
+    }
+
+    fn tool_use(&mut self) -> Result<(), String> {
+        let tool_id = self.tool_id();
+        self.tool_start(&tool_id, "Read", json!({ "path": "/tmp/x" }))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(&tool_id, "file contents")
+    }
+
+    fn cli_tools(&mut self) -> Result<(), String> {
+        let shell_id = self.tool_id();
+        let mcp_id = self.tool_id();
+        let list_id = self.tool_id();
+        let read_id = self.tool_id();
+        let edit_id = self.tool_id();
+        let path = "/workspace/src/lib.rs";
+        let events = vec![
+            json!({
+                "kind": "tool_start",
+                "tool_use_id": shell_id,
+                "name": "shell",
+                "input": {
+                    "command": "cargo build --release",
+                    "reason": "Build the release binary",
+                },
+            }),
+            json!({
+                "kind": "tool_end",
+                "tool_use_id": shell_id,
+                "output": json!({ "stdout": "Finished release\n", "exitCode": 0 }).to_string(),
+                "error": null,
+                "images": [],
+            }),
+            json!({
+                "kind": "tool_start",
+                "tool_use_id": mcp_id,
+                "name": "mcp__peckboard__search_files",
+                "input": { "query": "needle", "path_contains": "src" },
+            }),
+            json!({
+                "kind": "tool_end",
+                "tool_use_id": mcp_id,
+                "output": "one match",
+                "error": null,
+                "images": [],
+            }),
+            json!({
+                "kind": "tool_start",
+                "tool_use_id": list_id,
+                "name": "getMcpTools",
+                "input": { "server": "peckboard" },
+            }),
+            json!({
+                "kind": "tool_end",
+                "tool_use_id": list_id,
+                "output": "2 tools",
+                "error": null,
+                "images": [],
+            }),
+            json!({
+                "kind": "tool_start",
+                "tool_use_id": read_id,
+                "name": "read",
+                "input": { "path": path },
+            }),
+            json!({
+                "kind": "tool_end",
+                "tool_use_id": read_id,
+                "output": "fn main() {}",
+                "error": null,
+                "images": [],
+            }),
+            json!({
+                "kind": "tool_start",
+                "tool_use_id": edit_id,
+                "name": "edit",
+                "input": { "path": path, "streamContent": "fn main() {}\n" },
+            }),
+            json!({
+                "kind": "file_diff",
+                "path": path,
+                "diff": format!("--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new"),
+                "added": 1,
+                "removed": 1,
+                "created": false,
+            }),
+            json!({
+                "kind": "tool_end",
+                "tool_use_id": edit_id,
+                "output": "updated",
+                "error": null,
+                "images": [],
+            }),
+        ];
+        for event in events {
+            self.emit(event)?;
+            if !self.tick()? {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn tool_error(&mut self) -> Result<(), String> {
+        let tool_id = self.tool_id();
+        self.tool_start(
+            &tool_id,
+            "run_command",
+            json!({
+                "command": "nope",
+                "reason": "check the thing",
+            }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end(
+            &tool_id,
+            None,
+            Some("command not found: nope".into()),
+            json!([]),
+        )
+    }
+
+    fn system_blob(&self) -> Result<(), String> {
+        // Native appends a raw `system` row with no text/message. Plugins can
+        // only emit ProviderEvent::System, which always carries `text`. Empty
+        // text + the native payload in `detail` is the closest equivalent.
+        self.emit(json!({
+            "kind": "system",
+            "text": "",
+            "subtype": "mock_blob",
+            "detail": {
+                "code": 42,
+                "payload": { "reason": "mock system blob" },
+            },
+        }))
+    }
+
+    fn screenshot(&mut self) -> Result<(), String> {
+        const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        self.emit_text("Taking a screenshot...")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        let tool_id = self.tool_id();
+        self.tool_start(
+            &tool_id,
+            "mcp__playwright__browser_take_screenshot",
+            json!({ "filename": "page.png" }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end(
+            &tool_id,
+            Some("Took the screenshot".into()),
+            None,
+            json!([{ "mime_type": "image/png", "data_base64": TINY_PNG }]),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("Done.")
+    }
+
+    fn diff(&mut self) -> Result<(), String> {
+        let tool_id = self.tool_id();
+        self.tool_start(
+            &tool_id,
+            "mcp__peckboard__edit_file",
+            json!({ "path": "src/demo.ts", "original_hash": "abc" }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit(json!({
+            "kind": "file_diff",
+            "path": "src/demo.ts",
+            "diff": "@@ -1,3 +1,3 @@\n context\n-old line\n+new line\n context",
+            "added": 1,
+            "removed": 1,
+            "created": false,
+        }))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(
+            &tool_id,
+            "{\"ok\":true,\"path\":\"src/demo.ts\",\"edits_applied\":1}",
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("Edited src/demo.ts.")
+    }
+
+    fn thinking(&self) -> Result<(), String> {
+        self.emit_thinking("Let me reason about this. ")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_thinking("The answer is clearly 42.")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("The answer is 42.")
+    }
+
+    fn tool_orphan_crash(&mut self) -> Result<(), String> {
+        let tool_id = self.tool_id();
+        self.tool_start(&tool_id, "Bash", json!({ "command": "sleep forever" }))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.crashed("mock orphan-tool crash", "unknown", Some(1), None)
+    }
+
+    fn crash(&self) -> Result<(), String> {
+        self.emit_text("About to crash")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.crashed(
+            "mock scenario crash",
+            "unknown",
+            Some(1),
+            Some("simulated stderr"),
+        )
+    }
+
+    fn auth_error(&self) -> Result<(), String> {
+        self.completed(json!({
+            "error": "Failed to authenticate: OAuth session expired and could not be refreshed",
+            "errorKind": "auth_expired",
+        }))
+    }
+
+    /// `true` if this call already emitted a terminal (first-turn fail).
+    fn auth_error_once(&self) -> Result<bool, String> {
+        let already_failed = host::call_host(
+            HostFn::StoreGet,
+            &json!({
+                "collection": "auth-error-once",
+                "key": self.session_id,
+            }),
+        )
+        .ok()
+        .and_then(|v| v.get("value").cloned())
+        .and_then(|v| v.get("failed").and_then(|f| f.as_bool()))
+        .unwrap_or(false);
+        if !already_failed {
+            let _ = host::call_host(
+                HostFn::StorePut,
+                &json!({
+                    "collection": "auth-error-once",
+                    "key": self.session_id,
+                    "data": { "failed": true },
+                }),
+            );
+            self.completed(json!({
+                "error": "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+                "errorKind": "auth_expired",
+            }))?;
+            return Ok(true);
+        }
+        self.emit_text("Authenticated on the retry.")?;
+        Ok(false)
+    }
+
+    /// `true` if this call already emitted a terminal (resume rejected).
+    fn resume_error(&self) -> Result<bool, String> {
+        if let Some(dead) = self.resume {
+            self.emit(json!({
+                "kind": "completed",
+                "conversation_id": null,
+                "result_meta": {
+                    "error": format!("no rollout found for thread id {dead}"),
+                    "errorKind": "resume_failed",
+                },
+            }))?;
+            return Ok(true);
+        }
+        self.emit_text("Started a fresh conversation.")?;
+        Ok(false)
+    }
+
+    fn markdown(&self) -> Result<(), String> {
+        let md = "# Hello from mock\n\n\
+                  This reply has **bold text**, a list, and a code block.\n\n\
+                  - first\n\
+                  - second\n\
+                  - third\n\n\
+                  Inline `mock:markdown` reference.\n\n\
+                  ```rust\n\
+                  fn main() {\n\
+                      println!(\"hi\");\n\
+                  }\n\
+                  ```\n";
+        self.emit_text(md)
+    }
+
+    fn ask(&mut self) -> Result<(), String> {
+        let req_id = self.tool_id();
+        self.emit(json!({
+            "kind": "control_request",
+            "request_id": req_id,
+            "request_type": "question",
+            "payload": { "text": "Continue?" },
+        }))?;
+        let Some(answer) = self.read_stdin()? else {
+            return self.interrupted();
+        };
+        self.emit_text(&format!("Got reply: {answer}"))?;
+        self.completed(Value::Null)
+    }
+
+    fn block(&self) -> Result<(), String> {
+        self.emit_text("working…")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.wait_until_stop()
+    }
+
+    fn plan_review(&self) -> Result<(), String> {
+        self.emit_text("Writing the plan…")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        // Native upserts the plan via db + a `plan-proposed` side-channel.
+        // Plugin send can only emit ProviderEvents; the text sequence matches.
+        self.emit_text("Plan saved via propose_plan.")
+    }
+
+    fn doc_review(&mut self) -> Result<(), String> {
+        if self.message.contains("[mock:ask") {
+            if !self.scripted_mcp(
+                "get_review_doc",
+                json!({}),
+                json!({
+                    "markdown": "",
+                    "version": 1,
+                    "open_comments": [],
+                }),
+            )? {
+                return Ok(());
+            }
+            if !self.tick()? {
+                return Ok(());
+            }
+            self.emit_text("That passage reads two ways — asking before I guess.")?;
+            if !self.tick()? {
+                return Ok(());
+            }
+            let question = "Which reading of that passage did you mean?".to_string();
+            let payload = if self.message.contains("[mock:ask:free]") {
+                json!({ "questions": [{ "question": question, "header": "Intent" }] })
+            } else if self.message.contains("[mock:ask:multi]") {
+                json!({
+                    "questions": [{
+                        "question": question,
+                        "header": "Intent",
+                        "multiSelect": true,
+                        "options": [
+                            { "label": "Tighten the wording", "description": "Same meaning, fewer words." },
+                            { "label": "Add an example", "description": "Show what it looks like in practice." },
+                            { "label": "Split it in two", "description": "One idea per sentence." },
+                            { "label": "Other", "description": "" }
+                        ]
+                    }]
+                })
+            } else {
+                json!({
+                    "questions": [{
+                        "question": question,
+                        "header": "Intent",
+                        "options": [
+                            { "label": "Keep it as written", "description": "Leave the passage alone." },
+                            { "label": "Rewrite it", "description": "Replace it with clearer wording." },
+                            { "label": "Other", "description": "" }
+                        ]
+                    }]
+                })
+            };
+            if !self.scripted_mcp("ask_user", payload, json!({ "ok": true }))? {
+                return Ok(());
+            }
+            return self.completed(Value::Null);
+        }
+
+        if self.message.contains("[mock:chat]") {
+            for chunk in [
+                "Answering in the lane \u{2014} the document is unchanged.\n\n",
+                "Three things worth knowing:\n\n1. The rotation lives in `oncall.yaml`.\n2. Escalation is a separate policy.\n3. Nothing here touches the document.\n\n",
+                "| Field | Value |\n| --- | --- |\n| Owner | platform |\n| Cadence | quarterly |\n\n```bash\nmake verify\n```\n",
+            ] {
+                self.emit_text(chunk)?;
+                if !self.tick()? {
+                    return Ok(());
+                }
+            }
+            return self.completed(Value::Null);
+        }
+
+        if self.message.contains("[mock:block]") {
+            self.emit_text("Reading the document closely…")?;
+            if !self.tick()? {
+                return Ok(());
+            }
+            let tool_id = self.tool_id();
+            self.tool_start(&tool_id, "mcp__peckboard__get_review_doc", json!({}))?;
+            return self.wait_until_stop();
+        }
+
+        if !self.scripted_mcp(
+            "get_review_doc",
+            json!({}),
+            json!({
+                "markdown": "",
+                "version": 1,
+                "open_comments": [],
+            }),
+        )? {
+            return Ok(());
+        }
+        let markdown = "";
+        let version = 1_i64;
+        let next = version + 1;
+        let insert_only = self.message.contains("[mock:insert]");
+        if !self.tick()? {
+            return Ok(());
+        }
+        if !self.scripted_mcp(
+            "submit_review_revision",
+            json!({
+                "markdown": mock_revised_markdown(markdown, next, insert_only),
+                "note": format!("mock pass {next}"),
+                "resolutions": [],
+            }),
+            json!({ "ok": true, "version": next }),
+        )? {
+            return Ok(());
+        }
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text(&format!("Revised the document to v{next}."))?;
+        self.completed(Value::Null)
+    }
+
+    fn todo(&mut self) -> Result<(), String> {
+        let raw_input = json!({
+            "todos": [
+                { "content": "Write the parser", "status": "completed", "activeForm": "Writing the parser" },
+                { "content": "Wire up the route", "status": "in_progress", "activeForm": "Wiring up the route" },
+                { "content": "Add tests", "status": "pending", "activeForm": "Adding tests" },
+            ]
+        });
+        let tool_id = self.tool_id();
+        self.tool_start(&tool_id, "TodoWrite", raw_input)?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(&tool_id, "Todos updated")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        // snapshot_from_tool_call maps completed → done.
+        self.emit_todo(json!([
+            { "content": "Write the parser", "status": "done", "activeForm": "Writing the parser" },
+            { "content": "Wire up the route", "status": "in_progress", "activeForm": "Wiring up the route" },
+            { "content": "Add tests", "status": "pending", "activeForm": "Adding tests" },
+        ]))
+    }
+
+    fn tasks(&mut self) -> Result<(), String> {
+        let script: [(&str, Value, &str, Value); 6] = [
+            (
+                "TaskCreate",
+                json!({
+                    "subject": "Write the parser",
+                    "description": "Parse the stream",
+                    "activeForm": "Writing the parser",
+                }),
+                "Task #1 created successfully: Write the parser",
+                json!({ "task": { "id": "1", "subject": "Write the parser" } }),
+            ),
+            (
+                "TaskCreate",
+                json!({
+                    "subject": "Wire up the route",
+                    "description": "Expose it over HTTP",
+                    "activeForm": "Wiring up the route",
+                }),
+                "Task #2 created successfully: Wire up the route",
+                json!({ "task": { "id": "2", "subject": "Wire up the route" } }),
+            ),
+            (
+                "TaskCreate",
+                json!({
+                    "subject": "Add tests",
+                    "description": "Lock in behaviour",
+                    "activeForm": "Adding tests",
+                }),
+                "Task #3 created successfully: Add tests",
+                json!({ "task": { "id": "3", "subject": "Add tests" } }),
+            ),
+            (
+                "TaskUpdate",
+                json!({ "taskId": "1", "status": "in_progress" }),
+                "Updated task #1 status",
+                json!({
+                    "success": true,
+                    "taskId": "1",
+                    "statusChange": { "from": "pending", "to": "in_progress" },
+                }),
+            ),
+            (
+                "TaskUpdate",
+                json!({ "taskId": "1", "status": "completed" }),
+                "Updated task #1 status",
+                json!({
+                    "success": true,
+                    "taskId": "1",
+                    "statusChange": { "from": "in_progress", "to": "completed" },
+                }),
+            ),
+            (
+                "TaskUpdate",
+                json!({ "taskId": "2", "status": "in_progress" }),
+                "Updated task #2 status",
+                json!({
+                    "success": true,
+                    "taskId": "2",
+                    "statusChange": { "from": "pending", "to": "in_progress" },
+                }),
+            ),
+        ];
+        let snapshots = [
+            json!([
+                { "content": "Write the parser", "status": "pending", "activeForm": "Writing the parser" },
+            ]),
+            json!([
+                { "content": "Write the parser", "status": "pending", "activeForm": "Writing the parser" },
+                { "content": "Wire up the route", "status": "pending", "activeForm": "Wiring up the route" },
+            ]),
+            json!([
+                { "content": "Write the parser", "status": "pending", "activeForm": "Writing the parser" },
+                { "content": "Wire up the route", "status": "pending", "activeForm": "Wiring up the route" },
+                { "content": "Add tests", "status": "pending", "activeForm": "Adding tests" },
+            ]),
+            json!([
+                { "content": "Write the parser", "status": "in_progress", "activeForm": "Writing the parser" },
+                { "content": "Wire up the route", "status": "pending", "activeForm": "Wiring up the route" },
+                { "content": "Add tests", "status": "pending", "activeForm": "Adding tests" },
+            ]),
+            json!([
+                { "content": "Write the parser", "status": "done", "activeForm": "Writing the parser" },
+                { "content": "Wire up the route", "status": "pending", "activeForm": "Wiring up the route" },
+                { "content": "Add tests", "status": "pending", "activeForm": "Adding tests" },
+            ]),
+            json!([
+                { "content": "Write the parser", "status": "done", "activeForm": "Writing the parser" },
+                { "content": "Wire up the route", "status": "in_progress", "activeForm": "Wiring up the route" },
+                { "content": "Add tests", "status": "pending", "activeForm": "Adding tests" },
+            ]),
+        ];
+        for (i, (name, input, output, _result)) in script.into_iter().enumerate() {
+            let tool_id = self.tool_id();
+            self.tool_start(&tool_id, name, input)?;
+            if !self.tick()? {
+                return Ok(());
+            }
+            self.tool_end_ok(&tool_id, output)?;
+            self.emit_todo(snapshots[i].clone())?;
+            if !self.tick()? {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn ctx(&self) -> Result<(), String> {
+        let ctx: i64 = self.message.trim().parse().unwrap_or(160_000);
+        self.emit_text(&format!("context now {ctx}"))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit(json!({
+            "kind": "usage",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "total_tokens": 150,
+            "context_tokens": ctx,
+            "model": self.model,
+            "turn_seq": null,
+        }))
+    }
+}
+
+fn mock_revised_markdown(markdown: &str, version: i64, insert_only: bool) -> String {
+    let mut lines: Vec<String> = markdown.lines().map(str::to_string).collect();
+    if insert_only {
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with('#'))
+            .map_or(0, |i| i + 1);
+        lines.insert(at, String::new());
+        lines.insert(at + 1, format!("_Mock reviewer opener, pass {version}._"));
+    } else {
+        if let Some(line) = lines
+            .iter_mut()
+            .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        {
+            *line = format!("Revised: {}", line.trim());
+        }
+        lines.push(String::new());
+        lines.push(format!("_Mock reviewer pass {version}._"));
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
