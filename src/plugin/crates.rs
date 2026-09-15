@@ -1,11 +1,14 @@
 //! Trusted crate plugins compiled into the Peckboard binary.
 //!
-//! These are not WASM: they appear in the builtin catalog (`/api/plugins`
-//! `plugins` array) as always-on, cannot be installed or removed, and win
-//! over a leftover `.wasm` of the same id in the Settings list. Provider
-//! crates register a native [`crate::provider::agent::AgentProvider`] at
-//! boot; session-control stays catalog-only until its NativePlugin lands.
+//! These are not WASM downloads: the code ships inside the binary, and
+//! "installing" one just activates it — providers register a native
+//! [`crate::provider::agent::AgentProvider`], session-control approves its
+//! embedded wasm. Nothing is active on a fresh install; the user picks
+//! plugins from the registry (which lists them as `kind: "crate"` with no
+//! download). Upgrades of working installs seed everything installed so
+//! existing sessions keep their providers.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,7 +23,8 @@ use crate::provider::crate_provider::{self, CrateHooks};
 use crate::provider::registry::ProviderRegistry;
 
 /// Ids that ship as crates. WASM files of the same stem are hidden from the
-/// installed-plugins list and cannot be installed/uninstalled via the registry.
+/// installed-plugins list; the registry lists these ids as installable
+/// activations of the compiled-in code, never as downloads.
 pub const CRATE_PLUGIN_IDS: &[&str] = &[
     "claude",
     "grok",
@@ -44,6 +48,126 @@ pub fn is_crate_provider_id(id: &str) -> bool {
         "claude" | "grok" | "cursor" | "kimi" | "codex" | "ollama" | "mock"
     )
 }
+
+/// Plugin-store key (ns `core.settings`/`app`) holding the installed crate
+/// plugin ids: `{"ids": ["claude", ...]}`. Absent = never seeded.
+pub const INSTALLED_KEY: &str = "crate_plugins_installed";
+
+pub fn all_ids() -> HashSet<String> {
+    CRATE_PLUGIN_IDS.iter().map(|s| s.to_string()).collect()
+}
+
+/// The persisted installed set, or `None` when it has never been seeded.
+pub async fn installed_set(db: &Db) -> Option<HashSet<String>> {
+    let db = db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(
+            crate::routes::settings::SETTINGS_NS,
+            crate::routes::settings::SETTINGS_COLLECTION,
+            INSTALLED_KEY,
+        )
+    })
+    .await
+    .ok()?
+    .ok()??;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(
+        v.get("ids")?
+            .as_array()?
+            .iter()
+            .filter_map(|x| x.as_str())
+            .filter(|id| is_crate_plugin_id(id))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Persist the installed set.
+pub async fn write_installed(db: &Db, set: &HashSet<String>) {
+    let mut ids: Vec<&str> = set.iter().map(String::as_str).collect();
+    ids.sort_unstable();
+    let json = serde_json::json!({ "ids": ids }).to_string();
+    let db = db.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(
+            crate::routes::settings::SETTINGS_NS,
+            crate::routes::settings::SETTINGS_COLLECTION,
+            INSTALLED_KEY,
+            &json,
+        )
+    })
+    .await;
+}
+
+/// Resolve the installed set at boot, seeding it on first evaluation and
+/// persisting the decision:
+/// - `PECKBOARD_PREINSTALL_PLUGINS` (`all` | `none` | `a,b,c`) overrides the
+///   seed — the e2e harness and containerized deploys use this.
+/// - A fresh install (bootstrap admin just created) seeds EMPTY: nothing is
+///   active until the user installs plugins from the registry.
+/// - An upgrade of a working install seeds everything, so existing sessions
+///   keep their providers.
+pub async fn resolve_installed(db: &Db, fresh_install: bool) -> HashSet<String> {
+    if let Some(set) = installed_set(db).await {
+        return set;
+    }
+    let seeded = match std::env::var("PECKBOARD_PREINSTALL_PLUGINS")
+        .ok()
+        .as_deref()
+    {
+        Some("all") => all_ids(),
+        Some("none") | Some("") => HashSet::new(),
+        Some(csv) => csv
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|id| is_crate_plugin_id(id))
+            .collect(),
+        None if fresh_install => HashSet::new(),
+        None => all_ids(),
+    };
+    write_installed(db, &seeded).await;
+    seeded
+}
+
+/// The provider hooks for a crate plugin id (`None` for session-control).
+pub fn hooks_for(id: &str) -> Option<CrateHooks> {
+    SPECS.iter().find(|s| s.id == id).and_then(|s| s.hooks)
+}
+
+/// Live-activate one crate plugin after an install: providers register their
+/// native [`AgentProvider`]; session-control approves its embedded wasm.
+pub async fn activate(
+    id: &str,
+    provider_registry: &Arc<ProviderRegistry>,
+    db: &Db,
+    plugins: &Arc<PluginManager>,
+) {
+    match hooks_for(id) {
+        Some(hooks) => {
+            crate_provider::register_crate_provider(provider_registry, plugins.clone(), db, hooks)
+                .await;
+        }
+        None => {
+            let _ = plugins.decide(id, true).await;
+        }
+    }
+}
+
+/// Live-deactivate one crate plugin after an uninstall: providers leave the
+/// registry (in-flight turns get a stop request); session-control's wasm is
+/// denied, which shuts its hooks down but keeps the file for reinstall.
+pub async fn deactivate(
+    id: &str,
+    provider_registry: &Arc<ProviderRegistry>,
+    plugins: &Arc<PluginManager>,
+) {
+    if is_crate_provider_id(id) {
+        provider_registry.unregister(id).await;
+        plugins.provider_runtime().request_stop_for_plugin(id);
+    } else {
+        let _ = plugins.decide(id, false).await;
+    }
+}
 /// session-control's own release version, parsed from its nested crate
 /// manifest at compile time (the crate versions independently of core).
 static SESSION_CONTROL_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -58,13 +182,15 @@ static SESSION_CONTROL_VERSION: std::sync::LazyLock<String> = std::sync::LazyLoc
         .to_string()
 });
 
-/// Register every crate plugin into the builtin catalog and, for provider
-/// crates, a native [`AgentProvider`].
+/// Register every crate plugin into the builtin catalog (all of them — the
+/// catalog is the metadata source for both the installed list and the
+/// registry browser) and activate the ones in `installed`.
 pub async fn register_all(
     registry: &BuiltinPluginRegistry,
     provider_registry: Arc<ProviderRegistry>,
     db: &Db,
     plugins: Arc<PluginManager>,
+    installed: &HashSet<String>,
 ) {
     for spec in SPECS {
         registry
@@ -74,10 +200,21 @@ pub async fn register_all(
                 db.clone(),
             )
             .await;
+        if !installed.contains(spec.id) {
+            continue;
+        }
         if let Some(hooks) = spec.hooks {
             crate_provider::register_crate_provider(&provider_registry, plugins.clone(), db, hooks)
                 .await;
+        } else {
+            // session-control: approve the embedded wasm so its hooks run.
+            let _ = plugins.decide(spec.id, true).await;
         }
+    }
+    // An uninstalled session-control may still be approved from an earlier
+    // life (approval persists); deny it so its hooks stay off.
+    if !installed.contains("session-control") {
+        let _ = plugins.decide("session-control", false).await;
     }
 }
 

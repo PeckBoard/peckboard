@@ -4,7 +4,8 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
  * UI e2e for the Plugins settings sub-page (Settings → Plugins).
  *
  * First-party providers and session-control ship as bundled crate plugins
- * (always enabled). Untrusted plugins remain WASM.
+ * (compiled in; installable/removable as activation toggles — the e2e
+ * server preinstalls all of them). Untrusted plugins remain WASM.
  */
 
 const E2E_USER = 'e2e-user'
@@ -54,7 +55,7 @@ test('Plugins settings page lists bundled crate plugins; details modal shows per
   await claudeRow.getByTestId('plugin-open-claude').click()
   const claudeDetails = page.getByTestId('plugin-details-claude')
   await expect(claudeDetails).toBeVisible()
-  await expect(claudeDetails).toContainText('Crate · always enabled')
+  await expect(claudeDetails).toContainText('Bundled crate')
   await expect(claudeDetails.locator('[data-permission="register_provider"]')).toBeVisible()
   await expect(claudeDetails.locator('[data-permission="spawn_process"]')).toBeVisible()
   await page.keyboard.press('Escape')

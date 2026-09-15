@@ -40,6 +40,7 @@ impl AgentProvider for NoopProvider {
     fn model_price(&self, model_id: &str) -> Option<(f64, f64)> {
         match model_id {
             "echo" => Some((0.1, 0.5)),
+            "tool-use" => Some((0.5, 2.5)),
             "happy-path" => Some((1.0, 5.0)),
             _ => None,
         }
@@ -155,6 +156,12 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
             display_name: "Mock: echo".into(),
             capabilities: vec!["mock".into()],
             tier: 1,
+        },
+        ModelInfo {
+            id: "tool-use".into(),
+            display_name: "Mock: tool use".into(),
+            capabilities: vec!["mock".into(), "tools".into()],
+            tier: 2,
         },
         ModelInfo {
             id: "happy-path".into(),

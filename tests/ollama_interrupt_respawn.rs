@@ -256,6 +256,13 @@ async fn interrupt_drains_queued_followup_into_fresh_run() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // A crate-provider turn runs as a blocking task, and dropping the
+    // test runtime waits for blocking tasks to finish — so the fresh
+    // mock:ask run this test deliberately ends with must be stopped
+    // before returning (and before the assert, so a failure panics
+    // instead of hanging the whole test binary).
+    peckboard::provider::manager::clear_queued_message(&state.db, &state.broadcaster, "s1").await;
+    state.session_manager.cancel_and_wait("s1").await;
     assert!(
         drained_into_run,
         "interrupt must drain the queued follow-up into a fresh run (release-and-continue)"

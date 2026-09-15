@@ -101,7 +101,21 @@ async fn all_repositories(state: &AppState) -> anyhow::Result<Vec<(String, Strin
 /// the Settings UI gets them in the one request it already makes. Panels
 /// with an unsafe `path` are dropped by `PluginManager::ui_panels`.
 async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entries = state.builtin_plugins.list().await;
+    // Crate catalog rows only for INSTALLED crate plugins — uninstalled ones
+    // live in the registry browser, not the installed list.
+    let installed_crates = crate::plugin::crates::installed_set(&state.db)
+        .await
+        .unwrap_or_default();
+    let entries: Vec<_> = state
+        .builtin_plugins
+        .list()
+        .await
+        .into_iter()
+        .filter(|e| {
+            !crate::plugin::crates::is_crate_plugin_id(&e.metadata.id)
+                || installed_crates.contains(&e.metadata.id)
+        })
+        .collect();
     let ui_panels = state.plugins.ui_panels().await;
     // Left-rail entries declared by active WASM plugins (same validation +
     // inert-plugin exclusion as ui_panels).
@@ -178,19 +192,34 @@ async fn decide_approval(
 /// DELETE /api/plugins/:plugin_id — uninstall an installed WASM plugin.
 /// Shuts the plugin down, removes it from the live set, deletes its
 /// `.wasm` from disk, and clears its stored approval + settings so a later
-/// reinstall starts clean. Crate plugins are compiled in and cannot be
-/// uninstalled.
+/// reinstall starts clean. A crate plugin is compiled in, so uninstalling
+/// one just deactivates it (provider unregistered / wasm denied) and drops
+/// it from the installed set — reinstall from the registry re-activates.
 async fn uninstall_plugin(
     State(state): State<Arc<AppState>>,
     Path(plugin_id): Path<String>,
 ) -> impl IntoResponse {
     if crate::plugin::crates::is_crate_plugin_id(&plugin_id) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("plugin '{plugin_id}' is a bundled crate plugin and cannot be uninstalled"),
-            })),
-        ));
+        let mut set = crate::plugin::crates::installed_set(&state.db)
+            .await
+            .unwrap_or_default();
+        if !set.remove(&plugin_id) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "plugin is not installed" })),
+            ));
+        }
+        crate::plugin::crates::write_installed(&state.db, &set).await;
+        crate::plugin::crates::deactivate(&plugin_id, &state.provider_registry, &state.plugins)
+            .await;
+        state
+            .broadcaster
+            .broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "plugin-approval".into(),
+                session_id: String::new(),
+                data: serde_json::json!({ "plugin": plugin_id, "status": "removed" }),
+            });
+        return Ok(Json(serde_json::json!({ "removed": plugin_id })));
     }
     match state.plugins.uninstall(&plugin_id).await {
         Ok(true) => {
@@ -517,7 +546,11 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             }
         }
     }
+    let installed_crates = crate::plugin::crates::installed_set(&state.db)
+        .await
+        .unwrap_or_default();
     for p in state.builtin_plugins.list().await {
+        let is_installed = installed_crates.contains(&p.metadata.id);
         plugins.insert(
             0,
             serde_json::json!({
@@ -534,10 +567,10 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                 "kind": "crate",
                 "repository": "bundled",
                 "repository_label": "Peckboard",
-                "installed": true,
-                "installed_version": p.metadata.version,
-                "installed_status": "approved",
-                "installed_permissions": p.permissions.iter().map(|perm| perm.id).collect::<Vec<_>>(),
+                "installed": is_installed,
+                "installed_version": if is_installed { serde_json::json!(p.metadata.version) } else { serde_json::Value::Null },
+                "installed_status": if is_installed { serde_json::json!("approved") } else { serde_json::Value::Null },
+                "installed_permissions": if is_installed { serde_json::json!(p.permissions.iter().map(|perm| perm.id).collect::<Vec<_>>()) } else { serde_json::Value::Null },
                 "min_peckboard": serde_json::Value::Null,
                 "compatible": true,
                 "upgrade_available": false,
@@ -574,12 +607,32 @@ async fn install_registry(
         }
     };
     if crate::plugin::crates::is_crate_plugin_id(&id) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("plugin '{id}' is a bundled crate plugin and cannot be installed"),
-            })),
-        ));
+        // Compiled in — "install" activates the bundled code, no download.
+        let mut set = crate::plugin::crates::installed_set(&state.db)
+            .await
+            .unwrap_or_default();
+        if set.insert(id.clone()) {
+            crate::plugin::crates::write_installed(&state.db, &set).await;
+            crate::plugin::crates::activate(
+                &id,
+                &state.provider_registry,
+                &state.db,
+                &state.plugins,
+            )
+            .await;
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "plugin-approval".into(),
+                    session_id: String::new(),
+                    data: serde_json::json!({ "plugin": id, "status": "approved" }),
+                });
+        }
+        return Ok(Json(serde_json::json!({
+            "installed": id,
+            "kind": "crate",
+            "status": "approved",
+        })));
     }
     let repository = body
         .get("repository")

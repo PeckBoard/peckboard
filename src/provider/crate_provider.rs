@@ -212,13 +212,25 @@ impl AgentProvider for CrateAgentProvider {
         let completion_tx = ctx.completion_tx.clone();
         let run_id = ctx.run_id;
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                peck_plugin_native_host::with_host(host, || send(&payload))
-            })
-            .await;
-            let result = match result {
-                Ok(inner) => inner,
-                Err(e) => Err(e.to_string()),
+            // A dedicated thread, not `spawn_blocking`: a turn is a
+            // long-lived cooperative loop (a parked `mock:ask`, a CLI
+            // firehose), and tokio's runtime shutdown WAITS on blocking-pool
+            // tasks — a still-parked turn would hang every runtime drop
+            // (test binaries especially). A detached thread ends at the
+            // next stop poll or process exit instead.
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let spawned = std::thread::Builder::new()
+                .name("crate-provider-turn".into())
+                .spawn(move || {
+                    let _ =
+                        done_tx.send(peck_plugin_native_host::with_host(host, || send(&payload)));
+                });
+            let result = match spawned {
+                Ok(_) => done_rx
+                    .await
+                    .map_err(|_| "crate provider turn thread panicked".to_string())
+                    .and_then(|r| r),
+                Err(e) => Err(format!("failed to spawn crate provider turn thread: {e}")),
             };
             let terminal = runtime.end_turn(&session_id);
             let (completed, error, error_kind) = match terminal {

@@ -122,15 +122,24 @@ pub async fn run_server(
     let broadcaster = Broadcaster::new();
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
+    // Crate plugins are compiled in but only ACTIVE when installed. Fresh
+    // installs seed empty (install from the registry); upgrades seed all;
+    // PECKBOARD_PREINSTALL_PLUGINS overrides for automation.
+    let installed_crates =
+        crate::plugin::crates::resolve_installed(&db, bootstrap_outcome.is_some()).await;
+    tracing::info!("Crate plugins installed: [{}]", {
+        let mut ids: Vec<&str> = installed_crates.iter().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids.join(", ")
+    });
     crate::plugin::crates::register_all(
         &builtin_plugins,
         provider_registry.clone(),
         &db,
         plugins.clone(),
+        &installed_crates,
     )
     .await;
-    // First-party providers are crate AgentProviders; matching WASM is
-    // not extracted. Crate catalog entries hide leftover wasm rows.
     // interactive sessions can run `sudo -A` with the password typed in the
     // web UI (service::askpass). A write failure only disables sudo support.
     let askpass_registry = crate::service::askpass::AskpassRegistry::new();

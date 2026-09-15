@@ -23,7 +23,17 @@ pub async fn load_first_party_providers(
     let plugins = Arc::new(PluginManager::new(data_dir, db.clone()));
     plugins.load_all().await.expect("plugin manager must load");
     let builtin = Arc::new(BuiltinPluginRegistry::new());
-    peckboard::plugin::crates::register_all(&builtin, registry.clone(), &db, plugins.clone()).await;
+    // Tests act like a fully-installed instance: every crate plugin active.
+    let installed = peckboard::plugin::crates::all_ids();
+    peckboard::plugin::crates::write_installed(&db, &installed).await;
+    peckboard::plugin::crates::register_all(
+        &builtin,
+        registry.clone(),
+        &db,
+        plugins.clone(),
+        &installed,
+    )
+    .await;
     plugins.set_provider_registry(registry);
     plugins.sync_plugin_providers().await;
     plugins

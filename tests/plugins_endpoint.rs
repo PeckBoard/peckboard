@@ -43,11 +43,14 @@ async fn build_state() -> (Arc<AppState>, String) {
     let jwt_secret = generate_jwt_secret();
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
+    let installed = peckboard::plugin::crates::all_ids();
+    peckboard::plugin::crates::write_installed(&db, &installed).await;
     peckboard::plugin::crates::register_all(
         &builtin_plugins,
         provider_registry.clone(),
         &db,
         plugins.clone(),
+        &installed,
     )
     .await;
 
@@ -139,6 +142,76 @@ async fn list_plugins_lists_crate_catalog() {
         .as_array()
         .expect("ui_panels array present in catalog");
     assert!(panels.is_empty(), "no WASM plugins loaded; got {panels:?}");
+}
+
+/// A crate plugin uninstalls (provider unregisters, row leaves the catalog)
+/// and reinstalls through the registry install route (reactivates) — no
+/// download either way, and a second uninstall of the same id 404s.
+#[tokio::test]
+async fn crate_plugin_uninstall_and_reinstall_round_trip() {
+    let (state, token) = build_state().await;
+    let app = router(state.clone()).with_state(state.clone());
+
+    assert!(state.provider_registry.get_info("kimi").await.is_some());
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/kimi")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        state.provider_registry.get_info("kimi").await.is_none(),
+        "uninstall must unregister the provider"
+    );
+
+    let req = Request::builder()
+        .uri("/api/plugins")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let ids: Vec<&str> = json["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"kimi"),
+        "uninstalled crate plugin must leave the catalog: {ids:?}"
+    );
+
+    // Double-uninstall: not installed → 404.
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/kimi")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Reinstall through the registry route: no repository, no download.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/plugins/registry/install")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"id":"kimi"}"#))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        state.provider_registry.get_info("kimi").await.is_some(),
+        "reinstall must re-register the provider"
+    );
 }
 #[tokio::test]
 async fn list_plugins_requires_auth() {

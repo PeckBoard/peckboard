@@ -257,7 +257,10 @@ function renderAction(
   const testid = `${testidPrefix}${p.id}`
   const needs = `Requires Peckboard ≥ ${p.min_peckboard ?? '?'}`
 
-  if (p.kind === 'crate') {
+  // Bundled crate plugin: compiled into Peckboard, so "Install" activates
+  // it (no download). Installed → a disabled state chip; not installed →
+  // the normal Install button below.
+  if (p.kind === 'crate' && p.installed) {
     return (
       <button
         type="button"
@@ -266,7 +269,7 @@ function renderAction(
         data-action="bundled"
         disabled
       >
-        Bundled
+        Installed
       </button>
     )
   }

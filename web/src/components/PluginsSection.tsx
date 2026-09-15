@@ -132,7 +132,7 @@ export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?
           <div className="plugin-panels-title">Bundled</div>
           <ul className="wasm-plugins-list">
             {plugins.map((p) => (
-              <PluginCard key={p.id} plugin={p} />
+              <PluginCard key={p.id} plugin={p} onRemoved={() => load()} />
             ))}
           </ul>
         </div>
@@ -467,11 +467,14 @@ function PluginPanelList({ panels }: { panels: UiPanel[] }) {
 }
 
 /**
- * A built-in plugin as a compact row; the details modal carries the full
- * description, the built-in tag, and the permission grants. Built-ins
- * can't be removed and their settings live on Settings → Plugin Settings.
+ * A bundled crate plugin as a compact row; the details modal carries the
+ * full description, the bundled tag, the permission grants, and Remove —
+ * which deactivates the compiled-in plugin (reinstall it any time from the
+ * registry, no download).
  */
-function PluginCard({ plugin }: { plugin: PluginEntry }) {
+function PluginCard({ plugin, onRemoved }: { plugin: PluginEntry; onRemoved?: () => void }) {
+  const [confirmRemove, setConfirmRemove] = useState(false)
+  const [removing, setRemoving] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const statusBadge =
     plugin.status.kind === 'active' ? (
@@ -515,7 +518,7 @@ function PluginCard({ plugin }: { plugin: PluginEntry }) {
             {plugin.built_in && (
               <>
                 <span>·</span>
-                <span className="plugin-card-meta-builtin">Crate · always enabled</span>
+                <span className="plugin-card-meta-builtin">Bundled crate</span>
               </>
             )}
           </div>
@@ -548,10 +551,37 @@ function PluginCard({ plugin }: { plugin: PluginEntry }) {
             </div>
           )}
           <div className="form-actions">
+            <button
+              type="button"
+              className="plugin-approval-deny"
+              data-testid={`plugin-remove-${plugin.id}`}
+              disabled={removing}
+              onClick={() => setConfirmRemove(true)}
+            >
+              {removing ? 'Removing…' : 'Remove'}
+            </button>
             <button type="button" className="btn-secondary" onClick={() => setDetailsOpen(false)}>
               Close
             </button>
           </div>
+          {confirmRemove && (
+            <ConfirmDialog
+              title="Remove plugin"
+              message={`Remove “${plugin.display_name}”? It is compiled into Peckboard, so this just deactivates it — reinstall it any time from the registry.`}
+              confirmLabel="Remove"
+              danger
+              onConfirm={() => {
+                setConfirmRemove(false)
+                setRemoving(true)
+                void uninstallPlugin(plugin.id).finally(() => {
+                  setRemoving(false)
+                  setDetailsOpen(false)
+                  onRemoved?.()
+                })
+              }}
+              onCancel={() => setConfirmRemove(false)}
+            />
+          )}
         </Modal>
       )}
     </li>
