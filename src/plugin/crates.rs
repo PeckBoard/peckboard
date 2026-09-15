@@ -168,18 +168,18 @@ pub async fn deactivate(
         let _ = plugins.decide(id, false).await;
     }
 }
-/// session-control's own release version, parsed from its nested crate
-/// manifest at compile time (the crate versions independently of core).
+/// session-control's own release version (the crate versions independently
+/// of core). Read from the committed sidecar next to the embedded wasm —
+/// NOT from `peck-plugins/session-control/Cargo.toml`, which is a nested
+/// repo that CI checkouts don't have. Re-embedding the wasm must update the
+/// sidecar too.
 static SESSION_CONTROL_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    include_str!("../../peck-plugins/session-control/Cargo.toml")
-        .lines()
-        .find_map(|l| {
-            l.trim()
-                .strip_prefix("version = \"")
-                .and_then(|r| r.strip_suffix('"'))
-        })
-        .unwrap_or(env!("CARGO_PKG_VERSION"))
-        .to_string()
+    let v = include_str!("../../peck-plugins-wasm/session-control.version").trim();
+    if v.is_empty() {
+        env!("CARGO_PKG_VERSION").to_string()
+    } else {
+        v.to_string()
+    }
 });
 
 /// Register every crate plugin into the builtin catalog (all of them — the
