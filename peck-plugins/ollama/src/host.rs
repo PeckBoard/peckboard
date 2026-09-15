@@ -14,12 +14,43 @@ pub enum HostFn {
     ProviderWriteStdin,
     ProviderReadStdin,
     ProviderKill,
+    ProviderProbe,
+    ProviderListAccounts,
+    ProviderInvokeMcp,
     GetPluginSetting,
     HttpRequest,
     StorePut,
     StoreGet,
     StoreList,
     StoreDelete,
+}
+impl HostFn {
+    pub fn name(self) -> &'static str {
+        match self {
+            HostFn::RegisterProvider => "peckboard_register_provider",
+            HostFn::EmitProviderEvent => "peckboard_emit_provider_event",
+            HostFn::ProviderShouldStop => "peckboard_provider_should_stop",
+            HostFn::ProviderTakeMessage => "peckboard_provider_take_message",
+            HostFn::ProviderGetSession => "peckboard_provider_get_session",
+            HostFn::ProviderGetMcpConfig => "peckboard_provider_get_mcp_config",
+            HostFn::ProviderAccountEnv => "peckboard_provider_account_env",
+            HostFn::ProviderWriteFile => "peckboard_provider_write_file",
+            HostFn::ProviderSpawn => "peckboard_provider_spawn",
+            HostFn::ProviderReadLine => "peckboard_provider_read_line",
+            HostFn::ProviderWriteStdin => "peckboard_provider_write_stdin",
+            HostFn::ProviderReadStdin => "peckboard_provider_read_stdin",
+            HostFn::ProviderKill => "peckboard_provider_kill",
+            HostFn::ProviderProbe => "peckboard_provider_probe",
+            HostFn::ProviderListAccounts => "peckboard_provider_list_accounts",
+            HostFn::ProviderInvokeMcp => "peckboard_provider_invoke_mcp",
+            HostFn::GetPluginSetting => "peckboard_get_plugin_setting",
+            HostFn::HttpRequest => "peckboard_http_request",
+            HostFn::StorePut => "peckboard_store_put",
+            HostFn::StoreGet => "peckboard_store_get",
+            HostFn::StoreList => "peckboard_store_list",
+            HostFn::StoreDelete => "peckboard_store_delete",
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -42,6 +73,9 @@ mod imp {
         fn peckboard_provider_write_stdin(input: String) -> String;
         fn peckboard_provider_read_stdin(input: String) -> String;
         fn peckboard_provider_kill(input: String) -> String;
+        fn peckboard_provider_probe(input: String) -> String;
+        fn peckboard_provider_list_accounts(input: String) -> String;
+        fn peckboard_provider_invoke_mcp(input: String) -> String;
         fn peckboard_get_plugin_setting(input: String) -> String;
         fn peckboard_http_request(input: String) -> String;
         fn peckboard_store_put(input: String) -> String;
@@ -70,6 +104,9 @@ mod imp {
                 HostFn::ProviderWriteStdin => peckboard_provider_write_stdin(s),
                 HostFn::ProviderReadStdin => peckboard_provider_read_stdin(s),
                 HostFn::ProviderKill => peckboard_provider_kill(s),
+                HostFn::ProviderProbe => peckboard_provider_probe(s),
+                HostFn::ProviderListAccounts => peckboard_provider_list_accounts(s),
+                HostFn::ProviderInvokeMcp => peckboard_provider_invoke_mcp(s),
                 HostFn::GetPluginSetting => peckboard_get_plugin_setting(s),
                 HostFn::HttpRequest => peckboard_http_request(s),
                 HostFn::StorePut => peckboard_store_put(s),
@@ -93,10 +130,10 @@ mod imp {
     use super::HostFn;
 
     pub fn call_host(
-        _which: HostFn,
-        _input: &serde_json::Value,
+        which: HostFn,
+        input: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        unimplemented!("host calls are only available on wasm32")
+        peck_plugin_native_host::call_json(which.name(), input)
     }
 }
 

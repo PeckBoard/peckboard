@@ -261,8 +261,15 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
     }
   }
 
+  const cliField = payload.schema.fields.find((f) => f.key === 'cli_path')
   const cliPathRaw = form.values.cli_path
-  const cliPath = typeof cliPathRaw === 'string' && cliPathRaw.trim() ? cliPathRaw.trim() : 'codex'
+  const cliFallback =
+    typeof cliField?.default === 'string' && cliField.default.trim()
+      ? cliField.default.trim()
+      : pluginId
+  const cliPath =
+    typeof cliPathRaw === 'string' && cliPathRaw.trim() ? cliPathRaw.trim() : cliFallback
+  const providerLabel = pluginId.charAt(0).toUpperCase() + pluginId.slice(1)
 
   return (
     <div className="plugin-settings" data-testid={`plugin-settings-${pluginId}`}>
@@ -282,13 +289,13 @@ export default function PluginSettingsForm({ pluginId }: { pluginId: string }) {
           />
         ))}
       </fieldset>
-      {pluginId === 'codex' && (
+      {cliField && (
         <HostCliMissingBanner
           command={cliPath}
-          requiredBy="the Codex provider"
-          doneHint="go back to Settings → Providers and confirm the Codex CLI warning is gone"
+          requiredBy={`the ${providerLabel} provider`}
+          doneHint={`go back to Settings → Providers and confirm the ${providerLabel} CLI warning is gone`}
           consequence="This provider will fail to spawn until it is installed."
-          testIdPrefix="codex"
+          testIdPrefix={pluginId}
         />
       )}
       {!isAdmin && <p className="form-hint">Only an admin can change plugin settings.</p>}

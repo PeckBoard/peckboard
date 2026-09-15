@@ -1,5 +1,5 @@
 //! Plugin manifest: identity, hooks, permissions, settings.
-//! Settings copied from `src/plugin/builtins/cursor.rs`.
+//! Settings owned by this plugin's manifest.
 
 pub fn manifest_json() -> String {
     serde_json::json!({

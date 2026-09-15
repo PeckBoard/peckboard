@@ -203,12 +203,13 @@ export function uninstallPlugin(pluginId: string): Promise<Response> {
   })
 }
 
-/** A plugin available in the registry, aggregated across repositories. */
 export interface RegistryPlugin {
   id: string
   name: string
   description: string
   author: string
+  /** Bundled crate plugin compiled into Peckboard — not a WASM download. */
+  kind?: 'wasm' | 'crate'
   homepage?: string | null
   version: string
   hooks: string[]

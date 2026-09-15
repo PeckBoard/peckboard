@@ -1,0 +1,10 @@
+[package]
+name = "peck-plugin-native-host"
+version = "0.1.0"
+edition = "2024"
+description = "Thread-local host-function bridge so first-party provider crates can reuse their WASM send loops in-process."
+license = "MIT"
+publish = false
+
+[dependencies]
+serde_json = "1"

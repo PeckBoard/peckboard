@@ -71,8 +71,8 @@ fn dispatch_hook(hook: &str, payload: serde_json::Value) -> String {
     }
 }
 
-fn handle_register() -> String {
-    let body = serde_json::json!({
+pub fn registration() -> serde_json::Value {
+    serde_json::json!({
         "id": models::PROVIDER_ID,
         "display_name": models::DISPLAY_NAME,
         "models": models::seed_models(),
@@ -96,8 +96,11 @@ fn handle_register() -> String {
             "supports_mid_stream_injection": false,
             "answer_transport": "stdin",
         },
-    });
-    match host::call_host(host::HostFn::RegisterProvider, &body) {
+    })
+}
+
+fn handle_register() -> String {
+    match host::call_host(host::HostFn::RegisterProvider, &registration()) {
         Ok(_) => allow(serde_json::json!({ "ok": true })),
         Err(e) => cancel(&e),
     }
@@ -120,4 +123,16 @@ fn cancel(reason: &str) -> String {
 
 fn skip() -> String {
     serde_json::json!({ "verdict": "skip" }).to_string()
+}
+
+pub fn send_turn(payload: &serde_json::Value) -> Result<(), String> {
+    send::run_scenario(payload)
+}
+
+pub fn refresh_models() -> Option<serde_json::Value> {
+    None
+}
+
+pub fn manifest_json() -> String {
+    manifest::manifest_json()
 }

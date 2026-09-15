@@ -1,4 +1,5 @@
 pub mod builtin;
+pub mod crates;
 pub mod hooks;
 pub mod host;
 pub mod manager;
@@ -9,6 +10,6 @@ pub mod settings;
 pub mod ssh;
 pub mod todo_hook;
 
-// Plugins are WASM (Extism), loaded from `<dataDir>/plugins/`.
-// First-party AI providers ship as wasm in `peck-plugins-wasm/` and are
-// extracted + auto-approved at boot. There is no compiled-in AgentProvider.
+// Untrusted plugins are WASM (Extism) from `<dataDir>/plugins/`.
+// Trusted first-party plugins (providers + session-control) are crates
+// compiled into the binary (`crates` / `BuiltinPluginRegistry`).

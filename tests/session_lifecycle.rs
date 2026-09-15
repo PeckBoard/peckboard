@@ -33,7 +33,7 @@ async fn build_env() -> (SessionManager, Db, Arc<Broadcaster>, tempfile::TempDir
     let plugins = common::load_first_party_providers(dir.path(), db.clone(), &registry).await;
     assert!(
         registry.get_info("mock").await.is_some(),
-        "mock WASM plugin must register"
+        "mock crate provider must register"
     );
     let manager = SessionManager::new(registry).with_plugins(plugins);
     let broadcaster = Broadcaster::new();

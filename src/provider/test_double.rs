@@ -162,6 +162,12 @@ pub fn mock_model_infos() -> Vec<ModelInfo> {
             capabilities: vec!["mock".into(), "tools".into()],
             tier: 3,
         },
+        ModelInfo {
+            id: "plan-review".into(),
+            display_name: "Mock: plan review (thinking)".into(),
+            capabilities: vec!["mock".into(), "reasoning".into()],
+            tier: 3,
+        },
     ]
 }
 

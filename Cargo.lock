@@ -1873,6 +1873,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "extism-pdk"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "352fcb5a66eb74145a1c4a01f2bd15d59c62c85be73aac8471880c65b26b798f"
+dependencies = [
+ "anyhow",
+ "base64",
+ "extism-convert",
+ "extism-manifest",
+ "extism-pdk-derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "extism-pdk-derive"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d086daea5fd844e3c5ac69ddfe36df4a9a43e7218cf7d1f888182b089b09806c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4095,6 +4121,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "peck-plugin-native-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "peckboard"
 version = "0.1.12"
 dependencies = [
@@ -4126,6 +4159,14 @@ dependencies = [
  "mime_guess",
  "open",
  "p256 0.13.2",
+ "peck-plugin-native-host",
+ "peckboard-claude-plugin",
+ "peckboard-codex-plugin",
+ "peckboard-cursor-plugin",
+ "peckboard-grok-plugin",
+ "peckboard-kimi-plugin",
+ "peckboard-mock-plugin",
+ "peckboard-ollama-plugin",
  "qrcode",
  "rand 0.8.6",
  "rand_core 0.10.1",
@@ -4158,6 +4199,76 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wry",
+]
+
+[[package]]
+name = "peckboard-claude-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "peckboard-codex-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "peckboard-cursor-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "peckboard-grok-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "peckboard-kimi-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "peckboard-mock-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "peckboard-ollama-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

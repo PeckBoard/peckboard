@@ -61,12 +61,22 @@ const MAX_PLUGIN_CONCURRENCY: u32 = 4;
 /// `--provider-send-timeout-secs` / `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`
 /// (see [`PluginManager::with_provider_send_timeout`]).
 const DEFAULT_PROVIDER_SEND_TIMEOUT: Duration = Duration::from_secs(300);
-/// First-party provider plugins shipped in the binary. Extracted into
-/// `<dataDir>/plugins/` on every boot and auto-approved so a fresh install
-/// has models without the operator installing from the registry. There is
-/// no compiled-in `AgentProvider` — these wasm files ARE the providers.
-pub const FIRST_PARTY_PROVIDER_IDS: &[&str] = &[
-    "claude", "grok", "cursor", "kimi", "codex", "ollama", "mock",
+/// First-party plugins whose WASM ships embedded in the binary. Provider ids
+/// used to extract as WASM too, but turns now run on crate [`AgentProvider`]s
+/// (`plugin::crates`) — those ids are skipped at extract/auto-approve so a
+/// leftover `.wasm` cannot collide with the crate. `session-control` is the
+/// one bundled crate that still EXECUTES as WASM: its crate builds a cdylib
+/// embedded here, and it must be extracted and auto-approved to serve its
+/// MCP tools, orchestrator engine, and page.
+pub const FIRST_PARTY_PLUGIN_IDS: &[&str] = &[
+    "claude",
+    "grok",
+    "cursor",
+    "kimi",
+    "codex",
+    "ollama",
+    "mock",
+    "session-control",
 ];
 
 #[derive(rust_embed::Embed)]
@@ -157,9 +167,9 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "models_read", // peckboard_list_models — thinking-model catalog METADATA (ids, display names, tiers, account ids); never credentials or tokens
     "process_exec_any", // peckboard_exec_any — run ANY folder-contained command (after approval)
     "project_files_read", // peckboard_list_project_files / read_file / read_file_base64
-    "project_files_write", // peckboard_write_file
+    "project_files_write", // peckboard_write_file — write a file under the session/project folder
+    "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config / _provider_spawn / _read_line / _write_stdin / _read_stdin / _kill / _account_env / _write_file / _probe / _list_accounts / _invoke_mcp / _take_message — register an AI provider and drive its turns (HTTP, CLI, or MCP tools)
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
-    "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config / _provider_spawn / _read_line / _write_stdin / _kill — register an AI provider and drive its turns (HTTP or CLI)
     "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file — connect to remote SSH hosts, run commands, transfer files
     "ssh_keys", // peckboard_ssh_key_list, and Auth::KeyRef in peckboard_ssh_* — list vault-key METADATA and use a vault key by id; never exposes private key material, ciphertext, nonce, or passphrase
     "session_dispatch", // peckboard_dispatch_capture / resume_session
@@ -909,11 +919,17 @@ impl PluginManager {
     /// The app data dir — `plugins_dir` is `<data_dir>/plugins`; some host
     /// functions (browser-run recordings, the SSH vault key file) need the
     /// data dir itself.
-    fn data_dir(&self) -> PathBuf {
+    pub(crate) fn data_dir(&self) -> PathBuf {
         self.plugins_dir
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.plugins_dir.clone())
+    }
+
+    /// Shared host-side turn runtime crate providers and WASM adapters both
+    /// drive. One instance per manager so cancel/interrupt key off session id.
+    pub fn provider_runtime(&self) -> Arc<crate::provider::plugin_provider::PluginProviderRuntime> {
+        self.provider_runtime.clone()
     }
 
     /// Override the `provider.send` per-call budget (default 300s). Must be
@@ -948,6 +964,25 @@ impl PluginManager {
         if let Ok(mut guard) = self.self_weak.write() {
             *guard = Some(Arc::downgrade(self));
         }
+    }
+    /// The registry bound by [`PluginManager::set_provider_registry`], if any.
+    /// Used by `peckboard_provider_invoke_mcp` so MCP tools that need the
+    /// catalog (`list_models`, spawn-subagent) work during a plugin turn.
+    pub(crate) fn bound_provider_registry(
+        &self,
+    ) -> Option<Arc<crate::provider::registry::ProviderRegistry>> {
+        self.provider_registry
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .and_then(|w| w.upgrade())
+    }
+
+    /// The late-bound [`super::host::LiveHost`], once `set_live_host` has
+    /// run. Crate providers pass it to the store impls so their writes
+    /// announce `plugin-data` frames exactly like the WASM store host fns.
+    pub(crate) fn live_host(&self) -> Option<Arc<dyn super::host::LiveHost>> {
+        self.live.read().ok().and_then(|g| g.clone())
     }
 
     /// Bind the live-application bridge used by the agent-dispatch host
@@ -1026,6 +1061,10 @@ impl PluginManager {
             if !name.ends_with(".wasm") {
                 continue;
             }
+            let stem = name.trim_end_matches(".wasm");
+            if crate::plugin::crates::is_crate_provider_id(stem) {
+                continue;
+            }
             let dest = self.plugins_dir.join(name.as_ref());
             std::fs::write(&dest, file.data.as_ref())?;
         }
@@ -1036,7 +1075,10 @@ impl PluginManager {
     /// without an operator click. Same grant they had as compiled-in
     /// builtins.
     async fn approve_first_party(&self) {
-        for id in FIRST_PARTY_PROVIDER_IDS {
+        for id in FIRST_PARTY_PLUGIN_IDS {
+            if crate::plugin::crates::is_crate_provider_id(id) {
+                continue;
+            }
             match self.decide(id, true).await {
                 Ok(Some(_)) => info!("First-party provider plugin '{id}' approved"),
                 Ok(None) => warn!("First-party provider plugin '{id}' was not loaded"),
@@ -1044,7 +1086,6 @@ impl PluginManager {
             }
         }
     }
-
     /// Load a single plugin from a .wasm file.
     fn load_plugin(&self, path: &Path) -> anyhow::Result<LoadedPlugin> {
         let name = path
@@ -1839,7 +1880,7 @@ impl PluginManager {
         };
         let models: Vec<crate::provider::stream::ModelInfo> =
             serde_json::from_value(payload.get("models")?.clone()).ok()?;
-        if let Err(e) = crate::provider::plugin_provider::validate_models(&models) {
+        if let Err(e) = crate::provider::plugin_provider::validate_refresh_models(&models) {
             warn!("Plugin '{plugin_id}' returned an invalid {PROVIDER_MODELS_HOOK} catalog: {e}");
             return None;
         }
@@ -3410,6 +3451,29 @@ mod tests {
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_MODELS_HOOK));
         assert!(ALLOWED_HOOKS.contains(&crate::plugin::hooks::TIMER_TICK_HOOK));
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_INTERRUPT_HOOK));
+    }
+
+    #[test]
+    fn allowed_permissions_pinned() {
+        let mut seen = std::collections::HashSet::new();
+        for p in ALLOWED_PERMISSIONS {
+            assert!(
+                seen.insert(*p),
+                "duplicate permission in ALLOWED_PERMISSIONS: {p}"
+            );
+        }
+        for required in [
+            "register_provider",
+            "http_request",
+            "data_store",
+            "provide_mcp_tools",
+            "project_files_write",
+        ] {
+            assert!(
+                ALLOWED_PERMISSIONS.contains(&required),
+                "ALLOWED_PERMISSIONS is missing '{required}'"
+            );
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod models;
 mod parser;
 mod sandbox;
 mod send;
+mod settings;
 mod usage;
 
 use serde::Deserialize;
@@ -55,15 +56,15 @@ fn dispatch_hook(hook: &str, payload: serde_json::Value) -> String {
         "provider.send" => handle_send(payload),
         // Serve the catalog captured at register; a later implementation
         // can Allow a fresh list here.
-        "provider.models" => skip(),
+        "provider.models" => handle_models(),
         // Cooperative stop is the host-side flag; this hook is cleanup only.
         "provider.interrupt" => skip(),
         _ => skip(),
     }
 }
 
-fn handle_register() -> String {
-    let body = serde_json::json!({
+pub fn registration() -> serde_json::Value {
+    serde_json::json!({
         "id": models::PROVIDER_ID,
         "display_name": models::DISPLAY_NAME,
         "models": models::seed_models(),
@@ -84,12 +85,53 @@ fn handle_register() -> String {
             "supports_mid_stream_injection": true,
             "answer_transport": "stdin",
         },
-    });
-    match host::call_host(host::HostFn::RegisterProvider, &body) {
+    })
+}
+
+fn handle_register() -> String {
+    match host::call_host(host::HostFn::RegisterProvider, &registration()) {
         Ok(_) => allow(serde_json::json!({ "ok": true })),
         Err(e) => cancel(&e),
     }
 }
+/// Kill-switch for CLI model discovery. Set `PECKBOARD_CLAUDE_MODEL_DISCOVERY`
+/// to `0`/`false`/`off` to always serve the static seed — the e2e harness
+/// uses this to keep model labels deterministic on machines that have a real
+/// `claude` binary installed. WASM builds have no environment; discovery
+/// stays governed by the `discover_models` setting alone there.
+fn env_discovery_enabled() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        !matches!(
+            std::env::var("PECKBOARD_CLAUDE_MODEL_DISCOVERY").as_deref(),
+            Ok("0") | Ok("false") | Ok("off")
+        )
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        true
+    }
+}
+
+fn handle_models() -> String {
+    let cli = settings::cli_path("claude");
+    let extra = settings::str_list("additional_models");
+    let discovered: Vec<String> = Vec::new();
+    if settings::bool("discover_models", true) && env_discovery_enabled() {
+        if let Some(out) = settings::probe(&cli, &["--version"]) {
+            let _ = out;
+        }
+    }
+    let models = settings::merge_catalog(
+        models::seed_models(),
+        discovered,
+        extra,
+        &settings::accounts(),
+        |id| id.to_string(),
+    );
+    allow(serde_json::json!({ "models": models }))
+}
+
 fn handle_send(payload: serde_json::Value) -> String {
     match send::run(&payload) {
         Ok(()) => allow(serde_json::json!({ "ok": true })),
@@ -107,4 +149,21 @@ fn cancel(reason: &str) -> String {
 
 fn skip() -> String {
     serde_json::json!({ "verdict": "skip" }).to_string()
+}
+
+pub fn send_turn(payload: &serde_json::Value) -> Result<(), String> {
+    send::run(payload)
+}
+
+pub fn refresh_models() -> Option<serde_json::Value> {
+    let out = handle_models();
+    let v: serde_json::Value = serde_json::from_str(&out).ok()?;
+    if v.get("verdict").and_then(|x| x.as_str()) != Some("allow") {
+        return None;
+    }
+    v.get("payload")?.get("models").cloned()
+}
+
+pub fn manifest_json() -> String {
+    manifest::manifest_json()
 }

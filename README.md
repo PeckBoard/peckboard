@@ -10,7 +10,7 @@ Ships as a **single executable binary** — frontend assets, database migrations
 
 ## What's in the Box
 
-- **Pluggable agent providers** — sessions are driven by any registered `AgentProvider`; built-ins are the real Claude CLI (`claude:*` model ids) and a scripted `mock:*` provider for tests and offline dev
+- **Pluggable agent providers** — sessions are driven by any registered `AgentProvider`; first-party backends (claude, grok, cursor, kimi, codex, ollama, mock) are WASM plugins, not compiled into core
 - **Sessions** — spawn agent subprocesses with streaming JSON output; resume, interrupt, replay
 - **Kanban board** — cards flow through workflow steps, each step driven by a dedicated worker session (one session per card for life, via `--resume`)
 - **Real-time UI** — Axum WebSocket server streams events; clients reconnect with `resume-from-seq`
@@ -137,14 +137,16 @@ src/
     agent.rs        AgentProvider trait + shared event-emit helper
     manager.rs      provider-agnostic dispatcher (picks backend by model prefix)
     registry.rs     registry of registered providers + model metadata
-    claude/         Claude CLI provider (process spawn + stream-json parser)
-    mock/           scripted mock provider for tests and offline dev
+    plugin_provider.rs WASM adapter (register / send / models / interrupt)
+    test_double.rs  NoopProvider for tests only
   worker/           kanban worker orchestrator, watchdog
   service/          push, TLS, mDNS, wake-lock, MCP server
   plugin/           Extism plugin manager + hook dispatcher
   frontend.rs       rust-embed of web/dist/
 
 web/                React + Vite + Zustand SPA
+peck-plugins/      first-party WASM plugins (claude, grok, cursor, kimi, codex, ollama, mock, …)
+peck-plugins-wasm/ embedded .wasm copies extracted at boot
 
 migrations/         Diesel migrations (embedded into binary)
 

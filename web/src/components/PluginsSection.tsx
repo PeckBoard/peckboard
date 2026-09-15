@@ -124,10 +124,12 @@ export default function PluginsSection({ onBrowseRegistry }: { onBrowseRegistry?
       {wasmPlugins.length > 0 && (
         <WasmPluginList plugins={wasmPlugins} panels={panels} onDecided={() => load()} />
       )}
-      {plugins && plugins.length === 0 && <p className="settings-loading">No plugins installed.</p>}
+      {plugins && plugins.length === 0 && wasmPlugins.length === 0 && (
+        <p className="settings-loading">No plugins installed.</p>
+      )}
       {plugins && plugins.length > 0 && (
         <div className="plugins-list">
-          <div className="plugin-panels-title">Built-in Plugins</div>
+          <div className="plugin-panels-title">Bundled</div>
           <ul className="wasm-plugins-list">
             {plugins.map((p) => (
               <PluginCard key={p.id} plugin={p} />
@@ -513,7 +515,7 @@ function PluginCard({ plugin }: { plugin: PluginEntry }) {
             {plugin.built_in && (
               <>
                 <span>·</span>
-                <span className="plugin-card-meta-builtin">Built-in · always enabled</span>
+                <span className="plugin-card-meta-builtin">Crate · always enabled</span>
               </>
             )}
           </div>

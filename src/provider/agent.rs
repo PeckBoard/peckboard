@@ -94,14 +94,15 @@ pub struct SendMessageContext {
     /// [`ProcessCompletion::run_id`].
     pub run_id: u64,
     pub completion_tx: mpsc::Sender<ProcessCompletion>,
-    /// Plugin host for this dispatch. A non-Claude provider runs its raw
-    /// output through `crate::plugin::todo_hook::emit_plugin_todos` to let a
-    /// `todo`-hook plugin drive lifecycle tracking. Empty (a no-op) unless the
+    /// Plugin host for this dispatch. Used by the plugin-provider adapter
+    /// to run MCP tools during a turn (`peckboard_provider_invoke_mcp`) and
+    /// by `crate::plugin::todo_hook::emit_plugin_todos` so a `todo`-hook
+    /// plugin can drive lifecycle tracking. Empty (a no-op) unless the
     /// dispatching `SessionManager` was built with `with_plugins`.
     pub plugins: Arc<PluginManager>,
 }
 
-/// An agent provider runs agent sessions of one kind (Claude CLI, a mock,
+/// An agent provider runs agent sessions of one kind (a CLI plugin, a mock,
 /// a future cloud-hosted agent, etc.) and translates their output into the
 /// unified `ProviderEvent` stream that the rest of Peckboard consumes.
 ///

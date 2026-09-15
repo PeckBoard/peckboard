@@ -10,6 +10,7 @@ mod mcp;
 mod models;
 mod parser;
 mod send;
+mod settings;
 
 use serde::Deserialize;
 
@@ -51,14 +52,14 @@ fn dispatch_hook(hook: &str, payload: serde_json::Value) -> String {
     match hook {
         "provider.register" => handle_register(),
         "provider.send" => handle_send(payload),
-        "provider.models" => skip(),
+        "provider.models" => handle_models(),
         "provider.interrupt" => skip(),
         _ => skip(),
     }
 }
 
-fn handle_register() -> String {
-    let body = serde_json::json!({
+pub fn registration() -> serde_json::Value {
+    serde_json::json!({
         "id": models::PROVIDER_ID,
         "display_name": models::DISPLAY_NAME,
         "models": models::seed_models(),
@@ -78,11 +79,35 @@ fn handle_register() -> String {
             "supports_mid_stream_injection": false,
             "answer_transport": "new_turn",
         },
-    });
-    match host::call_host(host::HostFn::RegisterProvider, &body) {
+    })
+}
+
+fn handle_register() -> String {
+    match host::call_host(host::HostFn::RegisterProvider, &registration()) {
         Ok(_) => allow(serde_json::json!({ "ok": true })),
         Err(e) => cancel(&e),
     }
+}
+
+fn handle_models() -> String {
+    let cli = settings::cli_path("kimi");
+    let extra = settings::str_list("additional_models");
+    let mut discovered = Vec::new();
+    if settings::bool("discover_models", true) {
+        if let Some(out) = settings::probe(&cli, &["provider", "list", "--json"]) {
+            if let Some(ids) = parser::parse_cli_models(&out) {
+                discovered = ids.into_iter().map(|m| m.id).collect();
+            }
+        }
+    }
+    let models = settings::merge_catalog(
+        models::seed_models(),
+        discovered,
+        extra,
+        &settings::accounts(),
+        |id| id.to_string(),
+    );
+    allow(serde_json::json!({ "models": models }))
 }
 
 fn handle_send(payload: serde_json::Value) -> String {
@@ -102,4 +127,21 @@ fn cancel(reason: &str) -> String {
 
 fn skip() -> String {
     serde_json::json!({ "verdict": "skip" }).to_string()
+}
+
+pub fn send_turn(payload: &serde_json::Value) -> Result<(), String> {
+    send::run(payload)
+}
+
+pub fn refresh_models() -> Option<serde_json::Value> {
+    let out = handle_models();
+    let v: serde_json::Value = serde_json::from_str(&out).ok()?;
+    if v.get("verdict").and_then(|x| x.as_str()) != Some("allow") {
+        return None;
+    }
+    v.get("payload")?.get("models").cloned()
+}
+
+pub fn manifest_json() -> String {
+    manifest::manifest_json()
 }

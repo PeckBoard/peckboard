@@ -105,15 +105,14 @@ pub fn run(payload: &Value) -> Result<(), String> {
         HostFn::ProviderSpawn,
         &json!({
             "session_id": session_id,
-            "command": "grok",
+            "command": crate::settings::cli_path("grok"),
             "args": args,
             "env": env,
             "env_remove": env_remove,
             "cwd": working_dir,
         }),
     )?;
-
-    let mut conv = conversation_id.clone();
+    let mut conv = conversation_id;
     let mut usage = UsageTracker::default();
     let mut stream_error: Option<String> = None;
     let main_model = model.strip_prefix("grok:").unwrap_or(model);

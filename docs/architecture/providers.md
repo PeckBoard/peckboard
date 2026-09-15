@@ -1,6 +1,6 @@
 # AI Provider System
 
-Peckboard uses a provider factory pattern for AI integration. Claude CLI is the built-in provider. Plugins can register additional providers (e.g. OpenAI API, local models, custom orchestrators).
+Peckboard uses a provider factory pattern for AI integration. First-party providers (claude, grok, cursor, kimi, codex, ollama, mock) are trusted crate plugins compiled into the binary: each `peck-plugins/<id>/` crate builds natively (rlib) and as WASM (cdylib), and at boot `src/plugin/crates.rs` registers a native `CrateAgentProvider` (`src/provider/crate_provider.rs`) around the crate's `send_turn`/`refresh_models` hooks — same code the WASM build runs, no FFI. Third-party providers load as WASM plugins and register through the `provider.register` hook via `PluginProviderAdapter`. A WASM plugin can never displace a provider id that is already registered.
 
 ## Architecture
 
@@ -74,7 +74,7 @@ Providers parse their native output format and emit a unified stream of `Provide
 
 ### Provider Registry
 
-The registry holds all available providers. The built-in Claude provider is always registered. Plugin providers register via the `provider.register` hook.
+The registry holds every AI provider currently loaded. There is no compiled-in `AgentProvider`. First-party providers (claude, grok, cursor, kimi, codex, ollama, mock) ship as WASM in `peck-plugins-wasm/`, extract into `<dataDir>/plugins/` at boot, and auto-approve. Third-party plugins register the same way via the `provider.register` hook.
 
 **Registry operations:**
 
@@ -105,7 +105,9 @@ Resolved per dispatch and handed to `send_message` as
 | `timeout_ms`      | Turn timeout                                                           |
 | `metadata`        | Provider-specific config (opaque to Peckboard)                         |
 
-## Built-in: Claude CLI Provider
+## First-Party: Claude CLI Plugin
+
+Lives in `peck-plugins/claude` (embedded WASM at `peck-plugins-wasm/claude.wasm`). Core does not compile in a Claude `AgentProvider`.
 
 Provider ID: `claude`
 
@@ -147,10 +149,11 @@ Discovered from:
 A WASM plugin can register an AI provider. HTTP-API providers drive a turn
 with `peckboard_http_request` inside `provider.send`. CLI providers spawn a
 host-owned child via `peckboard_provider_spawn` / `_read_line` / `_write_stdin`
-/ `_kill` (cwd pinned to the session folder). Core wraps either in a
-`AgentProvider` and registers it in the `ProviderRegistry` like any native
-provider, so the `SessionManager` dispatch path, `/api/models`, the MCP
-`list_models` tool, and provider-visibility filtering all work unchanged.
+/ `_kill` (cwd pinned to the session folder). MCP tools: schemas via
+`peckboard_provider_get_mcp_config`, dispatch via `peckboard_provider_invoke_mcp`.
+Core wraps either in an `AgentProvider` and registers it in the `ProviderRegistry`,
+so the `SessionManager` dispatch path, `/api/models`, the MCP `list_models`
+tool, and provider-visibility filtering all work unchanged.
 
 A provider plugin:
 
@@ -188,7 +191,7 @@ conversation_id}`. The call runs on a dedicated blocking thread with the
    b. Plugin drives its HTTP API inside the call
    c. Plugin emits ProviderEvent values via peckboard_emit_provider_event
    d. Core persists each event (event log, usage_events, conversation_id)
-      and broadcasts it over WS — the same emit path native providers use
+      and broadcasts it over WS — the same emit path every provider uses
 6. On interrupt/cancel: core sets a host-side stop flag; the plugin's next
    peckboard_provider_should_stop poll returns true; the per-call WASM
    timeout guarantees termination regardless. On interrupt specifically, core

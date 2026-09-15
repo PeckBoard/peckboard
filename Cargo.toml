@@ -102,6 +102,16 @@ tao = { version = "0.36", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 open = { version = "5", optional = true }
 
+# First-party provider crates: native AgentProvider, same send loops as WASM.
+peck-plugin-native-host = { path = "peck-plugins/native-host" }
+peckboard-claude-plugin = { path = "peck-plugins/claude" }
+peckboard-grok-plugin = { path = "peck-plugins/grok" }
+peckboard-cursor-plugin = { path = "peck-plugins/cursor" }
+peckboard-kimi-plugin = { path = "peck-plugins/kimi" }
+peckboard-codex-plugin = { path = "peck-plugins/codex" }
+peckboard-ollama-plugin = { path = "peck-plugins/ollama" }
+peckboard-mock-plugin = { path = "peck-plugins/mock" }
+
 [features]
 default = ["desktop"]
 desktop = ["dep:wry", "dep:tao", "dep:image", "dep:open"]

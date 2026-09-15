@@ -92,7 +92,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
         HostFn::ProviderSpawn,
         &json!({
             "session_id": session_id,
-            "command": "codex",
+            "command": crate::settings::cli_path("codex"),
             "args": args,
             "env": env,
             "env_remove": env_remove,

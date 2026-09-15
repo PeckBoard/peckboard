@@ -18,6 +18,25 @@ pub enum HostFn {
     StoreList,
     StoreDelete,
 }
+impl HostFn {
+    pub fn name(self) -> &'static str {
+        match self {
+            HostFn::RegisterProvider => "peckboard_register_provider",
+            HostFn::EmitProviderEvent => "peckboard_emit_provider_event",
+            HostFn::ProviderShouldStop => "peckboard_provider_should_stop",
+            HostFn::ProviderReadStdin => "peckboard_provider_read_stdin",
+            HostFn::ProviderTakeMessage => "peckboard_provider_take_message",
+            HostFn::ProviderGetSession => "peckboard_provider_get_session",
+            HostFn::ProviderGetMcpConfig => "peckboard_provider_get_mcp_config",
+            HostFn::GetPluginSetting => "peckboard_get_plugin_setting",
+            HostFn::HttpRequest => "peckboard_http_request",
+            HostFn::StorePut => "peckboard_store_put",
+            HostFn::StoreGet => "peckboard_store_get",
+            HostFn::StoreList => "peckboard_store_list",
+            HostFn::StoreDelete => "peckboard_store_delete",
+        }
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
@@ -78,10 +97,10 @@ mod imp {
     use super::HostFn;
 
     pub fn call_host(
-        _which: HostFn,
-        _input: &serde_json::Value,
+        which: HostFn,
+        input: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        unimplemented!("host calls are only available on wasm32")
+        peck_plugin_native_host::call_json(which.name(), input)
     }
 }
 

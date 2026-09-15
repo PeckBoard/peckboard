@@ -34,7 +34,16 @@ pub fn run(payload: &Value) -> Result<(), String> {
     if working_dir.is_empty() {
         return Err("spawn_config.working_dir is empty".into());
     }
-    let model = cfg.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let mut model = cfg
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if model.is_empty() || model == "default" {
+        if let Some(d) = crate::settings::str("default_model") {
+            model = d;
+        }
+    }
 
     let account = host::call_host(
         HostFn::ProviderAccountEnv,
@@ -70,14 +79,19 @@ pub fn run(payload: &Value) -> Result<(), String> {
             }),
         );
     }
-
-    let args = argv::build_cli_args(model, &prompt, conversation_id.as_deref(), &system_prompt);
+    let args = argv::build_cli_args(
+        &model,
+        &prompt,
+        conversation_id.as_deref(),
+        &system_prompt,
+        crate::settings::bool("auto_approve", true),
+    );
 
     host::call_host(
         HostFn::ProviderSpawn,
         &json!({
             "session_id": session_id,
-            "command": "cursor-agent",
+            "command": crate::settings::cli_path("cursor-agent"),
             "args": args,
             "env": env,
             "env_remove": env_remove,

@@ -120,11 +120,17 @@ pub async fn run_server(
     let password_change_limiter = RateLimiter::<String>::new(5);
 
     let broadcaster = Broadcaster::new();
-
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
-    // Providers are WASM plugins (first-party extracted + auto-approved in
-    // `PluginManager::load_all`). No compiled-in AgentProvider remains.
+    crate::plugin::crates::register_all(
+        &builtin_plugins,
+        provider_registry.clone(),
+        &db,
+        plugins.clone(),
+    )
+    .await;
+    // First-party providers are crate AgentProviders; matching WASM is
+    // not extracted. Crate catalog entries hide leftover wasm rows.
     // interactive sessions can run `sudo -A` with the password typed in the
     // web UI (service::askpass). A write failure only disables sudo support.
     let askpass_registry = crate::service::askpass::AskpassRegistry::new();

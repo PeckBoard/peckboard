@@ -54,12 +54,30 @@ pub enum Permission {
     /// Register a handler that intercepts MCP tool calls and token
     /// minting hooks.
     HookMcpTools,
+    /// Declare MCP tools (`mcp.tool.invoke`).
+    ProvideMcpTools,
     /// Emit normalized `todo` snapshots through the shared todo hook.
     HookTodoTracking,
     /// Read rows from Peckboard's SQLite database.
     DatabaseRead,
     /// Mutate rows in Peckboard's SQLite database.
     DatabaseWrite,
+    /// Prompt the caller with `ask_user`.
+    AskUser,
+    /// Plugin-owned document store.
+    DataStore,
+    /// Interrupt / terminate / clear / send to other sessions.
+    SessionControl,
+    /// Unattended orchestrator send / create / prompt / state.
+    SessionOrchestrate,
+    /// Create sessions (caller-scoped).
+    SessionWrite,
+    /// Thinking-model catalog metadata (no credentials).
+    ModelsRead,
+    /// Authenticated plugin UI acting under the user.
+    UserAuthority,
+    /// Declare sidebar items.
+    ContributeSidebar,
 }
 
 impl Permission {
@@ -73,9 +91,18 @@ impl Permission {
             Permission::FilesystemWrite => "Write files",
             Permission::HookCardLifecycle => "Card lifecycle hooks",
             Permission::HookMcpTools => "MCP tool hooks",
+            Permission::ProvideMcpTools => "Provide MCP tools",
             Permission::HookTodoTracking => "Todo tracking",
             Permission::DatabaseRead => "Read database",
             Permission::DatabaseWrite => "Write database",
+            Permission::AskUser => "Ask the user",
+            Permission::DataStore => "Plugin data store",
+            Permission::SessionControl => "Session control",
+            Permission::SessionOrchestrate => "Session orchestrate",
+            Permission::SessionWrite => "Create sessions",
+            Permission::ModelsRead => "Read model catalog",
+            Permission::UserAuthority => "User authority",
+            Permission::ContributeSidebar => "Contribute sidebar",
         }
     }
 
@@ -89,14 +116,21 @@ impl Permission {
             Permission::FilesystemWrite => "Writes or modifies files on the host filesystem",
             Permission::HookCardLifecycle => "Intercepts card create/update lifecycle events",
             Permission::HookMcpTools => "Intercepts MCP tool calls and token minting",
+            Permission::ProvideMcpTools => "Declares MCP tools agents can invoke",
             Permission::HookTodoTracking => "Reports todo/task snapshots for sessions",
             Permission::DatabaseRead => "Reads from the Peckboard database",
             Permission::DatabaseWrite => "Writes to the Peckboard database",
+            Permission::AskUser => "Prompts the user for a decision",
+            Permission::DataStore => "Reads and writes plugin-owned documents",
+            Permission::SessionControl => "Interrupt, terminate, clear, or message other sessions",
+            Permission::SessionOrchestrate => "Unattended session control from lifecycle hooks",
+            Permission::SessionWrite => "Creates sessions in the caller's folder",
+            Permission::ModelsRead => "Reads model catalog metadata (not credentials)",
+            Permission::UserAuthority => "Serves authenticated UI and acts under the user",
+            Permission::ContributeSidebar => "Adds items to the app sidebar",
         }
     }
 }
-
-/// Display metadata for a plugin. The UI renders directly from this shape,
 /// so changes here ripple into `PluginsSection.tsx` — keep them in sync.
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginMetadata {

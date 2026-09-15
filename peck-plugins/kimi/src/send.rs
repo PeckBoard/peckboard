@@ -34,13 +34,28 @@ pub fn run(payload: &Value) -> Result<(), String> {
     if working_dir.is_empty() {
         return Err("spawn_config.working_dir is empty".into());
     }
-    let model = cfg.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let mut model = cfg
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if model.is_empty() || model == "default" || model == "auto" {
+        if let Some(d) = crate::settings::str("default_model") {
+            model = d;
+        }
+    }
 
     let account = host::call_host(
         HostFn::ProviderAccountEnv,
         &json!({ "session_id": session_id, "model": model }),
     )?;
     let mut env = map_env(cfg.get("env"));
+    if let Some(key) = crate::settings::str("api_key") {
+        env.entry("KIMI_API_KEY".into()).or_insert(key);
+    }
+    if let Some(url) = crate::settings::str("base_url") {
+        env.entry("KIMI_BASE_URL".into()).or_insert(url);
+    }
     if let Some(extra) = account.get("env").and_then(|v| v.as_object()) {
         for (k, v) in extra {
             if let Some(s) = v.as_str() {
@@ -74,7 +89,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
     let cli_model = if model.is_empty() || model == "default" || model == "auto" {
         None
     } else {
-        Some(model)
+        Some(model.as_str())
     };
     let args = argv::build_cli_args(
         cli_model,
@@ -86,7 +101,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
     emit(
         session_id,
         &ProviderEvent::Started {
-            model: model.to_string(),
+            model: model.clone(),
             conversation_id: conversation_id.clone(),
             metadata: json!({ "provider": "kimi" }),
         },
@@ -96,7 +111,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
         HostFn::ProviderSpawn,
         &json!({
             "session_id": session_id,
-            "command": "kimi",
+            "command": crate::settings::cli_path("kimi"),
             "args": args,
             "env": env,
             "env_remove": env_remove,
@@ -202,20 +217,18 @@ fn string_list(v: Option<&Value>) -> Vec<String> {
     v.and_then(|v| v.as_array())
         .map(|a| {
             a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
+                .filter_map(|v| v.as_str().map(str::to_string))
                 .collect()
         })
         .unwrap_or_default()
 }
 
 fn map_env(v: Option<&Value>) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    if let Some(obj) = v.and_then(|v| v.as_object()) {
-        for (k, val) in obj {
-            if let Some(s) = val.as_str() {
-                out.insert(k.clone(), s.to_string());
-            }
-        }
-    }
-    out
+    v.and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }

@@ -184,7 +184,7 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
       {
         id: 'providers',
         title: 'Providers & Accounts',
-        blurb: 'Claude, Grok and Kimi accounts, Ollama servers, Cursor CLI, Codex CLI, keep-alive',
+        blurb: 'Toggle providers, sign in accounts, and edit each plugin settings form',
       },
       {
         id: 'mcp',
@@ -351,13 +351,16 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     anchor: 'claude-accounts',
     keywords: 'anthropic oauth login plan usage',
   },
+  { page: 'providers', section: 'Claude', anchor: 'claude', keywords: 'cli binary path models' },
   { page: 'providers', section: 'Grok Accounts', anchor: 'grok-accounts', keywords: 'xai login' },
+  { page: 'providers', section: 'Grok', anchor: 'grok', keywords: 'cli binary discovery' },
   {
     page: 'providers',
     section: 'Kimi Accounts',
     anchor: 'kimi-accounts',
     keywords: 'moonshot login',
   },
+  { page: 'providers', section: 'Kimi', anchor: 'kimi', keywords: 'cli binary api key' },
   {
     page: 'providers',
     section: 'Ollama',
@@ -1377,74 +1380,50 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               )}
             </section>
 
-            {providerVisibility.find((p) => p.id === 'claude')?.hidden !== true && (
-              <div data-settings-anchor="claude-accounts">
-                <ClaudeAccountsSection />
-              </div>
-            )}
-
-            {providerVisibility.find((p) => p.id === 'grok')?.hidden !== true && (
-              <div data-settings-anchor="grok-accounts">
-                <GrokAccountsSection />
-              </div>
-            )}
-
-            {providerVisibility.find((p) => p.id === 'kimi')?.hidden !== true && (
-              <div data-settings-anchor="kimi-accounts">
-                <KimiAccountsSection />
-              </div>
-            )}
-
-            {providerVisibility.find((p) => p.id === 'ollama')?.hidden !== true && (
-              <section
-                className="settings-section"
-                data-testid="ollama-settings-section"
-                data-settings-anchor="ollama"
-              >
-                <h3>Ollama</h3>
-                <p className="form-hint">
-                  Local and remote Ollama servers. Models on the default server appear under their
-                  bare name; models on additional named servers appear as model@server (e.g.
-                  qwen2.5-coder@gpu-box).
-                </p>
-                <PluginSettingsForm pluginId="ollama" />
-                <OllamaPullModel />
-              </section>
-            )}
-
-            {providerVisibility.find((p) => p.id === 'cursor')?.hidden !== true && (
-              <section
-                className="settings-section"
-                data-testid="cursor-settings-section"
-                data-settings-anchor="cursor"
-              >
-                <h3>Cursor</h3>
-                <p className="form-hint">
-                  The cursor-agent CLI provider: binary path, default model, and model discovery.
-                </p>
-                <PluginSettingsForm pluginId="cursor" />
-              </section>
-            )}
-
-            {providerVisibility.find((p) => p.id === 'codex')?.hidden !== true && (
-              <>
-                <div data-settings-anchor="codex-accounts">
-                  <CodexAccountsSection />
+            {providerVisibility
+              .filter((p) => p.hidden !== true)
+              .map((p) => (
+                <div key={p.id}>
+                  {p.id === 'claude' && (
+                    <div data-settings-anchor="claude-accounts">
+                      <ClaudeAccountsSection />
+                    </div>
+                  )}
+                  {p.id === 'grok' && (
+                    <div data-settings-anchor="grok-accounts">
+                      <GrokAccountsSection />
+                    </div>
+                  )}
+                  {p.id === 'kimi' && (
+                    <div data-settings-anchor="kimi-accounts">
+                      <KimiAccountsSection />
+                    </div>
+                  )}
+                  {p.id === 'codex' && (
+                    <div data-settings-anchor="codex-accounts">
+                      <CodexAccountsSection />
+                    </div>
+                  )}
+                  {p.id !== 'mock' && (
+                    <section
+                      className="settings-section"
+                      data-testid={`${p.id}-settings-section`}
+                      data-settings-anchor={p.id}
+                    >
+                      <h3>{p.display_name}</h3>
+                      {p.id === 'ollama' && (
+                        <p className="form-hint">
+                          Local and remote Ollama servers. Models on the default server appear under
+                          their bare name; models on additional named servers appear as model@server
+                          (e.g. qwen2.5-coder@gpu-box).
+                        </p>
+                      )}
+                      <PluginSettingsForm pluginId={p.id} />
+                      {p.id === 'ollama' && <OllamaPullModel />}
+                    </section>
+                  )}
                 </div>
-                <section
-                  className="settings-section"
-                  data-testid="codex-settings-section"
-                  data-settings-anchor="codex"
-                >
-                  <h3>Codex</h3>
-                  <p className="form-hint">
-                    The OpenAI Codex CLI provider: binary path and model discovery. Sign in with
-                    ChatGPT under Codex Accounts above.
-                  </p>
-                  <PluginSettingsForm pluginId="codex" />
-                </section>
-              </>
-            )}
+              ))}
             <section
               className="settings-section"
               data-testid="keepalive-section"

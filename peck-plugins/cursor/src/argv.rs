@@ -3,6 +3,7 @@ pub fn build_cli_args(
     prompt: &str,
     conversation_id: Option<&str>,
     system_prompt: &str,
+    auto_approve: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "--print".to_string(),
@@ -20,8 +21,10 @@ pub fn build_cli_args(
         args.push("--resume".to_string());
         args.push(cid.to_string());
     }
-    args.push("--force".to_string());
-    args.push("--trust".to_string());
+    if auto_approve {
+        args.push("--force".to_string());
+        args.push("--trust".to_string());
+    }
     args.push("--".to_string());
     let prompt = match conversation_id {
         None if !system_prompt.trim().is_empty() => {

@@ -2,41 +2,15 @@
 //!
 //! A plugin that declares the `provider.register` hook (plus the
 //! `register_provider` permission and the `provider.send` hook) can register
-//! an AI provider that behaves like any native one: its models show up in
-//! `/api/models` and the MCP `list_models` tool, and sessions dispatch to it
-//! through the ordinary `ProviderRegistry` lookup — the `SessionManager`
-//! needs zero special-casing.
+//! an AI provider: its models show up in `/api/models` and MCP `list_models`,
+//! and sessions dispatch through the ordinary `ProviderRegistry` lookup.
 //!
-//! The bridge is [`PluginProviderAdapter`], an [`AgentProvider`] whose
-//! `send_message` runs one **turn per WASM call**: it dispatches the
-//! `provider.send` hook to the owning plugin on a dedicated blocking thread
-//! (via [`crate::plugin::manager::PluginManager::dispatch_provider_send`])
-//! and, while that call is in flight, the plugin streams
-//! [`ProviderEvent`]s back through the `peckboard_emit_provider_event` host
-//! function. Those events feed the shared [`emit_event`] path, so DB append,
-//! `usage_events` rows, `conversation_id` persistence, and the WS broadcast
-//! all work unchanged.
-//!
-//! v1 scope: HTTP-API providers only (OpenAI-compatible request/response or
-//! chunked HTTP the plugin consumes inside the call). No subprocess CLIs, no
-//! host-side SSE plumbing.
-//!
-//! Interrupts are cooperative: the adapter sets a per-session stop flag the
-//! v2 scope: HTTP-API providers **and** subprocess CLIs. A plugin drives a
-//! CLI by calling `peckboard_provider_spawn` / `_read_line` / `_write_stdin`
-//! / `_kill` during `provider.send`; the host owns the child (cwd pinned to
-//! the session folder) so `write_stdin` / interrupt work without a wasm
-//! input channel. HTTP providers keep using `peckboard_http_request` inside
-//! the call as before.
-//! out-of-wasm resources (see [`crate::plugin::hooks::PROVIDER_INTERRUPT_HOOK`]
-//! for why that hook cannot itself abort the turn).
-//!
-//! Two other opt-ins close the gap to native providers: the optional
-//! `provider.models` hook backs [`AgentProvider::dynamic_models`] so a
-//! catalog can follow the plugin's settings without re-registration, and
-//! `supports_mid_stream_injection` on the registration lets a plugin absorb a
-//! mid-turn user message (delivered through
-//! `peckboard_provider_take_message`) instead of core queueing it in the DB.
+//! [`PluginProviderAdapter`] runs one **turn per WASM call**. The plugin
+//! streams [`ProviderEvent`]s through `peckboard_emit_provider_event`.
+//! CLI children: `peckboard_provider_spawn` / `_read_line` / `_write_stdin`
+//! / `_kill` (cwd pinned to the session folder). HTTP: `peckboard_http_request`.
+//! MCP tools: `peckboard_provider_get_mcp_config` (schemas) and
+//! `peckboard_provider_invoke_mcp` (dispatch).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,9 +27,9 @@ use crate::db::Db;
 use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::message::UserMessage;
-use crate::provider::registry::{
-    AnswerTransport, EffortLevel, InterruptKind, ProviderCapabilities, split_model_account,
-};
+#[cfg(test)]
+use crate::provider::registry::{AnswerTransport, InterruptKind};
+use crate::provider::registry::{EffortLevel, ProviderCapabilities, split_model_account};
 use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent};
 use crate::provider::turn::compose_system_prompt;
 use crate::ws::broadcaster::Broadcaster;
@@ -77,9 +51,6 @@ pub struct ProviderRegistration {
     /// unknown (never free).
     #[serde(default)]
     pub pricing: HashMap<String, ModelPricing>,
-    /// Declared capabilities (optional — older plugins simply omit it and
-    /// get [`ProviderCapabilities::plugin_defaults`]). Transport semantics
-    /// the adapter fixes (cooperative interrupt, no stdin, answers as a new
     /// Declared capabilities (optional — older plugins simply omit it and
     /// get [`ProviderCapabilities::plugin_defaults`]). Transport defaults
     /// stay conservative (cooperative interrupt, answers as a new turn);
@@ -125,24 +96,51 @@ pub fn effective_capabilities(reg: &ProviderRegistration) -> ProviderCapabilitie
     caps
 }
 
-/// Shape-validate a model catalog: non-empty, ids usable as the suffix of a
-/// `provider:model` id, no duplicates. Shared by [`validate_registration`]
-/// and the `provider.models` refresh path, which must hold the catalog to
-/// exactly the same standard as registration did.
+/// Shape-validate a model catalog at REGISTRATION: non-empty, ids usable as
+/// the suffix of a `provider:model` id, no duplicates, and no `@` — the
+/// account-suffix convention owns that character, so seed ids must be bare.
 pub fn validate_models(models: &[ModelInfo]) -> Result<(), String> {
+    validate_models_inner(models, false)
+}
+
+/// Like [`validate_models`] but tolerating `base@account` scoped variants,
+/// which the `provider.models` refresh path adds so each stored account gets
+/// its own picker entries (`[Account] Model`). The deleted native providers
+/// served these variants directly; the plugin refresh path must accept them
+/// too or adding an account silently changes nothing in the catalog.
+pub fn validate_refresh_models(models: &[ModelInfo]) -> Result<(), String> {
+    validate_models_inner(models, true)
+}
+
+fn validate_models_inner(models: &[ModelInfo], allow_account_scoped: bool) -> Result<(), String> {
     if models.is_empty() {
         return Err("a provider must register at least one model".into());
     }
     let mut seen = std::collections::HashSet::new();
     for m in models {
-        // `@` would break the account-suffix split and whitespace breaks
-        // everything downstream; `:` is tolerated (model-id parsing splits
-        // on the FIRST colon, which the provider prefix owns).
-        if m.id.is_empty() || m.id.contains('@') || m.id.chars().any(char::is_whitespace) {
+        // Whitespace breaks everything downstream; `:` is tolerated
+        // (model-id parsing splits on the FIRST colon, which the provider
+        // prefix owns).
+        let (base, suffix) = match m.id.split_once('@') {
+            Some(parts) if allow_account_scoped => (parts.0, Some(parts.1)),
+            Some(_) => {
+                return Err(format!(
+                    "model id '{}' is invalid: '@' is reserved for account-scoped variants",
+                    m.id
+                ));
+            }
+            None => (m.id.as_str(), None),
+        };
+        if base.is_empty() || base.chars().any(char::is_whitespace) {
             return Err(format!(
-                "model id '{}' is invalid: must be non-empty, no '@', no whitespace",
+                "model id '{}' is invalid: must be non-empty with no whitespace",
                 m.id
             ));
+        }
+        if let Some(acct) = suffix
+            && (acct.is_empty() || acct.contains('@') || acct.chars().any(char::is_whitespace))
+        {
+            return Err(format!("model id '{}' has an invalid account suffix", m.id));
         }
         if !seen.insert(m.id.as_str()) {
             return Err(format!("duplicate model id '{}'", m.id));
@@ -225,6 +223,7 @@ fn terminal_from_completed(result_meta: &serde_json::Value) -> Terminal {
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub folder_path: String,
+    pub folder_id: String,
     pub card_id: Option<String>,
     pub project_id: Option<String>,
     pub is_worker: bool,
@@ -232,24 +231,26 @@ pub struct SessionSnapshot {
 }
 
 /// One in-flight `provider.send` turn.
-struct TurnState {
+pub(crate) struct TurnState {
     /// The plugin executing this turn — the ONLY plugin allowed to emit
     /// events into the session while the turn is active.
-    plugin_id: String,
-    stop: AtomicBool,
-    terminal: std::sync::Mutex<Option<Terminal>>,
-    db: Db,
-    broadcaster: Arc<Broadcaster>,
+    pub(crate) plugin_id: String,
+    pub(crate) stop: AtomicBool,
+    pub(crate) terminal: std::sync::Mutex<Option<Terminal>>,
+    pub(crate) db: Db,
+    pub(crate) broadcaster: Arc<Broadcaster>,
     /// Runtime handle for `block_on` from the host function. Safe because a
     /// turn's host calls only ever run on the dedicated `spawn_blocking`
     /// thread driving the plugin's `provider.send` call (the per-plugin
     /// mutex serialises all other dispatches to that plugin for the whole
     /// turn), never on an async worker thread.
-    rt: tokio::runtime::Handle,
-    snapshot: SessionSnapshot,
-    injected: std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>,
-    /// Control-response / question-answer text delivered by `write_stdin`
-    stdin_q: std::sync::Mutex<std::collections::VecDeque<String>>,
+    pub(crate) rt: tokio::runtime::Handle,
+    pub(crate) snapshot: SessionSnapshot,
+    pub(crate) injected: std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>,
+    pub(crate) stdin_q: std::sync::Mutex<std::collections::VecDeque<String>>,
+    /// Plugin manager for MCP tool dispatch during this turn. `None` in
+    /// unit tests that only exercise spawn/read_line.
+    pub(crate) plugins: Option<Arc<PluginManager>>,
 }
 
 /// Host-side state shared between every [`PluginProviderAdapter`] and the
@@ -316,7 +317,7 @@ impl PluginProviderRuntime {
         }
     }
 
-    fn begin_turn(&self, session_id: &str, turn: TurnState) -> Result<(), String> {
+    pub(crate) fn begin_turn(&self, session_id: &str, turn: TurnState) -> Result<(), String> {
         let mut turns = self
             .turns
             .lock()
@@ -331,7 +332,7 @@ impl PluginProviderRuntime {
     }
 
     /// Remove the turn and report the terminal event it emitted (if any).
-    fn end_turn(&self, session_id: &str) -> Option<Terminal> {
+    pub(crate) fn end_turn(&self, session_id: &str) -> Option<Terminal> {
         self.kill_child(session_id);
         let turn = self.turns.lock().ok()?.remove(session_id)?;
         turn.terminal.lock().ok()?.clone()
@@ -478,7 +479,11 @@ impl PluginProviderRuntime {
                 return error_json("a CLI child is already running for this turn");
             }
         }
-        let mut cmd = Command::new(&req.command);
+        let command = crate::provider::turn::resolve_cli_path(
+            &req.command,
+            crate::provider::turn::COMMON_CLI_FALLBACK_DIRS,
+        );
+        let mut cmd = Command::new(&command);
         cmd.args(&req.args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -854,6 +859,7 @@ impl PluginProviderRuntime {
             Ok(turn) => serde_json::json!({
                 "session_id": req.session_id,
                 "folder_path": turn.snapshot.folder_path,
+                "folder_id": turn.snapshot.folder_id,
                 "card_id": turn.snapshot.card_id,
                 "project_id": turn.snapshot.project_id,
                 "is_worker": turn.snapshot.is_worker,
@@ -876,11 +882,47 @@ impl PluginProviderRuntime {
             Ok(turn) => {
                 let path = turn.snapshot.mcp_config_path.clone();
                 let contents = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+                let hidden: &[&str] = if turn.snapshot.is_worker {
+                    crate::service::mcp_server::worker_hidden_tool_names()
+                } else {
+                    crate::service::mcp_server::chat_hidden_tool_names()
+                };
+                let registry = crate::service::mcp_server::McpToolRegistry::new();
+                let mut tool_defs: Vec<serde_json::Value> = registry
+                    .tool_definitions()
+                    .iter()
+                    .filter(|t| !hidden.contains(&t.name.as_str()))
+                    .map(|t| {
+                        serde_json::json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "input_schema": t.input_schema,
+                        })
+                    })
+                    .collect();
+                if let Some(plugins) = &turn.plugins {
+                    for t in turn.rt.block_on(plugins.mcp_tools()) {
+                        if turn.snapshot.is_worker && !t.worker_allowed {
+                            continue;
+                        }
+                        if tool_defs.iter().any(|d| {
+                            d.get("name").and_then(|n| n.as_str()) == Some(t.name.as_str())
+                        }) {
+                            continue;
+                        }
+                        tool_defs.push(serde_json::json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "input_schema": t.input_schema,
+                        }));
+                    }
+                }
                 serde_json::json!({
                     "path": path,
                     "contents": contents,
                     "core_tools": crate::service::mcp_server::tool_names(),
                     "pre_hatcher_tools": crate::service::mcp_server::pre_hatcher_allowed_tool_names(),
+                    "tool_defs": tool_defs,
                 })
                 .to_string()
             }
@@ -915,6 +957,57 @@ impl PluginProviderRuntime {
         )) {
             Ok(v) => v.to_string(),
             Err(e) => error_json(e),
+        }
+    }
+    /// `peckboard_provider_invoke_mcp {session_id, name, arguments}` — run one
+    /// MCP tool the same way the `/mcp` route does. Turn-gated: only the
+    /// plugin owning this `provider.send` may call it. Result is `{ok, result}`
+    /// or `{ok: false, error}` so the plugin can feed a tool error back to the
+    /// model instead of aborting the turn.
+    pub fn invoke_mcp_json(&self, plugin_id: &str, input: &str) -> String {
+        #[derive(Deserialize)]
+        struct InvokeReq {
+            session_id: String,
+            name: String,
+            #[serde(default)]
+            arguments: serde_json::Value,
+        }
+        let req: InvokeReq = match serde_json::from_str(input) {
+            Ok(r) => r,
+            Err(e) => return error_json(format!("invalid invoke_mcp request: {e}")),
+        };
+        if req.name.trim().is_empty() {
+            return error_json("tool name must not be empty");
+        }
+        let turn = match self.owned_turn(plugin_id, &req.session_id) {
+            Ok(t) => t,
+            Err(e) => return error_json(e),
+        };
+        let Some(plugins) = turn.plugins.clone() else {
+            return error_json("no plugin manager on this turn");
+        };
+        let ctx = crate::service::mcp_server::ToolCallContext {
+            session_id: req.session_id.clone(),
+            project_id: turn.snapshot.project_id.clone(),
+            card_id: turn.snapshot.card_id.clone(),
+            folder_id: turn.snapshot.folder_id.clone(),
+            db: Arc::new(turn.db.clone()),
+            broadcaster: turn.broadcaster.clone(),
+            provider_registry: plugins.bound_provider_registry(),
+            data_dir: Some(plugins.data_dir()),
+        };
+        let registry = crate::service::mcp_server::McpToolRegistry::new();
+        match turn
+            .rt
+            .block_on(crate::service::mcp_server::dispatch_tool_call(
+                &plugins,
+                &registry,
+                req.name.trim(),
+                req.arguments,
+                &ctx,
+            )) {
+            Ok(value) => serde_json::json!({ "ok": true, "result": value }).to_string(),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
         }
     }
 
@@ -967,10 +1060,175 @@ impl PluginProviderRuntime {
     }
 }
 
+/// TTL cache over one probe invocation, keyed by the raw request (command +
+/// args + env). Success and failure are cached alike so a broken or slow CLI
+/// stalls at most one catalog request per window — the same discipline the
+/// deleted native providers applied to their discovery probes. Settings and
+/// account merging happen in the plugin on every `provider.models` call;
+/// only the CLI shell-out is memoised here, so a settings or account change
+/// still shows up in the catalog immediately.
+const PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+static PROBE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (Instant, String)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// `peckboard_provider_probe {command, args?, env?, timeout_ms?}` — short-lived
+/// CLI capture for `provider.models` discovery. Not tied to a turn.
+pub fn probe_cli_json(input: &str) -> String {
+    if let Some((at, cached)) = PROBE_CACHE.lock().ok().and_then(|c| c.get(input).cloned())
+        && at.elapsed() < PROBE_CACHE_TTL
+    {
+        return cached;
+    }
+    let out = probe_cli_uncached(input);
+    if let Ok(mut cache) = PROBE_CACHE.lock() {
+        cache.retain(|_, (at, _)| at.elapsed() < PROBE_CACHE_TTL);
+        cache.insert(input.to_string(), (Instant::now(), out.clone()));
+    }
+    out
+}
+
+fn probe_cli_uncached(input: &str) -> String {
+    #[derive(Deserialize)]
+    struct ProbeRequest {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    }
+    let req: ProbeRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid probe request: {e}")),
+    };
+    if req.command.is_empty() || req.command.contains('\0') || req.command.contains('\n') {
+        return error_json("command must be a non-empty path or bare name");
+    }
+    let command = crate::provider::turn::resolve_cli_path(
+        &req.command,
+        crate::provider::turn::COMMON_CLI_FALLBACK_DIRS,
+    );
+    let timeout = Duration::from_millis(req.timeout_ms.unwrap_or(15_000).clamp(1_000, 30_000));
+    let mut cmd = Command::new(&command);
+    cmd.args(&req.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in &req.env {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return error_json(format!("failed to spawn '{command}': {e}")),
+    };
+    // Drain both pipes concurrently with the wait: a child that writes more
+    // than the pipe buffer (codex's bundled catalog is ~500 KB) blocks on
+    // write until someone reads, so reading only after exit deadlocks the
+    // probe into its timeout. The reader threads see EOF when the child
+    // exits or is killed, so the joins below never hang.
+    let stdout_reader = child.stdout.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let started = Instant::now();
+    loop {
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return error_json("probe timed out");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = stdout_reader
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_default();
+                let mut stderr = stderr_reader
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_default();
+                stdout.truncate(256 * 1024);
+                stderr.truncate(16 * 1024);
+                return serde_json::json!({
+                    "ok": true,
+                    "exit_code": status.code(),
+                    "stdout": String::from_utf8_lossy(&stdout),
+                    "stderr": String::from_utf8_lossy(&stderr),
+                })
+                .to_string();
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return error_json(format!("wait: {e}")),
+        }
+    }
+}
+
+/// `peckboard_provider_list_accounts` — stored accounts for this plugin's
+/// provider, used to stamp `@account` catalog variants.
+pub fn list_accounts_json(db: &Db, plugin_id: &str) -> String {
+    let plugin_id = plugin_id.to_string();
+    let db = db.clone();
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        rt.block_on(async move {
+            let accounts: Vec<serde_json::Value> = match plugin_id.as_str() {
+                "claude" => db
+                    .list_claude_accounts()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|a| serde_json::json!({ "id": a.id, "name": a.name }))
+                    .collect(),
+                "grok" => db
+                    .list_grok_accounts()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|a| serde_json::json!({ "id": a.id, "name": a.name }))
+                    .collect(),
+                "kimi" => db
+                    .list_kimi_accounts()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|a| serde_json::json!({ "id": a.id, "name": a.name }))
+                    .collect(),
+                "codex" => db
+                    .list_codex_accounts()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|a| serde_json::json!({ "id": a.id, "name": a.name }))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            Ok::<_, String>(serde_json::json!({ "accounts": accounts }).to_string())
+        })
+    });
+    match handle.join() {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => error_json(e),
+        Err(_) => error_json("account list thread panicked"),
+    }
+}
+
 /// The `message` object a turn sees: the user's text plus base64 attachments.
 /// Shared by the `provider.send` payload and the mid-stream injection queue so
 /// an injected message is byte-for-byte the shape the plugin already parses.
-fn message_payload(message: &UserMessage) -> serde_json::Value {
+pub(crate) fn message_payload(message: &UserMessage) -> serde_json::Value {
     use base64::Engine as _;
     let attachments: Vec<serde_json::Value> = message
         .attachments
@@ -1161,6 +1419,7 @@ impl AgentProvider for PluginProviderAdapter {
             .ok_or_else(|| anyhow::anyhow!("session not found: {}", ctx.session_id))?;
         let snapshot = SessionSnapshot {
             folder_path: ctx.config.working_dir.clone(),
+            folder_id: session.folder_id.clone(),
             card_id: session.card_id,
             project_id: session.project_id,
             is_worker: ctx.config.is_worker,
@@ -1179,6 +1438,7 @@ impl AgentProvider for PluginProviderAdapter {
                     snapshot,
                     injected: std::sync::Mutex::new(std::collections::VecDeque::new()),
                     stdin_q: Default::default(),
+                    plugins: Some(self.manager.clone()),
                 },
             )
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -1440,11 +1700,13 @@ mod tests {
                     terminal: std::sync::Mutex::new(None),
                     injected: Default::default(),
                     stdin_q: Default::default(),
+                    plugins: None,
                     db,
                     broadcaster: Broadcaster::new(),
                     rt: rt.handle().clone(),
                     snapshot: SessionSnapshot {
                         folder_path: "/tmp/x".into(),
+                        folder_id: String::new(),
                         card_id: Some("c1".into()),
                         project_id: None,
                         is_worker: true,
@@ -1465,11 +1727,13 @@ mod tests {
                         terminal: std::sync::Mutex::new(None),
                         injected: Default::default(),
                         stdin_q: Default::default(),
+                        plugins: None,
                         db: Db::in_memory().unwrap(),
                         broadcaster: Broadcaster::new(),
                         rt: rt.handle().clone(),
                         snapshot: SessionSnapshot {
                             folder_path: String::new(),
+                            folder_id: String::new(),
                             card_id: None,
                             project_id: None,
                             is_worker: false,
@@ -1559,11 +1823,13 @@ mod tests {
                     terminal: std::sync::Mutex::new(None),
                     injected: Default::default(),
                     stdin_q: Default::default(),
+                    plugins: None,
                     db: Db::in_memory().unwrap(),
                     broadcaster: Broadcaster::new(),
                     rt: rt.handle().clone(),
                     snapshot: SessionSnapshot {
                         folder_path: folder.into(),
+                        folder_id: String::new(),
                         card_id: None,
                         project_id: None,
                         is_worker: false,
@@ -1694,6 +1960,19 @@ mod tests {
             .to_string(),
         );
         assert!(err.contains("cwd must equal"), "got: {err}");
+        runtime.end_turn("s1");
+    }
+
+    #[test]
+    fn runtime_invoke_mcp_refuses_without_plugin_manager() {
+        let folder = std::env::temp_dir().to_string_lossy().into_owned();
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, &folder);
+        let out = runtime.invoke_mcp_json(
+            "p1",
+            r#"{"session_id":"s1","name":"list_models","arguments":{}}"#,
+        );
+        assert!(out.contains("no plugin manager"), "got: {out}");
         runtime.end_turn("s1");
     }
 }

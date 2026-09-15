@@ -156,3 +156,34 @@ test('additional models registered in settings appear in the model catalog', asy
     { timeout: 10_000 },
   )
 })
+
+test('first-party providers render plugin-owned settings forms', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+  const token = await authenticate(request)
+  await loadAppAt(page, token, '/settings/providers')
+
+  for (const id of ['claude', 'grok', 'kimi', 'ollama', 'cursor', 'codex'] as const) {
+    await expect(page.getByTestId(`${id}-settings-section`)).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByTestId(`plugin-settings-${id}`)).toBeVisible()
+  }
+
+  await expect(
+    page.getByTestId('plugin-settings-claude').locator('[data-field="cli_path"]'),
+  ).toBeVisible()
+  await expect(
+    page.getByTestId('plugin-settings-grok').locator('[data-field="cli_path"]'),
+  ).toBeVisible()
+  await expect(
+    page.getByTestId('plugin-settings-kimi').locator('[data-field="api_key"]'),
+  ).toBeVisible()
+  await expect(
+    page.getByTestId('plugin-settings-cursor').locator('[data-field="auto_approve"]'),
+  ).toBeVisible()
+  await expect(
+    page.getByTestId('plugin-settings-codex').locator('[data-field="cli_path"]'),
+  ).toBeVisible()
+})

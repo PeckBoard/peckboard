@@ -257,7 +257,20 @@ function renderAction(
   const testid = `${testidPrefix}${p.id}`
   const needs = `Requires Peckboard ≥ ${p.min_peckboard ?? '?'}`
 
-  // Newer compatible version on offer → Upgrade.
+  if (p.kind === 'crate') {
+    return (
+      <button
+        type="button"
+        className="plugin-approval-approve"
+        data-testid={testid}
+        data-action="bundled"
+        disabled
+      >
+        Bundled
+      </button>
+    )
+  }
+
   if (p.installed && p.upgrade_available && compatible) {
     return (
       <button
@@ -273,7 +286,6 @@ function renderAction(
       </button>
     )
   }
-  // Newer version exists but this Peckboard is too old for it.
   if (p.installed && p.upgrade_available && !compatible) {
     return (
       <button

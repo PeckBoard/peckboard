@@ -121,8 +121,10 @@ pub struct AppState {
     pub config: Config,
     pub db: Db,
     pub plugins: Arc<PluginManager>,
-    /// Catalog of statically-linked Rust plugins (currently `claude-code`
-    /// and `mock`). Surfaces in the Settings UI via `/api/plugins`.
+    /// Empty catalog of statically-linked Rust plugins. First-party AI
+    /// providers ship as WASM (`peck-plugins-wasm/`) and register through
+    /// `provider.register`. Kept so `/api/plugins` can still merge the two
+    /// catalogs without a schema change.
     pub builtin_plugins: Arc<BuiltinPluginRegistry>,
     pub jwt_secret: Vec<u8>,
     /// AES-256-GCM key for the SSH key vault (`service::ssh_keys`).

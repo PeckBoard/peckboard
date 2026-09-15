@@ -1,18 +1,15 @@
 //! Provider-agnostic todo/task lifecycle hook for Extism plugins.
 //!
-//! The built-in Claude provider parses its `TodoWrite` tool calls into the
-//! canonical [`TodoSnapshot`](crate::todo::TodoSnapshot) and emits them as
-//! `todo` [`ProviderEvent`]s (see `src/provider/claude/process.rs`). This
-//! module gives that exact same capability to *any other* provider through the
-//! plugin system: a plugin parses its provider's native output however it
-//! likes and hands back a normalized todo snapshot, which is emitted as the
-//! identical `todo` event. Downstream consumers (the `/todos` route, the
-//! frontend) never learn which agent produced the snapshot.
+//! Provider plugins emit canonical [`TodoSnapshot`](crate::todo::TodoSnapshot)
+//! events themselves via `peckboard_emit_provider_event`. This module is the
+//! extra path: a *separate* `todo`-hook plugin can parse raw assistant text
+//! from any provider and emit the same snapshot. Downstream consumers (the
+//! `/todos` route, the frontend) never learn which agent produced it.
 //!
-//! The host seam is [`emit_plugin_todos`]: a provider calls it with the raw
-//! output it just produced; if a `todo`-hook plugin turns that output into a
+//! The host seam is [`emit_plugin_todos`]: core (or a plugin host helper)
+//! calls it with raw output; if a `todo`-hook plugin turns that output into a
 //! snapshot, it lands in the event log + WebSocket broadcast via the shared
-//! [`emit_event`] path, exactly like the Claude todos do.
+//! [`emit_event`] path.
 
 use crate::db::Db;
 use crate::provider::agent::emit_event;
@@ -106,8 +103,8 @@ impl PluginManager {
 ///
 /// Dispatches `raw_output` to the `todo` hook and, if a plugin reported a
 /// snapshot, emits it as the canonical [`ProviderEvent::Todo`] through the
-/// shared [`emit_event`] persistence + broadcast path — the *same* event the
-/// built-in Claude path produces. Returns `true` when an event was emitted.
+/// shared [`emit_event`] persistence + broadcast path — the *same* event a
+/// CLI provider plugin produces. Returns `true` when an event was emitted.
 /// A no-op (returns `false`) when no `todo`-hook plugin is installed or a
 /// plugin reported nothing, so it is safe to call on every turn.
 pub async fn emit_plugin_todos(

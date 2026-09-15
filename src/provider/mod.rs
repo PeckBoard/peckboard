@@ -3,6 +3,7 @@ pub mod auth_recovery;
 pub mod login_stash {
     pub use crate::accounts::login_stash::*;
 }
+pub mod crate_provider;
 pub mod manager;
 pub mod message;
 pub mod plugin_provider;
@@ -324,5 +325,5 @@ mod auto_tests {
 //
 // Providers implement the full agent lifecycle: spawn, send,
 // interrupt, kill, cleanup. Each provider translates its native
-// output into the unified ProviderEvent stream. Claude CLI is
-// the built-in provider; plugins can register additional providers.
+// output into the unified ProviderEvent stream. First-party providers
+// are WASM plugins; core only ships [`plugin_provider::PluginProviderAdapter`].

@@ -54,7 +54,7 @@ async fn build_state() -> (Arc<AppState>, String) {
         common::load_first_party_providers(&cfg.data_dir, db.clone(), &provider_registry).await;
     assert!(
         provider_registry.get_info("mock").await.is_some(),
-        "mock WASM plugin must register"
+        "mock crate provider must register"
     );
 
     let session_manager =

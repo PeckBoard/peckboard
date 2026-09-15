@@ -113,10 +113,15 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Full-page entries declared for a Folders page row — the surface for a
     // page whose subject is the folder itself (same validation).
     let folder_items = state.plugins.folder_items().await;
-    // Loaded WASM plugins and their approval status. The UI uses any with
-    // status `pending` to drive the approval prompt; `ui_panels` already
-    // excludes panels from unapproved plugins.
-    let wasm_plugins = state.plugins.wasm_plugins().await;
+    // Loaded WASM plugins and their approval status. Hide stems that ship
+    // as crate plugins so Settings lists each id once (Bundled).
+    let wasm_plugins = state
+        .plugins
+        .wasm_plugins()
+        .await
+        .into_iter()
+        .filter(|p| !crate::plugin::crates::is_crate_plugin_id(&p.name))
+        .collect::<Vec<_>>();
     Json(serde_json::json!({
         "plugins": entries,
         "ui_panels": ui_panels,
@@ -127,14 +132,6 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "wasm_plugins": wasm_plugins,
     }))
 }
-
-/// POST /api/plugins/:plugin_id/approval — record an operator's approve or
-/// deny decision on a WASM plugin's declared hook set. Body:
-/// `{"decision": "approve" | "deny"}`. Approving runs the plugin's
-/// deferred `init` and activates its hooks/routes/panels; denying (or any
-/// plugin that has never been approved) leaves it inert. The decision is
-/// persisted, so it survives restarts as long as the plugin keeps
-/// declaring the same hooks.
 async fn decide_approval(
     State(state): State<Arc<AppState>>,
     Path(plugin_id): Path<String>,
@@ -181,19 +178,23 @@ async fn decide_approval(
 /// DELETE /api/plugins/:plugin_id — uninstall an installed WASM plugin.
 /// Shuts the plugin down, removes it from the live set, deletes its
 /// `.wasm` from disk, and clears its stored approval + settings so a later
-/// reinstall starts clean. Built-in plugins live in a separate registry and
-/// are never in the WASM set, so this only ever targets installed plugins —
-/// an id that doesn't match a loaded WASM plugin returns 404.
+/// reinstall starts clean. Crate plugins are compiled in and cannot be
+/// uninstalled.
 async fn uninstall_plugin(
     State(state): State<Arc<AppState>>,
     Path(plugin_id): Path<String>,
 ) -> impl IntoResponse {
+    if crate::plugin::crates::is_crate_plugin_id(&plugin_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("plugin '{plugin_id}' is a bundled crate plugin and cannot be uninstalled"),
+            })),
+        ));
+    }
     match state.plugins.uninstall(&plugin_id).await {
         Ok(true) => {
-            // Drop any AI provider the uninstalled plugin had registered.
             state.plugins.sync_plugin_providers().await;
-            // Tell every connected client so any open Plugins view drops the
-            // plugin (reusing the generic "plugin state changed" signal).
             state
                 .broadcaster
                 .broadcast(crate::ws::broadcaster::WsEvent {
@@ -214,20 +215,21 @@ async fn uninstall_plugin(
     }
 }
 
-/// Resolve the settings schema for a plugin id: built-in plugins first,
-/// then the manifest-declared schema of a loaded WASM plugin. Both store
-/// values in the same `plugin_settings` rows, so everything downstream
-/// (validation, redaction, storage) is shared.
+/// Resolve the settings schema for a plugin id: built-in plugins first
+/// (when they actually declare fields), then a loaded WASM plugin. Empty
+/// crate stubs must not shadow the WASM schema while native settings are
+/// still pending.
 async fn settings_schema_for(
     state: &AppState,
     plugin_id: &str,
 ) -> Option<crate::plugin::settings::SettingsSchema> {
-    if let Some(schema) = state.builtin_plugins.settings_schema_for(plugin_id).await {
+    if let Some(schema) = state.builtin_plugins.settings_schema_for(plugin_id).await
+        && !schema.is_empty()
+    {
         return Some(schema);
     }
     state.plugins.settings_schema_for(plugin_id).await
 }
-
 /// GET /api/plugins/:plugin_id/settings — current values, redacted for
 /// wire transmission. Always returns 200 with `settings: []` when the
 /// plugin exists but has no schema, so the UI can render an empty form
@@ -438,6 +440,9 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                     "label": label, "url": url, "removable": removable, "ok": true,
                 }));
                 for e in index.plugins {
+                    if crate::plugin::crates::is_crate_plugin_id(&e.id) {
+                        continue;
+                    }
                     let loaded = installed.get(&e.id);
                     let installed_version = loaded.map(|(v, _, _)| v.clone());
                     let compatible = registry::is_compatible(running, e.min_peckboard.as_deref());
@@ -512,6 +517,33 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             }
         }
     }
+    for p in state.builtin_plugins.list().await {
+        plugins.insert(
+            0,
+            serde_json::json!({
+                "id": p.metadata.id,
+                "name": p.metadata.display_name,
+                "description": p.metadata.description,
+                "author": p.metadata.author,
+                "homepage": serde_json::Value::Null,
+                "version": p.metadata.version,
+                "hooks": [],
+                "permissions": p.permissions.iter().map(|perm| perm.id).collect::<Vec<_>>(),
+                "tags": ["bundled", "crate"],
+                "category": "bundled",
+                "kind": "crate",
+                "repository": "bundled",
+                "repository_label": "Peckboard",
+                "installed": true,
+                "installed_version": p.metadata.version,
+                "installed_status": "approved",
+                "installed_permissions": p.permissions.iter().map(|perm| perm.id).collect::<Vec<_>>(),
+                "min_peckboard": serde_json::Value::Null,
+                "compatible": true,
+                "upgrade_available": false,
+            }),
+        );
+    }
 
     Ok(Json(serde_json::json!({
         "repositories": repo_statuses,
@@ -541,6 +573,14 @@ async fn install_registry(
             ));
         }
     };
+    if crate::plugin::crates::is_crate_plugin_id(&id) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("plugin '{id}' is a bundled crate plugin and cannot be installed"),
+            })),
+        ));
+    }
     let repository = body
         .get("repository")
         .and_then(|v| v.as_str())

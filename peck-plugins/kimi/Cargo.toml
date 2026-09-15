@@ -10,12 +10,17 @@ publish = false
 [lib]
 # Extism loads plugins as WASM cdylibs. The compiled artifact is
 # `target/wasm32-unknown-unknown/release/peckboard_kimi_plugin.wasm`.
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-extism-pdk = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+extism-pdk = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+peck-plugin-native-host = { path = "../native-host" }
 
 [profile.release]
 opt-level = "s"

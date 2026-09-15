@@ -46,7 +46,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
             }
         }
     }
-    let mut env_remove: Vec<String> = account
+    let env_remove: Vec<String> = account
         .get("env_remove")
         .and_then(|v| v.as_array())
         .map(|a| {
@@ -120,7 +120,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
         HostFn::ProviderSpawn,
         &json!({
             "session_id": session_id,
-            "command": "claude",
+            "command": crate::settings::cli_path("claude"),
             "args": args,
             "env": env,
             "env_remove": env_remove,
@@ -135,9 +135,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
     let mut usage = UsageTracker::default();
     let mut interrupt_sent = false;
     let mut interrupt_id: Option<String> = None;
-    let mut saw_result = false;
     let mut last_result_error: Option<String> = None;
-    let mut last_result_json: Option<Value> = None;
 
     loop {
         if !interrupt_sent && should_stop(session_id) {
@@ -192,9 +190,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 session_id,
                 &mut parser,
                 &mut usage,
-                saw_result,
                 last_result_error,
-                last_result_json.as_ref(),
                 interrupt_sent,
                 exit_code,
                 stderr,
@@ -241,9 +237,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
             emit(session_id, &ev)?;
         }
         if is_result {
-            saw_result = true;
             last_result_error = result_error(&json_line);
-            last_result_json = Some(json_line.clone());
             let usages = usage.on_result(&json_line, parser.model_name.as_deref());
             for u in usages {
                 emit(
@@ -295,16 +289,11 @@ fn finish(
     session_id: &str,
     parser: &mut ParserState,
     usage: &mut UsageTracker,
-    saw_result: bool,
     last_result_error: Option<String>,
-    _last_result: Option<&Value>,
     interrupted: bool,
     exit_code: Option<i32>,
     stderr: Option<String>,
 ) -> Result<(), String> {
-    if saw_result && last_result_error.is_none() && !interrupted {
-        return Ok(());
-    }
     for u in usage.take_crash_fallback(parser.model_name.as_deref()) {
         emit(
             session_id,

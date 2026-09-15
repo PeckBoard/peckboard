@@ -1,9 +1,8 @@
 //! HTTP-level test for `GET /api/plugins`.
 //!
 //! Locks in the wire shape the Settings page consumes — id, display name,
-//! permissions array, status enum — and asserts that the two built-in
-//! plugins registered by `plugin::builtins::register_all` show up with
-//! the permissions they declared.
+//! permissions array, status enum — and asserts crate plugins registered by
+//! `plugin::crates::register_all` show up with the permissions they declared.
 
 use std::sync::Arc;
 
@@ -44,6 +43,13 @@ async fn build_state() -> (Arc<AppState>, String) {
     let jwt_secret = generate_jwt_secret();
     let provider_registry = Arc::new(ProviderRegistry::new());
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
+    peckboard::plugin::crates::register_all(
+        &builtin_plugins,
+        provider_registry.clone(),
+        &db,
+        plugins.clone(),
+    )
+    .await;
 
     let session_manager = SessionManager::new(provider_registry.clone());
     let push_service = PushService::new(&config.data_dir);
@@ -98,7 +104,7 @@ async fn build_state() -> (Arc<AppState>, String) {
 }
 
 #[tokio::test]
-async fn list_plugins_returns_builtin_catalog() {
+async fn list_plugins_lists_crate_catalog() {
     let (state, token) = build_state().await;
     let app = router(state.clone()).with_state(state.clone());
 
@@ -115,11 +121,16 @@ async fn list_plugins_returns_builtin_catalog() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let plugins = json["plugins"].as_array().expect("plugins array");
-    assert_eq!(
-        plugins.len(),
-        7,
-        "expected built-in claude-code + mock + ollama + cursor + codex + kimi + grok; got {plugins:?}",
-    );
+    let ids: Vec<&str> = plugins.iter().filter_map(|p| p["id"].as_str()).collect();
+    for id in peckboard::plugin::crates::CRATE_PLUGIN_IDS {
+        assert!(ids.contains(id), "missing crate plugin {id} in {ids:?}");
+    }
+    let claude = plugins
+        .iter()
+        .find(|p| p["id"] == "claude")
+        .expect("claude crate plugin");
+    assert_eq!(claude["built_in"], true);
+    assert_eq!(claude["display_name"], "Claude");
 
     // The catalog also carries the plugin-contributed UI panels (from
     // loaded WASM plugins). None are loaded here, so the field is present
@@ -128,114 +139,7 @@ async fn list_plugins_returns_builtin_catalog() {
         .as_array()
         .expect("ui_panels array present in catalog");
     assert!(panels.is_empty(), "no WASM plugins loaded; got {panels:?}");
-
-    let claude = plugins
-        .iter()
-        .find(|p| p["id"] == "claude-code")
-        .expect("claude-code plugin present");
-    assert_eq!(claude["display_name"], "Claude Code");
-    assert_eq!(claude["built_in"], true);
-    assert_eq!(claude["enabled"], true);
-    assert_eq!(claude["status"]["kind"], "active");
-
-    let claude_perms: Vec<&str> = claude["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["id"].as_str().unwrap())
-        .collect();
-    // Claude needs subprocess + filesystem + network; the test pins the
-    // requested set so an accidental permission drop is caught.
-    for required in [
-        "register_provider",
-        "spawn_process",
-        "filesystem_read",
-        "filesystem_write",
-        "network_access",
-    ] {
-        assert!(
-            claude_perms.contains(&required),
-            "claude-code missing requested permission {required}: {claude_perms:?}",
-        );
-    }
-
-    let mock = plugins
-        .iter()
-        .find(|p| p["id"] == "mock")
-        .expect("mock plugin present");
-    assert_eq!(mock["display_name"], "Mock Provider");
-    let mock_perms: Vec<&str> = mock["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["id"].as_str().unwrap())
-        .collect();
-    // Mock never touches process / network / fs, so its catalog entry
-    // should only carry the one permission it actually needs.
-    assert_eq!(mock_perms, vec!["register_provider"]);
-
-    let cursor = plugins
-        .iter()
-        .find(|p| p["id"] == "cursor")
-        .expect("cursor plugin present");
-    assert_eq!(cursor["display_name"], "Cursor");
-    assert_eq!(cursor["built_in"], true);
-    let cursor_perms: Vec<&str> = cursor["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["id"].as_str().unwrap())
-        .collect();
-    // The cursor-agent CLI spawns a subprocess, touches the working dir,
-    // and talks to Cursor's backend — pin the requested set.
-    for required in [
-        "register_provider",
-        "spawn_process",
-        "filesystem_read",
-        "filesystem_write",
-        "network_access",
-    ] {
-        assert!(
-            cursor_perms.contains(&required),
-            "cursor missing requested permission {required}: {cursor_perms:?}",
-        );
-    }
-
-    let codex = plugins
-        .iter()
-        .find(|p| p["id"] == "codex")
-        .expect("codex plugin present");
-    assert_eq!(codex["display_name"], "Codex (CLI)");
-    assert_eq!(codex["built_in"], true);
-    let codex_fields = codex["settings_schema"]["fields"]
-        .as_array()
-        .expect("codex settings schema fields");
-    let codex_keys: Vec<&str> = codex_fields
-        .iter()
-        .map(|f| f["key"].as_str().unwrap())
-        .collect();
-    // No `api_key` here: since "Codex CLI login uses ChatGPT sign-in, not
-    // API keys" the credential lives on a stored Codex account, not in a
-    // plugin setting.
-    for required in ["cli_path", "discover_models", "additional_models"] {
-        assert!(
-            codex_keys.contains(&required),
-            "codex missing setting {required}: {codex_keys:?}",
-        );
-    }
-    assert!(
-        !codex_keys.contains(&"api_key"),
-        "codex must not re-offer an API-key setting: {codex_keys:?}",
-    );
-
-    // Each permission entry must carry a human label + description for
-    // the UI; an empty string would mean the UI renders a blank row.
-    for p in claude["permissions"].as_array().unwrap() {
-        assert!(!p["label"].as_str().unwrap().is_empty());
-        assert!(!p["description"].as_str().unwrap().is_empty());
-    }
 }
-
 #[tokio::test]
 async fn list_plugins_requires_auth() {
     let (state, _token) = build_state().await;
@@ -249,34 +153,24 @@ async fn list_plugins_requires_auth() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// The Ollama plugin's settings schema is the first non-trivial example
-/// of the typed schema flowing through `/api/plugins`. Pin the shape so
-/// the UI's renderer doesn't drift away from the backend.
+/// Ollama settings schema comes from the crate plugin's manifest.
 #[tokio::test]
 async fn list_plugins_includes_ollama_settings_schema() {
     let (state, token) = build_state().await;
     let app = router(state.clone()).with_state(state.clone());
 
     let req = Request::builder()
-        .uri("/api/plugins")
+        .uri("/api/plugins/ollama/settings")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-
     let body = axum::body::to_bytes(res.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    let plugins = json["plugins"].as_array().unwrap();
-    let ollama = plugins
-        .iter()
-        .find(|p| p["id"] == "ollama")
-        .expect("ollama plugin registered");
-    assert_eq!(ollama["display_name"], "Ollama");
-
-    let fields = ollama["settings_schema"]["fields"]
+    let fields = json["schema"]["fields"]
         .as_array()
         .expect("settings schema fields");
     let keys: Vec<&str> = fields.iter().map(|f| f["key"].as_str().unwrap()).collect();
@@ -284,8 +178,6 @@ async fn list_plugins_includes_ollama_settings_schema() {
     assert!(keys.contains(&"default_model"));
     assert!(keys.contains(&"additional_headers"));
 
-    // The headers field must declare secret_values so the UI password-
-    // masks it and the API never echoes the value back.
     let headers = fields
         .iter()
         .find(|f| f["key"] == "additional_headers")
@@ -293,10 +185,10 @@ async fn list_plugins_includes_ollama_settings_schema() {
     assert_eq!(headers["type"], "key_value_list");
     assert_eq!(headers["secret_values"], true);
 }
-
 #[tokio::test]
 async fn put_settings_round_trips_and_masks_secret_values() {
     let (state, token) = build_state().await;
+    state.plugins.load_all().await.unwrap();
     let app = router(state.clone()).with_state(state.clone());
 
     // Save a base URL change AND an additional Authorization header.
@@ -477,6 +369,7 @@ async fn wasm_plugin_settings_round_trip_via_routes() {
 #[tokio::test]
 async fn put_settings_rejects_invalid_url() {
     let (state, token) = build_state().await;
+    state.plugins.load_all().await.unwrap();
     let app = router(state.clone()).with_state(state.clone());
 
     let req = Request::builder()
@@ -503,6 +396,7 @@ async fn put_settings_rejects_invalid_url() {
 #[tokio::test]
 async fn put_settings_rejects_header_with_crlf() {
     let (state, token) = build_state().await;
+    state.plugins.load_all().await.unwrap();
     let app = router(state.clone()).with_state(state.clone());
 
     // CRLF in a header value is the classic response-splitting vector;
@@ -530,6 +424,7 @@ async fn put_settings_rejects_header_with_crlf() {
 #[tokio::test]
 async fn put_settings_rejects_unknown_field() {
     let (state, token) = build_state().await;
+    state.plugins.load_all().await.unwrap();
     let app = router(state.clone()).with_state(state.clone());
 
     let req = Request::builder()

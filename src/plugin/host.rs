@@ -4201,6 +4201,32 @@ host_fn!(peckboard_provider_write_file(user_data: HostState; input: String) -> S
     Ok(runtime.write_file_json(&plugin_id, &input))
 });
 
+host_fn!(peckboard_provider_probe(user_data: HostState; input: String) -> String {
+    let (_plugin_id, ok, _runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(crate::provider::plugin_provider::probe_cli_json(&input))
+});
+
+host_fn!(peckboard_provider_list_accounts(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, _runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    let _ = input;
+    let db = {
+        let state = user_data.get()?;
+        let state = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+        state.db.clone()
+    };
+    Ok(crate::provider::plugin_provider::list_accounts_json(&db, &plugin_id))
+});
+
+host_fn!(peckboard_provider_invoke_mcp(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.invoke_mcp_json(&plugin_id, &input))
+});
+
 /// Shared accessor for the browser-run host functions: permission check +
 /// the app data dir where `service::browser_runs` records runs.
 fn state_permission_and_data_dir(
@@ -4382,6 +4408,27 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_provider_write_file,
+        ),
+        Function::new(
+            "peckboard_provider_probe",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_probe,
+        ),
+        Function::new(
+            "peckboard_provider_list_accounts",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_list_accounts,
+        ),
+        Function::new(
+            "peckboard_provider_invoke_mcp",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_invoke_mcp,
         ),
         Function::new(
             "peckboard_browser_runs",

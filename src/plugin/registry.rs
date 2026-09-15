@@ -65,6 +65,10 @@ pub struct RegistryIndex {
     pub plugins: Vec<RegistryEntry>,
     /// Installable MCP server templates (Settings → MCP Servers entries with
     /// one-click add). Older cores ignore this field entirely.
+    /// Bundled crate plugins (compiled into Peckboard). Older indexes omit
+    /// this; new cores also inject the live crate catalog in `/api/plugins/registry`.
+    #[serde(default)]
+    pub crate_plugins: Vec<CrateRegistryEntry>,
     #[serde(default)]
     pub mcp_servers: Vec<McpRegistryEntry>,
 }
@@ -114,6 +118,25 @@ pub struct RegistryKv {
 }
 
 /// One installable MCP server template in the index. Mirrors the
+/// A trusted crate plugin in the index. No download URL — it ships in the binary.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CrateRegistryEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub author: String,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    pub version: String,
+    #[serde(default)]
+    pub hooks: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
 /// Settings → MCP Servers editor shape so the UI can prefill the add-server
 /// modal directly; nothing is downloaded — "installing" just saves a user
 /// MCP server. `id` doubles as the suggested `mcpServers` key.
@@ -426,5 +449,22 @@ mod tests {
         let bare: RegistryIndex =
             serde_json::from_str(r#"{"schema_version":1,"plugins":[]}"#).unwrap();
         assert!(bare.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn crate_plugins_parse_without_url() {
+        let json = r#"{
+            "schema_version": 1,
+            "plugins": [],
+            "crate_plugins": [{
+                "id": "claude", "name": "Claude", "description": "d",
+                "author": "PeckBoard", "version": "0.1.12",
+                "hooks": ["provider.register"], "permissions": ["register_provider"]
+            }]
+        }"#;
+        let index: RegistryIndex = serde_json::from_str(json).unwrap();
+        assert_eq!(index.crate_plugins.len(), 1);
+        assert_eq!(index.crate_plugins[0].id, "claude");
+        assert!(index.plugins.is_empty());
     }
 }
