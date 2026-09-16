@@ -24,6 +24,12 @@ use crate::provider::plugin_provider::{
 use crate::provider::registry::{ProviderInfo, ProviderRegistry};
 use crate::provider::stream::{CrashKind, ModelInfo, ProviderEvent};
 use crate::provider::turn::compose_system_prompt;
+/// Grace the CLI gets to settle an in-band interrupt with a real `result`
+/// before the hard kill (mirrors the pre-plugin claude provider's window).
+const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Grace a retired session's in-flight turn gets to finish naturally after
+/// `shutdown_after_turn` (finish_card / complete_step) before it is stopped.
+const RETIRE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Function pointers into one first-party provider crate.
 #[derive(Clone, Copy)]
@@ -32,6 +38,11 @@ pub struct CrateHooks {
     pub refresh_models: fn() -> Option<serde_json::Value>,
     pub registration: fn() -> serde_json::Value,
     pub manifest_json: fn() -> String,
+    /// Stdin frame that asks the CLI to stop the CURRENT turn in-band and
+    /// settle it with a real `result` (claude's `control_request
+    /// {subtype:"interrupt"}`). `None` = no in-band stop; interrupt is a
+    /// hard kill.
+    pub interrupt_frame: Option<fn() -> String>,
 }
 
 /// Settings schema declared in the crate's plugin manifest, or empty when
@@ -235,7 +246,17 @@ impl AgentProvider for CrateAgentProvider {
             let terminal = runtime.end_turn(&session_id);
             let (completed, error, error_kind) = match terminal {
                 Some(Terminal::Completed) => (true, None, None),
-                Some(Terminal::Crashed { reason, kind }) => (false, Some(reason), Some(kind)),
+                Some(Terminal::Crashed { reason, kind }) => {
+                    // A user-requested interrupt is not a failure: keep the
+                    // completion's `error` empty so downstream flows (e.g.
+                    // handover) report "cancelled", not "failed".
+                    let err = if matches!(kind, CrashKind::Interrupted) {
+                        None
+                    } else {
+                        Some(reason)
+                    };
+                    (false, err, Some(kind))
+                }
                 None => {
                     let reason = match result {
                         Err(e) => e,
@@ -277,7 +298,24 @@ impl AgentProvider for CrateAgentProvider {
     }
 
     async fn interrupt(&self, session_id: &str) {
+        // In-band first: give the CLI a grace window to settle the turn
+        // with a real `result` (usage included) before the hard kill.
+        if let Some(frame) = self.hooks.interrupt_frame
+            && self
+                .runtime
+                .soft_interrupt(session_id, &frame(), INTERRUPT_GRACE)
+        {
+            return;
+        }
         self.runtime.request_stop(session_id);
+    }
+
+    async fn shutdown_after_turn(&self, session_id: &str) {
+        // Bound the wind-down: the in-flight turn may finish naturally, but
+        // a retired session must not keep its CLI running indefinitely
+        // (unbounded wind-down is how the orchestrator used to double-start
+        // workers after finish_card).
+        self.runtime.stop_turn_after(session_id, RETIRE_GRACE);
     }
 
     async fn write_stdin(&self, session_id: &str, text: &str) -> bool {
@@ -331,6 +369,7 @@ fn dispatch_crate_host(
         "peckboard_provider_get_mcp_config" => runtime.get_mcp_config_json(plugin_id, input),
         "peckboard_provider_account_env" => runtime.account_env_json(plugin_id, input),
         "peckboard_provider_write_file" => runtime.write_file_json(plugin_id, input),
+        "peckboard_provider_read_file" => runtime.read_file_json(plugin_id, input),
         "peckboard_provider_spawn" => runtime.spawn_json(plugin_id, input),
         "peckboard_provider_read_line" => runtime.read_line_json(plugin_id, input),
         "peckboard_provider_write_stdin" => runtime.write_stdin_json(plugin_id, input),
@@ -340,7 +379,10 @@ fn dispatch_crate_host(
         "peckboard_provider_list_accounts" => list_accounts_json(db, plugin_id),
         "peckboard_provider_invoke_mcp" => runtime.invoke_mcp_json(plugin_id, input),
         "peckboard_get_plugin_setting" => host::get_plugin_setting_impl(db, plugin_id, input),
-        "peckboard_http_request" => host::http_request_impl(input),
+        // Trusted first-party crates get the full ollama-on-CPU window
+        // (an in-flight chat completion can legitimately run for an hour);
+        // untrusted WASM plugins keep the tighter 300 s cap in `host.rs`.
+        "peckboard_http_request" => host::http_request_impl(input, 3600),
         "peckboard_store_put" => {
             host::store_put_impl(db, plugin_id, input, plugins.live_host().as_deref())
         }

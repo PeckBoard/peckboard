@@ -23,6 +23,94 @@ pub enum CrashKind {
     #[default]
     Unknown,
 }
+impl CrashKind {
+    /// Stable wire string — identical to the serde representation and to
+    /// core's `src/provider/stream.rs::CrashKind::as_str`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CrashKind::AuthExpired => "auth_expired",
+            CrashKind::RateLimit => "rate_limit",
+            CrashKind::Timeout => "timeout",
+            CrashKind::Interrupted => "interrupted",
+            CrashKind::SpawnFailed => "spawn_failed",
+            CrashKind::ResumeFailed => "resume_failed",
+            CrashKind::ExitedMidTurn => "exited_mid_turn",
+            CrashKind::NoOutput => "no_output",
+            CrashKind::Unknown => "unknown",
+        }
+    }
+
+    /// Best-effort classification of free-form provider text — a stderr
+    /// tail, an API error body, a CLI message. Keep the needle lists in
+    /// sync with core's `CrashKind::classify`; the host only reclassifies
+    /// `Unknown`, so the plugin must sort resume/auth/rate-limit failures
+    /// itself for resume_recovery and auth-recovery to fire.
+    pub fn classify(text: &str) -> CrashKind {
+        let text = text.to_ascii_lowercase();
+        let has = |needles: &[&str]| needles.iter().any(|n| text.contains(n));
+        // Resume rejections first: the CLI words one as a failure to start
+        // ("no conversation found"), which the auth bucket below would
+        // otherwise swallow — and prescribe the wrong remedy.
+        if has(&[
+            "no rollout found",
+            "thread/resume",
+            "no conversation found",
+            "no session found",
+            "session not found",
+            "conversation not found",
+        ]) {
+            return CrashKind::ResumeFailed;
+        }
+        // Rate limiting next: a 429 body often also names the API key.
+        if has(&[
+            "429",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "quota",
+            "usage limit",
+            "overloaded",
+        ]) {
+            return CrashKind::RateLimit;
+        }
+        if has(&[
+            "401",
+            "unauthorized",
+            "unauthenticated",
+            "authenticate",
+            "authentication",
+            "invalid api key",
+            "invalid_api_key",
+            "api key",
+            "credential",
+            "not signed in",
+            "isn't signed in",
+            "no model configured",
+            "login",
+            "oauth",
+            "token expired",
+            "expired token",
+        ]) {
+            return CrashKind::AuthExpired;
+        }
+        if has(&["timed out", "timeout"]) {
+            return CrashKind::Timeout;
+        }
+        if has(&["interrupted", "cancelled", "canceled"]) {
+            return CrashKind::Interrupted;
+        }
+        CrashKind::Unknown
+    }
+
+    /// [`classify`](Self::classify), falling back to a structural kind when
+    /// the text carries nothing recognizable.
+    pub fn classify_or(text: &str, fallback: CrashKind) -> CrashKind {
+        match CrashKind::classify(text) {
+            CrashKind::Unknown => fallback,
+            kind => kind,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

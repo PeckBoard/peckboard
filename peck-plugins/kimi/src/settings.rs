@@ -107,7 +107,7 @@ pub fn merge_catalog(
     discovered: Vec<String>,
     extra: Vec<String>,
     accounts: &[(String, String)],
-    display: impl Fn(&str) -> String,
+    make: impl Fn(&str) -> Value,
 ) -> Value {
     let mut models: Vec<Value> = seed.as_array().cloned().unwrap_or_default();
     let mut seen: Vec<String> = models
@@ -119,12 +119,7 @@ pub fn merge_catalog(
             return;
         }
         seen.push(id.clone());
-        models.push(json!({
-            "id": id,
-            "display_name": display(&id),
-            "capabilities": ["code"],
-            "tier": 0,
-        }));
+        models.push(make(&id));
     };
     for id in discovered.into_iter().chain(extra) {
         add(id);
@@ -161,4 +156,42 @@ pub fn merge_catalog(
         }
     }
     Value::Array(models)
+}
+
+/// Resolve a bare `kimi` command to the official installer location
+/// (`~/.kimi-code/bin/kimi`) when it isn't on the server's PATH. The host
+/// resolves spawn/probe commands against its shared fallback list
+/// (`COMMON_CLI_FALLBACK_DIRS` in `src/provider/turn.rs`), which does NOT
+/// include the kimi installer dir — so the plugin resolves it here and
+/// passes an absolute path. Native builds only; the WASM sandbox has no
+/// filesystem and just forwards the bare name.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_kimi_fallback(command: String) -> String {
+    if command.contains('/') {
+        return command;
+    }
+    let on_path = std::env::var("PATH")
+        .map(|p| {
+            p.split(':')
+                .any(|d| !d.is_empty() && std::path::Path::new(d).join(&command).is_file())
+        })
+        .unwrap_or(false);
+    if on_path {
+        return command;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let candidate = std::path::Path::new(&home)
+            .join(".kimi-code")
+            .join("bin")
+            .join(&command);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    command
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn resolve_kimi_fallback(command: String) -> String {
+    command
 }

@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Replying with the single word OK**"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'printf OK'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'printf OK'","aggregated_output":"OK","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"cache_write_input_tokens":0,"output_tokens":8,"reasoning_output_tokens":16}}
+{"type":"error","message":"Not logged in"}
+{"type":"turn.failed","error":{"message":"Not logged in"}}

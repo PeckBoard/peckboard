@@ -90,22 +90,39 @@ fn handle_register() -> String {
 }
 
 fn handle_models() -> String {
-    let cli = settings::cli_path("kimi");
+    let cli = settings::resolve_kimi_fallback(settings::cli_path("kimi"));
     let extra = settings::str_list("additional_models");
-    let mut discovered = Vec::new();
-    if settings::bool("discover_models", true) {
-        if let Some(out) = settings::probe(&cli, &["provider", "list", "--json"]) {
-            if let Some(ids) = parser::parse_cli_models(&out) {
-                discovered = ids.into_iter().map(|m| m.id).collect();
+    // Seed first (the config-default pseudo-model stays a working
+    // selection), then the discovered aliases with their CLI-reported
+    // display names and capabilities.
+    let mut base: Vec<serde_json::Value> = models::seed_models()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if settings::bool("discover_models", true)
+        && let Some(out) = settings::probe(&cli, &["provider", "list", "--json"])
+        && let Some(discovered) = parser::parse_cli_models(&out)
+    {
+        for m in discovered {
+            if base
+                .iter()
+                .any(|b| b.get("id").and_then(|v| v.as_str()) == Some(m.id.as_str()))
+            {
+                continue;
             }
+            base.push(models::cli_model_json(
+                &m.id,
+                m.display_name.as_deref(),
+                &m.capabilities,
+            ));
         }
     }
     let models = settings::merge_catalog(
-        models::seed_models(),
-        discovered,
+        serde_json::Value::Array(base),
+        Vec::new(),
         extra,
         &settings::accounts(),
-        |id| id.to_string(),
+        |id| models::cli_model_json(id, None, &["code".to_string()]),
     );
     allow(serde_json::json!({ "models": models }))
 }

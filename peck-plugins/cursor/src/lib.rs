@@ -63,16 +63,14 @@ pub fn registration() -> serde_json::Value {
         "id": models::PROVIDER_ID,
         "display_name": models::DISPLAY_NAME,
         "models": models::seed_models(),
-        "effort_levels": [
-            { "id": "low", "label": "Low" },
-            { "id": "medium", "label": "Medium" },
-            { "id": "high", "label": "High" },
-            { "id": "xhigh", "label": "Extra high" },
-            { "id": "max", "label": "Max" },
-        ],
+        // cursor-agent's argv carries no effort flag, so advertising levels
+        // would render a dead menu in the UI.
+        "effort_levels": [],
         "capabilities": {
             "supports_thinking": true,
-            "supports_images_in": true,
+            // cursor-agent takes no image input; attachments are dropped
+            // with a transcript notice instead.
+            "supports_images_in": false,
             "supports_usage": true,
             "supports_resume": true,
             "interrupt_kind": "hard_kill",
@@ -93,20 +91,22 @@ fn handle_models() -> String {
     let cli = settings::cli_path("cursor-agent");
     let extra = settings::str_list("additional_models");
     let mut discovered = Vec::new();
-    if settings::bool("discover_models", true) {
-        if let Some(out) = settings::probe(&cli, &["models"]) {
-            if let Some(ids) = parser::parse_cli_models(&out) {
-                discovered = ids;
-            }
-        }
+    if settings::bool("discover_models", true)
+        && let Some(out) = settings::probe(&cli, &["models"])
+        && let Some(ids) = parser::parse_cli_models(&out)
+    {
+        discovered = ids;
     }
-    let models = settings::merge_catalog(
-        models::seed_models(),
-        discovered,
-        extra,
-        &settings::accounts(),
-        |id| id.to_string(),
-    );
+    // Discovery supersedes the static seed (the live `cursor-agent models`
+    // list is the truth); the seed only backstops a failed/disabled probe.
+    let base = if discovered.is_empty() {
+        models::seed_models()
+    } else {
+        serde_json::Value::Array(discovered.iter().map(|id| models::model_json(id)).collect())
+    };
+    let models = settings::merge_catalog(base, extra, &settings::accounts(), |id| {
+        models::model_json(id)
+    });
     allow(serde_json::json!({ "models": models }))
 }
 

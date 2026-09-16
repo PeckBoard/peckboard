@@ -178,19 +178,25 @@ pub fn servers() -> Vec<(String, String)> {
         .collect()
 }
 
-/// `(model without prefix/alias, base URL)` for `ollama:<model>` or `ollama:<model>@<server>`.
-pub fn resolve_model_ref(raw: &str) -> (String, String) {
+/// `(model without prefix/alias, base URL)` for `ollama:<model>` or
+/// `ollama:<model>@<server>`. Splits on the LAST `@` so model names that
+/// contain `@` still resolve. An alias that isn't configured is an error —
+/// silently sending the request to the default server would surface as a
+/// confusing model-not-found from Ollama instead.
+pub fn resolve_model_ref(raw: &str) -> Result<(String, String), String> {
     let stripped = raw.strip_prefix("ollama:").unwrap_or(raw);
-    match stripped.split_once('@') {
-        Some((model, alias)) => {
-            let url = servers()
-                .into_iter()
-                .find(|(n, _)| n == alias)
-                .map(|(_, u)| u)
-                .unwrap_or_else(base_url);
-            (model.to_string(), url)
-        }
-        None => (stripped.to_string(), base_url()),
+    match stripped.rsplit_once('@') {
+        Some((model, alias)) if !model.is_empty() && !alias.is_empty() => servers()
+            .into_iter()
+            .find(|(n, _)| n == alias)
+            .map(|(_, url)| (model.to_string(), url))
+            .ok_or_else(|| {
+                format!(
+                    "ollama plugin: model '{stripped}' references server '{alias}', which \
+                     is not configured under Additional Servers"
+                )
+            }),
+        _ => Ok((stripped.to_string(), base_url())),
     }
 }
 
@@ -207,4 +213,54 @@ pub fn http_headers() -> serde_json::Map<String, Value> {
 
 pub fn timeout_secs() -> u64 {
     i64("request_timeout_secs", 600).clamp(1, 3600) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Host double answering only `peckboard_get_plugin_setting`, with one
+    /// configured named server.
+    fn settings_host() -> peck_plugin_native_host::HostFn {
+        Arc::new(|name: &str, input: &str| {
+            let input: Value = serde_json::from_str(input).unwrap_or(json!({}));
+            if name != "peckboard_get_plugin_setting" {
+                return json!({ "error": format!("unexpected host fn {name}") }).to_string();
+            }
+            let value = match input.get("key").and_then(|k| k.as_str()) {
+                Some("servers") => json!([{ "key": "lan", "value": "http://box:11434/" }]),
+                _ => Value::Null,
+            };
+            json!({ "value": value }).to_string()
+        })
+    }
+
+    #[test]
+    fn resolves_known_alias_and_splits_on_last_at() {
+        peck_plugin_native_host::with_host(settings_host(), || {
+            assert_eq!(
+                resolve_model_ref("ollama:llama3.1@lan").unwrap(),
+                ("llama3.1".to_string(), "http://box:11434".to_string())
+            );
+            // LAST `@` wins: the model half keeps any earlier `@`.
+            assert_eq!(resolve_model_ref("a@b@lan").unwrap().0, "a@b".to_string());
+            // No alias → default base_url.
+            assert_eq!(
+                resolve_model_ref("ollama:llama3.1").unwrap(),
+                ("llama3.1".to_string(), "http://localhost:11434".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn unknown_alias_is_a_hard_error_not_a_fallback() {
+        peck_plugin_native_host::with_host(settings_host(), || {
+            let err = resolve_model_ref("ollama:llama3.1@nope").unwrap_err();
+            assert!(
+                err.contains("references server 'nope', which is not configured"),
+                "unexpected error: {err}"
+            );
+        });
+    }
 }

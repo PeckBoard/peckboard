@@ -228,8 +228,11 @@ pub enum ProviderEvent {
     /// Persisted under the existing `system` event kind, so the chat's
     /// system row renders `text` with no frontend change.
     System {
-        /// Human-readable label shown in the chat.
-        text: String,
+        /// Human-readable label shown in the chat. `None` = the provider
+        /// supplied no label; the chat renders `detail` instead (raw
+        /// system blobs surface this way).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
         /// The provider's own subtype for the notice (e.g. `compact_boundary`).
         subtype: String,
         /// Raw provider frame, kept for debugging / richer rendering later.
@@ -363,12 +366,20 @@ impl ProviderEvent {
                 text,
                 subtype,
                 detail,
-            } => serde_json::json!({
-                "text": text,
-                "source": "provider-system",
-                "subtype": subtype,
-                "detail": detail,
-            }),
+            } => {
+                let mut data = serde_json::json!({
+                    "source": "provider-system",
+                    "subtype": subtype,
+                    "detail": detail,
+                });
+                // No `text` key at all when the provider supplied none —
+                // the chat then falls back to rendering `detail`, which is
+                // the point of a raw system blob.
+                if let Some(text) = text {
+                    data["text"] = serde_json::json!(text);
+                }
+                data
+            }
             ProviderEvent::Completed {
                 conversation_id,
                 result_meta,
@@ -645,7 +656,7 @@ mod tests {
     #[test]
     fn system_event_maps_to_system_kind() {
         let event = ProviderEvent::System {
-            text: "Claude CLI compacted the conversation".into(),
+            text: Some("Claude CLI compacted the conversation".into()),
             subtype: "compact_boundary".into(),
             detail: serde_json::json!({ "trigger": "auto" }),
         };

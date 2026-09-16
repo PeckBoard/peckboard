@@ -11,6 +11,7 @@ pub enum HostFn {
     ProviderTakeMessage,
     ProviderGetSession,
     ProviderGetMcpConfig,
+    ProviderInvokeMcp,
     GetPluginSetting,
     HttpRequest,
     StorePut,
@@ -28,6 +29,7 @@ impl HostFn {
             HostFn::ProviderTakeMessage => "peckboard_provider_take_message",
             HostFn::ProviderGetSession => "peckboard_provider_get_session",
             HostFn::ProviderGetMcpConfig => "peckboard_provider_get_mcp_config",
+            HostFn::ProviderInvokeMcp => "peckboard_provider_invoke_mcp",
             HostFn::GetPluginSetting => "peckboard_get_plugin_setting",
             HostFn::HttpRequest => "peckboard_http_request",
             HostFn::StorePut => "peckboard_store_put",
@@ -52,6 +54,7 @@ mod imp {
         fn peckboard_provider_take_message(input: String) -> String;
         fn peckboard_provider_get_session(input: String) -> String;
         fn peckboard_provider_get_mcp_config(input: String) -> String;
+        fn peckboard_provider_invoke_mcp(input: String) -> String;
         fn peckboard_get_plugin_setting(input: String) -> String;
         fn peckboard_http_request(input: String) -> String;
         fn peckboard_store_put(input: String) -> String;
@@ -74,6 +77,7 @@ mod imp {
                 HostFn::ProviderTakeMessage => peckboard_provider_take_message(s),
                 HostFn::ProviderGetSession => peckboard_provider_get_session(s),
                 HostFn::ProviderGetMcpConfig => peckboard_provider_get_mcp_config(s),
+                HostFn::ProviderInvokeMcp => peckboard_provider_invoke_mcp(s),
                 HostFn::GetPluginSetting => peckboard_get_plugin_setting(s),
                 HostFn::HttpRequest => peckboard_http_request(s),
                 HostFn::StorePut => peckboard_store_put(s),

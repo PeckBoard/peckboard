@@ -14,7 +14,9 @@ use crate::event::{TodoItem, TodoStatus};
 pub(super) struct TurnState {
     pub conversation_id: Option<String>,
     pub error: Option<String>,
-    completed: bool,
+    /// Set by `turn.completed` — the CLI's own "this turn produced a
+    /// result" signal. EOF without it (and a non-zero exit) is a crash.
+    pub completed: bool,
     started_tools: HashSet<String>,
     emitted_text: HashSet<String>,
 }

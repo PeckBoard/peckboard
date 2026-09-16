@@ -38,10 +38,24 @@ You are a subagent inside Peckboard, a remote web UI. There is no terminal, and 
 - Never ask the user questions — no `ask_user`, no questions in plain text. If you are blocked or something is ambiguous, state the open question in your final message so the caller can decide.
 "#;
 
-pub const HOOK_CONTEXT_FILE: &str = "claude-subagent-context.json";
+/// SubagentStart hook context file, relative to the session folder. The
+/// host's `write_file` is session-folder scoped, so unlike 0.1.11 (which
+/// kept it next to the per-session MCP configs in the data dir) the file
+/// lives under a dotted `.peckboard/` directory inside the working tree.
+pub const HOOK_CONTEXT_FILE: &str = ".peckboard/claude-subagent-context.json";
 
+/// The hook-output JSON the SubagentStart hook command `cat`s. The CLI only
+/// honors the `hookSpecificOutput.additionalContext` envelope (0.1.11's
+/// `write_subagent_context_file`); a bare `{"additionalContext": …}` object
+/// is silently ignored.
 pub fn subagent_context_json() -> String {
-    json!({ "additionalContext": SUBAGENT_CONTEXT }).to_string()
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SubagentStart",
+            "additionalContext": SUBAGENT_CONTEXT,
+        }
+    })
+    .to_string()
 }
 
 pub struct CliSpec {

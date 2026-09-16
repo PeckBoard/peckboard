@@ -25,3 +25,15 @@ pub fn seed_models() -> serde_json::Value {
         }
     ])
 }
+
+/// Local inference has no per-token billing. Registration pricing is a
+/// static per-model map, so only the seed models can be declared free here;
+/// discovered / additional / `@server` models stay unpriced (the old native
+/// provider's `model_price` returned 0.0 for every id).
+pub fn seed_pricing() -> serde_json::Value {
+    serde_json::json!({
+        "llama3.1": { "input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0 },
+        "llama3.2": { "input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0 },
+        "qwen2.5-coder": { "input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0 }
+    })
+}

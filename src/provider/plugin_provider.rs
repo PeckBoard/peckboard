@@ -352,6 +352,54 @@ impl PluginProviderRuntime {
         self.kill_child(session_id);
     }
 
+    /// Soft interrupt: hand `frame` to the CLI child's stdin so the CLI can
+    /// settle the turn with a real `result` (usage included), then hard-stop
+    /// the SAME turn if it hasn't wound down within `grace`. `false` when
+    /// there is no live child to signal — the caller falls back to a hard
+    /// [`Self::request_stop`].
+    pub fn soft_interrupt(
+        self: &Arc<Self>,
+        session_id: &str,
+        frame: &str,
+        grace: Duration,
+    ) -> bool {
+        let wrote = {
+            let Ok(mut children) = self.children.lock() else {
+                return false;
+            };
+            match children.get_mut(session_id).and_then(|c| c.stdin.as_mut()) {
+                Some(stdin) => stdin.write_all(frame.as_bytes()).is_ok() && stdin.flush().is_ok(),
+                None => false,
+            }
+        };
+        if !wrote {
+            return false;
+        }
+        self.stop_turn_after(session_id, grace);
+        true
+    }
+
+    /// Hard-stop the turn currently running for `session_id` after `grace`,
+    /// unless it already ended. Guarded by turn identity so a NEW turn that
+    /// starts inside the grace window is never killed by a stale timer.
+    pub fn stop_turn_after(self: &Arc<Self>, session_id: &str, grace: Duration) {
+        let Some(turn) = self.turn(session_id) else {
+            return;
+        };
+        let guard = Arc::downgrade(&turn);
+        let runtime = Arc::clone(self);
+        let sid = session_id.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(grace);
+            let Some(current) = runtime.turn(&sid) else {
+                return;
+            };
+            if guard.upgrade().is_some_and(|g| Arc::ptr_eq(&g, &current)) {
+                runtime.request_stop(&sid);
+            }
+        });
+    }
+
     /// Flag every in-flight turn owned by `plugin_id` — used when the plugin
     /// is unloaded/denied so orphaned turns wind down at their next poll.
     pub fn request_stop_for_plugin(&self, plugin_id: &str) {
@@ -544,9 +592,12 @@ impl PluginProviderRuntime {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             if let Ok(mut b) = buf.lock() {
-                                if b.len() < 16 * 1024 {
-                                    let room = 16 * 1024 - b.len();
-                                    b.extend_from_slice(&chunk[..n.min(room)]);
+                                b.extend_from_slice(&chunk[..n]);
+                                if b.len() > 16 * 1024 {
+                                    // Keep the TAIL — a dying CLI's fatal
+                                    // lines are the last ones written.
+                                    let excess = b.len() - 16 * 1024;
+                                    b.drain(..excess);
                                 }
                             }
                         }
@@ -602,7 +653,21 @@ impl PluginProviderRuntime {
             };
             match children.get(&req.session_id) {
                 Some(child) => child.lines_rx.clone(),
-                None => return error_json("no CLI child running for this turn"),
+                None => {
+                    if turn.stop.load(Ordering::SeqCst) {
+                        // Stop raced this read: the child was already
+                        // reaped by `request_stop`. Report EOF so the
+                        // plugin runs its normal wind-down path instead
+                        // of erroring the whole turn.
+                        return serde_json::json!({
+                            "eof": true,
+                            "exit_code": serde_json::Value::Null,
+                            "stderr": "",
+                        })
+                        .to_string();
+                    }
+                    return error_json("no CLI child running for this turn");
+                }
             }
         };
 
@@ -800,12 +865,29 @@ impl PluginProviderRuntime {
                 _ => {}
             }
         }
+        let assistant_text = match &event {
+            ProviderEvent::Text { text } => Some(text.clone()),
+            _ => None,
+        };
         turn.rt.block_on(emit_event(
             &turn.db,
             &turn.broadcaster,
             &req.session_id,
             event,
         ));
+        // Feed plain assistant text to any `todo`-hook plugin — the same
+        // seam the CLI stdout path runs (`provider/turn.rs`), so lifecycle
+        // tracking works for plugin-emitted providers too.
+        if let (Some(text), Some(plugins)) = (assistant_text, turn.plugins.clone()) {
+            turn.rt
+                .block_on(crate::plugin::todo_hook::emit_plugin_todos(
+                    &plugins,
+                    &turn.db,
+                    &turn.broadcaster,
+                    &req.session_id,
+                    crate::plugin::todo_hook::assistant_text_payload(plugin_id, &text),
+                ));
+        }
         serde_json::json!({ "ok": true }).to_string()
     }
 
@@ -986,6 +1068,19 @@ impl PluginProviderRuntime {
         let Some(plugins) = turn.plugins.clone() else {
             return error_json("no plugin manager on this turn");
         };
+        // Hard gate, not advertisement: the same `ToolGate` `routes/mcp.rs`
+        // applies on tools/call, so the in-process provider tool path can't
+        // drift from the HTTP one. A refusal goes back to the model as a
+        // tool error, not a transport failure.
+        let session_row = match turn.rt.block_on(turn.db.get_session(&req.session_id)) {
+            Ok(Some(s)) => s,
+            _ => return error_json("session not found for tool call"),
+        };
+        let gate = crate::service::mcp_server::ToolGate::from_session(&session_row)
+            .with_plugin_tools(&turn.rt.block_on(plugins.mcp_tools()));
+        if let Some(reason) = gate.blocked(req.name.trim()) {
+            return serde_json::json!({ "ok": false, "error": reason }).to_string();
+        }
         let ctx = crate::service::mcp_server::ToolCallContext {
             session_id: req.session_id.clone(),
             project_id: turn.snapshot.project_id.clone(),
@@ -1012,21 +1107,38 @@ impl PluginProviderRuntime {
     }
 
     /// `peckboard_provider_write_file {session_id, path, contents}` — write
-    /// a UTF-8 file under the session folder. `path` is relative; `..` and
-    /// absolute paths are rejected. Used for workspace MCP config and the
-    /// Claude subagent-context file.
+    /// a file under the session folder. `contents` is UTF-8 text;
+    /// `contents_base64` carries raw bytes (codex image staging). Exactly one
+    /// of the two must be present. `path` is relative; `..` and absolute
+    /// paths are rejected. Used for workspace MCP config and the Claude
+    /// subagent-context file.
     pub fn write_file_json(&self, plugin_id: &str, input: &str) -> String {
         #[derive(Deserialize)]
         struct WriteFileRequest {
             session_id: String,
             path: String,
-            contents: String,
+            #[serde(default)]
+            contents: Option<String>,
+            /// Raw bytes, standard base64. Mutually exclusive with `contents`.
+            #[serde(default)]
+            contents_base64: Option<String>,
         }
         let req: WriteFileRequest = match serde_json::from_str(input) {
             Ok(r) => r,
             Err(e) => return error_json(format!("invalid write_file request: {e}")),
         };
-        if req.contents.len() > 1024 * 1024 {
+        let bytes: Vec<u8> = match (req.contents, req.contents_base64) {
+            (Some(text), None) => text.into_bytes(),
+            (None, Some(b64)) => {
+                use base64::Engine as _;
+                match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(e) => return error_json(format!("invalid contents_base64: {e}")),
+                }
+            }
+            _ => return error_json("provide exactly one of contents or contents_base64"),
+        };
+        if bytes.len() > 1024 * 1024 {
             return error_json("file too large (max 1 MiB)");
         }
         let turn = match self.owned_turn(plugin_id, &req.session_id) {
@@ -1053,9 +1165,58 @@ impl PluginProviderRuntime {
                 return error_json(format!("create_dir: {e}"));
             }
         }
-        match std::fs::write(&dest, req.contents.as_bytes()) {
+        match std::fs::write(&dest, &bytes) {
             Ok(()) => serde_json::json!({ "ok": true, "path": dest.to_string_lossy() }).to_string(),
             Err(e) => error_json(format!("write: {e}")),
+        }
+    }
+
+    /// `peckboard_provider_read_file {session_id, path}` — read a UTF-8 file
+    /// under the session folder (1 MiB cap), so a provider can MERGE into a
+    /// config file it shares with the user (`.mcp.json`, `.cursor/mcp.json`)
+    /// instead of clobbering it. `{"ok":true,"exists":false}` when absent.
+    pub fn read_file_json(&self, plugin_id: &str, input: &str) -> String {
+        #[derive(Deserialize)]
+        struct ReadFileRequest {
+            session_id: String,
+            path: String,
+        }
+        let req: ReadFileRequest = match serde_json::from_str(input) {
+            Ok(r) => r,
+            Err(e) => return error_json(format!("invalid read_file request: {e}")),
+        };
+        let turn = match self.owned_turn(plugin_id, &req.session_id) {
+            Ok(t) => t,
+            Err(e) => return error_json(e),
+        };
+        let folder = Path::new(&turn.snapshot.folder_path);
+        let rel = Path::new(&req.path);
+        if rel.is_absolute()
+            || req.path.is_empty()
+            || req.path.contains('\0')
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return error_json("path must be a relative file under the session folder");
+        }
+        let dest = folder.join(rel);
+        match std::fs::read(&dest) {
+            Ok(bytes) if bytes.len() > 1024 * 1024 => error_json("file too large (max 1 MiB)"),
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(contents) => {
+                    serde_json::json!({ "ok": true, "exists": true, "contents": contents })
+                        .to_string()
+                }
+                Err(_) => error_json("file is not UTF-8"),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::json!({ "ok": true, "exists": false }).to_string()
+            }
+            Err(e) => error_json(format!("read: {e}")),
         }
     }
 }
@@ -1072,7 +1233,7 @@ const PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
 static PROBE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (Instant, String)>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// `peckboard_provider_probe {command, args?, env?, timeout_ms?}` — short-lived
+/// `peckboard_provider_probe {command, args?, env?, cwd?, timeout_ms?}` — short-lived
 /// CLI capture for `provider.models` discovery. Not tied to a turn.
 pub fn probe_cli_json(input: &str) -> String {
     if let Some((at, cached)) = PROBE_CACHE.lock().ok().and_then(|c| c.get(input).cloned())
@@ -1098,6 +1259,18 @@ fn probe_cli_uncached(input: &str) -> String {
         env: HashMap<String, String>,
         #[serde(default)]
         timeout_ms: Option<u64>,
+        /// One-shot handshake input: written to the child's stdin, which is
+        /// then closed so the CLI replies and exits (claude's initialize
+        /// probe). Absent = stdin is null.
+        #[serde(default)]
+        stdin: Option<String>,
+        #[serde(default)]
+        env_remove: Vec<String>,
+        /// Working directory for the probe. cursor's `mcp enable` approval
+        /// is workspace-scoped, so it must run from the session folder.
+        /// Absent = the server's own cwd.
+        #[serde(default)]
+        cwd: Option<String>,
     }
     let req: ProbeRequest = match serde_json::from_str(input) {
         Ok(r) => r,
@@ -1113,9 +1286,21 @@ fn probe_cli_uncached(input: &str) -> String {
     let timeout = Duration::from_millis(req.timeout_ms.unwrap_or(15_000).clamp(1_000, 30_000));
     let mut cmd = Command::new(&command);
     cmd.args(&req.args)
-        .stdin(Stdio::null())
+        .stdin(if req.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
+        cmd.current_dir(cwd);
+    }
+    for k in &req.env_remove {
+        if !k.is_empty() && !k.contains('\0') {
+            cmd.env_remove(k);
+        }
+    }
     for (k, v) in &req.env {
         cmd.env(k, v);
     }
@@ -1123,6 +1308,13 @@ fn probe_cli_uncached(input: &str) -> String {
         Ok(c) => c,
         Err(e) => return error_json(format!("failed to spawn '{command}': {e}")),
     };
+    if let Some(payload) = req.stdin.as_deref() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(payload.as_bytes());
+            // Dropping the handle closes stdin so the CLI terminates
+            // after replying.
+        }
+    }
     // Drain both pipes concurrently with the wait: a child that writes more
     // than the pipe buffer (codex's bundled catalog is ~500 KB) blocks on
     // write until someone reads, so reading only after exit deadlocks the
@@ -1467,7 +1659,17 @@ impl AgentProvider for PluginProviderAdapter {
                 // The plugin already reported how the turn ended; a trap
                 // AFTER a terminal event doesn't retroactively fail it.
                 Some(Terminal::Completed) => (true, None, None),
-                Some(Terminal::Crashed { reason, kind }) => (false, Some(reason), Some(kind)),
+                Some(Terminal::Crashed { reason, kind }) => {
+                    // A user-requested interrupt is not a failure: keep the
+                    // completion's `error` empty so downstream flows (e.g.
+                    // handover) report "cancelled", not "failed".
+                    let err = if matches!(kind, CrashKind::Interrupted) {
+                        None
+                    } else {
+                        Some(reason)
+                    };
+                    (false, err, Some(kind))
+                }
                 None => {
                     let reason = match result {
                         Err(e) => e,

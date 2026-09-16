@@ -134,6 +134,11 @@ pub fn hooks_for(id: &str) -> Option<CrateHooks> {
     SPECS.iter().find(|s| s.id == id).and_then(|s| s.hooks)
 }
 
+/// Ids of the crate plugins that are AI providers (everything with hooks).
+pub fn provider_ids() -> impl Iterator<Item = &'static str> {
+    SPECS.iter().filter(|s| s.hooks.is_some()).map(|s| s.id)
+}
+
 /// Live-activate one crate plugin after an install: providers register their
 /// native [`AgentProvider`]; session-control approves its embedded wasm.
 pub async fn activate(
@@ -295,42 +300,49 @@ const CLAUDE: CrateHooks = CrateHooks {
     refresh_models: peckboard_claude_plugin::refresh_models,
     registration: peckboard_claude_plugin::registration,
     manifest_json: peckboard_claude_plugin::manifest_json,
+    interrupt_frame: Some(peckboard_claude_plugin::interrupt_frame),
 };
 const GROK: CrateHooks = CrateHooks {
     send: peckboard_grok_plugin::send_turn,
     refresh_models: peckboard_grok_plugin::refresh_models,
     registration: peckboard_grok_plugin::registration,
     manifest_json: peckboard_grok_plugin::manifest_json,
+    interrupt_frame: None,
 };
 const CURSOR: CrateHooks = CrateHooks {
     send: peckboard_cursor_plugin::send_turn,
     refresh_models: peckboard_cursor_plugin::refresh_models,
     registration: peckboard_cursor_plugin::registration,
     manifest_json: peckboard_cursor_plugin::manifest_json,
+    interrupt_frame: None,
 };
 const KIMI: CrateHooks = CrateHooks {
     send: peckboard_kimi_plugin::send_turn,
     refresh_models: peckboard_kimi_plugin::refresh_models,
     registration: peckboard_kimi_plugin::registration,
     manifest_json: peckboard_kimi_plugin::manifest_json,
+    interrupt_frame: None,
 };
 const CODEX: CrateHooks = CrateHooks {
     send: peckboard_codex_plugin::send_turn,
     refresh_models: peckboard_codex_plugin::refresh_models,
     registration: peckboard_codex_plugin::registration,
     manifest_json: peckboard_codex_plugin::manifest_json,
+    interrupt_frame: None,
 };
 const OLLAMA: CrateHooks = CrateHooks {
     send: peckboard_ollama_plugin::send_turn,
     refresh_models: peckboard_ollama_plugin::refresh_models,
     registration: peckboard_ollama_plugin::registration,
     manifest_json: peckboard_ollama_plugin::manifest_json,
+    interrupt_frame: None,
 };
 const MOCK: CrateHooks = CrateHooks {
     send: peckboard_mock_plugin::send_turn,
     refresh_models: peckboard_mock_plugin::refresh_models,
     registration: peckboard_mock_plugin::registration,
     manifest_json: peckboard_mock_plugin::manifest_json,
+    interrupt_frame: None,
 };
 
 const SPECS: &[Spec] = &[

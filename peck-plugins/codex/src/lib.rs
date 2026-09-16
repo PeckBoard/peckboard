@@ -93,20 +93,28 @@ fn handle_models() -> String {
     let cli = settings::cli_path("codex");
     let extra = settings::str_list("additional_models");
     let mut discovered = Vec::new();
-    if settings::bool("discover_models", true) {
-        if let Some(out) = settings::probe(&cli, &["debug", "models", "--bundled"]) {
-            if let Some(ids) = parser::parse_cli_models(&out) {
-                discovered = ids;
-            }
-        }
+    if settings::bool("discover_models", true)
+        && let Some(out) = settings::probe(&cli, &["debug", "models", "--bundled"])
+        && let Some(ids) = parser::parse_cli_models(&out)
+    {
+        discovered = ids;
     }
-    let models = settings::merge_catalog(
-        models::seed_models(),
-        discovered,
-        extra,
-        &settings::accounts(),
-        |id| id.to_string(),
-    );
+    // Discovery supersedes the static seed (the live `codex debug models`
+    // list is the truth); the seed only backstops a failed/disabled probe.
+    let base = if discovered.is_empty() {
+        models::seed_models()
+    } else {
+        serde_json::Value::Array(
+            discovered
+                .iter()
+                .enumerate()
+                .map(|(i, id)| models::model_json(id, i as i32))
+                .collect(),
+        )
+    };
+    let models = settings::merge_catalog(base, extra, &settings::accounts(), |id| {
+        models::model_json(id, 99)
+    });
     allow(serde_json::json!({ "models": models }))
 }
 

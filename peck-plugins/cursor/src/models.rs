@@ -67,3 +67,40 @@ pub fn seed_models() -> serde_json::Value {
         }
     ])
 }
+
+/// Cursor encodes thinking in the model id itself (e.g.
+/// `claude-opus-4-8-thinking-high`), so the catalog builder is where that
+/// naming convention becomes an explicit `reasoning` capability tag.
+fn model_capabilities(id: &str) -> Vec<&'static str> {
+    if id.to_ascii_lowercase().contains("thinking") {
+        vec!["code", "reasoning"]
+    } else {
+        vec!["code"]
+    }
+}
+
+/// Catalog entry for a discovered or user-added model id, tagged `(Cursor)`
+/// like the seed entries so the picker reads the same either way.
+pub fn model_json(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "display_name": format!("{id} (Cursor)"),
+        "capabilities": model_capabilities(id),
+        "tier": 0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovered_ids_get_cursor_suffix_and_thinking_reasoning_tag() {
+        let m = model_json("claude-4.6-sonnet-thinking");
+        assert_eq!(m["display_name"], "claude-4.6-sonnet-thinking (Cursor)");
+        assert_eq!(m["capabilities"], serde_json::json!(["code", "reasoning"]));
+        let plain = model_json("gpt-5.3-codex");
+        assert_eq!(plain["display_name"], "gpt-5.3-codex (Cursor)");
+        assert_eq!(plain["capabilities"], serde_json::json!(["code"]));
+    }
+}

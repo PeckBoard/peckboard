@@ -180,10 +180,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "peck-plugin-native-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "peckboard-kimi-plugin"
 version = "0.1.0"
 dependencies = [
  "extism-pdk",
+ "peck-plugin-native-host",
  "serde",
  "serde_json",
 ]

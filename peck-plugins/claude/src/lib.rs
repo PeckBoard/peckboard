@@ -3,6 +3,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
 mod argv;
+mod discovery;
 mod event;
 mod host;
 mod manifest;
@@ -11,6 +12,7 @@ mod parser;
 mod sandbox;
 mod send;
 mod settings;
+mod todo;
 mod usage;
 
 use serde::Deserialize;
@@ -75,6 +77,9 @@ pub fn registration() -> serde_json::Value {
             { "id": "xhigh", "label": "Extra high" },
             { "id": "max", "label": "Max" },
         ],
+        // Published Anthropic rates (USD per Mtok); backs core's
+        // `model_price` so cheapest-model auto-pick (pre-hatcher) works.
+        "pricing": models::pricing(),
         "supports_mid_stream_injection": true,
         "capabilities": {
             "supports_thinking": true,
@@ -83,7 +88,12 @@ pub fn registration() -> serde_json::Value {
             "supports_resume": true,
             "interrupt_kind": "soft",
             "supports_mid_stream_injection": true,
-            "answer_transport": "stdin",
+            // Mid-turn user messages (ask_user answers included) must go
+            // through `queue_injection` → `take_message`, where the send
+            // loop wraps them in a stream-json user envelope. `stdin`
+            // would make core write RAW text into the CLI's stream-json
+            // stdin — unparseable, message lost.
+            "answer_transport": "new_turn",
         },
     })
 }
@@ -116,15 +126,23 @@ fn env_discovery_enabled() -> bool {
 fn handle_models() -> String {
     let cli = settings::cli_path("claude");
     let extra = settings::str_list("additional_models");
-    let discovered: Vec<String> = Vec::new();
-    if settings::bool("discover_models", true) && env_discovery_enabled() {
-        if let Some(out) = settings::probe(&cli, &["--version"]) {
-            let _ = out;
-        }
+    // The CLI-probed catalog (host credentials) replaces the static seed,
+    // topped up with the pinned ids the CLI only covers as family aliases;
+    // any probe failure falls back to the seed alone.
+    let mut base = models::seed_models()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if settings::bool("discover_models", true)
+        && env_discovery_enabled()
+        && let Some(discovered) = discovery::probe_cli_models(&cli)
+    {
+        base = discovery::merge_always_offered(discovered);
     }
+    discovery::push_bedrock_env_models(&mut base);
     let models = settings::merge_catalog(
-        models::seed_models(),
-        discovered,
+        serde_json::Value::Array(base),
+        Vec::new(),
         extra,
         &settings::accounts(),
         |id| id.to_string(),
@@ -153,6 +171,18 @@ fn skip() -> String {
 
 pub fn send_turn(payload: &serde_json::Value) -> Result<(), String> {
     send::run(payload)
+}
+
+/// The CLI's in-band stop frame: it settles the CURRENT turn with a real
+/// `result` (usage included) instead of dying mid-stream. The native host
+/// writes this to the child's stdin on interrupt and only hard-kills if
+/// the CLI ignores it past the grace window.
+pub fn interrupt_frame() -> String {
+    concat!(
+        r#"{"type":"control_request","request_id":"pb-interrupt-host","request":{"subtype":"interrupt"}}"#,
+        "\n"
+    )
+    .to_string()
 }
 
 pub fn refresh_models() -> Option<serde_json::Value> {

@@ -800,6 +800,20 @@ pub async fn delete_session_core(state: &AppState, id: &str) -> anyhow::Result<b
 
     // Delete associated events first
     state.db.delete_events_by_session(id).await?;
+    // Provider plugins keep per-session conversation history in their data
+    // store (e.g. ollama's "history" collection); drop it with the session
+    // or the rows leak forever.
+    {
+        let db = state.db.clone();
+        let sid = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            for pid in crate::plugin::crates::provider_ids() {
+                let _ = db.plugin_store_delete_blocking(pid, "history", &sid);
+            }
+        })
+        .await
+        .ok();
+    }
 
     // Remove attachments directory for this session
     let attachments_dir = state.config.data_dir.join("attachments").join(id);
@@ -1093,6 +1107,20 @@ pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Re
         .db
         .replace_session_todos(id, crate::todo::TodoSnapshot::default())
         .await?;
+    // Provider plugins keep per-session conversation history in their data
+    // store (e.g. ollama's "history" collection). A clear must wipe that
+    // too, or the next turn replays the full pre-clear transcript.
+    {
+        let db = state.db.clone();
+        let sid = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            for pid in crate::plugin::crates::provider_ids() {
+                let _ = db.plugin_store_delete_blocking(pid, "history", &sid);
+            }
+        })
+        .await
+        .ok();
+    }
 
     state
         .broadcaster

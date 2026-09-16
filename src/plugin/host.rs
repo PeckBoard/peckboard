@@ -2693,9 +2693,10 @@ struct HttpRequestRequest {
 /// `peckboard_http_request` — perform an HTTP request on the plugin's behalf,
 /// private/loopback targets included. Input: `{"url", "method"?: "GET"|"HEAD"
 /// |"POST"|"PUT"|"PATCH"|"DELETE", "headers"?: {..}, "body"?,
-/// "timeout_secs"?: 1..=120 (default 30)}`. Output: `{"status", "headers":
+/// "timeout_secs"?: clamped to 1..=`max_timeout_secs` (default 30)}`.
+/// Output: `{"status", "headers":
 /// {..}, "body", "truncated", "final_url"}` or an `{"error"}` envelope.
-pub(crate) fn http_request_impl(input: &str) -> String {
+pub(crate) fn http_request_impl(input: &str, max_timeout_secs: u64) -> String {
     let req: HttpRequestRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
@@ -2720,7 +2721,7 @@ pub(crate) fn http_request_impl(input: &str) -> String {
     let timeout_secs = req
         .timeout_secs
         .unwrap_or(HTTP_REQUEST_DEFAULT_TIMEOUT_SECS)
-        .clamp(1, HTTP_REQUEST_MAX_TIMEOUT_SECS);
+        .clamp(1, max_timeout_secs);
 
     match perform_outbound_http(OutboundHttp {
         url,
@@ -3937,7 +3938,7 @@ host_fn!(peckboard_http_fetch(user_data: HostState; input: String) -> String {
 host_fn!(peckboard_http_request(user_data: HostState; input: String) -> String {
     let (_db, _plugin_id, ok) = state_and_permission(&user_data, "http_request")?;
     if !ok { return Ok(error_json("plugin lacks the 'http_request' permission")); }
-    Ok(http_request_impl(&input))
+    Ok(http_request_impl(&input, HTTP_REQUEST_MAX_TIMEOUT_SECS))
 });
 host_fn!(peckboard_exec(user_data: HostState; input: String) -> String {
     let (db, data_dir, _plugin_id, ok, inv) = state_permission_invocation_and_data_dir(&user_data, "process_exec")?;
@@ -4201,6 +4202,12 @@ host_fn!(peckboard_provider_write_file(user_data: HostState; input: String) -> S
     Ok(runtime.write_file_json(&plugin_id, &input))
 });
 
+host_fn!(peckboard_provider_read_file(user_data: HostState; input: String) -> String {
+    let (plugin_id, ok, runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
+    if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
+    Ok(runtime.read_file_json(&plugin_id, &input))
+});
+
 host_fn!(peckboard_provider_probe(user_data: HostState; input: String) -> String {
     let (_plugin_id, ok, _runtime, _pending) = state_permission_and_provider(&user_data, "register_provider")?;
     if !ok { return Ok(error_json("plugin lacks the 'register_provider' permission")); }
@@ -4408,6 +4415,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_provider_write_file,
+        ),
+        Function::new(
+            "peckboard_provider_read_file",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_provider_read_file,
         ),
         Function::new(
             "peckboard_provider_probe",
@@ -6003,10 +6017,10 @@ mod tests {
     #[test]
     fn http_request_validates_method_and_reaches_local_targets() {
         // Non-http scheme refused.
-        let r = http_request_impl(r#"{"url":"file:///etc/passwd"}"#);
+        let r = http_request_impl(r#"{"url":"file:///etc/passwd"}"#, 300);
         assert!(r.contains("http and https"), "scheme: {r}");
         // Unsupported method refused.
-        let r = http_request_impl(r#"{"url":"http://example.com","method":"TRACE"}"#);
+        let r = http_request_impl(r#"{"url":"http://example.com","method":"TRACE"}"#, 300);
         assert!(r.contains("not permitted"), "method: {r}");
         // Loopback is the point of this host fn: a POST to a local listener
         // round-trips, response headers included.
@@ -6040,7 +6054,7 @@ mod tests {
             "body": "{\"jsonrpc\":\"2.0\"}",
             "timeout_secs": 5,
         });
-        let r = http_request_impl(&input.to_string());
+        let r = http_request_impl(&input.to_string(), 300);
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
         assert_eq!(v["status"], 200, "response: {r}");
         assert_eq!(v["body"], "ok");

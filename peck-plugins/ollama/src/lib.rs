@@ -66,6 +66,7 @@ pub fn registration() -> serde_json::Value {
         "id": models::PROVIDER_ID,
         "display_name": models::DISPLAY_NAME,
         "models": models::seed_models(),
+        "pricing": models::seed_pricing(),
         "capabilities": {
             "supports_thinking": true,
             "supports_images_in": true,
@@ -104,13 +105,9 @@ fn handle_models() -> String {
             }
         }
     }
-    let models = settings::merge_catalog(
-        models::seed_models(),
-        discovered,
-        extra,
-        &[],
-        |id| format!("{id} (Ollama)"),
-    );
+    let models = settings::merge_catalog(models::seed_models(), discovered, extra, &[], |id| {
+        format!("{id} (Ollama)")
+    });
     allow(serde_json::json!({ "models": models }))
 }
 

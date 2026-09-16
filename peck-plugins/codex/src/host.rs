@@ -9,6 +9,7 @@ pub enum HostFn {
     ProviderGetMcpConfig,
     ProviderAccountEnv,
     ProviderWriteFile,
+    ProviderReadFile,
     ProviderSpawn,
     ProviderReadLine,
     ProviderWriteStdin,
@@ -35,6 +36,7 @@ impl HostFn {
             HostFn::ProviderGetMcpConfig => "peckboard_provider_get_mcp_config",
             HostFn::ProviderAccountEnv => "peckboard_provider_account_env",
             HostFn::ProviderWriteFile => "peckboard_provider_write_file",
+            HostFn::ProviderReadFile => "peckboard_provider_read_file",
             HostFn::ProviderSpawn => "peckboard_provider_spawn",
             HostFn::ProviderReadLine => "peckboard_provider_read_line",
             HostFn::ProviderWriteStdin => "peckboard_provider_write_stdin",
@@ -68,6 +70,7 @@ mod imp {
         fn peckboard_provider_get_mcp_config(input: String) -> String;
         fn peckboard_provider_account_env(input: String) -> String;
         fn peckboard_provider_write_file(input: String) -> String;
+        fn peckboard_provider_read_file(input: String) -> String;
         fn peckboard_provider_spawn(input: String) -> String;
         fn peckboard_provider_read_line(input: String) -> String;
         fn peckboard_provider_write_stdin(input: String) -> String;
@@ -99,6 +102,7 @@ mod imp {
                 HostFn::ProviderGetMcpConfig => peckboard_provider_get_mcp_config(s),
                 HostFn::ProviderAccountEnv => peckboard_provider_account_env(s),
                 HostFn::ProviderWriteFile => peckboard_provider_write_file(s),
+                HostFn::ProviderReadFile => peckboard_provider_read_file(s),
                 HostFn::ProviderSpawn => peckboard_provider_spawn(s),
                 HostFn::ProviderReadLine => peckboard_provider_read_line(s),
                 HostFn::ProviderWriteStdin => peckboard_provider_write_stdin(s),

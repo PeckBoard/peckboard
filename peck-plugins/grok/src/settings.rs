@@ -107,7 +107,7 @@ pub fn merge_catalog(
     discovered: Vec<String>,
     extra: Vec<String>,
     accounts: &[(String, String)],
-    display: impl Fn(&str) -> String,
+    make: impl Fn(&str) -> Value,
 ) -> Value {
     let mut models: Vec<Value> = seed.as_array().cloned().unwrap_or_default();
     let mut seen: Vec<String> = models
@@ -119,12 +119,7 @@ pub fn merge_catalog(
             return;
         }
         seen.push(id.clone());
-        models.push(json!({
-            "id": id,
-            "display_name": display(&id),
-            "capabilities": ["code"],
-            "tier": 0,
-        }));
+        models.push(make(&id));
     };
     for id in discovered.into_iter().chain(extra) {
         add(id);

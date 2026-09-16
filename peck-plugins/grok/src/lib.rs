@@ -106,13 +106,23 @@ fn handle_models() -> String {
     {
         discovered = cat.models;
     }
-    let models = settings::merge_catalog(
-        models::seed_models(),
-        discovered,
-        extra,
-        &settings::accounts(),
-        |id| id.to_string(),
-    );
+    // Discovery success REPLACES the static seed (the CLI catalog is
+    // auth-scoped); discovery off/failed keeps the seed. Discovered and
+    // additional ids get humanized names and the full capability set.
+    let base = if discovered.is_empty() {
+        models::seed_models()
+    } else {
+        serde_json::Value::Array(
+            discovered
+                .iter()
+                .enumerate()
+                .map(|(i, id)| models::model_json(id, i as i64))
+                .collect(),
+        )
+    };
+    let models = settings::merge_catalog(base, Vec::new(), extra, &settings::accounts(), |id| {
+        models::model_json(id, 99)
+    });
     allow(serde_json::json!({ "models": models }))
 }
 

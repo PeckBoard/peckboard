@@ -37,6 +37,29 @@ pub fn run_scenario(payload: &Value) -> Result<(), String> {
     let raw = model.strip_prefix("mock:").unwrap_or(model);
     let scenario = raw.split('@').next().unwrap_or(raw);
 
+    // A fresh conversation id per turn (persisted counter), so resume
+    // semantics behave the same as Claude: a cold replay after a rejected
+    // resume lands on a NEW id, never the dead one.
+    let turn = {
+        let prev = host::call_host(
+            HostFn::StoreGet,
+            &json!({ "collection": "mock-turns", "key": session_id }),
+        )
+        .ok()
+        .and_then(|v| {
+            v.get("value")
+                .and_then(|d| d.get("n"))
+                .and_then(|n| n.as_i64())
+        })
+        .unwrap_or(0);
+        let n = prev + 1;
+        let _ = host::call_host(
+            HostFn::StorePut,
+            &json!({ "collection": "mock-turns", "key": session_id, "data": { "n": n } }),
+        );
+        n
+    };
+
     let mut ctx = Ctx {
         session_id,
         model,
@@ -44,7 +67,8 @@ pub fn run_scenario(payload: &Value) -> Result<(), String> {
         message,
         resume,
         scenario,
-        conv_id: format!("mock-{session_id}-1"),
+        conv_id: format!("mock-{session_id}-{turn}"),
+        turn,
         n: 0,
         aborted: Cell::new(false),
     };
@@ -59,6 +83,7 @@ struct Ctx<'a> {
     resume: Option<&'a str>,
     scenario: &'a str,
     conv_id: String,
+    turn: i64,
     n: u32,
     aborted: Cell<bool>,
 }
@@ -77,7 +102,7 @@ impl Ctx<'_> {
 
     fn tool_id(&mut self) -> String {
         self.n += 1;
-        format!("tool-{}-{}", self.session_id, self.n)
+        format!("tool-{}-{}-{}", self.session_id, self.turn, self.n)
     }
 
     fn should_stop(&self) -> bool {
@@ -201,14 +226,45 @@ impl Ctx<'_> {
         }
     }
 
-    fn scripted_mcp(&mut self, name: &str, args: Value, result: Value) -> Result<bool, String> {
+    /// Run a real MCP tool with this turn's context, with no chat tool
+    /// events — the shape `plan-review` needs (native wrote the plan rows
+    /// directly, with nothing in the tool lane).
+    fn invoke_mcp(&self, name: &str, args: Value) -> Result<Value, String> {
+        host::call_host(
+            HostFn::ProviderInvokeMcp,
+            &json!({
+                "session_id": self.session_id,
+                "name": name,
+                "arguments": args,
+            }),
+        )
+    }
+
+    /// Port of native `call_mcp_tool`: ToolStart → REAL MCP handler →
+    /// ToolEnd, returning the handler's value on success. A gate refusal or
+    /// handler error lands in the ToolEnd's `error`, not an abort.
+    fn call_mcp_tool(&mut self, name: &str, args: Value) -> Result<Option<Value>, String> {
         let id = self.tool_id();
-        self.tool_start(&id, &format!("mcp__peckboard__{name}"), args)?;
-        if !self.tick()? {
-            return Ok(false);
-        }
-        self.tool_end_ok(&id, &result.to_string())?;
-        Ok(true)
+        self.tool_start(&id, &format!("mcp__peckboard__{name}"), args.clone())?;
+        let (result, output, error) = match self.invoke_mcp(name, args) {
+            Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
+                let r = v.get("result").cloned().unwrap_or(Value::Null);
+                (Some(r.clone()), Some(r.to_string()), None)
+            }
+            Ok(v) => (
+                None,
+                None,
+                Some(
+                    v.get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("tool failed")
+                        .to_string(),
+                ),
+            ),
+            Err(e) => (None, None, Some(e)),
+        };
+        self.tool_end(&id, output, error, json!([]))?;
+        Ok(result)
     }
 
     fn emit_todo(&self, todos: Value) -> Result<(), String> {
@@ -533,12 +589,11 @@ impl Ctx<'_> {
     }
 
     fn system_blob(&self) -> Result<(), String> {
-        // Native appends a raw `system` row with no text/message. Plugins can
-        // only emit ProviderEvent::System, which always carries `text`. Empty
-        // text + the native payload in `detail` is the closest equivalent.
+        // No `text` key at all: the chat must show a label with the payload
+        // behind a <details>, not a raw object blob in the feed — which only
+        // happens when the provider supplied no text.
         self.emit(json!({
             "kind": "system",
-            "text": "",
             "subtype": "mock_blob",
             "detail": {
                 "code": 42,
@@ -734,28 +789,36 @@ impl Ctx<'_> {
     }
 
     fn plan_review(&self) -> Result<(), String> {
+        // Drives the real plan-persistence path (the `propose_plan` MCP
+        // handler) so e2e can verify a saved plan survives clears/switches
+        // without a real model. The handler links the plan to the session's
+        // card/project and broadcasts `plan-proposed`, like native did.
         self.emit_text("Writing the plan…")?;
         if !self.tick()? {
             return Ok(());
         }
-        // Native upserts the plan via db + a `plan-proposed` side-channel.
-        // Plugin send can only emit ProviderEvents; the text sequence matches.
+        let markdown = "# Widget plan\n\nImplement the widget end to end.\n\n\
+```mermaid\nflowchart TD\n    A[Start] --> B[Build]\n    B --> C[Done]\n```\n\n\
+- Step 1: scaffold\n- Step 2: wire it up\n";
+        let _ = self.invoke_mcp(
+            "propose_plan",
+            json!({ "title": "Widget plan", "markdown": markdown }),
+        );
         self.emit_text("Plan saved via propose_plan.")
     }
 
     fn doc_review(&mut self) -> Result<(), String> {
         if self.message.contains("[mock:ask") {
-            if !self.scripted_mcp(
-                "get_review_doc",
-                json!({}),
-                json!({
-                    "markdown": "",
-                    "version": 1,
-                    "open_comments": [],
-                }),
-            )? {
-                return Ok(());
-            }
+            let quote = self
+                .call_mcp_tool("get_review_doc", json!({}))?
+                .and_then(|d| {
+                    d["open_comments"]
+                        .as_array()
+                        .and_then(|cs| cs.first())
+                        .and_then(|c| c["quote"].as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
             if !self.tick()? {
                 return Ok(());
             }
@@ -763,7 +826,11 @@ impl Ctx<'_> {
             if !self.tick()? {
                 return Ok(());
             }
-            let question = "Which reading of that passage did you mean?".to_string();
+            let question = if quote.is_empty() {
+                "Which reading of that passage did you mean?".to_string()
+            } else {
+                format!("Which reading of «{quote}» did you mean?")
+            };
             let payload = if self.message.contains("[mock:ask:free]") {
                 json!({ "questions": [{ "question": question, "header": "Intent" }] })
             } else if self.message.contains("[mock:ask:multi]") {
@@ -793,9 +860,7 @@ impl Ctx<'_> {
                     }]
                 })
             };
-            if !self.scripted_mcp("ask_user", payload, json!({ "ok": true }))? {
-                return Ok(());
-            }
+            self.call_mcp_tool("ask_user", payload)?;
             return self.completed(Value::Null);
         }
 
@@ -823,39 +888,50 @@ impl Ctx<'_> {
             return self.wait_until_stop();
         }
 
-        if !self.scripted_mcp(
-            "get_review_doc",
-            json!({}),
-            json!({
-                "markdown": "",
-                "version": 1,
-                "open_comments": [],
-            }),
-        )? {
-            return Ok(());
+        if let Some(doc) = self.call_mcp_tool("get_review_doc", json!({}))? {
+            let markdown = doc["markdown"].as_str().unwrap_or_default().to_string();
+            let version = doc["version"].as_i64().unwrap_or(1);
+            let next = version + 1;
+            let resolutions: Vec<Value> =
+                doc["open_comments"]
+                    .as_array()
+                    .map(|cs| {
+                        cs.iter()
+                        .filter_map(|c| {
+                            let id = c["id"].as_str()?;
+                            let kind = c["kind"].as_str().unwrap_or("comment");
+                            // A plain comment is a remark to answer; every
+                            // other kind asks for a change to the text.
+                            let action = if kind == "comment" { "answered" } else { "fixed" };
+                            Some(json!({
+                                "comment_id": id,
+                                "action": action,
+                                "note": format!("mock reviewer: {kind} {action} in pass {next}"),
+                            }))
+                        })
+                        .collect()
+                    })
+                    .unwrap_or_default();
+            if !self.tick()? {
+                return Ok(());
+            }
+            self.call_mcp_tool(
+                "submit_review_revision",
+                json!({
+                    "markdown": mock_revised_markdown(
+                        &markdown,
+                        next,
+                        self.message.contains("[mock:insert]"),
+                    ),
+                    "note": format!("mock pass {next}"),
+                    "resolutions": resolutions,
+                }),
+            )?;
+            if !self.tick()? {
+                return Ok(());
+            }
+            self.emit_text(&format!("Revised the document to v{next}."))?;
         }
-        let markdown = "";
-        let version = 1_i64;
-        let next = version + 1;
-        let insert_only = self.message.contains("[mock:insert]");
-        if !self.tick()? {
-            return Ok(());
-        }
-        if !self.scripted_mcp(
-            "submit_review_revision",
-            json!({
-                "markdown": mock_revised_markdown(markdown, next, insert_only),
-                "note": format!("mock pass {next}"),
-                "resolutions": [],
-            }),
-            json!({ "ok": true, "version": next }),
-        )? {
-            return Ok(());
-        }
-        if !self.tick()? {
-            return Ok(());
-        }
-        self.emit_text(&format!("Revised the document to v{next}."))?;
         self.completed(Value::Null)
     }
 

@@ -102,32 +102,26 @@ pub fn probe(command: &str, args: &[&str]) -> Option<String> {
     v.get("stdout")?.as_str().map(str::to_string)
 }
 
+/// Merge user-added `extra` ids into `base` (the seed catalog, or the
+/// discovered list when discovery replaced it), then append per-account
+/// variants. `make_model` builds the catalog entry for an added id.
 pub fn merge_catalog(
-    seed: Value,
-    discovered: Vec<String>,
+    base: Value,
     extra: Vec<String>,
     accounts: &[(String, String)],
-    display: impl Fn(&str) -> String,
+    make_model: impl Fn(&str) -> Value,
 ) -> Value {
-    let mut models: Vec<Value> = seed.as_array().cloned().unwrap_or_default();
+    let mut models: Vec<Value> = base.as_array().cloned().unwrap_or_default();
     let mut seen: Vec<String> = models
         .iter()
         .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_string))
         .collect();
-    let mut add = |id: String| {
+    for id in extra {
         if seen.iter().any(|s| s == &id) {
-            return;
+            continue;
         }
         seen.push(id.clone());
-        models.push(json!({
-            "id": id,
-            "display_name": display(&id),
-            "capabilities": ["code"],
-            "tier": 0,
-        }));
-    };
-    for id in discovered.into_iter().chain(extra) {
-        add(id);
+        models.push(make_model(&id));
     }
     if !accounts.is_empty() {
         let base = models.clone();

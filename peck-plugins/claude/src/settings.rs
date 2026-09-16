@@ -89,19 +89,27 @@ pub fn accounts() -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn probe(command: &str, args: &[&str]) -> Option<String> {
-    let v = host::call_host(
-        HostFn::ProviderProbe,
-        &json!({
-            "command": command,
-            "args": args,
-            "timeout_ms": 15_000,
-        }),
-    )
-    .ok()?;
+/// One-shot CLI probe through the host (`peckboard_provider_probe`).
+/// `stdin`, when given, is written to the child and then closed (the
+/// handshake pattern); the host caches the full request for 60 s. Returns
+/// captured stdout, `None` on spawn failure / timeout / non-UTF-8.
+pub fn probe_stdout(
+    command: &str,
+    args: &[&str],
+    stdin: Option<&str>,
+    timeout_ms: u64,
+) -> Option<String> {
+    let mut req = json!({
+        "command": command,
+        "args": args,
+        "timeout_ms": timeout_ms,
+    });
+    if let Some(payload) = stdin {
+        req["stdin"] = json!(payload);
+    }
+    let v = host::call_host(HostFn::ProviderProbe, &req).ok()?;
     v.get("stdout")?.as_str().map(str::to_string)
 }
-
 pub fn merge_catalog(
     seed: Value,
     discovered: Vec<String>,
