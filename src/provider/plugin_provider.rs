@@ -236,6 +236,11 @@ pub(crate) struct TurnState {
     /// events into the session while the turn is active.
     pub(crate) plugin_id: String,
     pub(crate) stop: AtomicBool,
+    /// Set by [`PluginProviderRuntime::retire_turn`]: let the current turn
+    /// settle naturally, but hand it no more injected messages, so the
+    /// plugin's send returns at this turn's `result` instead of starting
+    /// another turn on the same child.
+    pub(crate) retire: AtomicBool,
     pub(crate) terminal: std::sync::Mutex<Option<Terminal>>,
     pub(crate) db: Db,
     pub(crate) broadcaster: Arc<Broadcaster>,
@@ -377,6 +382,21 @@ impl PluginProviderRuntime {
         }
         self.stop_turn_after(session_id, grace);
         true
+    }
+
+    /// Retire the turn currently running for `session_id`: it finishes
+    /// naturally, but [`Self::take_message_json`] stops handing it injected
+    /// follow-ups, so the send returns at the current turn's `result` and
+    /// the provider delivers its completion then. Deliberately NO wall-clock
+    /// bound — a handover/compaction doc turn legitimately runs for minutes,
+    /// and the `AgentProvider::shutdown_after_turn` contract forbids
+    /// truncating it (no `Crashed { reason: "interrupted" }` on the way
+    /// out). A 30 s bound here is what killed every large compaction at
+    /// 29–30 s.
+    pub fn retire_turn(&self, session_id: &str) {
+        if let Some(turn) = self.turn(session_id) {
+            turn.retire.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Hard-stop the turn currently running for `session_id` after `grace`,
@@ -923,6 +943,11 @@ impl PluginProviderRuntime {
             Ok(t) => t,
             Err(e) => return error_json(e),
         };
+        if turn.retire.load(Ordering::SeqCst) {
+            // Retired: the current turn must settle and the send return —
+            // never start another injected turn on this child.
+            return serde_json::json!({ "message": serde_json::Value::Null }).to_string();
+        }
         let Ok(mut queue) = turn.injected.lock() else {
             return error_json("turn state poisoned");
         };
@@ -1623,6 +1648,7 @@ impl AgentProvider for PluginProviderAdapter {
                 TurnState {
                     plugin_id: self.plugin_id.clone(),
                     stop: AtomicBool::new(false),
+                    retire: AtomicBool::new(false),
                     terminal: std::sync::Mutex::new(None),
                     db: ctx.db.clone(),
                     broadcaster: ctx.broadcaster.clone(),
@@ -1899,6 +1925,7 @@ mod tests {
                 TurnState {
                     plugin_id: "p1".into(),
                     stop: AtomicBool::new(false),
+                    retire: AtomicBool::new(false),
                     terminal: std::sync::Mutex::new(None),
                     injected: Default::default(),
                     stdin_q: Default::default(),
@@ -1926,6 +1953,7 @@ mod tests {
                     TurnState {
                         plugin_id: "p1".into(),
                         stop: AtomicBool::new(false),
+                        retire: AtomicBool::new(false),
                         terminal: std::sync::Mutex::new(None),
                         injected: Default::default(),
                         stdin_q: Default::default(),
@@ -2006,6 +2034,14 @@ mod tests {
                 .contains("error")
         );
 
+        // Retiring starves injection without touching the turn: a queued
+        // message is no longer handed out, and the turn stays active.
+        assert!(runtime.queue_injection("p1", "s1", serde_json::json!({ "text": "late" })));
+        runtime.retire_turn("s1");
+        let retired: serde_json::Value =
+            serde_json::from_str(&runtime.take_message_json("p1", r#"{"session_id":"s1"}"#))
+                .unwrap();
+        assert!(retired["message"].is_null());
         assert!(runtime.is_active("s1"));
         assert!(runtime.end_turn("s1").is_none());
         assert!(!runtime.is_active("s1"));
@@ -2022,6 +2058,7 @@ mod tests {
                 TurnState {
                     plugin_id: "p1".into(),
                     stop: AtomicBool::new(false),
+                    retire: AtomicBool::new(false),
                     terminal: std::sync::Mutex::new(None),
                     injected: Default::default(),
                     stdin_q: Default::default(),

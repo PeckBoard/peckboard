@@ -27,9 +27,6 @@ use crate::provider::turn::compose_system_prompt;
 /// Grace the CLI gets to settle an in-band interrupt with a real `result`
 /// before the hard kill (mirrors the pre-plugin claude provider's window).
 const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
-/// Grace a retired session's in-flight turn gets to finish naturally after
-/// `shutdown_after_turn` (finish_card / complete_step) before it is stopped.
-const RETIRE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Function pointers into one first-party provider crate.
 #[derive(Clone, Copy)]
@@ -193,6 +190,7 @@ impl AgentProvider for CrateAgentProvider {
                 TurnState {
                     plugin_id: self.plugin_id.clone(),
                     stop: AtomicBool::new(false),
+                    retire: AtomicBool::new(false),
                     terminal: std::sync::Mutex::new(None),
                     db: ctx.db.clone(),
                     broadcaster: ctx.broadcaster.clone(),
@@ -311,11 +309,16 @@ impl AgentProvider for CrateAgentProvider {
     }
 
     async fn shutdown_after_turn(&self, session_id: &str) {
-        // Bound the wind-down: the in-flight turn may finish naturally, but
-        // a retired session must not keep its CLI running indefinitely
-        // (unbounded wind-down is how the orchestrator used to double-start
-        // workers after finish_card).
-        self.runtime.stop_turn_after(session_id, RETIRE_GRACE);
+        // Let the in-flight turn settle naturally and return at its
+        // `result` (one provider.send = one turn); only stop feeding it
+        // injected follow-ups. Deliberately NO wall-clock bound: a
+        // handover/compaction doc turn legitimately runs past any fixed
+        // grace — a 30 s bound here killed every large compaction at
+        // 29–30 s — and the trait contract forbids a `Crashed { reason:
+        // "interrupted" }` on the way out. Double-start protection lives in
+        // the orchestrator's is_running sibling check
+        // (`spawn_worker_for_card`), not here.
+        self.runtime.retire_turn(session_id);
     }
 
     async fn write_stdin(&self, session_id: &str, text: &str) -> bool {
