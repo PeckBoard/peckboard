@@ -436,7 +436,9 @@ async fn force_run_does_not_double_spawn_when_already_running() {
     let env = fresh_state().await;
     let tmp = tempfile::tempdir().unwrap();
     seed_folder(&env.db, "f1", tmp.path().to_str().unwrap()).await;
-    seed_task(&env.db, "t1", "f1", "hello", Some("mock:happy-path")).await;
+    // mock:block stays in-flight until cancelled — mock:happy-path could
+    // finish before the first is_running poll and fail the race below.
+    seed_task(&env.db, "t1", "f1", "hello", Some("mock:block")).await;
 
     let first = env
         .rtm
@@ -474,12 +476,7 @@ async fn force_run_does_not_double_spawn_when_already_running() {
     }
     assert!(hit, "first run never reached is_running=true within 1s");
 
-    for _ in 0..100 {
-        if !env.session_manager.is_running(&first_session_id).await {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    // The block scenario never ends on its own; tear it down explicitly.
     env.session_manager.cancel_and_wait(&first_session_id).await;
 
     let sessions = env.db.list_sessions_by_repeating_task("t1").await.unwrap();
