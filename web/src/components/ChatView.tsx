@@ -34,6 +34,7 @@ import PreHatchActivity from './chat/PreHatchActivity'
 import { chatMarkdownComponents } from './chat/markdown'
 import { type AnswerValue, answerText, selectedOptions, toggleOption } from '../lib/questionAnswers'
 import { fetchPlanId, openPlan } from '../lib/plan'
+import { PLUGIN_EVAL_INIT_PROMPT } from '../lib/pluginEvals'
 import { openReport } from '../lib/reports'
 import { describeActionError } from '../utils/actionError'
 import { parseTodoItems, latestTodoSnapshot, type TodoItem } from '../types/todo'
@@ -1834,6 +1835,31 @@ export default function ChatView({
     })
   }
 
+  // "Plugin evals → Init eval suite": the in-session equivalent of the
+  // interactive `claude plugin eval init` interview, which can't run
+  // headless. Sends a canned authoring prompt through the normal message
+  // path; the agent posts the plugin breakdown and writes the suite.
+  const handlePluginEvalInit = () => {
+    openConfirm({
+      title: 'Init plugin eval suite',
+      message:
+        "Send a prompt asking the agent to inspect this project's Claude Code plugins, post a breakdown of each, interview you, and write an eval suite under evals/? This runs a normal turn on the session's model.",
+      confirmLabel: 'Send',
+      testId: 'confirm-plugin-eval-init',
+      failMessage: "Couldn't send the eval-init prompt. Please try again.",
+      run: async () => {
+        const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: PLUGIN_EVAL_INIT_PROMPT }),
+        })
+        if (!res.ok) {
+          const err = (await res.json().catch(() => null)) as { error?: string } | null
+          throw new Error(err?.error ?? `Send failed (${res.status}).`)
+        }
+      },
+    })
+  }
   const handleDelete = () => {
     openConfirm({
       title: 'Delete session',
@@ -2014,6 +2040,12 @@ export default function ChatView({
       setSwitchBusy(false)
     }
   }
+  // Claude-only affordance gate for "Plugin evals". Bare model ids default
+  // to claude, matching the backend's parse_model_id.
+  const pluginEvalModel = sessionDetail?.model || appDefaultModel || ''
+  const isClaudeSession = pluginEvalModel.includes(':')
+    ? pluginEvalModel.startsWith('claude:')
+    : true
   const autoswitchOn = sessionDetail?.model_autoswitch ?? !!sessionDetail?.is_worker
   const sessionMenuItems: MenuItem[] = [
     { label: 'Rename', onSelect: handleRename, testId: 'chat-menu-rename' },
@@ -2057,6 +2089,18 @@ export default function ChatView({
           testId: `chat-menu-plugin-${item.id}`,
         }))
       : []),
+    {
+      label: 'Plugin evals',
+      hidden: !isClaudeSession,
+      submenu: [
+        {
+          label: 'Init eval suite',
+          onSelect: handlePluginEvalInit,
+          testId: 'chat-menu-plugin-evals-init',
+        },
+      ],
+      testId: 'chat-menu-plugin-evals',
+    },
     { divider: true },
     {
       label: 'Model',
