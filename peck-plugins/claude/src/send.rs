@@ -3,6 +3,7 @@
 use serde_json::{Value, json};
 
 use crate::argv::{self, CliSpec};
+use crate::background::BackgroundTracker;
 use crate::event::{CrashKind, ProviderEvent};
 use crate::host::{self, HostFn};
 use crate::parser::{self, ParserState};
@@ -135,8 +136,16 @@ pub fn run(payload: &Value) -> Result<(), String> {
     let mut parser = ParserState::new();
     let mut usage = UsageTracker::default();
     let mut tasks = TaskTracker::new();
+    let mut background = BackgroundTracker::new();
     let mut winding_down = false;
     let mut last_result_error: Option<String> = None;
+    // True once this send has settled a genuine turn `result`; from then
+    // on the loop is only lingering for in-flight background subagents
+    // (see `background.rs`) and every exit is a clean completion.
+    let mut turn_settled = false;
+    // Armed only while lingering, so a hung background agent cannot pin
+    // the CLI child (and the session's turn slot) forever.
+    let mut linger_guard = Watchdog::arm(None);
     // Per-turn watchdog from `SpawnConfig.timeout_ms`, re-armed for every
     // injected follow-up turn — a wedged turn dies instead of running
     // until a manual cancel.
@@ -152,8 +161,16 @@ pub fn run(payload: &Value) -> Result<(), String> {
         if !winding_down && should_stop(session_id) {
             winding_down = true;
         }
+        // A stop after the turn settled only ends the background linger:
+        // exit clean (the turn IS complete), never as an interrupt crash.
+        if winding_down && turn_settled {
+            return settle_and_exit(session_id, &background, "stop requested");
+        }
 
-        if watchdog.expired() {
+        if watchdog.expired() || linger_guard.expired() {
+            if turn_settled {
+                return settle_and_exit(session_id, &background, "linger timeout");
+            }
             let _ = kill(session_id);
             return finish_timeout(session_id, &mut parser, &mut usage, timeout_ms);
         }
@@ -164,6 +181,8 @@ pub fn run(payload: &Value) -> Result<(), String> {
             last_result_error = None;
             parser.reset_turn();
             watchdog.rearm();
+            turn_settled = false;
+            linger_guard = Watchdog::arm(None);
         }
 
         let line = read_line(session_id, 100)?;
@@ -194,6 +213,11 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 .get("stderr")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            if turn_settled {
+                // The CLI exited on its own after the turn settled (e.g.
+                // done with its background work); nothing crashed.
+                return settle_and_exit(session_id, &background, "claude exited");
+            }
             finish(
                 session_id,
                 &mut parser,
@@ -231,8 +255,12 @@ pub fn run(payload: &Value) -> Result<(), String> {
 
         usage.observe_line(&json_line);
         let is_result = json_line.get("type").and_then(|v| v.as_str()) == Some("result")
-            && is_turn_result(&json_line);
+            && (is_turn_result(&json_line) || (turn_settled && is_notification_result(&json_line)));
         let events = parser::parse_stream_json(&json_line, &mut parser);
+        // Background-subagent bookkeeping: a task-notification user frame
+        // settles its pending id (the frame itself carries no tool blocks,
+        // so the parser emits nothing for it).
+        background.on_stream_line(&json_line);
         // Assemble TodoWrite / TaskCreate / TaskUpdate calls into replace-
         // all `todo` snapshots as the tools stream (0.1.11's task_tracker).
         let mut todo_events: Vec<ProviderEvent> = Vec::new();
@@ -243,6 +271,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     name,
                     input,
                 } => {
+                    background.on_tool_start(tool_use_id, name, input);
                     if let Some(todos) = tasks.on_tool_start(tool_use_id, name, input) {
                         todo_events.push(ProviderEvent::Todo { todos });
                     }
@@ -253,6 +282,11 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     // The structured result (where TaskCreate's assigned id
                     // lives) is a sibling of `message` on the raw line, not
                     // part of the tool_result block the parser consumes.
+                    background.on_tool_end(
+                        tool_use_id,
+                        error.is_some(),
+                        json_line.get("tool_use_result"),
+                    );
                     if let Some(todos) = tasks.on_tool_end(
                         tool_use_id,
                         error.is_some(),
@@ -310,6 +344,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 },
             )?;
             parser.reset_turn();
+            turn_settled = true;
             // Drain the injection queue once more before tearing down: a
             // message queued between the last poll and this `result` would
             // otherwise die with the child. Deliver it as the next turn of
@@ -319,16 +354,68 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 let _ = write_stdin(session_id, &frame);
                 last_result_error = None;
                 watchdog.rearm();
+                turn_settled = false;
+                linger_guard = Watchdog::arm(None);
+                continue;
+            }
+            // Background subagents still running inside the CLI: linger —
+            // killing now would orphan them (0.1.15 and earlier lost the
+            // work; --resume only replayed a "stopped" notification).
+            // Their task-notification turns stream through this same loop
+            // and settle above.
+            if !winding_down && background.pending() > 0 {
+                linger_guard = Watchdog::arm(Some(BACKGROUND_LINGER_CAP_MS));
                 continue;
             }
             // One provider.send = one turn. The CLI child is dropped when
             // we return; next send respawns (or resumes via --resume).
-            let _ = kill(session_id);
-            return Ok(());
+            return settle_and_exit(session_id, &background, "stop requested");
         }
     }
 }
 
+/// Cap on how long a settled turn lingers for in-flight background
+/// subagents before giving up and tearing the CLI child down anyway.
+const BACKGROUND_LINGER_CAP_MS: u64 = 60 * 60 * 1000;
+
+/// A `result` frame the CLI stamps for a background task-notification
+/// turn (`origin: {"kind": "task-notification"}`). While lingering these
+/// settle the notification's follow-up turn; at turn start they are
+/// resume replays and stay skipped (see `is_turn_result`).
+fn is_notification_result(json: &Value) -> bool {
+    json.get("origin")
+        .and_then(|o| o.get("kind"))
+        .and_then(|k| k.as_str())
+        == Some("task-notification")
+}
+
+/// Tear down after the turn has settled (possibly mid-linger). If
+/// background subagents are still in flight, leave a visible note first —
+/// the next turn's `--resume` replays their notifications as "stopped".
+fn settle_and_exit(
+    session_id: &str,
+    background: &BackgroundTracker,
+    why: &str,
+) -> Result<(), String> {
+    if background.pending() > 0 {
+        let ids = background.pending_ids();
+        let _ = emit(
+            session_id,
+            &ProviderEvent::System {
+                text: format!(
+                    "{n} background subagent(s) still running ({list}) were terminated ({why}); \
+                     they will be reported as stopped next turn",
+                    n = background.pending(),
+                    list = ids.join(", "),
+                ),
+                subtype: "background-subagents".into(),
+                detail: json!({ "ids": ids, "reason": why }),
+            },
+        );
+    }
+    let _ = kill(session_id);
+    Ok(())
+}
 fn finish(
     session_id: &str,
     parser: &mut ParserState,
@@ -794,5 +881,23 @@ mod tests {
             "num_turns": 0, "result": "Not logged in · Please run /login",
         });
         assert!(is_turn_result(&auth_error));
+    }
+
+    #[test]
+    fn notification_results_settle_only_while_lingering() {
+        let stamped: Value = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "result": "task done",
+            "origin": { "kind": "task-notification" },
+        });
+        assert!(is_notification_result(&stamped));
+        // Still never a genuine turn result — replays at turn start must
+        // keep being skipped (the 0.1.13 silent-empty-turn bug).
+        assert!(!is_turn_result(&stamped));
+        let genuine: Value = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "result": "OK",
+        });
+        assert!(!is_notification_result(&genuine));
     }
 }

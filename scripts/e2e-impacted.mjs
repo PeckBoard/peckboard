@@ -25,16 +25,17 @@ const mapPath = path.join(repoRoot, "web", "e2e", "impact-map.json");
 
 /**
  * Only files the app or the suite is actually BUILT from can affect a
- * spec: Rust sources, the web bundle's inputs, the e2e suite itself, and
- * the build manifests. Everything else — scratch logs in the repo root,
- * docs, graphify caches, scripts (never compiled in or served), plugin
- * checkouts (the e2e config copies whatever wasm was already built — a
- * source edit without a rebuild changes nothing) — is irrelevant by
- * construction. A whitelist, not a blacklist: untracked junk must never
- * be able to force a full run by being unclassifiable.
+ * spec: Rust sources (including the first-party plugin crates, which
+ * compile natively into the release binary Playwright boots), the web
+ * bundle's inputs, the e2e suite itself, and the build manifests.
+ * Everything else — scratch logs in the repo root, docs, graphify caches,
+ * scripts (never compiled in or served) — is irrelevant by construction.
+ * A whitelist, not a blacklist: untracked junk must never be able to
+ * force a full run by being unclassifiable.
  */
 const RELEVANT = [
   /^src\//,
+  /^peck-plugins\/[^/]+\/(src\/|Cargo\.toml$)/,
   /^web\/src\//,
   /^web\/e2e\//,
   /^migrations\//,

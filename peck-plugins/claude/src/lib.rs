@@ -3,6 +3,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
 mod argv;
+mod background;
 mod discovery;
 mod event;
 mod host;
