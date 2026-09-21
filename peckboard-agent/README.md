@@ -41,9 +41,10 @@ chmod +x peckboard-agent-linux-x86_64
 sudo mv peckboard-agent-linux-x86_64 /usr/local/bin/peckboard-agent
 ```
 
-Linux and Windows binaries are statically linked (musl / static CRT), so
-there is no runtime dependency to install. macOS binaries are
-self-contained.
+Windows binaries link the CRT statically and macOS binaries are
+self-contained — nothing to install. Linux binaries link glibc and libxcb
+(the screenshot backend): preinstalled on desktop distros, and on minimal
+servers `apt install libxcb1` (or the distro equivalent) satisfies it.
 
 ### Unsigned Binary Workarounds
 
@@ -265,7 +266,7 @@ cargo build --release --manifest-path peckboard-agent/Cargo.toml
 #   .github/workflows/build-agent.yml  (also workflow_dispatch)
 #   release-promote.yml attaches the artifacts to each tagged release
 # local cross-builds for installed targets:
-peckboard-agent/build-release.sh x86_64-unknown-linux-musl
+peckboard-agent/build-release.sh x86_64-unknown-linux-gnu
 ```
 
 The daemon is a standalone crate (not a workspace member); always build it

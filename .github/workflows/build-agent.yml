@@ -10,9 +10,13 @@ name: Build Agent
 #
 # One native runner per target: `aws-lc-rs` (the rustls TLS backend) builds
 # C/asm and is painful to cross-compile, so we build each triple on its own
-# native OS/arch runner rather than one cross-compile host. Linux uses musl
-# for a fully static binary; Windows links the CRT statically. macOS binaries
-# are self-contained already.
+# native OS/arch runner rather than one cross-compile host. Linux links
+# glibc (gnu targets, like the core peckboard binaries): the screenshot
+# backend (xcap → xcb) links the C libxcb, which has no static musl build
+# — a musl agent fails to link with `cannot find -lxcb`. Linux hosts need
+# libxcb at runtime (preinstalled on desktops; `apt install libxcb1` on
+# minimal servers). Windows links the CRT statically; macOS binaries are
+# self-contained already.
 #
 # NOTE: these binaries are UNSIGNED. macOS Gatekeeper notarization and
 # Windows Authenticode signing are a follow-up (see peckboard-agent/README.md).
@@ -43,11 +47,11 @@ jobs:
             bin: peckboard-agent
           - asset: peckboard-agent-linux-x86_64
             runs_on: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             bin: peckboard-agent
           - asset: peckboard-agent-linux-arm64
             runs_on: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
+            target: aarch64-unknown-linux-gnu
             bin: peckboard-agent
           - asset: peckboard-agent-windows-x86_64.exe
             runs_on: windows-latest
@@ -73,12 +77,12 @@ jobs:
           key: agent-${{ matrix.target }}
           workspaces: peckboard-agent
 
-      # musl static builds need the musl gcc wrapper; aws-lc-rs needs cmake.
-      - name: Install musl + cmake (Linux)
+      # aws-lc-rs (rustls backend) needs cmake; xcap's xcb backend links libxcb.
+      - name: Install cmake + libxcb (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools cmake
+          sudo apt-get install -y cmake libxcb1-dev
 
       # Statically link the MSVC CRT so the .exe has no vcruntime dependency.
       - name: Static CRT (Windows)

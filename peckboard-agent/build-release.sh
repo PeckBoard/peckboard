@@ -6,14 +6,15 @@
 # target by default, or for any target triples you pass as arguments, and
 # stages named binaries + SHA-256 checksums into peckboard-agent/dist/.
 #
-# Cross-target builds require the rustup target and (for musl/other) the
-# matching linker/C toolchain installed — the aws-lc-rs TLS backend compiles
-# C, so cross-compiling to a foreign OS/arch usually needs that platform's
-# toolchain. For all five release targets, prefer the CI workflow.
+# Cross-target builds require the rustup target and the matching linker/C
+# toolchain installed — the aws-lc-rs TLS backend compiles C, and on Linux
+# the screenshot backend links libxcb (which is also why the Linux release
+# targets are gnu, not musl — libxcb has no static musl build). For all
+# five release targets, prefer the CI workflow.
 #
 # Usage:
 #   ./build-release.sh                              # host target
-#   ./build-release.sh x86_64-unknown-linux-musl    # one explicit target
+#   ./build-release.sh x86_64-unknown-linux-gnu     # one explicit target
 #   ./build-release.sh aarch64-apple-darwin x86_64-apple-darwin
 set -euo pipefail
 
@@ -26,9 +27,8 @@ asset_name() {
   case "$1" in
     aarch64-apple-darwin)         echo "peckboard-agent-macos-arm64" ;;
     x86_64-apple-darwin)          echo "peckboard-agent-macos-x86_64" ;;
-    x86_64-unknown-linux-musl)    echo "peckboard-agent-linux-x86_64" ;;
-    aarch64-unknown-linux-musl)   echo "peckboard-agent-linux-arm64" ;;
-    x86_64-unknown-linux-gnu)     echo "peckboard-agent-linux-x86_64-gnu" ;;
+    x86_64-unknown-linux-gnu)     echo "peckboard-agent-linux-x86_64" ;;
+    aarch64-unknown-linux-gnu)    echo "peckboard-agent-linux-arm64" ;;
     x86_64-pc-windows-msvc)       echo "peckboard-agent-windows-x86_64.exe" ;;
     *)                            echo "peckboard-agent-$1" ;;
   esac
