@@ -42,7 +42,9 @@ jobs:
             target: aarch64-apple-darwin
             bin: peckboard-agent
           - asset: peckboard-agent-macos-x86_64
-            runs_on: macos-13
+            # macos-13 (the last x86_64 image of that era) is retired — jobs
+            # on it queue forever; macos-15-intel is the free Intel label.
+            runs_on: macos-15-intel
             target: x86_64-apple-darwin
             bin: peckboard-agent
           - asset: peckboard-agent-linux-x86_64
