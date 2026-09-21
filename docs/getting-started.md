@@ -25,6 +25,23 @@ chmod +x peckboard-macos-arm64
 
 The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install to run it as a server. Linux `--desktop` needs the WebKitGTK shared library (`libwebkit2gtk-4.1-0` on Debian/Ubuntu). Running agents on Claude models needs the Claude Code CLI — `claude` installed and signed in on the same machine; the Grok, Kimi, and Cursor providers sign in from Settings → Connections → Providers & Accounts, Ollama connects to an Ollama server you point it at, and the built-in mock models work with nothing installed at all.
 
+## Download the Remote Agent
+
+The optional **peckboard-agent** daemon runs on another machine and dials home to your Peckboard over an outbound WebSocket, so sessions can drive that machine (commands, servers, screenshots, mouse/keyboard) without opening inbound ports. The same [releases page](https://github.com/PeckBoard/peckboard/releases) ships one agent binary per platform:
+
+- `peckboard-agent-macos-arm64` / `peckboard-agent-macos-x86_64`
+- `peckboard-agent-linux-x86_64` / `peckboard-agent-linux-arm64` (static musl)
+- `peckboard-agent-windows-x86_64.exe`
+
+Verify the matching `.sha256`, put the binary on your `PATH`, then enroll from Peckboard's **Agents** panel:
+
+```bash
+peckboard-agent enroll --server https://your-peckboard-host:3345 --token <TOKEN>
+peckboard-agent run
+```
+
+Capabilities are deny-by-default — see the [peckboard-agent README](https://github.com/PeckBoard/peckboard/blob/main/peckboard-agent/README.md) for install, permissions, and service setup.
+
 ## Build from Source
 
 A source build needs a stable [Rust](https://rustup.rs/) toolchain and [Node.js](https://nodejs.org/). The frontend is built first because the Rust compiler embeds its output into the binary; `scripts/build.sh` runs both steps in order:

@@ -213,6 +213,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 .get("stderr")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            let signal = line
+                .get("signal")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32);
             if turn_settled {
                 // The CLI exited on its own after the turn settled (e.g.
                 // done with its background work); nothing crashed.
@@ -224,6 +228,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 &mut usage,
                 last_result_error,
                 winding_down,
+                signal,
                 exit_code,
                 stderr,
             )?;
@@ -422,6 +427,7 @@ fn finish(
     usage: &mut UsageTracker,
     last_result_error: Option<String>,
     interrupted: bool,
+    signal: Option<i32>,
     exit_code: Option<i32>,
     stderr: Option<String>,
 ) -> Result<(), String> {
@@ -440,7 +446,7 @@ fn finish(
             },
         )?;
     }
-    let (reason, kind) = classify_exit(last_result_error, interrupted, stderr.as_deref());
+    let (reason, kind) = classify_exit(last_result_error, interrupted, signal, stderr.as_deref());
     emit(
         session_id,
         &ProviderEvent::Crashed {
@@ -459,9 +465,12 @@ fn finish(
 /// resume rejection, an expired login, a 429) even when the *shape* of the
 /// exit only says "no output" — so it is classified first and `NoOutput`
 /// is only the fallback when stderr carries nothing recognizable.
+/// A signal kill outranks the stderr sniff: the OS took the child down
+/// (OOM killer, service shutdown), so any stderr tail predates the kill.
 fn classify_exit(
     last_result_error: Option<String>,
     interrupted: bool,
+    signal: Option<i32>,
     stderr: Option<&str>,
 ) -> (String, CrashKind) {
     if interrupted {
@@ -471,11 +480,36 @@ fn classify_exit(
         let kind = CrashKind::classify(&err);
         return (err, kind);
     }
+    if let Some(sig) = signal {
+        return (
+            killed_by_signal_reason("claude", sig),
+            CrashKind::ExitedMidTurn,
+        );
+    }
     let stderr_text = stderr.map(str::to_string).filter(|s| !s.trim().is_empty());
     let kind = CrashKind::classify_or(stderr_text.as_deref().unwrap_or(""), CrashKind::NoOutput);
     (
         stderr_text.unwrap_or_else(|| "claude exited without a result".into()),
         kind,
+    )
+}
+
+/// Reason for a child that died to a signal instead of exiting: the OS or
+/// service manager killed it mid-turn — the CLI itself never got to report
+/// anything, so "exited without a result" would point at the wrong culprit.
+fn killed_by_signal_reason(provider: &str, signal: i32) -> String {
+    let name = match signal {
+        6 => " (SIGABRT)",
+        9 => " (SIGKILL)",
+        11 => " (SIGSEGV)",
+        15 => " (SIGTERM)",
+        _ => "",
+    };
+    format!(
+        "{provider} was killed by signal {signal}{name} before finishing — \
+         the OS or service manager took it down mid-turn (usually the \
+         out-of-memory killer; check `journalctl -k` for oom-kill events). \
+         Send the message again to retry."
     )
 }
 
@@ -789,6 +823,7 @@ mod tests {
         let (reason, kind) = classify_exit(
             None,
             false,
+            None,
             Some("Error: No conversation found with session ID: abc123"),
         );
         assert_eq!(kind, CrashKind::ResumeFailed);
@@ -798,16 +833,17 @@ mod tests {
         let (_, kind) = classify_exit(
             None,
             false,
+            None,
             Some("Failed to authenticate. API Error: 401 Unauthorized"),
         );
         assert_eq!(kind, CrashKind::AuthExpired);
 
         // Rate limit.
-        let (_, kind) = classify_exit(None, false, Some("API Error: 429 Too Many Requests"));
+        let (_, kind) = classify_exit(None, false, None, Some("API Error: 429 Too Many Requests"));
         assert_eq!(kind, CrashKind::RateLimit);
 
         // Nothing usable on stderr → the structural fallback.
-        let (reason, kind) = classify_exit(None, false, Some("   "));
+        let (reason, kind) = classify_exit(None, false, None, Some("   "));
         assert_eq!(kind, CrashKind::NoOutput);
         assert_eq!(reason, "claude exited without a result");
 
@@ -816,15 +852,28 @@ mod tests {
         let (reason, kind) = classify_exit(
             Some("No conversation found with session ID: abc123".into()),
             false,
+            None,
             Some("unrelated stderr"),
         );
         assert_eq!(kind, CrashKind::ResumeFailed);
         assert_eq!(reason, "No conversation found with session ID: abc123");
 
         // Wind-down beats everything.
-        let (reason, kind) = classify_exit(Some("401".into()), true, None);
+        let (reason, kind) = classify_exit(Some("401".into()), true, None, None);
         assert_eq!(kind, CrashKind::Interrupted);
         assert_eq!(reason, "interrupted");
+    }
+
+    #[test]
+    fn signal_kill_outranks_stderr_but_not_the_clis_own_error() {
+        let (reason, kind) = classify_exit(None, false, Some(9), Some("partial stderr tail"));
+        assert_eq!(kind, CrashKind::ExitedMidTurn);
+        assert!(reason.contains("killed by signal 9 (SIGKILL)"), "{reason}");
+
+        // The CLI's own result error still wins — it names the real cause.
+        let (reason, kind) = classify_exit(Some("API Error: 429".into()), false, Some(9), None);
+        assert_eq!(kind, CrashKind::RateLimit);
+        assert_eq!(reason, "API Error: 429");
     }
 
     #[test]

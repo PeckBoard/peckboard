@@ -735,7 +735,18 @@ impl PluginProviderRuntime {
                     if let Some(handle) = child.stderr_thread.take() {
                         let _ = handle.join();
                     }
-                    let exit_code = status.ok().and_then(|s| s.code());
+                    let exit_code = status.as_ref().ok().and_then(|s| s.code());
+                    // A child that died to a signal (SIGKILL from the OOM
+                    // killer, service shutdown) has no exit code and usually
+                    // no stderr; surface the signal so the plugin can name
+                    // the real cause instead of "exited without a result".
+                    #[cfg(unix)]
+                    let signal = {
+                        use std::os::unix::process::ExitStatusExt;
+                        status.as_ref().ok().and_then(|s| s.signal())
+                    };
+                    #[cfg(not(unix))]
+                    let signal: Option<i32> = None;
                     let stderr = child
                         .stderr
                         .lock()
@@ -746,6 +757,7 @@ impl PluginProviderRuntime {
                         "eof": true,
                         "exit_code": exit_code,
                         "stderr": stderr,
+                        "signal": signal,
                     })
                     .to_string();
                 }
@@ -2117,6 +2129,10 @@ mod tests {
         assert_eq!(eof["eof"], true, "eof: {eof}");
         assert_eq!(eof["exit_code"], 0);
 
+        assert!(
+            eof["signal"].is_null(),
+            "clean exit carries no signal: {eof}"
+        );
         // Foreign plugin cannot spawn on this turn.
         let runtime2 = PluginProviderRuntime::new();
         let _rt2 = begin_test_turn(&runtime2, &folder);
@@ -2133,6 +2149,44 @@ mod tests {
             foreign.contains("another plugin") || foreign.contains("error"),
             "got: {foreign}"
         );
+
+        runtime.end_turn("s1");
+    }
+
+    /// A child killed by a signal (the OOM killer's SIGKILL in production)
+    /// exits with no code and no stderr; the eof frame must carry the signal
+    /// so plugins can name the real cause instead of "exited without a
+    /// successful result".
+    #[cfg(unix)]
+    #[test]
+    fn signal_killed_child_reports_signal_on_eof() {
+        let folder = std::env::temp_dir().to_string_lossy().into_owned();
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, &folder);
+
+        let spawn: serde_json::Value = serde_json::from_str(
+            &runtime.spawn_json(
+                "p1",
+                &serde_json::json!({
+                    "session_id": "s1",
+                    "command": "/bin/sh",
+                    "args": ["-c", "kill -KILL $$"],
+                    "cwd": folder,
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(spawn["ok"], true, "spawn: {spawn}");
+
+        let eof: serde_json::Value = serde_json::from_str(&runtime.read_line_json(
+            "p1",
+            &serde_json::json!({ "session_id": "s1", "timeout_ms": 5000 }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(eof["eof"], true, "eof: {eof}");
+        assert!(eof["exit_code"].is_null(), "eof: {eof}");
+        assert_eq!(eof["signal"], 9, "eof: {eof}");
 
         runtime.end_turn("s1");
     }

@@ -2,10 +2,11 @@ name: Build Agent
 
 # Cross-compile the peckboard-agent daemon for all v1 targets.
 #
-# Dispatch-only: run manually against a tag ref to publish the daemon
-# binaries to that release, or against a branch to just produce artifacts.
-# Mirrors the core build-*.yml workflows but targets the standalone
-# `peckboard-agent/Cargo.toml` crate (no web bundle — the daemon has no UI).
+# Runs on every push to main (artifacts for release-promote.yml) and on
+# workflow_dispatch (manual rebuild, or against a tag ref as a backstop
+# publish path). Mirrors the core build-main.yml → release-promote.yml
+# flow but targets the standalone `peckboard-agent/Cargo.toml` crate
+# (no web bundle — the daemon has no UI).
 #
 # One native runner per target: `aws-lc-rs` (the rustls TLS backend) builds
 # C/asm and is painful to cross-compile, so we build each triple on its own
@@ -16,6 +17,8 @@ name: Build Agent
 # NOTE: these binaries are UNSIGNED. macOS Gatekeeper notarization and
 # Windows Authenticode signing are a follow-up (see peckboard-agent/README.md).
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

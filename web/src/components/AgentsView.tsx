@@ -204,7 +204,15 @@ export default function AgentsView() {
               <p>No remote agents enrolled yet</p>
               <p>
                 Enroll a machine to control it from Peckboard — run commands, manage servers, and
-                drive its screen from your sessions.
+                drive its screen from your sessions. Download{' '}
+                <a
+                  href="https://github.com/PeckBoard/peckboard/releases"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  peckboard-agent
+                </a>{' '}
+                for your platform first.
               </p>
               <button className="list-view-empty-action" onClick={() => setShowEnroll(true)}>
                 Enroll your first agent
@@ -323,9 +331,18 @@ function EnrollModal({
       <Modal onClose={onClose} maxWidth={520} data-testid="enroll-token-modal">
         <h2>Agent enrolled</h2>
         <p>
-          Run this on the machine to connect it. The enrollment token is shown{' '}
-          <strong>only once</strong> and cannot be recovered — if it's lost, delete the agent and
-          enroll again.
+          Download{' '}
+          <a
+            href="https://github.com/PeckBoard/peckboard/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid="enroll-agent-download"
+          >
+            peckboard-agent
+          </a>{' '}
+          for this platform, then run the command below on the machine. The enrollment token is
+          shown <strong>only once</strong> and cannot be recovered — if it's lost, delete the agent
+          and enroll again.
         </p>
         <div className="form-field">
           <label className="form-label">Install command</label>

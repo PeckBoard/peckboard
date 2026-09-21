@@ -22,6 +22,23 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# Memory guard: cap parallel rustc jobs so a full build can't OOM the box.
+# Each rustc job can take ~1 GiB (the release build + rust-lld link spike
+# higher), and this machine also runs the live Peckboard server. On
+# 2026-09-21 an uncapped `cargo build --release` (64 jobs) + Playwright
+# tripped the kernel OOM killer three times: it shot the provider CLI
+# children (reported as "grok exited without a successful result") and
+# finally peckboard.service itself (29.2G peak). journalctl -k has the
+# oom-kill records. Preset CARGO_BUILD_JOBS wins; floor of 2.
+if [[ -z "${CARGO_BUILD_JOBS:-}" ]]; then
+  avail_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  cpu_jobs=$(nproc 2>/dev/null || echo 4)
+  mem_jobs=$((avail_kb / 1048576)) # ~1 GiB per job
+  jobs=$((mem_jobs < cpu_jobs ? mem_jobs : cpu_jobs))
+  ((jobs < 2)) && jobs=2
+  export CARGO_BUILD_JOBS="$jobs"
+  echo "(memory guard: CARGO_BUILD_JOBS=$jobs — MemAvailable ${avail_kb} kB, ${cpu_jobs} CPUs)"
+fi
 FAST=0
 IMPACTED=0
 case "${1:-}" in

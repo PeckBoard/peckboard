@@ -46,8 +46,18 @@ AGENT_NOTICE
 #    paths under src/ (lint-staged otherwise treats web/ as the root and
 #    rewrites paths as ../src/... which match no glob).
 npx --prefix web --no-install lint-staged --cwd "$ROOT" --config web/package.json || exit 1
-
 # 2. Fast Rust unit tests — catches things like assertion-count drift
 #    that lint-staged can't see (e.g. someone adds a tool but forgets to
-#    bump the registry-count test).
-cargo test --lib --quiet || exit 1
+#    bump the registry-count test). Only when Rust build inputs are
+#    staged: the run is only "fast" when the compile cache is warm, and
+#    a docs/web-only commit must not pay a multi-minute lib recompile
+#    (a cold rebuild here is what breaks the few-seconds promise above).
+rust_staged=0
+for f in $(git diff --cached --name-only); do
+  case "$f" in
+  *.rs | Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock | migrations/*) rust_staged=1 ;;
+  esac
+done
+if [ "$rust_staged" = "1" ]; then
+  cargo test --lib --quiet || exit 1
+fi

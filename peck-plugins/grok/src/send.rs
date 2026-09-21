@@ -194,6 +194,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 .get("stderr")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            let signal = line
+                .get("signal")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32);
             if let Some(err) = stream_error {
                 emit(
                     session_id,
@@ -220,6 +224,16 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     &ProviderEvent::Completed {
                         conversation_id: conv,
                         result_meta: Value::Null,
+                    },
+                )?;
+            } else if let Some(sig) = signal {
+                emit(
+                    session_id,
+                    &ProviderEvent::Crashed {
+                        reason: killed_by_signal_reason("grok", sig),
+                        error_kind: CrashKind::ExitedMidTurn,
+                        exit_code,
+                        stderr,
                     },
                 )?;
             } else {
@@ -281,6 +295,25 @@ fn classify_failed_exit(stderr: &str) -> (String, CrashKind) {
     } else {
         (stderr.trim().to_string(), CrashKind::Unknown)
     }
+}
+
+/// Reason for a child that died to a signal instead of exiting: the OS or
+/// service manager killed it mid-turn — the CLI itself never got to report
+/// anything, so "exited without a result" would point at the wrong culprit.
+fn killed_by_signal_reason(provider: &str, signal: i32) -> String {
+    let name = match signal {
+        6 => " (SIGABRT)",
+        9 => " (SIGKILL)",
+        11 => " (SIGSEGV)",
+        15 => " (SIGTERM)",
+        _ => "",
+    };
+    format!(
+        "{provider} was killed by signal {signal}{name} before finishing — \
+         the OS or service manager took it down mid-turn (usually the \
+         out-of-memory killer; check `journalctl -k` for oom-kill events). \
+         Send the message again to retry."
+    )
 }
 
 /// The transcript note for attachments a text-only CLI can't take.
@@ -395,6 +428,14 @@ mod tests {
         let (reason, kind) = classify_failed_exit("segfault\n");
         assert_eq!(kind, CrashKind::Unknown);
         assert_eq!(reason, "segfault");
+    }
+
+    #[test]
+    fn signal_kill_reason_names_the_signal() {
+        let reason = killed_by_signal_reason("grok", 9);
+        assert!(reason.contains("killed by signal 9 (SIGKILL)"), "{reason}");
+        let reason = killed_by_signal_reason("grok", 3);
+        assert!(reason.contains("killed by signal 3 "), "{reason}");
     }
 
     #[test]

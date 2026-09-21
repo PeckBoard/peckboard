@@ -261,8 +261,9 @@ schtasks /create /tn peckboard-agent /tr "\"C:\Program Files\peckboard-agent\pec
 # host target
 cargo build --release --manifest-path peckboard-agent/Cargo.toml
 
-# all release targets: use CI (native runner per target)
-#   .github/workflows/build-agent.yml  (workflow_dispatch)
+# all release targets: CI builds on every main push
+#   .github/workflows/build-agent.yml  (also workflow_dispatch)
+#   release-promote.yml attaches the artifacts to each tagged release
 # local cross-builds for installed targets:
 peckboard-agent/build-release.sh x86_64-unknown-linux-musl
 ```
