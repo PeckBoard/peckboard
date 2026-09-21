@@ -1,6 +1,6 @@
 ---
 title: Architecture
-nav_order: 7
+nav_order: 9
 ---
 
 # Architecture
@@ -23,8 +23,8 @@ graph LR
 ## One Server, One File
 
 The backend is written in Rust. HTTP routes and WebSocket connections are handled by [axum](https://github.com/tokio-rs/axum), an async web framework that runs on the Tokio runtime, so one process serves many browsers and agent sessions concurrently. Data is stored in SQLite through the [Diesel](https://diesel.rs/) ORM. SQLite means the whole database is one self-contained file — there is no separate database server to install, configure, or keep running — and Diesel checks queries against the schema at compile time, so a query that no longer matches the tables fails the build instead of failing at runtime.
+
 The SQLite library, the database migrations, and the built frontend assets are all compiled into the release binary. Installing PeckBoard is therefore copying one executable; beyond a writable data directory, the main thing it needs on the host is a provider for real agent work — typically the Claude Code CLI it spawns.
-The SQLite library, the database migrations, and the built frontend assets are all compiled into the release binary. Installing PeckBoard is therefore copying one executable; beyond a writable data directory, the main thing it needs on the host is the Claude Code CLI it spawns.
 
 <details markdown="1">
 <summary>Backend components in detail</summary>

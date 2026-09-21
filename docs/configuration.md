@@ -1,6 +1,6 @@
 ---
 title: Configuration
-nav_order: 8
+nav_order: 10
 ---
 
 # Configuration
@@ -15,20 +15,20 @@ Started with no flags, the server listens on HTTP port `3344` and HTTPS port `33
 peckboard --port 8080 --https-port 8443 --data-dir /var/lib/peckboard
 ```
 
-| Flag                           | Default        | Description                                                                                                                                             |
-| ------------------------------ | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--port`                       | `3344`         | HTTP port                                                                                                                                               |
-| `--https-port`                 | `3345`         | HTTPS port                                                                                                                                              |
-| `--host`                       | `0.0.0.0`      | Bind address                                                                                                                                            |
-| `--data-dir`                   | `~/.peckboard` | Data directory; also settable via the `PECKBOARD_DATA_DIR` environment variable                                                                         |
-| `--reset-password`             | —              | Generate a new password for a user, print it, and exit; add `--user <name>` when more than one user exists                                              |
-| `--mdns`                       | off            | Advertise the server on the local network via mDNS; also `PECKBOARD_MDNS=1`                                                                             |
-| `--keep-alive-hours`           | `1`            | Hours between provider login keep-alive pings, which exercise each saved login so tokens don't go stale; `0` disables; also `PECKBOARD_KEEPALIVE_HOURS` |
-| `--provider-send-timeout-secs` | `300`          | Time budget in seconds for one full agent turn of a plugin-provided provider; also `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`                               |
-| `--restore-from <FILE>`        | —              | Restore a backup archive into the data directory and exit; refuses to overwrite an existing database unless `--force` is also given                     |
-| `--force`                      | —              | Allow `--restore-from` to overwrite an existing database                                                                                                |
+| Flag                           | Default        | Description                                                                                                                                                                   |
+| ------------------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port`                       | `3344`         | HTTP port                                                                                                                                                                     |
+| `--https-port`                 | `3345`         | HTTPS port                                                                                                                                                                    |
+| `--host`                       | `0.0.0.0`      | Bind address                                                                                                                                                                  |
+| `--data-dir`                   | `~/.peckboard` | Data directory; also settable via the `PECKBOARD_DATA_DIR` environment variable                                                                                               |
+| `--reset-password`             | —              | Generate a new password for a user, print it, and exit; add `--user <name>` when more than one user exists                                                                    |
+| `--mdns`                       | off            | Advertise the server on the local network via mDNS; also `PECKBOARD_MDNS=1`                                                                                                   |
+| `--keep-alive-hours`           | `1`            | Hours between provider login keep-alive pings, which exercise each saved login so tokens don't go stale; `0` disables; also `PECKBOARD_KEEPALIVE_HOURS`                       |
+| `--provider-send-timeout-secs` | `300`          | Time budget in seconds for one full agent turn of a plugin-provided provider; also `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`                                                     |
+| `--restore-from <FILE>`        | —              | Restore a backup archive into the data directory and exit; refuses to overwrite an existing database unless `--force` is also given                                           |
+| `--force`                      | —              | Allow `--restore-from` to overwrite an existing database                                                                                                                      |
 | `--desktop`                    | off            | Open a native window on `http://127.0.0.1:<port>` after the server binds; also `PECKBOARD_DESKTOP=1`. Headless `peckboard` is unchanged. Linux desktop builds need WebKitGTK. |
-| `--install-desktop-entry`      | —              | Linux: write `~/.local/share/applications/peckboard.desktop` and the app icon, then exit                                                                |
+| `--install-desktop-entry`      | —              | Linux: write `~/.local/share/applications/peckboard.desktop` and the app icon, then exit                                                                                      |
 
 HTTPS uses a self-signed certificate that PeckBoard generates into the data directory on first start and renews automatically, so browsers warn on first visit. Set `RUST_LOG` (for example `RUST_LOG=debug`) to change log verbosity.
 
@@ -60,47 +60,49 @@ They take effect only on a first start with an empty database. The credential ba
 
 ## Models
 
-Every conversation in PeckBoard — a _session_ — runs on a model. A model id names a provider and a model joined by a colon: `claude:claude-opus-4-7` drives the Claude Code CLI with Opus 4.7, while `mock:happy-path` runs one of the built-in mock models.
+Every conversation in PeckBoard — a _session_ — runs on a model. A model id names a provider and a model joined by a colon: `claude:claude-opus-5` drives the Claude Code CLI with Opus 5, while `mock:happy-path` runs one of the built-in mock models. The [Providers]({{ "/providers.html" | relative_url }}) page covers every provider — the CLI each one drives, its models, and its sign-in flow.
 
 A _mock model_ is a fake agent: instead of talking to a provider, it replays a fixed script of events — some text, a tool call, a completion — identically on every run. Mock models exist for tests and demos. They let you try the UI, record a reproducible demo, or run the end-to-end test suite with no provider installed and at no API cost. For real work, pick a model from a real provider.
 
-You choose a model when creating a session; the dropdown groups models by provider — Claude, Grok, Kimi, Cursor, Ollama, Mock — with _Server default_ at the top. An existing session can be switched from the model button in the chat toolbar. Projects have their own model setting, used for the worker sessions they spawn, and a card can override its project's choice.
+You choose a model when creating a session; the dropdown groups models by provider — Claude, Codex, Grok, Kimi, Cursor, Ollama, Mock — with _Server default_ at the top. An existing session can be switched from the model button in the chat toolbar. Projects have their own model setting, used for the worker sessions they spawn, and a card can override its project's choice.
 
-Providers and their accounts are managed in Settings → Connections → Providers & Accounts: toggle a provider off to hide its models everywhere, sign in Claude, Grok, and Kimi accounts (each then appears in every model picker as `[Name] Model`, with optional per-account budgets), and configure Ollama servers and the Cursor CLI. The same page shows the Claude subscription plan usage the `claude /usage` command reports.
+Providers and their accounts are managed in Settings → Connections → Providers & Accounts: toggle a provider off to hide its models everywhere, sign in Claude, Codex, Grok, and Kimi accounts (each then appears in every model picker as `[Name] Model`, with optional per-account budgets), and configure Ollama servers and the Cursor CLI. The same page shows the Claude subscription plan usage the `claude /usage` command reports.
 
 ![Settings → Connections → Providers & Accounts: provider on/off toggles, Claude plan usage, and two signed-in Claude accounts with spend and budget badges]({{ "/assets/screenshots/providers.png" | relative_url }})
 
 <details markdown="1">
 <summary>Available models</summary>
 
-The Claude provider lists these models (use as `claude:<id>`, or bare — a bare id defaults to the Claude provider):
+The Claude provider seeds these models (use as `claude:<id>`, or bare — a bare id defaults to the Claude provider), then live-discovers what your installed CLI actually offers:
 
 | Id                  | Display name      |
 | ------------------- | ----------------- |
 | `claude-fable-5`    | Claude Fable 5    |
+| `claude-opus-5`     | Claude Opus 5     |
 | `claude-opus-4-8`   | Claude Opus 4.8   |
 | `claude-opus-4-7`   | Claude Opus 4.7   |
 | `claude-opus-4-6`   | Claude Opus 4.6   |
+| `claude-sonnet-5`   | Claude Sonnet 5   |
 | `claude-sonnet-4-6` | Claude Sonnet 4.6 |
 | `claude-haiku-4-5`  | Claude Haiku 4.5  |
 
 If any of the environment variables `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, or `ANTHROPIC_DEFAULT_HAIKU_MODEL` is set to an Amazon Bedrock model ARN, that model is added to the list as well.
 
 The mock provider offers one model per scripted scenario (use as `mock:<id>`):
-
-| Id                  | Scenario                                                                                                          |
+The mock provider offers one model per scripted scenario (use as `mock:<id>`):
+| Id | Scenario |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `echo`              | Echoes your message back as a text event                                                                          |
-| `happy-path`        | Text, a tool call, more text, then a clean completion                                                             |
-| `tool-use`          | A single tool call, then completion                                                                               |
-| `markdown`          | Text exercising markdown rendering                                                                                |
-| `ask`               | Asks you a question and waits for the answer                                                                      |
-| `plan-review`       | Thinking, then saves a plan the way the `propose_plan` tool does                                                  |
-| `usage`             | A turn with file-read, file-edit, and expert tool calls plus a deterministic usage event, for the usage dashboard |
-| `ctx`               | Reports the context occupancy you type as the message (default `160000`), driving the context banner              |
-| `block`             | Prints one line, then blocks until interrupted                                                                    |
-| `crash`             | Text, then a simulated agent crash                                                                                |
-| `tool-orphan-crash` | A tool call that never finishes, then a crash                                                                     |
+| `echo` | Echoes your message back as a text event |
+| `happy-path` | Text, a tool call, more text, then a clean completion |
+| `tool-use` | A single tool call, then completion |
+| `markdown` | Text exercising markdown rendering |
+| `ask` | Asks you a question and waits for the answer |
+| `plan-review` | Thinking, then saves a plan the way the `propose_plan` tool does |
+| `usage` | A turn with file-read, file-edit, and expert tool calls plus a deterministic usage event, for the usage dashboard |
+| `ctx` | Reports the context occupancy you type as the message (default `160000`), driving the context banner |
+| `block` | Prints one line, then blocks until interrupted |
+| `crash` | Text, then a simulated agent crash |
+| `tool-orphan-crash` | A tool call that never finishes, then a crash |
 
 </details>
 

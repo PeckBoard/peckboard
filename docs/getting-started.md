@@ -23,7 +23,7 @@ chmod +x peckboard-macos-arm64
 ./peckboard-macos-arm64
 ```
 
-The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install to run it as a server. Linux `--desktop` needs the WebKitGTK shared library (`libwebkit2gtk-4.1-0` on Debian/Ubuntu). Running agents on Claude models needs the Claude Code CLI — `claude` installed and signed in on the same machine; the Grok, Kimi, and Cursor providers sign in from Settings → Connections → Providers & Accounts, Ollama connects to an Ollama server you point it at, and the built-in mock models work with nothing installed at all.
+The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install to run it as a server. Linux `--desktop` needs the WebKitGTK shared library (`libwebkit2gtk-4.1-0` on Debian/Ubuntu). Running agents on Claude models needs the Claude Code CLI — `claude` installed and signed in on the same machine; the Codex, Grok, Kimi, and Cursor providers drive their own CLIs, Ollama connects to an Ollama server you point it at, and the built-in mock models work with nothing installed at all. The [Providers]({{ "/providers.html" | relative_url }}) page lists every supported CLI and its sign-in flow.
 
 ## Download the Remote Agent
 
