@@ -43,6 +43,12 @@ pub fn seed_models() -> serde_json::Value {
             "tier": 2
         },
         {
+            "id": "mcp",
+            "display_name": "Mock: run mcp blocks from the message",
+            "capabilities": ["mock", "tools", "reasoning"],
+            "tier": 2
+        },
+        {
             "id": "tool-use",
             "display_name": "Mock: tool use",
             "capabilities": ["mock", "tools"],

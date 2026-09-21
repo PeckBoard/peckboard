@@ -293,6 +293,7 @@ impl Ctx<'_> {
             "usage" => self.usage()?,
             "tool-use" => self.tool_use()?,
             "cli-tools" => self.cli_tools()?,
+            "mcp" => self.mcp_blocks()?,
             "tool-error" => self.tool_error()?,
             "system-blob" => self.system_blob()?,
             "screenshot" => self.screenshot()?,
@@ -331,6 +332,33 @@ impl Ctx<'_> {
             return self.interrupted();
         }
         self.completed(Value::Null)
+    }
+    /// Generic MCP driver: every ```mcp fenced block in the message is a
+    /// `{"tool": name, "args": {...}}` request run against the REAL MCP
+    /// handler with this session's scope. Lets e2e specs exercise any
+    /// plugin tool end to end (e.g. ui-gauge page generation) by embedding
+    /// the call in the dispatched prompt.
+    fn mcp_blocks(&mut self) -> Result<(), String> {
+        let blocks = extract_mcp_blocks(self.message);
+        if blocks.is_empty() {
+            return self.emit_text("no ```mcp blocks in message");
+        }
+        let total = blocks.len();
+        let mut ran = 0usize;
+        for b in blocks {
+            let Some(tool) = b.get("tool").and_then(|t| t.as_str()) else {
+                self.emit_text("mcp block missing 'tool'")?;
+                continue;
+            };
+            let args = b.get("args").cloned().unwrap_or(json!({}));
+            if self.call_mcp_tool(tool, args)?.is_some() {
+                ran += 1;
+            }
+            if !self.tick()? {
+                return Ok(());
+            }
+        }
+        self.emit_text(&format!("ran {ran}/{total} mcp block(s)"))
     }
 
     fn echo(&self) -> Result<(), String> {
@@ -1109,4 +1137,36 @@ fn mock_revised_markdown(markdown: &str, version: i64, insert_only: bool) -> Str
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Every ```mcp fenced block in `message`, parsed as JSON. Blocks that
+/// fail to parse are skipped — the scenario reports counts, and a
+/// malformed block should not abort the ones that follow.
+fn extract_mcp_blocks(message: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut rest = message;
+    while let Some(start) = rest.find("```mcp") {
+        let after = &rest[start + "```mcp".len()..];
+        let Some(end) = after.find("```") else { break };
+        if let Ok(v) = serde_json::from_str::<Value>(after[..end].trim()) {
+            out.push(v);
+        }
+        rest = &after[end + 3..];
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_mcp_blocks;
+
+    #[test]
+    fn extracts_multiple_blocks_and_skips_malformed() {
+        let msg = "intro\n```mcp\n{\"tool\":\"a\",\"args\":{\"x\":1}}\n```\nmiddle\n```mcp\nnot json\n```\n```mcp\n{\"tool\":\"b\"}\n```\n";
+        let blocks = extract_mcp_blocks(msg);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["tool"], "a");
+        assert_eq!(blocks[1]["tool"], "b");
+        assert!(extract_mcp_blocks("no blocks here").is_empty());
+    }
 }
