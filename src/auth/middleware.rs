@@ -183,6 +183,7 @@ pub(crate) mod tests {
         let provider_registry = Arc::new(crate::provider::registry::ProviderRegistry::new());
         Arc::new(AppState {
             plugin_ws_tickets: Default::default(),
+            device_registry: Default::default(),
             config: Config {
                 port: 0,
                 https_port: 0,

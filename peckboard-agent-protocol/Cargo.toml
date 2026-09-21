@@ -1,0 +1,12 @@
+[package]
+name = "peckboard-agent-protocol"
+version = "0.1.0"
+edition = "2024"
+
+# Shared wire protocol between the peckboard-agent daemon and core. Pure
+# serde types + a versioned envelope; no transport. Both core (Phase 1
+# transport) and the daemon crate (Phase 2) depend on this.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }

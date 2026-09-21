@@ -80,6 +80,7 @@ async fn build_fixture() -> Fixture {
 
     let state = Arc::new(AppState {
         plugin_ws_tickets: Default::default(),
+        device_registry: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
         config,
         db,

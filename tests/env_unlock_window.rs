@@ -45,6 +45,7 @@ async fn build_state() -> Arc<AppState> {
 
     let state = Arc::new(AppState {
         plugin_ws_tickets: Default::default(),
+        device_registry: Default::default(),
         env_unlock: Arc::new(EnvUnlockRegistry::new()),
         config,
         db,

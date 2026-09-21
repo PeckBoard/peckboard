@@ -67,6 +67,8 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_env_vars_table(conn)?;
     ensure_agent_vars_table(conn)?;
     ensure_mfa_tables(conn)?;
+    ensure_devices_table(conn)?;
+    ensure_device_activity_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -193,6 +195,53 @@ fn ensure_kimi_accounts_table(conn: &mut SqliteConnection) -> anyhow::Result<()>
             created_at          BIGINT  NOT NULL,
             updated_at          BIGINT  NOT NULL
         )",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+fn ensure_devices_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "devices")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS devices (
+            id           TEXT PRIMARY KEY NOT NULL,
+            user_id      TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            platform     TEXT NOT NULL,
+            secret_hash  TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'active',
+            last_seen_at TEXT,
+            created_at   TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id)")
+        .execute(conn)?;
+    sql_query("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_secret_hash ON devices(secret_hash)")
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1789953645_device_activity`. `CREATE TABLE IF
+/// NOT EXISTS` is idempotent so this is safe on a fully-migrated DB and
+/// only does work on one that lacks the table. DDL mirrors the migration.
+fn ensure_device_activity_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "device_activity")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS device_activity (
+            id           TEXT PRIMARY KEY NOT NULL,
+            device_id    TEXT NOT NULL,
+            session_id   TEXT,
+            capability   TEXT NOT NULL,
+            args_summary TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_device_activity_device \
+         ON device_activity(device_id, created_at)",
     )
     .execute(conn)?;
     Ok(())
@@ -2649,6 +2698,63 @@ mod tests {
             assert_eq!(hit.n, 1, "missing index {idx}");
         }
 
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// Pre-existing DB with no `devices` table (older version). ensure_schema
+    /// must create it, its indexes, and leave it usable for inserts.
+    #[test]
+    fn ensure_schema_creates_missing_devices_table() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        // ensure_schema's earliest heals touch `projects`; give it the
+        // minimal shape the sibling test uses.
+        sql_query("CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        assert!(!table_exists(&mut conn, "devices").unwrap());
+
+        ensure_schema(&mut conn).unwrap();
+
+        assert!(table_exists(&mut conn, "devices").unwrap());
+        sql_query(
+            "INSERT INTO devices (id, user_id, name, platform, secret_hash, status, created_at) \
+             VALUES ('d1', 'u1', 'laptop', 'linux', 'h1', 'active', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let n: CountRow = sql_query("SELECT count(*) AS n FROM devices")
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(n.n, 1);
+        // idempotent second run
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// Pre-existing DB with no `device_activity` table (older version).
+    /// ensure_schema must create it and leave it usable for inserts.
+    #[test]
+    fn ensure_schema_creates_missing_device_activity_table() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        assert!(!table_exists(&mut conn, "device_activity").unwrap());
+
+        ensure_schema(&mut conn).unwrap();
+
+        assert!(table_exists(&mut conn, "device_activity").unwrap());
+        sql_query(
+            "INSERT INTO device_activity \
+             (id, device_id, session_id, capability, args_summary, status, created_at) \
+             VALUES ('a1', 'd1', 's1', 'echo', '{}', 'ok', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let n: CountRow = sql_query("SELECT count(*) AS n FROM device_activity")
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(n.n, 1);
+        // idempotent second run
         ensure_schema(&mut conn).unwrap();
     }
 }

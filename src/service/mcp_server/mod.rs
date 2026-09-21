@@ -131,11 +131,14 @@ impl McpToolRegistry {
                 self.handle_browser_tool(tool_name, args, ctx).await
             }
             "run_command" => self.handle_run_command(args, ctx).await,
+            name if name.starts_with("remote_agent_") => {
+                self.handle_remote_agent_tool(name, args, ctx).await
+            }
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
 
-    // ── Shared helpers used by handlers across submodules ───────────────
+    // ── Shared helpers used by handlers across submodules ───────────────────
 
     /// Returns true if the worker session is associated with a card in a
     /// terminal state (`done` or `wont_do`). Used to filter inter-worker
@@ -328,27 +331,35 @@ pub async fn dispatch_tool_call(
         }
     }
 
-    // A plugin that declared this tool owns the call; otherwise core handles
-    // it. The scoped `ctx` carries session/project/card/folder so plugin and
-    // core dispatch enforce the same folder boundary.
-    let plugin_ctx = serde_json::json!({
-        "sessionId": &ctx.session_id,
-        "projectId": &ctx.project_id,
-        "cardId": &ctx.card_id,
-        "folderId": &ctx.folder_id,
-    });
-    let tool_result = match plugins
-        .invoke_mcp_tool(tool_name, final_args.clone(), plugin_ctx)
-        .await
-    {
-        Some(r) => r,
-        // `upgrade_plugin` is a core tool that needs the PluginManager, which
-        // `McpToolRegistry::handle_tool_call` doesn't receive — handle it here
-        // where both `plugins` and the scoped `ctx` are in scope.
-        None if tool_name == "upgrade_plugin" => {
+    // A CORE tool name always dispatches to core — the same rule
+    // `tools/list` applies to name collisions — so a plugin manifest that
+    // declares e.g. `remote_agent_run` cannot silently divert those calls
+    // (and their command lines / device ids) into plugin code. Only
+    // non-core names route to `invoke_mcp_tool`. The scoped `ctx` carries
+    // session/project/card/folder so plugin and core dispatch enforce the
+    // same folder boundary.
+    let tool_result = if is_core_tool(tool_name) {
+        if tool_name == "upgrade_plugin" {
+            // Core tool that needs the PluginManager, which
+            // `McpToolRegistry::handle_tool_call` doesn't receive.
             handle_upgrade_plugin(plugins, ctx, final_args).await
+        } else {
+            registry.handle_tool_call(tool_name, final_args, ctx).await
         }
-        None => registry.handle_tool_call(tool_name, final_args, ctx).await,
+    } else {
+        let plugin_ctx = serde_json::json!({
+            "sessionId": &ctx.session_id,
+            "projectId": &ctx.project_id,
+            "cardId": &ctx.card_id,
+            "folderId": &ctx.folder_id,
+        });
+        match plugins
+            .invoke_mcp_tool(tool_name, final_args.clone(), plugin_ctx)
+            .await
+        {
+            Some(r) => r,
+            None => registry.handle_tool_call(tool_name, final_args, ctx).await,
+        }
     };
 
     match &tool_result {
@@ -378,6 +389,16 @@ pub async fn dispatch_tool_call(
         }
     }
     tool_result
+}
+
+/// Whether `name` is a core tool ([`schemas::tool_definitions`]) — the
+/// dispatch counterpart of the `tools/list` collision rule that a core
+/// name always wins over a same-named plugin tool.
+fn is_core_tool(name: &str) -> bool {
+    static CORE: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    CORE.get_or_init(|| schemas::tool_names().into_iter().collect())
+        .contains(name)
 }
 
 /// `upgrade_plugin` MCP tool: install/upgrade a plugin from the configured
@@ -490,7 +511,12 @@ mod tests {
         // Document review (only advertised on a review session).
         assert!(names.contains(&"get_review_doc"));
         assert!(names.contains(&"submit_review_revision"));
-        assert_eq!(names.len(), 75);
+        // Remote-control device bridge (echo-first; executors land later).
+        assert!(names.contains(&"remote_agent_list"));
+        assert!(names.contains(&"remote_agent_echo"));
+        assert!(names.contains(&"remote_agent_run"));
+        assert!(names.contains(&"remote_agent_screenshot"));
+        assert_eq!(names.len(), 82);
     }
 
     #[test]
@@ -516,6 +542,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             folder_id: "f1".into(),
+            device_registry: None,
         };
 
         let result = registry
@@ -538,6 +565,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             folder_id: "f1".into(),
+            device_registry: None,
         };
 
         // Global GREETING, folder GREETING (default scope), global TARGET.
@@ -649,6 +677,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             folder_id: "f1".into(),
+            device_registry: None,
         };
 
         let err = dispatch_tool_call(
@@ -705,6 +734,7 @@ mod tests {
             provider_registry: None,
             data_dir: Some(tmp.path().to_path_buf()),
             folder_id: "f1".into(),
+            device_registry: None,
         };
 
         let written = registry
@@ -781,6 +811,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             folder_id: "f1".into(),
+            device_registry: None,
         };
 
         // Two prerequisites via create_card (no deps yet).
@@ -942,6 +973,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             folder_id: "f1".into(),
+            device_registry: None,
         };
 
         let a = registry
@@ -1084,6 +1116,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             folder_id: "f1".into(),
+            device_registry: None,
         };
 
         let result = registry

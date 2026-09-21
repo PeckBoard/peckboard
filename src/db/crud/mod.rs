@@ -11,6 +11,7 @@ mod claude_accounts;
 mod codex_accounts;
 mod custom_workflows;
 mod dependencies;
+mod devices;
 mod doc_review_anchors;
 mod doc_reviews;
 mod env_vars;

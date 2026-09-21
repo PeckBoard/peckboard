@@ -211,6 +211,14 @@ export const useWsStore = create<WsState>((set, get) => ({
         window.dispatchEvent(new CustomEvent('peckboard:plugin-data', { detail: msg }))
         return
       }
+
+      if (msg.type === 'device-update') {
+        // A remote-control device went online/offline or its in-flight
+        // request count changed (identifiers + counters only). AgentsView
+        // listens and patches its rows / refetches.
+        window.dispatchEvent(new CustomEvent('peckboard:device-update', { detail: msg }))
+        return
+      }
       if (msg.type === 'repeating-task-changed') {
         window.dispatchEvent(new CustomEvent('peckboard:repeating-task-changed', { detail: msg }))
         return

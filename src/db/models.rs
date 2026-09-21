@@ -1108,6 +1108,81 @@ pub struct SshKeyRename {
     pub updated_at: String,
 }
 
+// ── Devices ──────────────────────────────────────
+
+/// An enrolled remote-control machine (the peckboard-agent daemon). The
+/// daemon dials home over an outbound WebSocket and authenticates with a
+/// one-time enrollment token; only the SHA-256 hex of that 32-byte token
+/// is stored (`secret_hash`), never the token itself. `status` is one of
+/// `active` / `disabled` (admin kill-switch) / `revoked` (see the
+/// `device_status` consts). `last_seen_at` is an RFC3339 timestamp, NULL
+/// until the device first connects.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = devices)]
+pub struct Device {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub platform: String,
+    /// Never serialized — `skip_serializing` keeps the credential hash out
+    /// of any JSON this row is ever fed into (API bodies, WS frames,
+    /// exports); `DeviceView` additionally omits it by construction.
+    #[serde(skip_serializing)]
+    pub secret_hash: String,
+    pub status: String,
+    pub last_seen_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = devices)]
+pub struct NewDevice {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub platform: String,
+    pub secret_hash: String,
+    pub status: String,
+    pub last_seen_at: Option<String>,
+    pub created_at: String,
+}
+
+/// Valid `Device::status` values.
+pub mod device_status {
+    pub const ACTIVE: &str = "active";
+    pub const DISABLED: &str = "disabled";
+    pub const REVOKED: &str = "revoked";
+}
+
+/// One bridged remote-agent action against a device — the audit log the
+/// Agents panel's recent-actions drawer renders. `args_summary` is a
+/// short redacted summary of the request arguments (never the payload
+/// itself and never any output); `status` is `ok` or a short failure
+/// word (`offline` / `timeout` / `disconnected` / `error`).
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = device_activity)]
+pub struct DeviceActivity {
+    pub id: String,
+    pub device_id: String,
+    pub session_id: Option<String>,
+    pub capability: String,
+    pub args_summary: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = device_activity)]
+pub struct NewDeviceActivity {
+    pub id: String,
+    pub device_id: String,
+    pub session_id: Option<String>,
+    pub capability: String,
+    pub args_summary: String,
+    pub status: String,
+    pub created_at: String,
+}
+
 // ── Agent Vars ───────────────────────────────────
 
 /// A user-defined agent variable: plain name/value state agents read AND

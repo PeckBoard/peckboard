@@ -280,7 +280,7 @@ dependencies = [
  "sha1 0.10.6",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "tower",
  "tower-layer",
  "tower-service",
@@ -4129,7 +4129,7 @@ dependencies = [
 
 [[package]]
 name = "peckboard"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4160,6 +4160,7 @@ dependencies = [
  "open",
  "p256 0.13.2",
  "peck-plugin-native-host",
+ "peckboard-agent-protocol",
  "peckboard-claude-plugin",
  "peckboard-codex-plugin",
  "peckboard-cursor-plugin",
@@ -4190,6 +4191,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite 0.30.0",
  "totp-rs",
  "tower",
  "tower-http",
@@ -4199,6 +4201,14 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wry",
+]
+
+[[package]]
+name = "peckboard-agent-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -6446,7 +6456,19 @@ dependencies = [
  "futures-util",
  "log",
  "tokio",
- "tungstenite",
+ "tungstenite 0.29.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -6735,6 +6757,22 @@ dependencies = [
  "log",
  "rand 0.9.4",
  "sha1 0.10.6",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.10.2",
+ "sha1 0.11.0",
  "thiserror 2.0.18",
 ]
 

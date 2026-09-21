@@ -311,6 +311,7 @@ async fn mcp_handler(
                 broadcaster: state.broadcaster.clone(),
                 provider_registry: Some(state.provider_registry.clone()),
                 data_dir: Some(state.config.data_dir.clone()),
+                device_registry: Some(state.device_registry.clone()),
             };
 
             // Run the call through the shared dispatcher: it fires the

@@ -12,6 +12,7 @@ mod misc;
 mod model_control;
 mod plans;
 mod projects;
+mod remote_agent;
 mod repeating_tasks;
 mod reports;
 mod subagents;

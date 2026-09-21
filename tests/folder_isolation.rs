@@ -160,6 +160,7 @@ fn ctx(
         broadcaster: Broadcaster::new(),
         provider_registry: None,
         data_dir: None,
+        device_registry: None,
     }
 }
 

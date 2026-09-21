@@ -453,6 +453,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // open can refresh it. Global because plugin
                             // pages are not tied to a session subscription.
                             | "plugin-data"
+                            // device-update announces a remote-control
+                            // device going online/offline — identifiers +
+                            // a boolean only, never capabilities output —
+                            // so the Agents panel refreshes live. Not tied
+                            // to any session subscription.
+                            | "device-update"
                     );
 
                     let should_send = if is_global {

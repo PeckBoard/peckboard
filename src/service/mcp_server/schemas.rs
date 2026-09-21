@@ -154,6 +154,8 @@ fn read_only_tool_names() -> &'static [&'static str] {
         "browser_find",
         "browser_pages",
         "browser_screenshot",
+        "remote_agent_list",
+        "remote_agent_screenshot",
     ]
 }
 
@@ -174,6 +176,10 @@ fn destructive_tool_names() -> &'static [&'static str] {
         "git",
         "upgrade_plugin",
         "browser_act",
+        "remote_agent_run",
+        "remote_agent_server",
+        "remote_agent_mouse",
+        "remote_agent_keyboard",
     ]
 }
 
@@ -196,6 +202,12 @@ fn open_world_tool_names() -> &'static [&'static str] {
         "browser_screenshot",
         "browser_pages",
         "browser_close",
+        "remote_agent_echo",
+        "remote_agent_run",
+        "remote_agent_server",
+        "remote_agent_screenshot",
+        "remote_agent_mouse",
+        "remote_agent_keyboard",
     ]
 }
 
@@ -1729,6 +1741,106 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "scope": { "type": "string", "enum": ["folder", "global"], "description": "Scope to delete from (default 'folder')." }
                 },
                 "required": ["name"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_list".into(),
+            description: "List YOUR enrolled remote-control devices (peckboard-agent daemons) with live state: online, in-flight request count, platform, status, last seen. Use the returned device_id with the other remote_agent_* tools.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_echo".into(),
+            description: "Connectivity probe: send a message to a remote device's daemon and get it echoed back. Proves the full session→server→device→result loop without touching the machine. Start here when a device misbehaves.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "message": { "type": "string", "description": "Text for the daemon to echo back." }
+                },
+                "required": ["device_id", "message"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_run".into(),
+            description: "Run a shell command on a remote device via its peckboard-agent daemon. The daemon enforces its own per-capability allow/deny config and kill-switch; a refusal comes back as a tool error. Returns stdout/stderr/exit code.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "command": { "type": "string", "description": "Command line to execute." },
+                    "cwd": { "type": "string", "description": "Working directory (daemon default if omitted)." },
+                    "timeout_secs": { "type": "integer", "description": "Deadline in seconds, 1–600 (default 120)." }
+                },
+                "required": ["device_id", "command"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_server".into(),
+            description: "Manage a long-running server process on a remote device: start / stop / restart / logs / health. The daemon maps 'server' names to its locally configured process definitions.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "action": { "type": "string", "enum": ["start", "stop", "restart", "logs", "health"], "description": "What to do." },
+                    "server": { "type": "string", "description": "Which configured server to act on." },
+                    "lines": { "type": "integer", "description": "logs: how many trailing lines (daemon default if omitted)." }
+                },
+                "required": ["device_id", "action"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_screenshot".into(),
+            description: "Capture the remote device's screen (returned as an image). Optional display index for multi-monitor machines. The daemon shows a visible 'being controlled' indicator while serving these.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "display": { "type": "integer", "description": "Display index (default: primary)." }
+                },
+                "required": ["device_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_mouse".into(),
+            description: "Control the remote device's mouse: move, click, drag, scroll. Coordinates are screen pixels. The daemon may refuse if the user disabled the mouse capability locally.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "action": { "type": "string", "enum": ["move", "click", "drag", "scroll"], "description": "What to do." },
+                    "x": { "type": "integer", "description": "Target X (move/click/drag end)." },
+                    "y": { "type": "integer", "description": "Target Y (move/click/drag end)." },
+                    "from_x": { "type": "integer", "description": "drag: start X." },
+                    "from_y": { "type": "integer", "description": "drag: start Y." },
+                    "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "click/drag button (default left)." },
+                    "delta_x": { "type": "integer", "description": "scroll: horizontal amount." },
+                    "delta_y": { "type": "integer", "description": "scroll: vertical amount." }
+                },
+                "required": ["device_id", "action"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_keyboard".into(),
+            description: "Control the remote device's keyboard: type text or press a key combo (e.g. ctrl+shift+t). The daemon may refuse if the user disabled the keyboard capability locally.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "action": { "type": "string", "enum": ["type", "combo"], "description": "type = literal text; combo = chord like ctrl+shift+t." },
+                    "text": { "type": "string", "description": "type: the text to type." },
+                    "keys": { "type": "string", "description": "combo: '+'-joined chord, e.g. 'ctrl+c'." }
+                },
+                "required": ["device_id", "action"],
                 "additionalProperties": false
             }),
         },

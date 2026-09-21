@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.16"
+version = "0.1.17"
 edition = "2024"
 
 [dependencies]
@@ -102,6 +102,8 @@ tao = { version = "0.36", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 open = { version = "5", optional = true }
 
+# Shared wire protocol between core and the peckboard-agent daemon.
+peckboard-agent-protocol = { path = "peckboard-agent-protocol" }
 # First-party provider crates: native AgentProvider, same send loops as WASM.
 peck-plugin-native-host = { path = "peck-plugins/native-host" }
 peckboard-claude-plugin = { path = "peck-plugins/claude" }
@@ -122,6 +124,7 @@ tempfile = "3.27.0"
 time = "0.3.47"
 # test-util enables tokio::test(start_paused) for timeout tests.
 tokio = { version = "1", features = ["full", "test-util"] }
+tokio-tungstenite = "0.30.0"
 
 # Trim debug info so `target/debug` doesn't fill the disk every few
 # builds. Backtraces still show file:line; we lose pretty struct

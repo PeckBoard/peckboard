@@ -64,6 +64,7 @@ async fn unknown_explicit_model_is_rejected_before_creating_a_child_row() {
         broadcaster: Broadcaster::new(),
         provider_registry: Some(provider_registry),
         data_dir: None,
+        device_registry: None,
     };
     let registry = McpToolRegistry::new();
 
@@ -102,6 +103,7 @@ async fn known_model_still_spawns_normally() {
         broadcaster: Broadcaster::new(),
         provider_registry: Some(provider_registry),
         data_dir: None,
+        device_registry: None,
     };
     let registry = McpToolRegistry::new();
 
@@ -151,6 +153,7 @@ async fn inherited_model_from_caller_is_also_validated() {
         broadcaster: Broadcaster::new(),
         provider_registry: Some(provider_registry),
         data_dir: None,
+        device_registry: None,
     };
     let registry = McpToolRegistry::new();
 

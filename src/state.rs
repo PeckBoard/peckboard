@@ -156,6 +156,10 @@ pub struct AppState {
     /// One-time, plugin-scoped tickets for the restricted plugin-page
     /// WebSocket (`/ws/plugin-ui`). See [`crate::ws::plugin_ui`].
     pub plugin_ws_tickets: crate::ws::plugin_ui::PluginWsTickets,
+    /// Live remote-control daemon connections (`/ws/agent`), device_id →
+    /// socket handle. Arc so MCP tool calls (`ToolCallContext`) can hold a
+    /// shared handle. See [`crate::ws::agent::DeviceRegistry`].
+    pub device_registry: Arc<crate::ws::agent::DeviceRegistry>,
     pub tls: Arc<TlsState>,
 }
 

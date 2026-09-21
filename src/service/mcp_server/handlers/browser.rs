@@ -373,6 +373,7 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             data_dir,
+            device_registry: None,
         }
     }
 

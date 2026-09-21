@@ -1,0 +1,48 @@
+[package]
+name = "peckboard-agent"
+version = "0.1.0"
+edition = "2024"
+
+# The daemon that runs on users' machines. Dials home to Peckboard core
+# over an OUTBOUND WSS connection (agent → server, never the reverse) and
+# serves capabilities requested by sessions. Standalone crate: root is a
+# package (not a workspace), so this mirrors `peckboard-agent-protocol` as
+# a plain path-dep sibling rather than a workspace member. Build/test with
+# `--manifest-path peckboard-agent/Cargo.toml`.
+
+[[bin]]
+name = "peckboard-agent"
+path = "src/main.rs"
+
+[dependencies]
+peckboard-agent-protocol = { path = "../peckboard-agent-protocol" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+# First outbound WS client in the tree; TLS via rustls (no system OpenSSL).
+tokio-tungstenite = { version = "0.30.0", features = ["connect", "rustls-tls-webpki-roots"] }
+rustls = "0.23"
+futures-util = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+gethostname = "0.5"
+async-trait = "0.1"
+rand = "0.8"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+xcap = { version = "0.4", features = ["vendored"] }
+base64 = "0.23.1"
+# Mouse + keyboard input synthesis. Pure-Rust X11 backend (`x11rb`) instead
+# of the default `xdo` one so we don't link libxdo (a C lib absent on many
+# Linux hosts / headless CI). Wayland is refused up front in input.rs, so we
+# don't need enigo's Wayland backend.
+enigo = { version = "0.3", default-features = false, features = ["x11rb"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tempfile = "3"

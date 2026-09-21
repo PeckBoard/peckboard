@@ -33,6 +33,7 @@ import PlanView from './components/PlanView'
 import ReviewListView from './components/review/ReviewListView'
 import ReviewView from './components/review/ReviewView'
 import RepeatingTasksView from './components/RepeatingTasksView'
+import AgentsView from './components/AgentsView'
 import UsageDashboard from './components/UsageDashboard'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import SetupWizard from './components/SetupWizard'
@@ -65,6 +66,7 @@ type View =
   | 'pluginPage'
   | 'plan'
   | 'docReview'
+  | 'agents'
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -151,6 +153,8 @@ function parseRoute(): {
       return { view: 'usage', activeId: null, sub: 'chat' }
     case 'repeating-tasks':
       return { view: 'repeatingTasks', activeId: id, sub: 'chat' }
+    case 'agents':
+      return { view: 'agents', activeId: null, sub: 'chat' }
     case 'folders':
       // `/folders` — the folder list; `/folders/<folderId>/plugin/<itemId>` — a
       // folder-scoped plugin page, same shape as the project/session routes;
@@ -1353,6 +1357,30 @@ function App() {
             </svg>
           </button>
           <button
+            className={`rail-btn ${view === 'agents' ? 'active' : ''}`}
+            onClick={() => {
+              navigate('agents', null)
+            }}
+            title="Agents"
+            aria-label="Agents"
+            data-testid="rail-agents"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
+          </button>
+          <button
             className={`rail-btn ${view === 'projects' && !activeProjectId ? 'active' : ''}`}
             onClick={() => {
               setActiveProject(null)
@@ -1760,6 +1788,7 @@ function App() {
                 }}
               />
             )}
+            {view === 'agents' && <AgentsView />}
             {view === 'usage' && <UsageDashboard />}
             {view === 'pluginPage' &&
               (() => {

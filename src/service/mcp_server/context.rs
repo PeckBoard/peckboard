@@ -60,6 +60,11 @@ pub struct ToolCallContext {
     /// Data dir for durable exports. `Some` on real tool calls from the `mcp`
     /// route; when `None`, handlers skip the export hook.
     pub data_dir: Option<std::path::PathBuf>,
+    /// Live device connections for the `remote_agent_*` tools. `Some` on
+    /// tool calls from the `mcp` route (cloned off `AppState`); `None` on
+    /// the in-process plugin-provider path and in unit tests, where those
+    /// tools report themselves unavailable instead of panicking.
+    pub device_registry: Option<Arc<crate::ws::agent::DeviceRegistry>>,
 }
 
 /// Proof token: a project id verified against the current MCP token's
@@ -348,6 +353,7 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             data_dir: None,
+            device_registry: None,
         }
     }
 
@@ -404,6 +410,7 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             data_dir: None,
+            device_registry: None,
         };
         let err = ctx.scope_project(Some("p-2")).await.unwrap_err();
         // "not found", not "forbidden" — don't leak the project's existence.
@@ -475,6 +482,7 @@ mod tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             data_dir: None,
+            device_registry: None,
         }
     }
 

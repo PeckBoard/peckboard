@@ -53,6 +53,7 @@ fn ctx(db: &Arc<Db>, session_id: &str, folder_id: &str) -> ToolCallContext {
         broadcaster: Broadcaster::new(),
         provider_registry: None,
         data_dir: None,
+        device_registry: None,
     }
 }
 

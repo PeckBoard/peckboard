@@ -6,6 +6,7 @@ pub mod auth;
 pub mod backup;
 pub mod claude_accounts;
 pub mod codex_accounts;
+pub mod devices;
 pub mod doc_reviews;
 pub mod env_vars;
 pub mod folders;
@@ -36,6 +37,7 @@ pub mod workflows;
 
 use crate::frontend::static_handler;
 use crate::state::AppState;
+use crate::ws::agent::agent_ws_handler;
 use crate::ws::handler::ws_handler;
 use crate::ws::plugin_ui::plugin_ws_handler;
 use axum::{Router, routing::get};
@@ -50,6 +52,11 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // not by JWT — the sandboxed iframe holding the socket never sees
         // the user's token. See src/ws/plugin_ui.rs.
         .route("/ws/plugin-ui", get(plugin_ws_handler))
+        // Remote-control daemon WS: authenticated by the device's enrollment
+        // token (hashed against devices.secret_hash) BEFORE the upgrade —
+        // never by JWT. Daemons send no Origin, so origin_check passes them.
+        // See src/ws/agent.rs.
+        .route("/ws/agent", get(agent_ws_handler))
         // Sudo askpass bridge -- /api/askpass is token-authed (called by the
         // generated helper from inside sessions), the answer route is JWT'd.
         .merge(askpass::router(state.clone()))
@@ -77,6 +84,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(agent_vars::router(state.clone()))
         .merge(ssh_keys::router(state.clone()))
         .merge(env_vars::router(state.clone()))
+        .merge(devices::router(state.clone()))
         .merge(settings::router(state.clone()))
         .merge(system_prompts::router(state.clone()))
         .merge(ollama::router(state.clone()))

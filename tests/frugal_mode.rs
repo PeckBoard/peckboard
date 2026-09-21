@@ -35,6 +35,7 @@ async fn build_state() -> Arc<AppState> {
 
     Arc::new(AppState {
         plugin_ws_tickets: Default::default(),
+        device_registry: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
         config: Config {
             port: 0,
@@ -111,6 +112,7 @@ fn ctx(state: &Arc<AppState>, session_id: &str) -> ToolCallContext {
         provider_registry: Some(state.provider_registry.clone()),
         data_dir: None,
         folder_id: "f1".into(),
+        device_registry: None,
     }
 }
 

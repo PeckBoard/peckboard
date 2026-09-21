@@ -1,0 +1,126 @@
+name: Build Agent
+
+# Cross-compile the peckboard-agent daemon for all v1 targets.
+#
+# Dispatch-only: run manually against a tag ref to publish the daemon
+# binaries to that release, or against a branch to just produce artifacts.
+# Mirrors the core build-*.yml workflows but targets the standalone
+# `peckboard-agent/Cargo.toml` crate (no web bundle — the daemon has no UI).
+#
+# One native runner per target: `aws-lc-rs` (the rustls TLS backend) builds
+# C/asm and is painful to cross-compile, so we build each triple on its own
+# native OS/arch runner rather than one cross-compile host. Linux uses musl
+# for a fully static binary; Windows links the CRT statically. macOS binaries
+# are self-contained already.
+#
+# NOTE: these binaries are UNSIGNED. macOS Gatekeeper notarization and
+# Windows Authenticode signing are a follow-up (see peckboard-agent/README.md).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runs_on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: peckboard-agent-macos-arm64
+            runs_on: macos-15
+            target: aarch64-apple-darwin
+            bin: peckboard-agent
+          - asset: peckboard-agent-macos-x86_64
+            runs_on: macos-13
+            target: x86_64-apple-darwin
+            bin: peckboard-agent
+          - asset: peckboard-agent-linux-x86_64
+            runs_on: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            bin: peckboard-agent
+          - asset: peckboard-agent-linux-arm64
+            runs_on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            bin: peckboard-agent
+          - asset: peckboard-agent-windows-x86_64.exe
+            runs_on: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: peckboard-agent.exe
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-${{ matrix.target }}
+          workspaces: peckboard-agent
+
+      # musl static builds need the musl gcc wrapper; aws-lc-rs needs cmake.
+      - name: Install musl + cmake (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools cmake
+
+      # Statically link the MSVC CRT so the .exe has no vcruntime dependency.
+      - name: Static CRT (Windows)
+        if: runner.os == 'Windows'
+        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> $env:GITHUB_ENV
+
+      - name: Build release binary
+        run: >
+          cargo build --release
+          --manifest-path peckboard-agent/Cargo.toml
+          --target ${{ matrix.target }}
+
+      - name: Stage asset (Unix)
+        if: runner.os != 'Windows'
+        run: cp peckboard-agent/target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.asset }}
+
+      - name: Stage asset (Windows)
+        if: runner.os == 'Windows'
+        run: copy peckboard-agent\target\${{ matrix.target }}\release\${{ matrix.bin }} ${{ matrix.asset }}
+
+      - name: Checksum (macOS)
+        if: runner.os == 'macOS'
+        run: shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+
+      - name: Checksum (Linux)
+        if: runner.os == 'Linux'
+        run: sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+
+      - name: Checksum (Windows)
+        if: runner.os == 'Windows'
+        run: certutil -hashfile ${{ matrix.asset }} SHA256 > ${{ matrix.asset }}.sha256
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256

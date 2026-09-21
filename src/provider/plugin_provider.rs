@@ -1115,6 +1115,7 @@ impl PluginProviderRuntime {
             broadcaster: turn.broadcaster.clone(),
             provider_registry: plugins.bound_provider_registry(),
             data_dir: Some(plugins.data_dir()),
+            device_registry: None,
         };
         let registry = crate::service::mcp_server::McpToolRegistry::new();
         match turn

@@ -50,6 +50,7 @@ async fn build_state() -> Arc<AppState> {
 
     Arc::new(AppState {
         plugin_ws_tickets: Default::default(),
+        device_registry: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
         config: Config {
             port: 0,
@@ -197,6 +198,7 @@ fn ctx_for_card(state: &Arc<AppState>, session_id: &str, card_id: &str) -> ToolC
         provider_registry: None,
         data_dir: None,
         folder_id: "f1".into(),
+        device_registry: None,
     }
 }
 
@@ -891,6 +893,7 @@ fn ctx_for_project(state: &Arc<AppState>, session_id: &str) -> ToolCallContext {
         provider_registry: None,
         data_dir: None,
         folder_id: "f1".into(),
+        device_registry: None,
     }
 }
 
@@ -1066,6 +1069,7 @@ fn ctx_with_registry(
         provider_registry: Some(registry),
         data_dir: None,
         folder_id: "f1".into(),
+        device_registry: None,
     }
 }
 
@@ -1266,6 +1270,7 @@ fn unscoped_ctx(state: &Arc<AppState>) -> ToolCallContext {
         provider_registry: None,
         data_dir: None,
         folder_id: "f1".into(),
+        device_registry: None,
     }
 }
 

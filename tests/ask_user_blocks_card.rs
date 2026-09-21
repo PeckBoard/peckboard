@@ -50,6 +50,7 @@ async fn build_state() -> Arc<AppState> {
 
     Arc::new(AppState {
         plugin_ws_tickets: Default::default(),
+        device_registry: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
         config: Config {
             port: 0,
@@ -185,6 +186,7 @@ async fn ask_user_parks_card_until_answered_then_resumes_once() {
         provider_registry: None,
         data_dir: None,
         folder_id: "f1".into(),
+        device_registry: None,
     };
     tools
         .handle_tool_call(
@@ -328,6 +330,7 @@ async fn answered_question_does_not_reblock_card_on_plain_turn_end() {
         provider_registry: None,
         data_dir: None,
         folder_id: "f1".into(),
+        device_registry: None,
     };
     tools
         .handle_tool_call(

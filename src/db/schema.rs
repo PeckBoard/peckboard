@@ -415,6 +415,29 @@ diesel::table! {
     }
 }
 diesel::table! {
+    devices (id) {
+        id -> Text,
+        user_id -> Text,
+        name -> Text,
+        platform -> Text,
+        secret_hash -> Text,
+        status -> Text,
+        last_seen_at -> Nullable<Text>,
+        created_at -> Text,
+    }
+}
+diesel::table! {
+    device_activity (id) {
+        id -> Text,
+        device_id -> Text,
+        session_id -> Nullable<Text>,
+        capability -> Text,
+        args_summary -> Text,
+        status -> Text,
+        created_at -> Text,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -637,4 +660,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     mfa_challenges,
     mfa_pending,
     doc_review_pr_links,
+    devices,
+    device_activity,
 );

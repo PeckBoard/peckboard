@@ -537,6 +537,7 @@ mod fetch_url_tests {
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
             data_dir: None,
+            device_registry: None,
         };
         (ctx, dir)
     }
