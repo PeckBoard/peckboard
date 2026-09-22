@@ -2,7 +2,8 @@ use crate::mcp;
 
 /// Safe fallback model for empty / legacy ids. Kept as `grok-4.5` because
 /// that id is in every auth-scoped CLI catalog (OAuth, API key, unauth);
-/// `grok-4.6` is OAuth-only and would hard-error on API-key turns.
+/// newer flagships (`grok-4.6`, `grok-4.7`) are OAuth-gated and would
+/// hard-error on API-key turns.
 pub const DEFAULT_MODEL: &str = "grok-4.5";
 
 /// The default model grok 0.x shipped with; grok 1.0 removed it from the

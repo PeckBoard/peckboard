@@ -489,14 +489,15 @@ pub(super) struct ParsedCatalog {
 
 /// Parse the human-readable listing from `grok models`.
 ///
-/// Verified against grok 1.0.3:
+/// Verified against grok 1.0.3+ OAuth output shaped like:
 /// ```text
 /// You are logged in with grok.com.
 ///
-/// Default model: grok-4.6
+/// Default model: grok-4.7
 ///
 /// Available models:
-///   * grok-4.6 (default)
+///   * grok-4.7 (default)
+///   - grok-4.6
 ///   - grok-4.5
 /// ```
 /// Returns `None` when nothing usable was found so the caller can fall back
@@ -1256,6 +1257,23 @@ Available models:
         let cat = parse_cli_models(out).expect("oauth catalog");
         assert_eq!(cat.default_id.as_deref(), Some("grok-4.6"));
         assert_eq!(cat.models, vec!["grok-4.6", "grok-4.5"]);
+    }
+
+    #[test]
+    fn parse_cli_models_oauth_lists_47_then_46_then_45() {
+        let out = "\
+You are logged in with grok.com.
+
+Default model: grok-4.7
+
+Available models:
+  * grok-4.7 (default)
+  - grok-4.6
+  - grok-4.5
+";
+        let cat = parse_cli_models(out).expect("oauth catalog");
+        assert_eq!(cat.default_id.as_deref(), Some("grok-4.7"));
+        assert_eq!(cat.models, vec!["grok-4.7", "grok-4.6", "grok-4.5"]);
     }
 
     #[test]

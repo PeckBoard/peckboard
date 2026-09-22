@@ -38,7 +38,7 @@ pub fn manifest_json() -> String {
                 "title": "Additional Models",
                 "description": "Extra model ids to add to the picker on top of the auto-discovered (or built-in) list. Each appears as grok:<id>.",
                 "type": "string_list",
-                "item_placeholder": "grok-4.6"
+                "item_placeholder": "grok-4.7"
             }
         ],
     })

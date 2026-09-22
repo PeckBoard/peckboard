@@ -25,14 +25,14 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000
  *  `claude-fable-5[1m]`), so the suffix — not an id list that churns with
  *  each model release — is what [`contextWindowInfo`] matches on. */
 export const LONG_CONTEXT_WINDOW = 1_000_000
-
 /** Per-model context-window overrides, keyed by bare model id. Standard
  *  Claude tiers share the 200K default and long-context tiers are matched
- *  by their `[1m]` suffix; Grok 4.5/4.6 advertise a 500K window; Codex
+ *  by their `[1m]` suffix; Grok 4.5/4.6/4.7 advertise a 500K window; Codex
  *  GPT-5.6 / GPT-6 advertise a 1.05M window. */
 const CONTEXT_WINDOWS: Record<string, number> = {
   'grok-4.5': 500_000,
   'grok-4.6': 500_000,
+  'grok-4.7': 500_000,
   // Legacy CLI ids still stored on old sessions; same window as 4.5.
   'grok-build': 500_000,
   'grok-build-0.1': 500_000,

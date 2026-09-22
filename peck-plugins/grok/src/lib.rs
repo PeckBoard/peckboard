@@ -102,16 +102,22 @@ fn handle_models() -> String {
     let extra = settings::str_list("additional_models");
     let discovery_on = settings::bool("discover_models", true);
     let mut discovered = Vec::new();
-    if discovery_on
-        && let Some(out) = settings::probe(&cli, &["models"])
-        && let Some(cat) = parser::parse_cli_models(&out)
-    {
-        discovered = cat.models;
+    if discovery_on && let Some(out) = settings::probe(&cli, &["models"]) {
+        // Unauthenticated `grok models` only lists the free default and is
+        // not an auth-scoped catalog — treat it as a failed probe so we
+        // don't replace / cache the seed with a truncated list.
+        let unauth = out
+            .to_ascii_lowercase()
+            .contains("you are not authenticated");
+        if !unauth && let Some(cat) = parser::parse_cli_models(&out) {
+            discovered = cat.models;
+        }
     }
-    // Discovery success REPLACES the static seed (the CLI catalog is
-    // auth-scoped); discovery attempted-but-failed prefers last-good, then
-    // the compile-time seed. Discovered and additional ids get humanized
-    // names and the full capability set.
+    // Live discovery is auth-scoped and REPLACES the static seed as the
+    // base, then seed ids missing from that list are merged back in so
+    // newly pinned flagships stay selectable when the CLI is behind.
+    // Failed / skipped discovery prefers last-good (also topped up), then
+    // the compile-time seed.
     let seed = models::seed_models()
         .as_array()
         .cloned()
@@ -128,7 +134,10 @@ fn handle_models() -> String {
                     .collect(),
             )
         };
-        catalog_cache::resolve_base(discovered_models, seed).0
+        let (base, _source) = catalog_cache::resolve_base(discovered_models, seed);
+        // Top up live and last-good catalogs with any seed ids they lack so
+        // newly pinned flagships stay selectable when the CLI is behind.
+        models::merge_always_offered(base)
     } else {
         seed
     };
@@ -141,6 +150,7 @@ fn handle_models() -> String {
     );
     allow(serde_json::json!({ "models": models }))
 }
+
 fn allow(value: serde_json::Value) -> String {
     serde_json::json!({ "verdict": "allow", "payload": value }).to_string()
 }

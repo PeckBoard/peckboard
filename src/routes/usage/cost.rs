@@ -67,10 +67,9 @@ const HAIKU: ModelRates = ModelRates {
     cache_read_per_mtok: 0.08,
     cache_creation_per_mtok: 1.0,
 };
-
-// xAI published short-context rates (prompt < 200k). Cache-creation has
-// no published write premium, so it matches input. Long-context (≥200k)
-// doubles these; we price the common short-context tier.
+// xAI published short-context rates (prompt < 200k) for Grok 4.6 / 4.7.
+// Cache-creation has no published write premium, so it matches input.
+// Long-context (≥200k) doubles these; we price the common short-context tier.
 const GROK_46: ModelRates = ModelRates {
     input_per_mtok: 2.0,
     output_per_mtok: 6.0,
@@ -140,7 +139,7 @@ pub fn known_rates_for(model: &str) -> Option<ModelRates> {
         | "claude-fable-5" => Some(OPUS),
         "claude-sonnet-5" | "claude-sonnet-4-6" => Some(SONNET),
         "claude-haiku-4-5" => Some(HAIKU),
-        "grok-4.6" => Some(GROK_46),
+        "grok-4.7" | "grok-4.6" => Some(GROK_46),
         "grok-4.5" | "grok-build" | "grok-build-0.1" => Some(GROK_45),
         "gpt-5.6-luna" => Some(CODEX_LUNA),
         "gpt-5.6-terra" | "gpt-5.6" => Some(CODEX_TERRA),
@@ -195,15 +194,14 @@ pub fn cost_table() -> CostTable {
     for id in [
         "claude-opus-5",
         "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-        "claude-fable-5",
         "claude-sonnet-5",
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
+        "grok-4.7",
         "grok-4.6",
         "grok-4.5",
         "grok-build",
+        "grok-build-0.1",
         "grok-build-0.1",
         "gpt-5.6-luna",
         "gpt-5.6-terra",
@@ -283,6 +281,7 @@ mod tests {
         }
         assert_eq!(table.rates["grok-4.5"].output_per_mtok, 6.0);
         assert_eq!(table.rates["grok-4.6"].cache_read_per_mtok, 0.50);
+        assert_eq!(table.rates["grok-4.7"].cache_read_per_mtok, 0.50);
         assert_eq!(table.rates["gpt-5.6-luna"].output_per_mtok, 1.20);
         assert_eq!(table.rates["gpt-6-astra"].input_per_mtok, 10.0);
     }
