@@ -338,3 +338,134 @@ test('remote_agent_echo round-trips through a mock device: in-flight count and a
   await page.getByTestId('confirm-dialog-confirm').click()
   await expect(page.getByTestId('agents-empty')).toBeVisible()
 })
+
+test('remote_agent_screenshot targets a monitor: monitor forwarded, display aliased, image returned', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const authHeader = { Authorization: `Bearer ${token}` }
+  await loadApp(page, token)
+
+  await page.getByTestId('rail-agents').click()
+  await expect(page.getByTestId('agents-view')).toBeVisible()
+  const enrollToken = await enrollViaUi(page, 'Screen Box')
+
+  const row = page.locator('.list-view-row', { hasText: 'Screen Box' })
+  await expect(row).toBeVisible()
+
+  const devicesRes = await request.get('/api/devices', { headers: authHeader })
+  expect(devicesRes.ok()).toBeTruthy()
+  const devices = (await devicesRes.json()) as { devices: { id: string; name: string }[] }
+  const deviceId = devices.devices.find((d) => d.name === 'Screen Box')?.id
+  expect(deviceId, 'enrolled device id resolvable from /api/devices').toBeTruthy()
+
+  // MCP token via a fresh session (same mechanics as the echo test above).
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-agents-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: authHeader,
+    data: { name: 'e2e-agents-screenshot', path: folderPath },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'screenshot bridge', folder_id: folder.id },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const session = (await sessionRes.json()) as { id: string }
+  const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
+    headers: authHeader,
+    data: { text: 'go', model: 'mock:happy-path' },
+  })
+  expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
+  const dataDir = process.env.PECKBOARD_E2E_DATA_DIR
+  expect(dataDir, 'PECKBOARD_E2E_DATA_DIR exported by playwright.config.ts').toBeTruthy()
+  const mcpCfgPath = path.join(dataDir!, 'worker-mcp', `${session.id}.json`)
+  const mcpCfg = JSON.parse(readFileSync(mcpCfgPath, 'utf8')) as {
+    mcpServers: { peckboard: { headers: { Authorization: string } } }
+  }
+  const mcpToken = mcpCfg.mcpServers.peckboard.headers.Authorization.replace(/^Bearer /, '')
+
+  // Screenshot-executor stand-in: replies with a tiny image plus the args
+  // the daemon actually received, so the test can assert the wire contract
+  // (the daemon-side selector key is `monitor`).
+  await page.evaluate((tok) => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const ws = new WebSocket(`${proto}://${location.host}/ws/agent`, [
+      'peckboard-agent',
+      `token.${tok}`,
+    ])
+    ;(window as unknown as { __agentWs?: WebSocket }).__agentWs = ws
+    ws.addEventListener('open', () => {
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: 'hello',
+          agent_version: '0.0.1-e2e',
+          platform: 'linux',
+          hostname: 'e2e-box',
+          capabilities: ['screenshot'],
+        }),
+      )
+    })
+    ws.addEventListener('message', (ev) => {
+      const frame = JSON.parse(String(ev.data))
+      if (frame.type !== 'request') return
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: 'result',
+          corr_id: frame.corr_id,
+          ok: true,
+          payload: { image_base64: 'aGVsbG8=', mime: 'image/png', received: frame.args },
+        }),
+      )
+    })
+  }, enrollToken)
+  await expect(row.getByTestId('agent-dot-online')).toBeVisible({ timeout: 10_000 })
+
+  const shoot = async (args: Record<string, unknown>) => {
+    const res = await request.post('/mcp', {
+      headers: { Authorization: `Bearer ${mcpToken}` },
+      data: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'remote_agent_screenshot', arguments: { device_id: deviceId, ...args } },
+      },
+    })
+    expect(res.ok(), `remote_agent_screenshot failed: ${await res.text()}`).toBeTruthy()
+    const body = (await res.json()) as {
+      result?: { content: { type: string; data?: string; mimeType?: string; text?: string }[] }
+      error?: unknown
+    }
+    expect(body.error, `MCP error: ${JSON.stringify(body.error)}`).toBeFalsy()
+    return body.result!.content
+  }
+
+  // `monitor` reaches the daemon verbatim, and the image comes back as an
+  // MCP image content block ahead of the text block.
+  let content = await shoot({ monitor: 1 })
+  expect(content[0]).toMatchObject({ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' })
+  let toolResult = JSON.parse(content[1].text ?? '') as {
+    ok: boolean
+    result: { received: Record<string, unknown> }
+  }
+  expect(toolResult.ok).toBe(true)
+  expect(toolResult.result.received).toEqual({ monitor: 1 })
+
+  // Legacy `display` is aliased to `monitor` before it hits the wire.
+  content = await shoot({ display: 2 })
+  toolResult = JSON.parse(content[1].text ?? '') as {
+    ok: boolean
+    result: { received: Record<string, unknown> }
+  }
+  expect(toolResult.result.received).toEqual({ monitor: 2 })
+
+  // Cleanup so this spec leaves no row behind for others.
+  await row.locator('.list-view-menu').click()
+  await page.getByRole('menuitem', { name: 'Delete' }).click()
+  await page.getByTestId('confirm-dialog-confirm').click()
+  await expect(page.getByTestId('agents-empty')).toBeVisible()
+})

@@ -75,7 +75,12 @@ impl McpToolRegistry {
             }
             "remote_agent_screenshot" => {
                 let result = self
-                    .remote_agent_call(ctx, args, CAP_SCREENSHOT, Duration::from_secs(30))
+                    .remote_agent_call(
+                        ctx,
+                        normalize_screenshot_args(args),
+                        CAP_SCREENSHOT,
+                        Duration::from_secs(30),
+                    )
                     .await?;
                 Ok(image_result(result))
             }
@@ -249,6 +254,20 @@ async fn resolve_device(ctx: &ToolCallContext, device_id: &str) -> anyhow::Resul
     Ok(device)
 }
 
+/// The daemon's screenshot executor selects a display via `monitor`; an
+/// earlier tool schema called the field `display` (and the daemon
+/// silently ignored it). Accept both, preferring an explicit `monitor`,
+/// and never forward `display`.
+fn normalize_screenshot_args(mut args: Value) -> Value {
+    if let Some(o) = args.as_object_mut()
+        && let Some(d) = o.remove("display")
+        && !o.contains_key("monitor")
+    {
+        o.insert("monitor".into(), d);
+    }
+    args
+}
+
 /// Map a screenshot payload onto the `_image_base64` convention
 /// (`routes/mcp.rs` turns it into an MCP image content block). Payloads
 /// without an image pass through untouched so daemon-side errors stay
@@ -297,6 +316,21 @@ fn args_summary(capability: &str, payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_display_arg_aliases_to_monitor() {
+        // Legacy `display` becomes `monitor`.
+        let v = normalize_screenshot_args(serde_json::json!({ "display": 1 }));
+        assert_eq!(v, serde_json::json!({ "monitor": 1 }));
+
+        // An explicit `monitor` wins; `display` is never forwarded.
+        let v = normalize_screenshot_args(serde_json::json!({ "monitor": 2, "display": 1 }));
+        assert_eq!(v, serde_json::json!({ "monitor": 2 }));
+
+        // No selector at all passes through untouched.
+        let v = normalize_screenshot_args(serde_json::json!({ "list": true }));
+        assert_eq!(v, serde_json::json!({ "list": true }));
+    }
 
     #[test]
     fn screenshot_payload_maps_to_the_image_convention() {

@@ -1798,12 +1798,13 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "remote_agent_screenshot".into(),
-            description: "Capture the remote device's screen (returned as an image). Optional display index for multi-monitor machines. The daemon shows a visible 'being controlled' indicator while serving these.".into(),
+            description: "Capture the remote device's screen (returned as an image). Multi-monitor: call once with list=true to get the monitor table, then pass 'monitor' with the chosen index. The daemon shows a visible 'being controlled' indicator while serving these.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
-                    "display": { "type": "integer", "description": "Display index (default: primary)." }
+                    "monitor": { "type": "integer", "description": "Monitor index from list mode (default: the primary display)." },
+                    "list": { "type": "boolean", "description": "true = return the monitor table (index, name, size, is_primary) instead of capturing." }
                 },
                 "required": ["device_id"],
                 "additionalProperties": false
