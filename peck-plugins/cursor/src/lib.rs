@@ -3,6 +3,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
 mod argv;
+mod catalog_cache;
 mod event;
 mod host;
 mod manifest;
@@ -90,23 +91,36 @@ fn handle_register() -> String {
 fn handle_models() -> String {
     let cli = settings::cli_path("cursor-agent");
     let extra = settings::str_list("additional_models");
+    let discovery_on = settings::bool("discover_models", true);
     let mut discovered = Vec::new();
-    if settings::bool("discover_models", true)
+    if discovery_on
         && let Some(out) = settings::probe(&cli, &["models"])
         && let Some(ids) = parser::parse_cli_models(&out)
     {
         discovered = ids;
     }
     // Discovery supersedes the static seed (the live `cursor-agent models`
-    // list is the truth); the seed only backstops a failed/disabled probe.
-    let base = if discovered.is_empty() {
-        models::seed_models()
+    // list is the truth); probe failure prefers last-good, then the seed.
+    let seed = models::seed_models()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let base = if discovery_on {
+        let discovered_models = if discovered.is_empty() {
+            None
+        } else {
+            Some(discovered.iter().map(|id| models::model_json(id)).collect())
+        };
+        catalog_cache::resolve_base(discovered_models, seed).0
     } else {
-        serde_json::Value::Array(discovered.iter().map(|id| models::model_json(id)).collect())
+        seed
     };
-    let models = settings::merge_catalog(base, extra, &settings::accounts(), |id| {
-        models::model_json(id)
-    });
+    let models = settings::merge_catalog(
+        serde_json::Value::Array(base),
+        extra,
+        &settings::accounts(),
+        |id| models::model_json(id),
+    );
     allow(serde_json::json!({ "models": models }))
 }
 

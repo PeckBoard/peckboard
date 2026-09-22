@@ -3,6 +3,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
 mod argv;
+mod catalog_cache;
 mod event;
 mod host;
 mod manifest;
@@ -94,27 +95,36 @@ fn handle_models() -> String {
     let extra = settings::str_list("additional_models");
     // Seed first (the config-default pseudo-model stays a working
     // selection), then the discovered aliases with their CLI-reported
-    // display names and capabilities.
+    // display names and capabilities. Probe failure prefers last-good
+    // discovered aliases before giving up on extras.
     let mut base: Vec<serde_json::Value> = models::seed_models()
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if settings::bool("discover_models", true)
+    let discovery_on = settings::bool("discover_models", true);
+    let mut discovered_models: Option<Vec<serde_json::Value>> = None;
+    if discovery_on
         && let Some(out) = settings::probe(&cli, &["provider", "list", "--json"])
         && let Some(discovered) = parser::parse_cli_models(&out)
     {
-        for m in discovered {
+        discovered_models = Some(
+            discovered
+                .into_iter()
+                .map(|m| models::cli_model_json(&m.id, m.display_name.as_deref(), &m.capabilities))
+                .collect(),
+        );
+    }
+    if discovery_on {
+        let (extras, _source) = catalog_cache::resolve_base(discovered_models, Vec::new());
+        for m in extras {
+            let id = m.get("id").and_then(|v| v.as_str());
             if base
                 .iter()
-                .any(|b| b.get("id").and_then(|v| v.as_str()) == Some(m.id.as_str()))
+                .any(|b| b.get("id").and_then(|v| v.as_str()) == id)
             {
                 continue;
             }
-            base.push(models::cli_model_json(
-                &m.id,
-                m.display_name.as_deref(),
-                &m.capabilities,
-            ));
+            base.push(m);
         }
     }
     let models = settings::merge_catalog(
@@ -126,7 +136,6 @@ fn handle_models() -> String {
     );
     allow(serde_json::json!({ "models": models }))
 }
-
 fn handle_send(payload: serde_json::Value) -> String {
     match send::run(&payload) {
         Ok(()) => allow(serde_json::json!({ "ok": true })),

@@ -3,6 +3,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
 mod argv;
+mod catalog_cache;
 mod event;
 mod host;
 mod manifest;
@@ -99,33 +100,47 @@ fn handle_send(payload: serde_json::Value) -> String {
 fn handle_models() -> String {
     let cli = settings::cli_path("grok");
     let extra = settings::str_list("additional_models");
+    let discovery_on = settings::bool("discover_models", true);
     let mut discovered = Vec::new();
-    if settings::bool("discover_models", true)
+    if discovery_on
         && let Some(out) = settings::probe(&cli, &["models"])
         && let Some(cat) = parser::parse_cli_models(&out)
     {
         discovered = cat.models;
     }
     // Discovery success REPLACES the static seed (the CLI catalog is
-    // auth-scoped); discovery off/failed keeps the seed. Discovered and
-    // additional ids get humanized names and the full capability set.
-    let base = if discovered.is_empty() {
-        models::seed_models()
+    // auth-scoped); discovery attempted-but-failed prefers last-good, then
+    // the compile-time seed. Discovered and additional ids get humanized
+    // names and the full capability set.
+    let seed = models::seed_models()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let base = if discovery_on {
+        let discovered_models = if discovered.is_empty() {
+            None
+        } else {
+            Some(
+                discovered
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| models::model_json(id, i as i64))
+                    .collect(),
+            )
+        };
+        catalog_cache::resolve_base(discovered_models, seed).0
     } else {
-        serde_json::Value::Array(
-            discovered
-                .iter()
-                .enumerate()
-                .map(|(i, id)| models::model_json(id, i as i64))
-                .collect(),
-        )
+        seed
     };
-    let models = settings::merge_catalog(base, Vec::new(), extra, &settings::accounts(), |id| {
-        models::model_json(id, 99)
-    });
+    let models = settings::merge_catalog(
+        serde_json::Value::Array(base),
+        Vec::new(),
+        extra,
+        &settings::accounts(),
+        |id| models::model_json(id, 99),
+    );
     allow(serde_json::json!({ "models": models }))
 }
-
 fn allow(value: serde_json::Value) -> String {
     serde_json::json!({ "verdict": "allow", "payload": value }).to_string()
 }

@@ -60,8 +60,8 @@ pub fn seed_models() -> serde_json::Value {
             "tier": 0
         },
         {
-            "id": "grok-4.5-high",
-            "display_name": "Grok 4.5 High (Cursor)",
+            "id": "cursor-grok-4.5-high",
+            "display_name": "Grok 4.5 (Cursor)",
             "capabilities": ["code"],
             "tier": 0
         }

@@ -4,6 +4,7 @@
 
 mod argv;
 mod background;
+mod catalog_cache;
 mod discovery;
 mod event;
 mod host;
@@ -129,17 +130,25 @@ fn handle_models() -> String {
     let extra = settings::str_list("additional_models");
     // The CLI-probed catalog (host credentials) replaces the static seed,
     // topped up with the pinned ids the CLI only covers as family aliases;
-    // any probe failure falls back to the seed alone.
-    let mut base = models::seed_models()
+    // any probe failure prefers the last-good cache, then the seed alone.
+    let seed = models::seed_models()
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if settings::bool("discover_models", true)
-        && env_discovery_enabled()
-        && let Some(discovered) = discovery::probe_cli_models(&cli)
-    {
-        base = discovery::merge_always_offered(discovered);
-    }
+    let discovery_on = settings::bool("discover_models", true) && env_discovery_enabled();
+    let mut base = if discovery_on {
+        let discovered = discovery::probe_cli_models(&cli).map(discovery::merge_always_offered);
+        let had_live = discovered.as_ref().is_some_and(|m| !m.is_empty());
+        let (mut base, _source) = catalog_cache::resolve_base(discovered, seed);
+        // Last-good may predate a newly pinned seed id — top up again so
+        // pins stay selectable even when serving a cached catalog.
+        if !had_live {
+            base = discovery::merge_always_offered(base);
+        }
+        base
+    } else {
+        seed
+    };
     discovery::push_bedrock_env_models(&mut base);
     let models = settings::merge_catalog(
         serde_json::Value::Array(base),

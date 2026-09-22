@@ -40,7 +40,20 @@ Run from the repo root unless noted.
 | Playwright e2e (single)       | `cd web && npm run e2e`                        |
 | Playwright e2e (impacted)     | `scripts/e2e-impacted.sh`                      |
 | Rebuild the e2e impact map    | `scripts/e2e-impact-map.sh`                    |
+| Refresh provider model seeds  | `scripts/refresh-provider-model-seeds.sh`      |
 | Playwright install (one-time) | `cd web && npm run e2e:install`                |
+
+First-party providers prefer live CLI/HTTP model discovery at runtime
+(`provider.models`). When discovery fails they serve a last-good catalog
+cached in the plugin data store, then the compile-time `seed_models()`
+fallback. After a provider ships new models, refresh checked-in seeds on a
+machine with that CLI authenticated:
+
+```bash
+scripts/refresh-provider-model-seeds.sh           # probe + print drift
+scripts/refresh-provider-model-seeds.sh --write   # rewrite seed_models()
+scripts/refresh-provider-model-seeds.sh --check   # CI: non-zero on drift
+```
 
 The Playwright `webServer` block boots `target/release/peckboard` with a
 fresh `mktemp -d` data dir, so each run starts from a clean state.

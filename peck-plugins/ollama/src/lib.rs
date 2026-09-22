@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
+mod catalog_cache;
 mod event;
 mod host;
 mod manifest;
@@ -88,8 +89,9 @@ fn handle_register() -> String {
 
 fn handle_models() -> String {
     let extra = settings::str_list("additional_models");
+    let discovery_on = settings::bool("discover_models", true);
     let mut discovered = Vec::new();
-    if settings::bool("discover_models", true) {
+    if discovery_on {
         let mut targets: Vec<(Option<String>, String)> = vec![(None, settings::base_url())];
         for (name, url) in settings::servers() {
             targets.push((Some(name), url));
@@ -105,7 +107,35 @@ fn handle_models() -> String {
             }
         }
     }
-    let models = settings::merge_catalog(models::seed_models(), discovered, extra, &[], |id| {
+    // Live server tags are the truth; on a dead daemon prefer the last-good
+    // discovered list before the compile-time suggestions.
+    let discovered_ids: Vec<String> = if discovery_on {
+        let discovered_models = if discovered.is_empty() {
+            None
+        } else {
+            Some(
+                discovered
+                    .iter()
+                    .map(|id| {
+                        json!({
+                            "id": id,
+                            "display_name": format!("{id} (Ollama)"),
+                            "capabilities": ["code"],
+                            "tier": 0,
+                        })
+                    })
+                    .collect(),
+            )
+        };
+        catalog_cache::resolve_base(discovered_models, Vec::new())
+            .0
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let models = settings::merge_catalog(models::seed_models(), discovered_ids, extra, &[], |id| {
         format!("{id} (Ollama)")
     });
     allow(serde_json::json!({ "models": models }))
