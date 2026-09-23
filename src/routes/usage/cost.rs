@@ -67,6 +67,21 @@ const HAIKU: ModelRates = ModelRates {
     cache_read_per_mtok: 0.08,
     cache_creation_per_mtok: 1.0,
 };
+// Current flagships (https://platform.claude.com/docs/en/about-claude/pricing,
+// 2026-09-22). Cache-creation is the 5-minute write (1.25× input). Fable 5.1
+// cache reads are 0.025× input; Opus 5.5 cache reads are 0.05× input.
+const FABLE_51: ModelRates = ModelRates {
+    input_per_mtok: 10.0,
+    output_per_mtok: 50.0,
+    cache_read_per_mtok: 0.25,
+    cache_creation_per_mtok: 12.50,
+};
+const OPUS_55: ModelRates = ModelRates {
+    input_per_mtok: 4.0,
+    output_per_mtok: 20.0,
+    cache_read_per_mtok: 0.20,
+    cache_creation_per_mtok: 5.0,
+};
 // xAI published short-context rates (prompt < 200k) for Grok 4.6 / 4.7.
 // Cache-creation has no published write premium, so it matches input.
 // Long-context (≥200k) doubles these; we price the common short-context tier.
@@ -135,6 +150,8 @@ fn bare_model_id(model: &str) -> &str {
 pub fn known_rates_for(model: &str) -> Option<ModelRates> {
     let id = bare_model_id(model);
     match id {
+        "claude-fable-5-1" => Some(FABLE_51),
+        "claude-opus-5-5" => Some(OPUS_55),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
         | "claude-fable-5" => Some(OPUS),
         "claude-sonnet-5" | "claude-sonnet-4-6" => Some(SONNET),
@@ -192,6 +209,8 @@ pub struct CostTable {
 pub fn cost_table() -> CostTable {
     let mut rates = BTreeMap::new();
     for id in [
+        "claude-fable-5-1",
+        "claude-opus-5-5",
         "claude-opus-5",
         "claude-opus-4-8",
         "claude-sonnet-5",
@@ -273,6 +292,11 @@ mod tests {
     #[test]
     fn every_known_model_is_priced() {
         let table = cost_table();
+        assert_eq!(table.rates["claude-opus-5-5"].input_per_mtok, 4.0);
+        assert_eq!(table.rates["claude-opus-5-5"].output_per_mtok, 20.0);
+        assert_eq!(table.rates["claude-opus-5-5"].cache_read_per_mtok, 0.20);
+        assert_eq!(table.rates["claude-fable-5-1"].input_per_mtok, 10.0);
+        assert_eq!(table.rates["claude-fable-5-1"].cache_read_per_mtok, 0.25);
         for (id, rates) in &table.rates {
             assert!(
                 rates.input_per_mtok > 0.0 && rates.output_per_mtok > 0.0,

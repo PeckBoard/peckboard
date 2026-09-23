@@ -77,6 +77,18 @@ test('contextWindowInfo: [1m] aliases stay 1M; table members stay 200K', () => {
   })
 })
 
+test('contextWindowInfo: Fable 5.1 and Opus 5.5 are 1M, known, even with prefix/@account', () => {
+  const ids = [
+    'claude-fable-5-1',
+    'claude:claude-fable-5-1',
+    'claude:claude-opus-5-5@acc',
+    'claude-opus-5-5',
+  ]
+  for (const id of ids) {
+    expect(contextWindowInfo(id, table)).toEqual({ limit: LONG_CONTEXT_WINDOW, known: true })
+  }
+})
+
 test('contextWindowInfo: unknown model is the 200K default and says so', () => {
   expect(contextWindowInfo('mock:usage', table)).toEqual({
     limit: DEFAULT_CONTEXT_WINDOW,

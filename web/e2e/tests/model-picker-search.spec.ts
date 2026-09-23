@@ -185,10 +185,12 @@ test('claude picker lists every still-available opus snapshot', async ({
   const search = page.getByTestId('new-session-model-search')
   await expect(search).toBeVisible()
 
-  // Type the bare id: the catalogue must keep Opus 4.6 / 4.7 / 4.8
-  // selectable after Opus 5 shipped, plus the current Sonnet / Fable /
-  // Haiku ids. Discovery is off in e2e, so this is the static seed.
+  // Type the bare id: the catalogue must keep Opus 4.6 / 4.7 / 4.8 / 5
+  // selectable after Opus 5.5 shipped, plus current Fable / Sonnet / Haiku
+  // ids. Discovery is off in e2e, so this is the static seed.
   const pinned = [
+    'claude:claude-fable-5-1',
+    'claude:claude-opus-5-5',
     'claude:claude-opus-5',
     'claude:claude-opus-4-8',
     'claude:claude-opus-4-7',

@@ -263,6 +263,8 @@ mod tests {
             .collect();
         assert_eq!(ids[0], "opus[1m]");
         assert!(ids.contains(&"claude-opus-4-8"));
+        assert!(ids.contains(&"claude-opus-5-5"));
+        assert!(ids.contains(&"claude-fable-5-1"));
         assert!(ids.contains(&"claude-haiku-4-5"));
     }
 

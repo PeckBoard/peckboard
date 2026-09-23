@@ -12,8 +12,8 @@ import type { CostTable, ModelRates } from '../types/api'
 export type TokenKind = 'input' | 'output' | 'cache_read' | 'cache_creation'
 
 /** Usable context-window size (tokens) assumed when a row carries no model,
- *  or one we hold no window for. Every standard Claude tier exposes a 200K
- *  window, so it is the safe assumption — but callers must LABEL it as a
+ *  or one we hold no window for. Older Claude tiers expose a 200K window,
+ *  so it is the safe assumption — but callers must LABEL it as a
  *  default rather than presenting it as the model's real limit (see
  *  [`contextWindowInfo`]). Lives here, next to the rate table, so the limit
  *  is part of the shared cost/model module rather than hardcoded in a
@@ -25,11 +25,14 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000
  *  `claude-fable-5[1m]`), so the suffix — not an id list that churns with
  *  each model release — is what [`contextWindowInfo`] matches on. */
 export const LONG_CONTEXT_WINDOW = 1_000_000
-/** Per-model context-window overrides, keyed by bare model id. Standard
- *  Claude tiers share the 200K default and long-context tiers are matched
- *  by their `[1m]` suffix; Grok 4.5/4.6/4.7 advertise a 500K window; Codex
- *  GPT-5.6 / GPT-6 advertise a 1.05M window. */
+/** Per-model context-window overrides, keyed by bare model id. Older Claude
+ *  tiers share the 200K default and long-context aliases are matched by
+ *  their `[1m]` suffix. Fable 5.1 and Opus 5.5 are 1M with no separate
+ *  200K SKU. Grok 4.5/4.6/4.7 advertise a 500K window; Codex GPT-5.6 /
+ *  GPT-6 advertise a 1.05M window. */
 const CONTEXT_WINDOWS: Record<string, number> = {
+  'claude-fable-5-1': 1_000_000,
+  'claude-opus-5-5': 1_000_000,
   'grok-4.5': 500_000,
   'grok-4.6': 500_000,
   'grok-4.7': 500_000,
@@ -62,7 +65,9 @@ export function bareModelId(model: string): string {
  *  Pass the fetched `CostTable` to recognize the standard 200K tiers: the
  *  table is keyed by the ids the running binary actually advertises (see the
  *  Rust `cost_table`), so membership in it — rather than a model list
- *  duplicated here and left to rot — is what makes a window known. */
+ *  duplicated here and left to rot — is what makes a window known. Ids in
+ *  [`CONTEXT_WINDOWS`] (Fable 5.1, Opus 5.5, Grok, Codex) win over that
+ *  200K default. */
 export function contextWindowInfo(
   model: string | null | undefined,
   table?: CostTable,
