@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -46,6 +46,7 @@ use tokio::time::Instant as TokioInstant;
 
 use crate::db::models::{Device, device_status};
 use crate::state::AppState;
+use crate::ws::agent_lease::{DeviceLease, LeaseError, LeaseStatus, LeaseTable};
 use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 /// Same cadence as `/ws` and `/ws/plugin-ui`: ping idle sockets, drop
@@ -119,6 +120,8 @@ struct DeviceConn {
 pub struct DeviceRegistry {
     inner: Mutex<HashMap<String, DeviceConn>>,
     next_conn_id: AtomicU64,
+    /// Per-device control leases: one driving session at a time.
+    leases: LeaseTable,
 }
 
 /// What a socket task gets back from [`DeviceRegistry::connect`].
@@ -313,7 +316,48 @@ impl DeviceRegistry {
         }
     }
 
-    /// Run `capability` on the device and await its reply.
+    /// Take (or top up) `session_id`'s control lease on `device_id`.
+    pub fn acquire_lease(
+        &self,
+        device_id: &str,
+        session_id: &str,
+    ) -> Result<LeaseStatus, LeaseError> {
+        let busy = self.in_flight(device_id) > 0;
+        self.leases
+            .acquire(device_id, session_id, busy, Instant::now())
+    }
+
+    /// Gate for every bridged call: `session_id` must hold the device's
+    /// lease. Extends it and returns the token [`Self::send_request`] needs.
+    pub fn use_lease(&self, device_id: &str, session_id: &str) -> Result<DeviceLease, LeaseError> {
+        let busy = self.in_flight(device_id) > 0;
+        self.leases
+            .use_lease(device_id, session_id, busy, Instant::now())
+    }
+
+    /// Release `session_id`'s lease on `device_id`.
+    pub fn release_lease(&self, device_id: &str, session_id: &str) -> Result<(), LeaseError> {
+        let busy = self.in_flight(device_id) > 0;
+        self.leases
+            .release(device_id, session_id, busy, Instant::now())
+    }
+
+    /// The device's live lease, if any.
+    pub fn lease_status(&self, device_id: &str) -> Option<LeaseStatus> {
+        let busy = self.in_flight(device_id) > 0;
+        self.leases.status(device_id, busy, Instant::now())
+    }
+
+    /// A lease for tests that exercise the request bridge itself.
+    #[cfg(test)]
+    pub fn test_lease(&self, device_id: &str) -> DeviceLease {
+        self.acquire_lease(device_id, "test-session").unwrap();
+        self.use_lease(device_id, "test-session").unwrap()
+    }
+
+    /// Run `capability` on the lease's device and await its reply. The
+    /// lease is topped up again when the call finishes, so a long command
+    /// doesn't hand the device to another session the moment it returns.
     ///
     /// Allocates a correlation id, queues a [`ServerFrame::Request`], and
     /// resolves when the daemon's matching [`AgentFrame::Result`] arrives
@@ -323,6 +367,21 @@ impl DeviceRegistry {
     /// best-effort cancel). Every in-flight-count change is broadcast as a
     /// `device-update` event.
     pub async fn send_request(
+        &self,
+        events: &Broadcaster,
+        lease: &DeviceLease,
+        capability: &str,
+        args: Value,
+        timeout: Duration,
+    ) -> Result<Value, RequestError> {
+        let outcome = self
+            .dispatch(events, lease.device_id(), capability, args, timeout)
+            .await;
+        self.leases.touch(lease, Instant::now());
+        outcome
+    }
+
+    async fn dispatch(
         &self,
         events: &Broadcaster,
         device_id: &str,
@@ -666,8 +725,14 @@ mod tests {
         let mut conn = reg.connect("d1");
 
         assert_eq!(
-            reg.send_request(&events, "nope", "echo", Value::Null, Duration::from_secs(1))
-                .await,
+            reg.send_request(
+                &events,
+                &reg.test_lease("nope"),
+                "echo",
+                Value::Null,
+                Duration::from_secs(1)
+            )
+            .await,
             Err(RequestError::Offline)
         );
 
@@ -676,7 +741,7 @@ mod tests {
         let call = tokio::spawn(async move {
             reg2.send_request(
                 &events2,
-                "d1",
+                &reg2.test_lease("d1"),
                 "echo",
                 serde_json::json!({ "msg": "hi" }),
                 Duration::from_secs(5),
@@ -741,8 +806,14 @@ mod tests {
         let reg2 = Arc::clone(&reg);
         let events2 = Arc::clone(&events);
         let call = tokio::spawn(async move {
-            reg2.send_request(&events2, "d1", "echo", Value::Null, Duration::from_secs(30))
-                .await
+            reg2.send_request(
+                &events2,
+                &reg2.test_lease("d1"),
+                "echo",
+                Value::Null,
+                Duration::from_secs(30),
+            )
+            .await
         });
         // Wait until the request is actually in flight.
         tokio::time::timeout(Duration::from_secs(5), conn.outbound.recv())
@@ -764,8 +835,14 @@ mod tests {
         let reg2 = Arc::clone(&reg);
         let events2 = Arc::clone(&events);
         let call = tokio::spawn(async move {
-            reg2.send_request(&events2, "d1", "echo", Value::Null, Duration::from_secs(5))
-                .await
+            reg2.send_request(
+                &events2,
+                &reg2.test_lease("d1"),
+                "echo",
+                Value::Null,
+                Duration::from_secs(5),
+            )
+            .await
         });
         // Wait until the request frame is queued so it's genuinely pending.
         tokio::time::timeout(Duration::from_secs(5), conn.outbound.recv())
@@ -796,7 +873,7 @@ mod tests {
         let call = tokio::spawn(async move {
             reg2.send_request(
                 &events2,
-                "d1",
+                &reg2.test_lease("d1"),
                 "echo",
                 Value::Null,
                 Duration::from_millis(100),

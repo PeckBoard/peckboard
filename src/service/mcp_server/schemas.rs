@@ -1746,10 +1746,34 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "remote_agent_list".into(),
-            description: "List YOUR enrolled remote-control devices (peckboard-agent daemons) with live state: online, in-flight request count, platform, status, last seen. Use the returned device_id with the other remote_agent_* tools.".into(),
+            description: "List YOUR enrolled remote-control devices (peckboard-agent daemons) with live state: online, in-flight request count, platform, status, last seen, and lock state (locked, locked_by_you, lock_expires_in_secs). Use the returned device_id with the other remote_agent_* tools — take remote_agent_lock on it first.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_lock".into(),
+            description: "Take exclusive control of a remote device for THIS session. Required before any other remote_agent_* call on that device (echo/run/server/screenshot/mouse/keyboard) — calls without the lock are rejected. Only one session can hold a device's lock; others are refused until it expires or is released. A lock lasts 30s, and every call you make on the device tops it up to at least 15s remaining; calling remote_agent_lock again while holding it does the same. Release it with remote_agent_unlock when done.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Device to lock (see remote_agent_list)." }
+                },
+                "required": ["device_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "remote_agent_unlock".into(),
+            description: "Release this session's lock on a remote device so another session can take control. Fails if this session doesn't hold the lock.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string", "description": "Device to unlock." }
+                },
+                "required": ["device_id"],
                 "additionalProperties": false
             }),
         },
@@ -1759,7 +1783,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
                     "message": { "type": "string", "description": "Text for the daemon to echo back." }
                 },
                 "required": ["device_id", "message"],
@@ -1772,7 +1796,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
                     "command": { "type": "string", "description": "Command line to execute." },
                     "cwd": { "type": "string", "description": "Working directory (daemon default if omitted)." },
                     "timeout_secs": { "type": "integer", "description": "Deadline in seconds, 1–600 (default 120)." }
@@ -1787,7 +1811,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
                     "action": { "type": "string", "enum": ["start", "stop", "restart", "logs", "health"], "description": "What to do." },
                     "server": { "type": "string", "description": "Which configured server to act on." },
                     "lines": { "type": "integer", "description": "logs: how many trailing lines (daemon default if omitted)." }
@@ -1802,7 +1826,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
                     "monitor": { "type": "integer", "description": "Monitor index from list mode (default: the primary display). Not combinable with a window target." },
                     "list": { "type": "boolean", "description": "true = return the monitor table (index, name, size, x, y, scale_factor, is_primary) instead of capturing." },
                     "list_windows": { "type": "boolean", "description": "true = return the window table (window_id, app_name, title, x, y, width, height, is_focused, is_minimized) instead of capturing." },
@@ -1820,7 +1844,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
                     "action": { "type": "string", "enum": ["move", "click", "drag", "scroll"], "description": "What to do." },
                     "x": { "type": "integer", "description": "Target X (move/click/drag end)." },
                     "y": { "type": "integer", "description": "Target Y (move/click/drag end)." },
@@ -1843,7 +1867,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
+                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
                     "action": { "type": "string", "enum": ["type", "combo"], "description": "type = literal text; combo = chord like ctrl+shift+t." },
                     "text": { "type": "string", "description": "type: the text to type." },
                     "keys": { "type": "string", "description": "combo: '+'-joined chord, e.g. 'ctrl+c'." }

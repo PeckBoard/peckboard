@@ -59,6 +59,56 @@ async function enrollViaUi(page: Page, name: string): Promise<string> {
   return enrollToken
 }
 
+/** A fresh session's MCP bearer token (the per-session worker-mcp config). */
+async function sessionMcpToken(
+  request: APIRequestContext,
+  authHeader: Record<string, string>,
+  label: string,
+): Promise<string> {
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-agents-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: authHeader,
+    data: { name: `e2e-agents-${label}`, path: folderPath },
+  })
+  const folder = (await folderRes.json()) as { id: string }
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: label, folder_id: folder.id },
+  })
+  const session = (await sessionRes.json()) as { id: string }
+  const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
+    headers: authHeader,
+    data: { text: 'go', model: 'mock:happy-path' },
+  })
+  expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
+  const cfgPath = path.join(process.env.PECKBOARD_E2E_DATA_DIR!, 'worker-mcp', `${session.id}.json`)
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as {
+    mcpServers: { peckboard: { headers: { Authorization: string } } }
+  }
+  return cfg.mcpServers.peckboard.headers.Authorization.replace(/^Bearer /, '')
+}
+
+/** One MCP tools/call; returns the JSON-RPC body. */
+async function mcpCall(
+  request: APIRequestContext,
+  mcpToken: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<{ result?: { content: { text?: string }[] }; error?: { message: string } }> {
+  const res = await request.post('/mcp', {
+    headers: { Authorization: `Bearer ${mcpToken}` },
+    data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: tool, arguments: args } },
+  })
+  expect(res.ok()).toBeTruthy()
+  return res.json()
+}
+
+/** Take the session's exclusive control lock; every bridged call needs it. */
+async function lockDevice(request: APIRequestContext, mcpToken: string, deviceId: string) {
+  const body = await mcpCall(request, mcpToken, 'remote_agent_lock', { device_id: deviceId })
+  expect(body.error, `remote_agent_lock failed: ${JSON.stringify(body.error)}`).toBeFalsy()
+}
+
 test('agents panel: enroll, live online dot, rename, disable, delete', async ({
   request,
   page,
@@ -280,6 +330,7 @@ test('remote_agent_echo round-trips through a mock device: in-flight count and a
     })
   }, enrollToken)
   await expect(row.getByTestId('agent-dot-online')).toBeVisible({ timeout: 10_000 })
+  await lockDevice(request, mcpToken, deviceId!)
 
   // Fire remote_agent_echo over the loopback /mcp JSON-RPC endpoint
   // (same path a real Claude session's tool call takes) but don't await
@@ -424,6 +475,7 @@ test('remote_agent_screenshot targets a monitor: monitor forwarded, display alia
     })
   }, enrollToken)
   await expect(row.getByTestId('agent-dot-online')).toBeVisible({ timeout: 10_000 })
+  await lockDevice(request, mcpToken, deviceId!)
 
   const shoot = async (args: Record<string, unknown>) => {
     const res = await request.post('/mcp', {
@@ -599,6 +651,7 @@ test('remote_agent window targets: old agents refused, window capture + window-r
   //    refuses before anything reaches the daemon.
   await connectAgent([])
   await expect(row.getByTestId('agent-dot-online')).toBeVisible({ timeout: 10_000 })
+  await lockDevice(request, mcpToken, deviceId!)
   for (const [tool, args] of [
     ['remote_agent_screenshot', { app: 'firefox' }],
     ['remote_agent_mouse', { action: 'click', x: 1, y: 1, window_id: 5 }],
@@ -646,6 +699,122 @@ test('remote_agent window targets: old agents refused, window capture + window-r
   expect(body.error).toBeFalsy()
   const drag = JSON.parse(body.result!.content[0].text ?? '') as { result: { received: unknown } }
   expect(drag.result.received).toEqual({ op: 'drag', from: [1, 2], to: [3, 4], window_id: 5 })
+
+  await row.locator('.list-view-menu').click()
+  await page.getByRole('menuitem', { name: 'Delete' }).click()
+  await page.getByTestId('confirm-dialog-confirm').click()
+  await expect(page.getByTestId('agents-empty')).toBeVisible()
+})
+
+test('remote agent lock: one session controls a device at a time; unlock hands it over', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const authHeader = { Authorization: `Bearer ${token}` }
+  await loadApp(page, token)
+
+  await page.getByTestId('rail-agents').click()
+  await expect(page.getByTestId('agents-view')).toBeVisible()
+  const enrollToken = await enrollViaUi(page, 'Lock Box')
+  const row = page.locator('.list-view-row', { hasText: 'Lock Box' })
+  await expect(row).toBeVisible()
+  const devicesRes = await request.get('/api/devices', { headers: authHeader })
+  const devices = (await devicesRes.json()) as { devices: { id: string; name: string }[] }
+  const deviceId = devices.devices.find((d) => d.name === 'Lock Box')!.id
+
+  const sessionA = await sessionMcpToken(request, authHeader, 'lock-a')
+  const sessionB = await sessionMcpToken(request, authHeader, 'lock-b')
+
+  // Daemon stand-in that records every request it actually receives.
+  await page.evaluate((tok) => {
+    const w = window as unknown as { __agentWs?: WebSocket; __agentReqs: unknown[] }
+    w.__agentReqs = []
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const ws = new WebSocket(`${proto}://${location.host}/ws/agent`, [
+      'peckboard-agent',
+      `token.${tok}`,
+    ])
+    w.__agentWs = ws
+    ws.addEventListener('open', () => {
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: 'hello',
+          agent_version: '0.0.1-e2e',
+          platform: 'linux',
+          hostname: 'e2e-box',
+          capabilities: ['echo'],
+        }),
+      )
+    })
+    ws.addEventListener('message', (ev) => {
+      const frame = JSON.parse(String(ev.data))
+      if (frame.type !== 'request') return
+      w.__agentReqs.push(frame.args)
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: 'result',
+          corr_id: frame.corr_id,
+          ok: true,
+          payload: { echo: frame.args },
+        }),
+      )
+    })
+  }, enrollToken)
+  await expect(row.getByTestId('agent-dot-online')).toBeVisible({ timeout: 10_000 })
+  const received = () =>
+    page.evaluate(() => (window as unknown as { __agentReqs: unknown[] }).__agentReqs.length)
+  const echo = (tok: string, message: string) =>
+    mcpCall(request, tok, 'remote_agent_echo', { device_id: deviceId, message })
+
+  // No lock → rejected before reaching the device.
+  expect((await echo(sessionA, 'unlocked')).error?.message).toContain(
+    'call remote_agent_lock first',
+  )
+
+  // A locks (30s lease) and can drive the device.
+  const lock = await mcpCall(request, sessionA, 'remote_agent_lock', { device_id: deviceId })
+  expect(lock.error).toBeFalsy()
+  expect(JSON.parse(lock.result!.content[0].text ?? '')).toMatchObject({
+    locked: true,
+    lock_expires_in_secs: 30,
+  })
+  const ok = await echo(sessionA, 'from-a')
+  expect(ok.error).toBeFalsy()
+  expect(JSON.parse(ok.result!.content[0].text ?? '').lock_expires_in_secs).toBeGreaterThanOrEqual(
+    15,
+  )
+
+  // B is locked out of both calls and the lock itself.
+  expect((await echo(sessionB, 'from-b')).error?.message).toContain('locked by another session')
+  expect(
+    (await mcpCall(request, sessionB, 'remote_agent_lock', { device_id: deviceId })).error?.message,
+  ).toContain('locked by another session')
+  expect(
+    (await mcpCall(request, sessionB, 'remote_agent_unlock', { device_id: deviceId })).error,
+  ).toBeTruthy()
+
+  // The list shows who holds it.
+  const listed = await mcpCall(request, sessionB, 'remote_agent_list', {})
+  const mine = (
+    JSON.parse(listed.result!.content[0].text ?? '') as {
+      devices: { device_id: string; locked: boolean; locked_by_you: boolean }[]
+    }
+  ).devices.find((d) => d.device_id === deviceId)
+  expect(mine).toMatchObject({ locked: true, locked_by_you: false })
+
+  // A releases; B takes over and A is now the one refused.
+  expect(
+    (await mcpCall(request, sessionA, 'remote_agent_unlock', { device_id: deviceId })).error,
+  ).toBeFalsy()
+  await lockDevice(request, sessionB, deviceId)
+  expect((await echo(sessionB, 'from-b')).error).toBeFalsy()
+  expect((await echo(sessionA, 'late-a')).error?.message).toContain('locked by another session')
+
+  // Only the two permitted calls ever reached the daemon.
+  expect(await received()).toBe(2)
 
   await row.locator('.list-view-menu').click()
   await page.getByRole('menuitem', { name: 'Delete' }).click()

@@ -22,6 +22,11 @@
 //! `remote_agent_echo` exists to prove the full
 //! session → server → device → result loop with no OS executors; it stays
 //! useful afterwards as a connectivity probe.
+//!
+//! Exclusive control: a session must hold the device's lease
+//! (`remote_agent_lock`) before any bridged call, so two sessions can't
+//! give one machine conflicting orders. See [`crate::ws::agent_lease`] for
+//! the 30s / 15s-floor lifetime rules; `remote_agent_unlock` hands it back.
 
 use std::time::Duration;
 
@@ -32,6 +37,7 @@ use super::super::McpToolRegistry;
 use crate::db::models::{Device, NewDeviceActivity, device_status};
 use crate::service::mcp_server::context::ToolCallContext;
 use crate::ws::agent::{DeviceRegistry, RequestError};
+use crate::ws::agent_lease::LeaseError;
 
 /// Wire capability names (must match the daemon's `Hello.capabilities`
 /// entries and its executor dispatch).
@@ -57,6 +63,8 @@ impl McpToolRegistry {
     ) -> anyhow::Result<Value> {
         match name {
             "remote_agent_list" => self.handle_remote_agent_list(ctx).await,
+            "remote_agent_lock" => self.handle_remote_agent_lock(ctx, &args).await,
+            "remote_agent_unlock" => self.handle_remote_agent_unlock(ctx, &args).await,
             "remote_agent_echo" => {
                 self.remote_agent_call(ctx, args, CAP_ECHO, Duration::from_secs(10))
                     .await
@@ -117,6 +125,7 @@ impl McpToolRegistry {
             .iter()
             .filter(|d| d.status != device_status::REVOKED)
             .map(|d| {
+                let lock = registry.lease_status(&d.id);
                 serde_json::json!({
                     "device_id": d.id,
                     "name": d.name,
@@ -125,10 +134,54 @@ impl McpToolRegistry {
                     "online": registry.is_online(&d.id),
                     "in_flight": registry.in_flight(&d.id),
                     "last_seen_at": d.last_seen_at,
+                    "locked": lock.is_some(),
+                    "locked_by_you": lock.as_ref().is_some_and(|l| l.session_id == ctx.session_id),
+                    "lock_expires_in_secs": lock.map(|l| secs(l.remaining)),
                 })
             })
             .collect();
         Ok(serde_json::json!({ "devices": rows, "count": rows.len() }))
+    }
+
+    /// `remote_agent_lock` — take (or top up) this session's exclusive
+    /// control lease on a device. Refused while another session holds it.
+    async fn handle_remote_agent_lock(
+        &self,
+        ctx: &ToolCallContext,
+        args: &Value,
+    ) -> anyhow::Result<Value> {
+        let registry = registry(ctx)?;
+        let device = resolve_device(ctx, &required_device_id(args)?).await?;
+        let lease = registry
+            .acquire_lease(&device.id, &ctx.session_id)
+            .map_err(|e| lease_error(&device.name, e))?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "device_id": device.id,
+            "device_name": device.name,
+            "locked": true,
+            "lock_expires_in_secs": secs(lease.remaining),
+        }))
+    }
+
+    /// `remote_agent_unlock` — release this session's lease so another
+    /// session can take the device.
+    async fn handle_remote_agent_unlock(
+        &self,
+        ctx: &ToolCallContext,
+        args: &Value,
+    ) -> anyhow::Result<Value> {
+        let registry = registry(ctx)?;
+        let device = resolve_device(ctx, &required_device_id(args)?).await?;
+        registry
+            .release_lease(&device.id, &ctx.session_id)
+            .map_err(|e| lease_error(&device.name, e))?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "device_id": device.id,
+            "device_name": device.name,
+            "locked": false,
+        }))
     }
 
     /// Resolve + authorize the target device, then forward `capability`
@@ -141,13 +194,13 @@ impl McpToolRegistry {
         timeout: Duration,
     ) -> anyhow::Result<Value> {
         let registry = registry(ctx)?;
-        let device_id = args
-            .get("device_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("device_id is required (see remote_agent_list)"))?
-            .to_string();
-        let device = resolve_device(ctx, &device_id).await?;
+        let device = resolve_device(ctx, &required_device_id(&args)?).await?;
+
+        // Exclusive-control gate: only the lease holder may drive the
+        // device, and each call keeps the lease alive.
+        let lease = registry
+            .use_lease(&device.id, &ctx.session_id)
+            .map_err(|e| lease_error(&device.name, e))?;
 
         // An agent without window-target support silently ignores
         // `window_id`/`app`/`title` — a window-relative click would land at
@@ -180,7 +233,7 @@ impl McpToolRegistry {
 
         let summary = args_summary(capability, &payload);
         let outcome = registry
-            .send_request(&ctx.broadcaster, &device.id, capability, payload, timeout)
+            .send_request(&ctx.broadcaster, &lease, capability, payload, timeout)
             .await;
 
         // Audit log — one row per bridged action, success or failure
@@ -214,6 +267,7 @@ impl McpToolRegistry {
                 "ok": true,
                 "device_id": device.id,
                 "device_name": device.name,
+                "lock_expires_in_secs": registry.lease_status(&device.id).map(|l| secs(l.remaining)),
                 "result": result,
             })),
             Err(RequestError::Offline) => anyhow::bail!(
@@ -245,6 +299,37 @@ fn registry(ctx: &ToolCallContext) -> anyhow::Result<&DeviceRegistry> {
     ctx.device_registry
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("remote agent tools are unavailable on this dispatch path"))
+}
+
+/// The non-empty `device_id` argument every per-device tool requires.
+fn required_device_id(args: &Value) -> anyhow::Result<String> {
+    args.get("device_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("device_id is required (see remote_agent_list)"))
+}
+
+/// Whole seconds left on a lease, rounded up so "0" never means "still
+/// held".
+fn secs(d: Duration) -> u64 {
+    d.as_secs() + u64::from(d.subsec_nanos() > 0)
+}
+
+/// Actionable wording for a refused lease operation.
+fn lease_error(device_name: &str, e: LeaseError) -> anyhow::Error {
+    match e {
+        LeaseError::HeldByOther { remaining } => anyhow::anyhow!(
+            "device '{device_name}' is locked by another session for {}s more — only one \
+             session may control a device at a time; retry after it expires or that \
+             session calls remote_agent_unlock",
+            secs(remaining)
+        ),
+        LeaseError::NotHeld => anyhow::anyhow!(
+            "this session does not hold the lock on device '{device_name}' — call \
+             remote_agent_lock first (a lock lasts 30s; each call keeps at least 15s left)"
+        ),
+    }
 }
 
 /// The caller's user id: the session's owner, falling back to the sole

@@ -516,7 +516,9 @@ mod tests {
         assert!(names.contains(&"remote_agent_echo"));
         assert!(names.contains(&"remote_agent_run"));
         assert!(names.contains(&"remote_agent_screenshot"));
-        assert_eq!(names.len(), 82);
+        assert!(names.contains(&"remote_agent_lock"));
+        assert!(names.contains(&"remote_agent_unlock"));
+        assert_eq!(names.len(), 84);
     }
 
     #[test]
