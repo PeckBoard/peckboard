@@ -1,32 +1,35 @@
 name: Publish Release
 
-# The sub-minute release path: a tag does not build anything. It finds the
-# "Build Main" and "Build Agent" runs for the tagged commit, downloads their
-# artifacts, and attaches them to the release. Building already happened on
-# the main push (see build-main.yml and build-agent.yml). If the tag lands
-# while those builds are still running, this job waits for them — worst case
-# it degrades to the old wall-clock, it never publishes a stale or missing
+# A tag does not build anything. It finds the "Build Main" and "Build Agent"
+# runs for the tagged commit, downloads their artifacts, and attaches them to
+# the release. Building already happened on the main push (see build-main.yml
+# and build-agent.yml). If the tag lands while those builds are still
+# running, these jobs wait for them. They never publish a stale or missing
 # asset.
 #
-# Two phases, because the Windows core build is the slowest matrix job by a
-# wide margin (~9.5 min of codegen on a 4-vCPU runner vs ~6.5 min macOS and
-# ~3.5 min Linux) and used to gate the whole release:
+# The release goes live on the FASTEST core build, and every slower one is
+# attached as it lands. Typical Build Main job times (4-vCPU hosted runners):
 #
-#   promote          waits for every Build Main job EXCEPT Windows, plus the
-#                    Build Agent run, and publishes the release with those
-#                    assets. The release is live as soon as macOS finishes.
-#   attach-windows   waits for the Windows job of that same Build Main run
-#                    and uploads its asset onto the already-published release.
+#   linux-x86_64           ~3.7 min   <- gates the release
+#   linux-x86_64-desktop   ~5.2 min   (WebKitGTK install + bigger link)
+#   macos-arm64            ~6.6 min
+#   windows-x86_64         ~9 min
+#
+#   promote        waits for the Linux CLI job and the Build Agent run, then
+#                  publishes the release with those assets.
+#   attach-late    one matrix leg per slower core asset: waits for that job
+#                  of the same Build Main run and uploads its asset onto the
+#                  already-published release.
 #
 # Self-update (src/service/update.rs) only offers a release once the asset
-# for the running platform is attached, so a Windows install polling in the
-# gap simply sees "no update yet" rather than a 404 mid-upgrade. If the
-# Windows job fails, attach-windows goes red and the release stays live
-# without the Windows asset; run build-windows-x86_64.yml against the tag to
-# rebuild and publish it.
+# for the running platform AND its .sha256 are attached, so a macOS or
+# Windows install polling in the gap sees "no update yet" rather than a 404
+# mid-upgrade. If a late job fails, its attach-late leg goes red and the
+# release stays live without that asset. Run the matching
+# build-<platform>.yml against the tag to rebuild and publish it.
 #
 # A tag containing '-' (0.0.191-rc1) publishes as a prerelease, which
-# `releases/latest` — what self-update reads — ignores.
+# `releases/latest` (what self-update reads) ignores.
 on:
   push:
     tags: ["*"]
@@ -36,15 +39,9 @@ permissions:
   actions: read
 
 env:
-  # Must match the `asset:` names in build-main.yml — they double as the
-  # artifact names `gh run download -n` selects.
-  WINDOWS_ASSET: peckboard-windows-x86_64.exe
-  # Core assets the first phase publishes: every build-main.yml asset except
-  # the Windows one.
-  CORE_ASSETS: >-
-    peckboard-linux-x86_64
-    peckboard-linux-x86_64-desktop
-    peckboard-macos-arm64
+  # Must match an `asset:` name in build-main.yml. The Build Main job is
+  # named "Build <asset>", and the artifact is named <asset>.
+  FIRST_ASSET: peckboard-linux-x86_64
 
 jobs:
   promote:
@@ -74,38 +71,36 @@ jobs:
             exit 1
           fi
 
-      # Gate on the run's JOBS, not its conclusion: the run stays
-      # `in_progress` until Windows finishes, but every other artifact is
-      # already uploaded and downloadable by name.
-      - name: Wait for the tagged commit's Build Main jobs (all but Windows)
+      # Gate on one JOB, not the run's conclusion: the run stays
+      # `in_progress` until its slowest leg finishes, but a finished job's
+      # artifact is already uploaded and downloadable by name.
+      - name: Wait for the tagged commit's Build Main Linux job
         id: find_main
         run: |
-          for i in $(seq 90); do
+          for i in $(seq 180); do
             run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/build-main.yml/runs?head_sha=$GITHUB_SHA&per_page=5" \
               --jq '.workflow_runs | sort_by(.run_started_at) | reverse | first // empty')
             if [ -z "$run" ]; then
               echo "no Build Main run for $GITHUB_SHA yet — was main pushed before tagging?"
             else
               id=$(jq -r '.id' <<<"$run")
-              jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=50" \
-                --jq "[.jobs[] | select(.name != \"Build $WINDOWS_ASSET\")]")
-              total=$(jq 'length' <<<"$jobs")
-              done_ok=$(jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length' <<<"$jobs")
-              bad=$(jq -r '.[] | select(.status == "completed" and .conclusion != "success") | "\(.name): \(.conclusion)"' <<<"$jobs")
-              echo "Build Main run $id: $done_ok/$total non-Windows jobs succeeded"
-              if [ -n "$bad" ]; then
-                echo "Build Main for $GITHUB_SHA has failed jobs — refusing to promote its artifacts:"
-                echo "$bad"
-                exit 1
-              fi
-              # `total` can be 0 for a moment while the matrix is still
-              # being expanded; keep waiting until the jobs exist.
-              if [ "$total" -gt 0 ] && [ "$done_ok" -eq "$total" ]; then
+              job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=50" \
+                --jq ".jobs[] | select(.name == \"Build $FIRST_ASSET\")")
+              # Empty while the matrix is still being expanded.
+              [ -n "$job" ] || job='{"status":"queued"}'
+              status=$(jq -r '.status' <<<"$job")
+              conclusion=$(jq -r '.conclusion // ""' <<<"$job")
+              echo "Build Main run $id, job 'Build $FIRST_ASSET': status=$status conclusion=$conclusion"
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" != "success" ]; then
+                  echo "Build $FIRST_ASSET concluded '$conclusion' — refusing to publish."
+                  exit 1
+                fi
                 echo "run_id=$id" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
             fi
-            sleep 20
+            sleep 10
           done
           echo "Timed out waiting for Build Main of $GITHUB_SHA (30 min)."
           exit 1
@@ -113,7 +108,7 @@ jobs:
       - name: Wait for the tagged commit's Build Agent run
         id: find_agent
         run: |
-          for i in $(seq 90); do
+          for i in $(seq 180); do
             run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/build-agent.yml/runs?head_sha=$GITHUB_SHA&per_page=5" \
               --jq '.workflow_runs | sort_by(.run_started_at) | reverse | first // empty')
             if [ -z "$run" ]; then
@@ -132,19 +127,13 @@ jobs:
                 exit 0
               fi
             fi
-            sleep 20
+            sleep 10
           done
           echo "Timed out waiting for Build Agent of $GITHUB_SHA (30 min)."
           exit 1
 
-      # By name, one artifact at a time: the run is still in progress
-      # (Windows), and a whole-run download would pick up whatever happens
-      # to exist rather than exactly the set this phase promises.
-      - name: Download core artifacts (all but Windows)
-        run: |
-          for asset in $CORE_ASSETS; do
-            gh run download "${{ steps.find_main.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" -n "$asset" --dir "assets/$asset"
-          done
+      - name: Download the Linux core artifact
+        run: gh run download "${{ steps.find_main.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" -n "$FIRST_ASSET" --dir "assets/$FIRST_ASSET"
 
       - name: Download agent artifacts
         run: gh run download "${{ steps.find_agent.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --dir assets
@@ -155,44 +144,54 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: assets/*/*
 
-  attach-windows:
-    name: Attach the Windows asset once its build finishes
+  attach-late:
+    name: Attach ${{ matrix.asset }}
     runs-on: ubuntu-24.04
     needs: promote
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every build-main.yml asset except FIRST_ASSET.
+        asset:
+          - peckboard-linux-x86_64-desktop
+          - peckboard-macos-arm64
+          - peckboard-windows-x86_64.exe
 
     env:
       GH_TOKEN: ${{ github.token }}
       MAIN_RUN_ID: ${{ needs.promote.outputs.main_run_id }}
+      ASSET: ${{ matrix.asset }}
 
     steps:
-      - name: Wait for the Windows job of Build Main run
+      - name: Wait for the Build Main job
         run: |
-          for i in $(seq 90); do
+          for i in $(seq 180); do
             job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$MAIN_RUN_ID/jobs?per_page=50" \
-              --jq ".jobs[] | select(.name == \"Build $WINDOWS_ASSET\")")
+              --jq ".jobs[] | select(.name == \"Build $ASSET\")")
             if [ -z "$job" ]; then
-              echo "Build Main run $MAIN_RUN_ID has no job named 'Build $WINDOWS_ASSET' — did build-main.yml rename its assets?"
+              echo "Build Main run $MAIN_RUN_ID has no job named 'Build $ASSET' — did build-main.yml rename its assets?"
               exit 1
             fi
             status=$(jq -r '.status' <<<"$job")
             conclusion=$(jq -r '.conclusion // ""' <<<"$job")
-            echo "Windows job: status=$status conclusion=$conclusion"
+            echo "Build $ASSET: status=$status conclusion=$conclusion"
             if [ "$status" = "completed" ]; then
               if [ "$conclusion" != "success" ]; then
-                echo "Windows build for $GITHUB_SHA concluded '$conclusion'. The release is live without $WINDOWS_ASSET — run build-windows-x86_64.yml against tag $GITHUB_REF_NAME to rebuild and publish it."
+                echo "Build $ASSET for $GITHUB_SHA concluded '$conclusion'. The release is live without $ASSET — run the matching build-*.yml against tag $GITHUB_REF_NAME to rebuild and publish it."
                 exit 1
               fi
               exit 0
             fi
-            sleep 20
+            sleep 10
           done
-          echo "Timed out waiting for the Windows job of Build Main $MAIN_RUN_ID (30 min)."
+          echo "Timed out waiting for Build $ASSET of Build Main $MAIN_RUN_ID (30 min)."
           exit 1
 
-      - name: Download the Windows artifact
-        run: gh run download "$MAIN_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$WINDOWS_ASSET" --dir assets
+      - name: Download the artifact
+        run: gh run download "$MAIN_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$ASSET" --dir assets
 
-      # --clobber so a re-run of this job after a partial upload converges
-      # instead of failing on "asset already exists".
+      # --clobber so a re-run after a partial upload converges instead of
+      # failing on "asset already exists".
       - name: Upload onto the published release
-        run: gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "assets/$WINDOWS_ASSET" "assets/$WINDOWS_ASSET.sha256"
+        run: gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "assets/$ASSET" "assets/$ASSET.sha256"
