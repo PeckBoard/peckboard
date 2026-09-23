@@ -8,6 +8,23 @@ name: Publish Release
 # it degrades to the old wall-clock, it never publishes a stale or missing
 # asset.
 #
+# Two phases, because the Windows core build is the slowest matrix job by a
+# wide margin (~9.5 min of codegen on a 4-vCPU runner vs ~6.5 min macOS and
+# ~3.5 min Linux) and used to gate the whole release:
+#
+#   promote          waits for every Build Main job EXCEPT Windows, plus the
+#                    Build Agent run, and publishes the release with those
+#                    assets. The release is live as soon as macOS finishes.
+#   attach-windows   waits for the Windows job of that same Build Main run
+#                    and uploads its asset onto the already-published release.
+#
+# Self-update (src/service/update.rs) only offers a release once the asset
+# for the running platform is attached, so a Windows install polling in the
+# gap simply sees "no update yet" rather than a 404 mid-upgrade. If the
+# Windows job fails, attach-windows goes red and the release stays live
+# without the Windows asset; run build-windows-x86_64.yml against the tag to
+# rebuild and publish it.
+#
 # A tag containing '-' (0.0.191-rc1) publishes as a prerelease, which
 # `releases/latest` — what self-update reads — ignores.
 on:
@@ -18,10 +35,23 @@ permissions:
   contents: write
   actions: read
 
+env:
+  # Must match the `asset:` names in build-main.yml — they double as the
+  # artifact names `gh run download -n` selects.
+  WINDOWS_ASSET: peckboard-windows-x86_64.exe
+  # Core assets the first phase publishes: every build-main.yml asset except
+  # the Windows one.
+  CORE_ASSETS: >-
+    peckboard-linux-x86_64
+    peckboard-linux-x86_64-desktop
+    peckboard-macos-arm64
+
 jobs:
   promote:
     name: Promote main-build artifacts to release
     runs-on: ubuntu-24.04
+    outputs:
+      main_run_id: ${{ steps.find_main.outputs.run_id }}
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -44,7 +74,10 @@ jobs:
             exit 1
           fi
 
-      - name: Wait for the tagged commit's Build Main run
+      # Gate on the run's JOBS, not its conclusion: the run stays
+      # `in_progress` until Windows finishes, but every other artifact is
+      # already uploaded and downloadable by name.
+      - name: Wait for the tagged commit's Build Main jobs (all but Windows)
         id: find_main
         run: |
           for i in $(seq 90); do
@@ -53,15 +86,21 @@ jobs:
             if [ -z "$run" ]; then
               echo "no Build Main run for $GITHUB_SHA yet — was main pushed before tagging?"
             else
-              status=$(jq -r '.status' <<<"$run")
-              conclusion=$(jq -r '.conclusion // ""' <<<"$run")
               id=$(jq -r '.id' <<<"$run")
-              echo "Build Main run $id: status=$status conclusion=$conclusion"
-              if [ "$status" = "completed" ]; then
-                if [ "$conclusion" != "success" ]; then
-                  echo "Build Main for $GITHUB_SHA concluded '$conclusion' — refusing to promote its artifacts."
-                  exit 1
-                fi
+              jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=50" \
+                --jq "[.jobs[] | select(.name != \"Build $WINDOWS_ASSET\")]")
+              total=$(jq 'length' <<<"$jobs")
+              done_ok=$(jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length' <<<"$jobs")
+              bad=$(jq -r '.[] | select(.status == "completed" and .conclusion != "success") | "\(.name): \(.conclusion)"' <<<"$jobs")
+              echo "Build Main run $id: $done_ok/$total non-Windows jobs succeeded"
+              if [ -n "$bad" ]; then
+                echo "Build Main for $GITHUB_SHA has failed jobs — refusing to promote its artifacts:"
+                echo "$bad"
+                exit 1
+              fi
+              # `total` can be 0 for a moment while the matrix is still
+              # being expanded; keep waiting until the jobs exist.
+              if [ "$total" -gt 0 ] && [ "$done_ok" -eq "$total" ]; then
                 echo "run_id=$id" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
@@ -98,8 +137,14 @@ jobs:
           echo "Timed out waiting for Build Agent of $GITHUB_SHA (30 min)."
           exit 1
 
-      - name: Download core artifacts
-        run: gh run download "${{ steps.find_main.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --dir assets
+      # By name, one artifact at a time: the run is still in progress
+      # (Windows), and a whole-run download would pick up whatever happens
+      # to exist rather than exactly the set this phase promises.
+      - name: Download core artifacts (all but Windows)
+        run: |
+          for asset in $CORE_ASSETS; do
+            gh run download "${{ steps.find_main.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" -n "$asset" --dir "assets/$asset"
+          done
 
       - name: Download agent artifacts
         run: gh run download "${{ steps.find_agent.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --dir assets
@@ -109,3 +154,45 @@ jobs:
         with:
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: assets/*/*
+
+  attach-windows:
+    name: Attach the Windows asset once its build finishes
+    runs-on: ubuntu-24.04
+    needs: promote
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MAIN_RUN_ID: ${{ needs.promote.outputs.main_run_id }}
+
+    steps:
+      - name: Wait for the Windows job of Build Main run
+        run: |
+          for i in $(seq 90); do
+            job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$MAIN_RUN_ID/jobs?per_page=50" \
+              --jq ".jobs[] | select(.name == \"Build $WINDOWS_ASSET\")")
+            if [ -z "$job" ]; then
+              echo "Build Main run $MAIN_RUN_ID has no job named 'Build $WINDOWS_ASSET' — did build-main.yml rename its assets?"
+              exit 1
+            fi
+            status=$(jq -r '.status' <<<"$job")
+            conclusion=$(jq -r '.conclusion // ""' <<<"$job")
+            echo "Windows job: status=$status conclusion=$conclusion"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" != "success" ]; then
+                echo "Windows build for $GITHUB_SHA concluded '$conclusion'. The release is live without $WINDOWS_ASSET — run build-windows-x86_64.yml against tag $GITHUB_REF_NAME to rebuild and publish it."
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "Timed out waiting for the Windows job of Build Main $MAIN_RUN_ID (30 min)."
+          exit 1
+
+      - name: Download the Windows artifact
+        run: gh run download "$MAIN_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$WINDOWS_ASSET" --dir assets
+
+      # --clobber so a re-run of this job after a partial upload converges
+      # instead of failing on "asset already exists".
+      - name: Upload onto the published release
+        run: gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "assets/$WINDOWS_ASSET" "assets/$WINDOWS_ASSET.sha256"

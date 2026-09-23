@@ -35,6 +35,25 @@ pub fn platform_asset() -> Option<&'static str> {
     }
 }
 
+/// Whether the release JSON lists both `asset` and its `.sha256` among its
+/// attached assets. Releases publish in two phases (release-promote.yml:
+/// Linux + macOS go live first, Windows is attached when its slower build
+/// finishes), so a strictly-newer tag alone does not mean *this* platform
+/// can upgrade yet — offering it would 404 in [`download_and_swap`].
+fn release_has_asset(rel: &serde_json::Value, asset: &str) -> bool {
+    let sha = format!("{asset}.sha256");
+    let names: Vec<&str> = rel
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.get("name").and_then(|n| n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.contains(&asset) && names.contains(&sha.as_str())
+}
+
 /// The result of an update check, serialized to the `/api/update/check` client.
 #[derive(Debug, Serialize)]
 pub struct UpdateStatus {
@@ -42,7 +61,9 @@ pub struct UpdateStatus {
     pub current_version: String,
     /// The latest released tag, if the check succeeded.
     pub latest_version: Option<String>,
-    /// True iff a strictly-newer release exists AND this platform is supported.
+    /// True iff a strictly-newer release exists, this platform is supported,
+    /// AND that release already carries this platform's asset + `.sha256`
+    /// (releases publish Windows a few minutes after Linux/macOS).
     pub update_available: bool,
     /// Whether self-update is supported on this OS/arch.
     pub supported: bool,
@@ -95,7 +116,7 @@ pub async fn check(client: &reqwest::Client) -> Result<UpdateStatus> {
     Ok(UpdateStatus {
         current_version: current,
         latest_version: latest,
-        update_available: newer && asset.is_some(),
+        update_available: newer && asset.is_some_and(|a| release_has_asset(&rel, a)),
         supported: asset.is_some(),
         asset: asset.map(str::to_string),
         notes,
@@ -274,6 +295,41 @@ mod tests {
         if let Some(name) = a {
             assert!(name.starts_with("peckboard-"));
         }
+    }
+
+    /// A newer tag is only an *available* update once this platform's asset
+    /// and checksum are attached — the Windows asset lands minutes after the
+    /// release goes live (see release-promote.yml).
+    #[test]
+    fn release_has_asset_requires_binary_and_checksum() {
+        let rel = |names: &[&str]| {
+            serde_json::json!({
+                "tag_name": "9.9.9",
+                "assets": names.iter().map(|n| serde_json::json!({ "name": n })).collect::<Vec<_>>(),
+            })
+        };
+        let exe = "peckboard-windows-x86_64.exe";
+        assert!(release_has_asset(
+            &rel(&[
+                "peckboard-linux-x86_64",
+                exe,
+                "peckboard-windows-x86_64.exe.sha256"
+            ]),
+            exe
+        ));
+        // Binary without its checksum: download_and_swap would fail on step 1.
+        assert!(!release_has_asset(&rel(&[exe]), exe));
+        // Linux/macOS phase published, Windows still building.
+        assert!(!release_has_asset(
+            &rel(&["peckboard-linux-x86_64", "peckboard-linux-x86_64.sha256"]),
+            exe
+        ));
+        assert!(!release_has_asset(&rel(&[]), exe));
+        // No `assets` key at all (unexpected API shape) — never offer.
+        assert!(!release_has_asset(
+            &serde_json::json!({ "tag_name": "9.9.9" }),
+            exe
+        ));
     }
 
     /// The swap must land the new bytes at the *exact* original path (so a later
