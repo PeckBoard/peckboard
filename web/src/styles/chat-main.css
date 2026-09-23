@@ -36,18 +36,31 @@
 .chat-load-older {
   display: flex;
   justify-content: center;
+  align-items: center;
   padding: var(--space-3) 0 var(--space-2);
+}
+
+.chat-load-older-btn,
+.chat-load-older-start {
+  line-height: 1.4;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  border: 1px solid transparent;
 }
 
 .chat-load-older-btn {
   background: var(--surface2);
   color: var(--text2);
-  border: 1px solid var(--border);
+  border-color: var(--border);
   border-radius: var(--radius);
-  padding: var(--space-2) var(--space-4);
-  font-size: var(--text-sm);
   cursor: pointer;
   transition: background 0.12s ease;
+}
+
+/* Same box as the button, so the bar keeps its height when history runs
+   out and the rows below never shift. */
+.chat-load-older-start {
+  color: var(--text3);
 }
 
 .chat-load-older-btn:hover:not(:disabled) {

@@ -743,6 +743,12 @@ fn is_turn_result(json: &Value) -> bool {
     !(zero_turns && empty)
 }
 
+/// Error text of a failed `result` frame. The CLI puts a model-side failure
+/// in `result`, but a startup failure (e.g. `--resume` of a transcript it
+/// can't load) arrives as `subtype: error_during_execution` with an empty
+/// `result` and the real reason in `errors[]` — without reading that array
+/// the text was just the subtype, which classifies as `unknown` and kept
+/// resume recovery from ever firing.
 fn result_error(json: &Value) -> Option<String> {
     let is_error = json
         .get("is_error")
@@ -752,11 +758,18 @@ fn result_error(json: &Value) -> Option<String> {
     if !is_error && subtype.is_none_or(|s| s == "success") {
         return None;
     }
+    let errors = string_list(json.get("errors"))
+        .into_iter()
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
     Some(
         json.get("result")
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
             .map(str::to_string)
+            .or_else(|| (!errors.is_empty()).then_some(errors))
             .or_else(|| subtype.map(str::to_string))
             .unwrap_or_else(|| "the model reported an error".into()),
     )
@@ -948,5 +961,32 @@ mod tests {
             "num_turns": 1, "result": "OK",
         });
         assert!(!is_notification_result(&genuine));
+    }
+
+    /// Captured live from claude resuming a conversation whose transcript
+    /// was truncated to 0 bytes (disk full mid-write): empty `result`, the
+    /// reason only in `errors[]`. It must classify as a resume failure so
+    /// resume_recovery drops the dead id instead of wedging the session.
+    #[test]
+    fn resume_failure_reason_is_read_from_errors_array() {
+        let frame: Value = serde_json::json!({
+            "type": "result", "subtype": "error_during_execution",
+            "duration_ms": 0, "is_error": true, "num_turns": 0,
+            "session_id": "75d27545-6363-41f4-aefd-d802881b05df",
+            "errors": ["No conversation found with session ID: 75d27545-6363-41f4-aefd-d802881b05df"],
+        });
+        assert!(is_turn_result(&frame));
+        let err = result_error(&frame).expect("error frame");
+        assert!(err.starts_with("No conversation found"), "{err}");
+        assert_eq!(CrashKind::classify(&err), CrashKind::ResumeFailed);
+
+        // No `errors[]` and no `result` still falls back to the subtype.
+        let bare: Value = serde_json::json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+        });
+        assert_eq!(
+            result_error(&bare).as_deref(),
+            Some("error_during_execution")
+        );
     }
 }

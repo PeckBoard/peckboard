@@ -375,8 +375,25 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         // visit (older pages) and events broadcast over the WS while this
         // fetch was in flight both live outside the HTTP snapshot — a
         // wholesale replace would silently drop them.
+        const cached = s.eventsBySession[sessionId] ?? []
         const fetchedIds = new Set(events.map((e) => e.id))
-        const extras = (s.eventsBySession[sessionId] ?? []).filter((e) => !fetchedIds.has(e.id))
+        let extras = cached.filter((e) => !fetchedIds.has(e.id))
+        // A full page that starts past everything cached means the session
+        // moved on by more than a page while we were away: merging would
+        // leave a silent hole between the stale cache and the fresh page.
+        // Drop the stale scrollback (keep only WS events newer than the
+        // page) and let "Load older" page back through the gap.
+        let gap = false
+        if (hadCache && events.length >= EVENTS_PAGE_SIZE && cached.length > 0) {
+          const fetchedMin = events.reduce((m, e) => (e.seq < m ? e.seq : m), events[0].seq)
+          const fetchedMax = events.reduce((m, e) => (e.seq > m ? e.seq : m), events[0].seq)
+          const cachedMax = cached.reduce((m, e) => (e.seq > m ? e.seq : m), cached[0].seq)
+          // seq is per-session `max + 1`, so adjacent pages are contiguous.
+          if (fetchedMin > cachedMax + 1) {
+            gap = true
+            extras = extras.filter((e) => e.seq > fetchedMax)
+          }
+        }
         const merged = [...events, ...extras].sort((a, b) => a.seq - b.seq)
         return {
           eventsBySession: { ...s.eventsBySession, [sessionId]: merged },
@@ -384,13 +401,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           hasMoreOlderEventsBySession: {
             ...s.hasMoreOlderEventsBySession,
             // A short page means the whole history fit in one page — no
-            // older events, cached or not. A full page on a cold open
-            // means history continues past it. A full page on a revisit
-            // says nothing about our (possibly deeper) cached oldest, so
-            // keep the flag the previous visit earned.
+            // older events, cached or not. A full page on a cold open (or
+            // one that just discarded a stale cache) means history
+            // continues past it. A full page on a contiguous revisit says
+            // nothing about our (possibly deeper) cached oldest, so keep
+            // the flag the previous visit earned.
             [sessionId]:
               events.length >= EVENTS_PAGE_SIZE
-                ? hadCache
+                ? hadCache && !gap
                   ? (s.hasMoreOlderEventsBySession[sessionId] ?? true)
                   : true
                 : false,

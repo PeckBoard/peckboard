@@ -196,6 +196,14 @@ impl Fixture {
 async fn echo_round_trips_through_a_fake_device() {
     let fx = Fixture::new().await;
     fx.connect_fake_device("d-online");
+    // Every bridged call needs the per-session device lease (0.1.25).
+    fx.call(
+        "chat-a",
+        "remote_agent_lock",
+        serde_json::json!({ "device_id": "d-online" }),
+    )
+    .await
+    .unwrap();
 
     let out = fx
         .call(
@@ -307,6 +315,13 @@ async fn list_shows_only_the_callers_devices_with_live_state() {
 async fn screenshot_result_uses_the_image_convention() {
     let fx = Fixture::new().await;
     fx.connect_fake_device("d-online");
+    fx.call(
+        "chat-a",
+        "remote_agent_lock",
+        serde_json::json!({ "device_id": "d-online" }),
+    )
+    .await
+    .unwrap();
 
     let out = fx
         .call(

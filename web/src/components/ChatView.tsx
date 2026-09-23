@@ -1122,12 +1122,6 @@ export default function ChatView({
    *  this is set, scroll events re-snap instead of flagging; it clears
    *  on the first observation of an at-bottom viewport. */
   const pendingSwitchSnap = useRef(false)
-  /** Saved scroll-height immediately before a "Load older" fetch so
-   *  we can restore the user's viewport position after the new rows
-   *  splice in at the top. Without this the entire conversation
-   *  shifts down by the height of the loaded page and the user loses
-   *  their reading position. `null` whenever no restore is pending. */
-  const pendingOlderScrollRestore = useRef<number | null>(null)
   // Jump-to-latest pill: `userScrolledUp` mirrored into state (refs don't
   // re-render) plus "content arrived below the viewport while scrolled up".
   const [scrolledUp, setScrolledUp] = useState(false)
@@ -1365,6 +1359,10 @@ export default function ChatView({
     overscan: 12,
     getItemKey: (i) => displayItems[i].key,
     scrollMargin: listOffset,
+    // Chat mode: on prepends ("Load older") and appends the virtualizer
+    // re-anchors on the first visible row's key inside its layout effect,
+    // so older pages splice in above without moving what's on screen.
+    anchorTo: 'end',
   })
   // The virtual list starts below the "Load older" button inside the same
   // scroll container; keep the virtualizer's origin in sync with it.
@@ -1376,12 +1374,6 @@ export default function ChatView({
   }, [hasMoreOlderEvents, displayItems.length])
   const virtualTotal = rowVirtualizer.getTotalSize()
   const handleLoadOlder = useCallback(() => {
-    const el = scrollRef.current
-    if (el) {
-      // Capture the current "distance from top of content" so the
-      // scroll effect below can restore it after the new rows render.
-      pendingOlderScrollRestore.current = el.scrollHeight - el.scrollTop
-    }
     void fetchOlderEvents(sessionId)
   }, [fetchOlderEvents, sessionId])
 
@@ -1406,56 +1398,44 @@ export default function ChatView({
     userScrolledUp.current = !atBottom
     setScrolledUp(!atBottom)
     if (atBottom) setNewBelow(false)
-    // Auto-load the next history page as the user nears the top — same
-    // pattern as the sessions list. The store's loading flag debounces a
-    // fast scroll to one page at a time; the manual button stays as the
-    // keyboard-reachable fallback and carries the error/retry state.
-    if (el.scrollTop < 200 && hasMoreOlderEvents && !loadingOlderEvents && !olderEventsError) {
+    // Prefetch the next history page while the user is still ~2 screens
+    // from the top, so it lands before a fling reaches the edge (hitting
+    // scrollTop 0 first stops momentum dead, then the page pops in). The
+    // store's loading flag debounces a fast scroll to one page at a time;
+    // the manual button stays as the keyboard-reachable fallback and
+    // carries the error/retry state.
+    const prefetchZone = Math.max(800, el.clientHeight * 2)
+    if (
+      el.scrollTop < prefetchZone &&
+      hasMoreOlderEvents &&
+      !loadingOlderEvents &&
+      !olderEventsError
+    ) {
       handleLoadOlder()
     }
   }, [hasMoreOlderEvents, loadingOlderEvents, olderEventsError, handleLoadOlder])
 
-  // Arm the jump-to-latest pill when events grew while the user was
-  // scrolled up. Declared BEFORE the auto-scroll effect below: that
-  // effect clears `pendingOlderScrollRestore`, which is how this one
-  // tells a "Load older" prepend (not new content) from a live append.
-  const prevEventCount = useRef(0)
+  // Arm the jump-to-latest pill when content arrived below the viewport
+  // while the user was scrolled up. A "Load older" prepend grows the list
+  // too but leaves the newest event unchanged — only a new tail counts.
+  const prevLastEventId = useRef<Event['id'] | null>(null)
   useEffect(() => {
-    const prev = prevEventCount.current
-    prevEventCount.current = events.length
-    if (
-      events.length > prev &&
-      userScrolledUp.current &&
-      pendingOlderScrollRestore.current === null
-    ) {
+    const last = events.length > 0 ? events[events.length - 1].id : null
+    const prev = prevLastEventId.current
+    prevLastEventId.current = last
+    if (last !== null && prev !== null && last !== prev && userScrolledUp.current) {
       setNewBelow(true)
     }
   }, [events])
 
-  useEffect(() => {
+  // Pin to the bottom before paint. A post-paint effect let one frame
+  // show the unpinned position (new rows, remeasured heights), then
+  // snapped — the visible flicker. Scrolled-up viewports are left alone:
+  // the virtualizer's `anchorTo: 'end'` keeps them steady across
+  // prepends and appends.
+  useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    // If a "Load older" fetch is in flight, restore the user's
-    // scroll-from-bottom so the older rows splice in above without
-    // shifting their viewport. Stomp the saved value so we don't
-    // re-apply on the next render.
-    //
-    // BUT only if the user is still scrolled up. If they scrolled
-    // all the way to the bottom while the fetch was in flight (the
-    // agent just emitted something, or they hit End), respect that
-    // — fall through to the auto-scroll branch and snap to the new
-    // bottom. Restoring an older saved position over an active
-    // scroll-to-bottom would yank them away from text they just
-    // chose to read.
-    if (pendingOlderScrollRestore.current !== null) {
-      const savedHeight = pendingOlderScrollRestore.current
-      pendingOlderScrollRestore.current = null
-      if (userScrolledUp.current) {
-        el.scrollTop = el.scrollHeight - savedHeight
-        return
-      }
-      // Falls through to auto-scroll-to-bottom.
-    }
     if (pendingSwitchSnap.current) {
       // Settling a session switch: pin to the newest message, overriding
       // any scrolled-up flag the content swap's clamped scroll event
@@ -1567,8 +1547,6 @@ export default function ChatView({
         const st = useSessionsStore.getState()
         if (st.hasMoreOlderEventsBySession[sessionId] === false) break
         if (st.olderEventsErrorBySession[sessionId]) break
-        const el = scrollRef.current
-        if (el) pendingOlderScrollRestore.current = el.scrollHeight - el.scrollTop
         await fetchOlderEvents(sessionId)
       }
     } finally {
@@ -2473,9 +2451,16 @@ export default function ChatView({
             the start of the conversation. The store debounces with
             `loadingOlderEvents` so a rapid double-click loads at most
             one extra page. */}
-        {hasMoreOlderEvents && displayItems.length > 0 && (
+        {displayItems.length > 0 && (
           <div className="chat-load-older">
-            {olderEventsError ? (
+            {/* The bar stays mounted (same height) once history is
+                exhausted: removing it would shift every row up and the
+                virtualizer's scroll margin would lag one render. */}
+            {!hasMoreOlderEvents ? (
+              <span className="chat-load-older-start" data-testid="chat-history-start">
+                Start of conversation
+              </span>
+            ) : olderEventsError ? (
               <span
                 className="chat-load-older-error"
                 role="alert"
