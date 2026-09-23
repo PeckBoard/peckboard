@@ -16,6 +16,12 @@ use serde_json::Value;
 /// Current wire protocol version. Bump on any breaking change to the
 /// frame shapes. Carried on every [`Envelope`] so a peer can detect skew.
 pub const PROTOCOL_VERSION: u32 = 1;
+/// `Hello.features` flag: the daemon's `screenshot` and `mouse`
+/// capabilities understand window targets (`window_id` / `app` / `title`,
+/// `list_windows`). An older daemon silently ignores those args — for
+/// `mouse` that means clicking window-relative coordinates as absolute
+/// ones — so the server refuses window-targeted requests without it.
+pub const FEATURE_WINDOW_TARGETS: &str = "window-targets";
 
 /// Versioned wrapper around a direction frame. The `v` field lets either
 /// end detect a version mismatch before interpreting the frame; the frame
@@ -52,6 +58,10 @@ pub enum AgentFrame {
         platform: String,
         hostname: String,
         capabilities: Vec<String>,
+        /// Optional behaviours within existing capabilities
+        /// (`FEATURE_*`). Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     /// Periodic liveness ping (server may also [`ServerFrame::Ping`]).
     Heartbeat,
@@ -117,6 +127,7 @@ mod tests {
             platform: "linux".into(),
             hostname: "box".into(),
             capabilities: vec!["echo".into(), "terminal".into()],
+            features: vec![FEATURE_WINDOW_TARGETS.into()],
         });
         round_trip_agent(AgentFrame::Heartbeat);
         round_trip_agent(AgentFrame::Result {
@@ -162,6 +173,7 @@ mod tests {
             platform: "linux".into(),
             hostname: "box".into(),
             capabilities: vec!["echo".into()],
+            features: vec![],
         });
         let v = serde_json::to_value(&env).unwrap();
         assert_eq!(
@@ -175,6 +187,9 @@ mod tests {
                 "capabilities": ["echo"],
             })
         );
+        // An older daemon's hello (no `features`) still parses.
+        let back: Envelope<AgentFrame> = serde_json::from_value(v).unwrap();
+        assert_eq!(back, env);
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod input_exec;
 mod screenshot;
 mod server_mgmt;
 mod terminal;
+mod windows;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};

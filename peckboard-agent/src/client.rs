@@ -131,6 +131,7 @@ async fn connect_once(
         platform: std::env::consts::OS.to_string(),
         hostname: gethostname::gethostname().to_string_lossy().into_owned(),
         capabilities: config.enabled_capabilities(),
+        features: vec![peckboard_agent_protocol::FEATURE_WINDOW_TARGETS.to_string()],
     };
     sink.send(Message::Text(encode(&hello).into())).await?;
 

@@ -108,6 +108,9 @@ struct DeviceConn {
     /// This connection's in-flight requests. Per-connection (not
     /// per-device) so a superseded socket fails exactly its own callers.
     pending: PendingMap,
+    /// Optional behaviours the daemon advertised in its `hello`
+    /// (`peckboard_agent_protocol::FEATURE_*`).
+    features: Vec<String>,
 }
 
 /// Live agent connections, device_id → socket handle. One connection per
@@ -132,6 +135,16 @@ impl DeviceRegistry {
     /// one (its `close` handle fires, its outbound channel drops, and its
     /// pending requests fail with [`RequestError::Disconnected`]).
     pub fn connect(&self, device_id: &str) -> DeviceConnection {
+        self.connect_with_features(device_id, Vec::new())
+    }
+
+    /// [`Self::connect`], recording the daemon's advertised `features` so
+    /// callers can refuse requests an older agent would misinterpret.
+    pub fn connect_with_features(
+        &self,
+        device_id: &str,
+        features: Vec<String>,
+    ) -> DeviceConnection {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel(OUTBOUND_BUFFER);
         let close = Arc::new(Notify::new());
@@ -142,6 +155,7 @@ impl DeviceRegistry {
                 tx,
                 close: close.clone(),
                 pending: PendingMap::default(),
+                features,
             },
         );
         if let Some(old) = old {
@@ -203,6 +217,15 @@ impl DeviceRegistry {
 
     pub fn is_online(&self, device_id: &str) -> bool {
         self.inner.lock().unwrap().contains_key(device_id)
+    }
+    /// Whether `device_id`'s live connection advertised `feature`. `false`
+    /// when offline.
+    pub fn has_feature(&self, device_id: &str, feature: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .is_some_and(|c| c.features.iter().any(|f| f == feature))
     }
 
     /// How many requests are currently awaiting a reply from `device_id`.
@@ -452,9 +475,13 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<AppState>, device: De
     let hello = hello_text
         .as_deref()
         .and_then(|t| serde_json::from_str::<Envelope<AgentFrame>>(t).ok());
-    let capabilities = match hello {
+    let (capabilities, features) = match hello {
         Some(env) if env.v == PROTOCOL_VERSION => match env.frame {
-            AgentFrame::Hello { capabilities, .. } => capabilities,
+            AgentFrame::Hello {
+                capabilities,
+                features,
+                ..
+            } => (capabilities, features),
             _ => {
                 close_with(&mut sender, 4400, "expected hello frame").await;
                 return;
@@ -472,10 +499,13 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<AppState>, device: De
     tracing::info!(
         device_id = %device.id,
         capabilities = ?capabilities,
+        features = ?features,
         "agent connected"
     );
 
-    let conn = state.device_registry.connect(&device.id);
+    let conn = state
+        .device_registry
+        .connect_with_features(&device.id, features);
     let conn_id = conn.conn_id;
     let close = conn.close;
     let mut outbound = conn.outbound;
@@ -938,6 +968,7 @@ mod tests {
             platform: "linux".into(),
             hostname: "box".into(),
             capabilities: vec!["echo".into()],
+            features: vec![peckboard_agent_protocol::FEATURE_WINDOW_TARGETS.into()],
         }))
         .unwrap();
         ws.send(TgMessage::Text(hello.into())).await.unwrap();
@@ -945,6 +976,13 @@ mod tests {
         let online = wait_for_device_update(&mut events, "d1").await;
         assert!(online);
         assert!(state.device_registry.is_online("d1"));
+        assert!(
+            state
+                .device_registry
+                .has_feature("d1", peckboard_agent_protocol::FEATURE_WINDOW_TARGETS),
+            "hello features must be recorded on the connection"
+        );
+        assert!(!state.device_registry.has_feature("d1", "nope"));
         let row = state.db.get_device("d1").await.unwrap().unwrap();
         assert!(row.last_seen_at.is_some(), "hello must stamp last_seen_at");
 

@@ -25,6 +25,7 @@
 
 use std::time::Duration;
 
+use peckboard_agent_protocol::FEATURE_WINDOW_TARGETS;
 use serde_json::Value;
 
 use super::super::McpToolRegistry;
@@ -82,15 +83,25 @@ impl McpToolRegistry {
                         Duration::from_secs(30),
                     )
                     .await?;
-                Ok(image_result(result))
+                Ok(with_coordinate_hint(image_result(result)))
             }
             "remote_agent_mouse" => {
-                self.remote_agent_call(ctx, args, CAP_MOUSE, Duration::from_secs(30))
-                    .await
+                self.remote_agent_call(
+                    ctx,
+                    normalize_mouse_args(args),
+                    CAP_MOUSE,
+                    Duration::from_secs(30),
+                )
+                .await
             }
             "remote_agent_keyboard" => {
-                self.remote_agent_call(ctx, args, CAP_KEYBOARD, Duration::from_secs(30))
-                    .await
+                self.remote_agent_call(
+                    ctx,
+                    normalize_keyboard_args(args),
+                    CAP_KEYBOARD,
+                    Duration::from_secs(30),
+                )
+                .await
             }
             _ => anyhow::bail!("unknown tool: {name}"),
         }
@@ -137,6 +148,21 @@ impl McpToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("device_id is required (see remote_agent_list)"))?
             .to_string();
         let device = resolve_device(ctx, &device_id).await?;
+
+        // An agent without window-target support silently ignores
+        // `window_id`/`app`/`title` — a window-relative click would land at
+        // absolute coordinates. Refuse up front; an offline device falls
+        // through to the registry's clearer "offline" error.
+        if targets_window(capability, &args)
+            && registry.is_online(&device.id)
+            && !registry.has_feature(&device.id, FEATURE_WINDOW_TARGETS)
+        {
+            anyhow::bail!(
+                "device '{}' runs a peckboard-agent too old for window targets \
+                 (window_id / app / title / list_windows) — update the agent on that machine",
+                device.name
+            );
+        }
 
         // Forward everything except the routing field; the daemon owns
         // per-capability argument validation.
@@ -268,6 +294,97 @@ fn normalize_screenshot_args(mut args: Value) -> Value {
     args
 }
 
+/// Whether a screenshot/mouse request addresses a window (and so needs
+/// an agent advertising [`FEATURE_WINDOW_TARGETS`]).
+fn targets_window(capability: &str, args: &Value) -> bool {
+    if capability != CAP_SCREENSHOT && capability != CAP_MOUSE {
+        return false;
+    }
+    let present = |k: &str| match args.get(k) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::String(s)) => !s.trim().is_empty(),
+        Some(_) => true,
+    };
+    ["window_id", "app", "title", "list_windows"]
+        .into_iter()
+        .any(present)
+}
+
+/// Move `from` to `to` in `o` unless `to` is already set.
+fn rename_key(o: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
+    if let Some(v) = o.remove(from)
+        && !o.contains_key(to)
+    {
+        o.insert(to.into(), v);
+    }
+}
+
+/// The `remote_agent_mouse` tool schema speaks `action` / `from_x` /
+/// `from_y` / `delta_x` / `delta_y`; the daemon's parser expects `op`,
+/// `from: [x, y]` + `to: [x, y]` for drags, and `dx` / `dy`. Translate so
+/// schema-following calls work (daemon-shaped args pass through).
+fn normalize_mouse_args(mut args: Value) -> Value {
+    let Some(o) = args.as_object_mut() else {
+        return args;
+    };
+    rename_key(o, "action", "op");
+    rename_key(o, "delta_x", "dx");
+    rename_key(o, "delta_y", "dy");
+    let is_drag = o.get("op").and_then(Value::as_str) == Some("drag");
+    let fx = o.remove("from_x");
+    let fy = o.remove("from_y");
+    if is_drag && !o.contains_key("from") {
+        if let (Some(fx), Some(fy)) = (fx, fy) {
+            o.insert("from".into(), Value::Array(vec![fx, fy]));
+        }
+        if !o.contains_key("to")
+            && let (Some(x), Some(y)) = (o.remove("x"), o.remove("y"))
+        {
+            o.insert("to".into(), Value::Array(vec![x, y]));
+        }
+    }
+    args
+}
+
+/// Same translation for `remote_agent_keyboard`: schema `action` → `op`,
+/// and a `'+'`-joined `keys` chord string → the daemon's key array.
+fn normalize_keyboard_args(mut args: Value) -> Value {
+    let Some(o) = args.as_object_mut() else {
+        return args;
+    };
+    rename_key(o, "action", "op");
+    if let Some(Value::String(chord)) = o.get("keys") {
+        let keys: Vec<Value> = chord
+            .split('+')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(|k| Value::String(k.to_string()))
+            .collect();
+        o.insert("keys".into(), Value::Array(keys));
+    }
+    args
+}
+
+/// A window capture's text block gets a one-line recipe for turning image
+/// pixels into mouse input, so the caller doesn't have to guess.
+fn with_coordinate_hint(mut result: Value) -> Value {
+    if result.pointer("/result/window").is_some()
+        && let Some(o) = result.as_object_mut()
+    {
+        o.insert(
+            "coordinates".into(),
+            Value::String(
+                "Image pixel (px, py) is at screen (window.x + px / window.scale, \
+                 window.y + py / window.scale). Or call remote_agent_mouse with the same \
+                 window_id and x/y in image pixels — the agent maps them to the \
+                 window's current position."
+                    .into(),
+            ),
+        );
+    }
+    result
+}
+
 /// Map a screenshot payload onto the `_image_base64` convention
 /// (`routes/mcp.rs` turns it into an MCP image content block). Payloads
 /// without an image pass through untouched so daemon-side errors stay
@@ -369,5 +486,48 @@ mod tests {
 
         let short = args_summary(CAP_ECHO, &serde_json::json!({ "text": "hi" }));
         assert_eq!(short, "{\"text\":\"hi\"}");
+    }
+
+    #[test]
+    fn window_targets_are_detected_for_screenshot_and_mouse_only() {
+        let app = serde_json::json!({ "app": "firefox" });
+        assert!(targets_window(CAP_SCREENSHOT, &app));
+        assert!(targets_window(
+            CAP_MOUSE,
+            &serde_json::json!({ "window_id": 3 })
+        ));
+        assert!(targets_window(
+            CAP_SCREENSHOT,
+            &serde_json::json!({ "list_windows": true })
+        ));
+        assert!(!targets_window(
+            CAP_SCREENSHOT,
+            &serde_json::json!({ "list_windows": false, "app": "" })
+        ));
+        assert!(!targets_window(CAP_KEYBOARD, &app));
+    }
+
+    #[test]
+    fn schema_shaped_mouse_and_keyboard_args_map_to_the_daemon_shape() {
+        let drag = normalize_mouse_args(serde_json::json!({
+            "action": "drag", "from_x": 1, "from_y": 2, "x": 3, "y": 4, "window_id": 9
+        }));
+        assert_eq!(
+            drag,
+            serde_json::json!({ "op": "drag", "from": [1, 2], "to": [3, 4], "window_id": 9 })
+        );
+        let scroll = normalize_mouse_args(serde_json::json!({ "action": "scroll", "delta_y": -3 }));
+        assert_eq!(scroll, serde_json::json!({ "op": "scroll", "dy": -3 }));
+        // Daemon-shaped args pass through.
+        let native = serde_json::json!({ "op": "click", "x": 1, "y": 2 });
+        assert_eq!(normalize_mouse_args(native.clone()), native);
+
+        let combo = normalize_keyboard_args(
+            serde_json::json!({ "action": "combo", "keys": "ctrl + shift+t" }),
+        );
+        assert_eq!(
+            combo,
+            serde_json::json!({ "op": "combo", "keys": ["ctrl", "shift", "t"] })
+        );
     }
 }

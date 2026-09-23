@@ -29,6 +29,7 @@ use crate::audit;
 use crate::config::Config;
 use crate::executor::{CapabilityExecutor, ExecContext};
 use crate::input::{Indicator, InputAction, InputBackend, MouseButton};
+use crate::windows::{WindowInfo, WindowLocator, WindowQuery, XcapLocator};
 
 /// Parse a mouse button name; defaults to left when absent.
 fn parse_button(args: &Value) -> Result<MouseButton, String> {
@@ -105,6 +106,45 @@ fn parse_mouse(args: &Value) -> Result<InputAction, String> {
             dy: args.get("dy").and_then(Value::as_i64).unwrap_or(0) as i32,
         }),
         other => Err(format!("unknown mouse op '{other}'")),
+    }
+}
+
+/// Rewrite a parsed mouse action whose coordinates are relative to
+/// `window` (screenshot pixels) into absolute screen coordinates.
+fn to_window_space(action: InputAction, window: &WindowInfo) -> Result<InputAction, String> {
+    match action {
+        InputAction::MouseMove { relative: true, .. } => {
+            Err("'relative' moves can't be combined with a window target".to_string())
+        }
+        InputAction::MouseMove { x, y, .. } => {
+            let (x, y) = window.to_screen(x, y)?;
+            Ok(InputAction::MouseMove {
+                x,
+                y,
+                relative: false,
+            })
+        }
+        InputAction::Click { at: None, .. } => {
+            Err("a click on a window target needs 'x' and 'y'".to_string())
+        }
+        InputAction::Click {
+            button,
+            at: Some((x, y)),
+        } => Ok(InputAction::Click {
+            button,
+            at: Some(window.to_screen(x, y)?),
+        }),
+        InputAction::Drag { from, to, button } => Ok(InputAction::Drag {
+            from: window.to_screen(from.0, from.1)?,
+            to: window.to_screen(to.0, to.1)?,
+            button,
+        }),
+        InputAction::Scroll { .. } => Err(
+            "scroll has no coordinates: move into the window first, then scroll \
+             without a window target"
+                .to_string(),
+        ),
+        other => Ok(other),
     }
 }
 
@@ -205,11 +245,16 @@ async fn run_action(
     result.map(|_| json!({"ok": true, "action": action.name()}))
 }
 
-/// Mouse control: move / click / drag / scroll.
+/// Mouse control: move / click / drag / scroll. Coordinates are absolute
+/// screen coordinates, or window-relative when the args carry a window
+/// target (`window_id` / `app` / `title`) — the window's CURRENT bounds
+/// are looked up per action, so a window that moved since the screenshot
+/// is still hit correctly.
 pub struct MouseExecutor {
     backend: Arc<dyn InputBackend>,
     indicator: Arc<dyn Indicator>,
     config_path: Option<PathBuf>,
+    locator: Arc<dyn WindowLocator>,
 }
 
 impl MouseExecutor {
@@ -222,15 +267,33 @@ impl MouseExecutor {
             backend,
             indicator,
             config_path,
+            locator: Arc::new(XcapLocator),
         }
+    }
+
+    #[cfg(test)]
+    fn with_locator(mut self, locator: Arc<dyn WindowLocator>) -> Self {
+        self.locator = locator;
+        self
     }
 }
 
 #[async_trait]
 impl CapabilityExecutor for MouseExecutor {
     async fn execute(&self, ctx: &ExecContext, args: Value) -> Result<Value, String> {
-        let action = parse_mouse(&args)?;
-        run_action(
+        let mut action = parse_mouse(&args)?;
+        let window = match WindowQuery::from_args(&args)? {
+            Some(query) => {
+                let locator = self.locator.clone();
+                let window = tokio::task::spawn_blocking(move || locator.locate(&query))
+                    .await
+                    .map_err(|e| format!("window lookup panicked: {e}"))??;
+                action = to_window_space(action, &window)?;
+                Some(window)
+            }
+            None => None,
+        };
+        let mut out = run_action(
             "mouse",
             &self.backend,
             &self.indicator,
@@ -238,7 +301,13 @@ impl CapabilityExecutor for MouseExecutor {
             action,
             self.config_path.as_deref(),
         )
-        .await
+        .await?;
+        // Echo the resolved window so the server can tell a window-aware
+        // agent from an old one that silently ignored the target.
+        if let Some(window) = window {
+            out["window"] = window.to_json();
+        }
+        Ok(out)
     }
 }
 
@@ -291,6 +360,55 @@ mod tests {
     }
     fn keyboard_with(backend: Arc<MockBackend>) -> KeyboardExecutor {
         KeyboardExecutor::new(backend, Arc::new(NoopIndicator), None)
+    }
+
+    #[tokio::test]
+    async fn mouse_window_target_maps_to_screen_and_echoes_window() {
+        use crate::windows::tests_support::{FixedLocator, win};
+        let backend = Arc::new(MockBackend::new());
+        let locator = Arc::new(FixedLocator(vec![
+            win(7, "code", "main.rs", 0, 0),
+            win(9, "firefox", "Docs", 100, 50),
+        ]));
+        let exec = mouse_with(backend.clone()).with_locator(locator);
+        let (ctx, _rx) = collecting_ctx();
+
+        let out = exec
+            .execute(&ctx, json!({"op":"click","x":10,"y":20,"app":"firefox"}))
+            .await
+            .unwrap();
+        assert_eq!(out["window"]["window_id"], 9);
+        exec.execute(
+            &ctx,
+            json!({"op":"drag","from":[0,0],"to":[5,5],"window_id":7}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            backend.recorded(),
+            vec![
+                InputAction::Click {
+                    button: MouseButton::Left,
+                    at: Some((110, 70))
+                },
+                InputAction::Drag {
+                    from: (0, 0),
+                    to: (5, 5),
+                    button: MouseButton::Left
+                },
+            ]
+        );
+
+        // Outside the window / no match / coordinate-less ops are refused
+        // before the backend runs.
+        for bad in [
+            json!({"op":"click","x":900,"y":0,"app":"firefox"}),
+            json!({"op":"click","x":1,"y":1,"app":"slack"}),
+            json!({"op":"scroll","dy":1,"app":"firefox"}),
+        ] {
+            assert!(exec.execute(&ctx, bad).await.is_err());
+        }
+        assert_eq!(backend.recorded().len(), 2);
     }
 
     #[tokio::test]

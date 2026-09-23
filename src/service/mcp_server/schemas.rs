@@ -1798,13 +1798,17 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "remote_agent_screenshot".into(),
-            description: "Capture the remote device's screen (returned as an image). Multi-monitor: call once with list=true to get the monitor table, then pass 'monitor' with the chosen index. The daemon shows a visible 'being controlled' indicator while serving these.".into(),
+            description: "Capture the remote device's screen or a single app window (returned as an image). Multi-monitor: call once with list=true to get the monitor table (with each monitor's x/y offset), then pass 'monitor'. One app: call with list_windows=true to get every window's app_name, title, window_id and absolute screen bounds, then pass window_id (or app / title substrings) to capture just that window. A window capture's result carries window.x/y/scale: image pixel (px, py) is at screen (x + px/scale, y + py/scale) — or pass the same window_id to remote_agent_mouse and use image pixels directly. The daemon shows a visible 'being controlled' indicator while serving these.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "device_id": { "type": "string", "description": "Target device (see remote_agent_list)." },
-                    "monitor": { "type": "integer", "description": "Monitor index from list mode (default: the primary display)." },
-                    "list": { "type": "boolean", "description": "true = return the monitor table (index, name, size, is_primary) instead of capturing." }
+                    "monitor": { "type": "integer", "description": "Monitor index from list mode (default: the primary display). Not combinable with a window target." },
+                    "list": { "type": "boolean", "description": "true = return the monitor table (index, name, size, x, y, scale_factor, is_primary) instead of capturing." },
+                    "list_windows": { "type": "boolean", "description": "true = return the window table (window_id, app_name, title, x, y, width, height, is_focused, is_minimized) instead of capturing." },
+                    "window_id": { "type": "integer", "description": "Capture exactly this window (from list_windows)." },
+                    "app": { "type": "string", "description": "Capture the window whose app name contains this (case-insensitive); the focused match wins." },
+                    "title": { "type": "string", "description": "Capture the window whose title contains this (case-insensitive); combinable with app." }
                 },
                 "required": ["device_id"],
                 "additionalProperties": false
@@ -1812,7 +1816,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "remote_agent_mouse".into(),
-            description: "Control the remote device's mouse: move, click, drag, scroll. Coordinates are screen pixels. The daemon may refuse if the user disabled the mouse capability locally.".into(),
+            description: "Control the remote device's mouse: move, click, drag, scroll. Coordinates are absolute screen pixels — or, when window_id / app / title is given, pixels within that window's screenshot (from remote_agent_screenshot with the same target); the agent maps them onto the window's current on-screen position and refuses points outside it. The daemon may refuse if the user disabled the mouse capability locally.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1824,7 +1828,10 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "from_y": { "type": "integer", "description": "drag: start Y." },
                     "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "click/drag button (default left)." },
                     "delta_x": { "type": "integer", "description": "scroll: horizontal amount." },
-                    "delta_y": { "type": "integer", "description": "scroll: vertical amount." }
+                    "delta_y": { "type": "integer", "description": "scroll: vertical amount." },
+                    "window_id": { "type": "integer", "description": "Make x/y (and from_x/from_y) relative to this window (from remote_agent_screenshot list_windows). Not valid for scroll." },
+                    "app": { "type": "string", "description": "Like window_id, but pick the window whose app name contains this (case-insensitive)." },
+                    "title": { "type": "string", "description": "Like window_id, but pick the window whose title contains this; combinable with app." }
                 },
                 "required": ["device_id", "action"],
                 "additionalProperties": false

@@ -469,3 +469,186 @@ test('remote_agent_screenshot targets a monitor: monitor forwarded, display alia
   await page.getByTestId('confirm-dialog-confirm').click()
   await expect(page.getByTestId('agents-empty')).toBeVisible()
 })
+
+test('remote_agent window targets: old agents refused, window capture + window-relative mouse forwarded', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const authHeader = { Authorization: `Bearer ${token}` }
+  await loadApp(page, token)
+
+  await page.getByTestId('rail-agents').click()
+  await expect(page.getByTestId('agents-view')).toBeVisible()
+  const enrollToken = await enrollViaUi(page, 'Window Box')
+  const row = page.locator('.list-view-row', { hasText: 'Window Box' })
+  await expect(row).toBeVisible()
+
+  const devicesRes = await request.get('/api/devices', { headers: authHeader })
+  const devices = (await devicesRes.json()) as { devices: { id: string; name: string }[] }
+  const deviceId = devices.devices.find((d) => d.name === 'Window Box')?.id
+  expect(deviceId).toBeTruthy()
+
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-agents-'))
+  const folderRes = await request.post('/api/folders', {
+    headers: authHeader,
+    data: { name: 'e2e-agents-windows', path: folderPath },
+  })
+  const folder = (await folderRes.json()) as { id: string }
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'window bridge', folder_id: folder.id },
+  })
+  const session = (await sessionRes.json()) as { id: string }
+  const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
+    headers: authHeader,
+    data: { text: 'go', model: 'mock:happy-path' },
+  })
+  expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
+  const mcpCfgPath = path.join(
+    process.env.PECKBOARD_E2E_DATA_DIR!,
+    'worker-mcp',
+    `${session.id}.json`,
+  )
+  const mcpCfg = JSON.parse(readFileSync(mcpCfgPath, 'utf8')) as {
+    mcpServers: { peckboard: { headers: { Authorization: string } } }
+  }
+  const mcpToken = mcpCfg.mcpServers.peckboard.headers.Authorization.replace(/^Bearer /, '')
+
+  // Daemon stand-in. `features` decides whether it advertises window-target
+  // support; every request's args are recorded, and a window-targeted
+  // request gets a `window` block back like the real agent's.
+  const connectAgent = (features: string[]) =>
+    page.evaluate(
+      ({ tok, features }) => {
+        const w = window as unknown as { __agentWs?: WebSocket; __agentReqs: unknown[] }
+        w.__agentWs?.close()
+        w.__agentReqs = []
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+        const ws = new WebSocket(`${proto}://${location.host}/ws/agent`, [
+          'peckboard-agent',
+          `token.${tok}`,
+        ])
+        w.__agentWs = ws
+        ws.addEventListener('open', () => {
+          ws.send(
+            JSON.stringify({
+              v: 1,
+              type: 'hello',
+              agent_version: '0.0.1-e2e',
+              platform: 'linux',
+              hostname: 'e2e-box',
+              capabilities: ['screenshot', 'mouse'],
+              features,
+            }),
+          )
+        })
+        ws.addEventListener('message', (ev) => {
+          const frame = JSON.parse(String(ev.data))
+          if (frame.type !== 'request') return
+          w.__agentReqs.push({ capability: frame.capability, args: frame.args })
+          const targeted = frame.args.window_id !== undefined || frame.args.app !== undefined
+          const payload: Record<string, unknown> = { received: frame.args }
+          if (frame.capability === 'screenshot') {
+            payload.image_base64 = 'aGVsbG8='
+            payload.mime = 'image/png'
+          }
+          if (targeted) {
+            payload.window = {
+              window_id: 5,
+              app_name: 'firefox',
+              title: 'Docs',
+              x: 100,
+              y: 50,
+              width: 800,
+              height: 600,
+              scale: 1,
+            }
+          }
+          ws.send(
+            JSON.stringify({ v: 1, type: 'result', corr_id: frame.corr_id, ok: true, payload }),
+          )
+        })
+      },
+      { tok: enrollToken, features },
+    )
+  const agentRequests = () =>
+    page.evaluate(
+      () => (window as unknown as { __agentReqs: { capability: string }[] }).__agentReqs,
+    )
+
+  const call = async (tool: string, args: Record<string, unknown>) => {
+    const res = await request.post('/mcp', {
+      headers: { Authorization: `Bearer ${mcpToken}` },
+      data: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: tool, arguments: { device_id: deviceId, ...args } },
+      },
+    })
+    expect(res.ok()).toBeTruthy()
+    return (await res.json()) as {
+      result?: { content: { type: string; data?: string; text?: string }[] }
+      error?: { message: string }
+    }
+  }
+
+  // 1. An agent without the feature would silently ignore window targets
+  //    (a window-relative click landing at absolute coords), so the server
+  //    refuses before anything reaches the daemon.
+  await connectAgent([])
+  await expect(row.getByTestId('agent-dot-online')).toBeVisible({ timeout: 10_000 })
+  for (const [tool, args] of [
+    ['remote_agent_screenshot', { app: 'firefox' }],
+    ['remote_agent_mouse', { action: 'click', x: 1, y: 1, window_id: 5 }],
+  ] as const) {
+    const body = await call(tool, args)
+    expect(body.error?.message, `${tool} must be refused`).toContain('too old for window targets')
+  }
+  expect(await agentRequests()).toEqual([])
+
+  // 2. A window-aware agent: capture by app returns the image plus the
+  //    window's screen bounds and a coordinate recipe.
+  await connectAgent(['window-targets'])
+  await expect(row.getByTestId('agent-dot-online')).toBeVisible({ timeout: 10_000 })
+  await expect
+    .poll(
+      async () =>
+        (await call('remote_agent_screenshot', { list_windows: true })).error?.message ?? 'ok',
+      {
+        timeout: 10_000,
+      },
+    )
+    .toBe('ok')
+
+  let body = await call('remote_agent_screenshot', { app: 'firefox' })
+  expect(body.error).toBeFalsy()
+  expect(body.result!.content[0]).toMatchObject({ type: 'image', data: 'aGVsbG8=' })
+  const shot = JSON.parse(body.result!.content[1].text ?? '') as {
+    coordinates: string
+    result: { received: unknown; window: { x: number; y: number } }
+  }
+  expect(shot.result.received).toEqual({ app: 'firefox' })
+  expect(shot.result.window).toMatchObject({ x: 100, y: 50 })
+  expect(shot.coordinates).toContain('window.x + px')
+
+  // 3. Schema-shaped mouse args reach the daemon in its own shape, with
+  //    the window target intact for window-relative mapping.
+  body = await call('remote_agent_mouse', {
+    action: 'drag',
+    from_x: 1,
+    from_y: 2,
+    x: 3,
+    y: 4,
+    window_id: 5,
+  })
+  expect(body.error).toBeFalsy()
+  const drag = JSON.parse(body.result!.content[0].text ?? '') as { result: { received: unknown } }
+  expect(drag.result.received).toEqual({ op: 'drag', from: [1, 2], to: [3, 4], window_id: 5 })
+
+  await row.locator('.list-view-menu').click()
+  await page.getByRole('menuitem', { name: 'Delete' }).click()
+  await page.getByTestId('confirm-dialog-confirm').click()
+  await expect(page.getByTestId('agents-empty')).toBeVisible()
+})
