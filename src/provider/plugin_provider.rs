@@ -557,6 +557,9 @@ impl PluginProviderRuntime {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Default SIGINT/SIGQUIT for the CLI and every shell it runs, even
+        // when the server itself inherited them ignored (see the helper).
+        crate::provider::turn::reset_child_signals_std(&mut cmd);
         for k in &req.env_remove {
             if !k.is_empty() && !k.contains('\0') {
                 cmd.env_remove(k);
@@ -1331,6 +1334,7 @@ fn probe_cli_uncached(input: &str) -> String {
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::provider::turn::reset_child_signals_std(&mut cmd);
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         cmd.current_dir(cwd);
     }
@@ -2187,6 +2191,45 @@ mod tests {
         assert_eq!(eof["eof"], true, "eof: {eof}");
         assert!(eof["exit_code"].is_null(), "eof: {eof}");
         assert_eq!(eof["signal"], 9, "eof: {eof}");
+
+        runtime.end_turn("s1");
+    }
+
+    /// Regression: `peckboard_provider_spawn` hands the CLI a *default*
+    /// SIGINT even when the server process has it ignored (inherited from a
+    /// `&` background launch in a non-interactive shell). A shell cannot
+    /// trap an inherited-ignored SIGINT, so without the `pre_exec` reset the
+    /// self-signal below is dropped and the child prints `missed` — and so
+    /// would every shell an agent's Bash tool runs.
+    #[cfg(unix)]
+    #[test]
+    fn spawned_child_gets_default_sigint_even_when_the_server_ignores_it() {
+        let _ignore = crate::provider::turn::IgnoreSigint::new();
+        let folder = std::env::temp_dir().to_string_lossy().into_owned();
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, &folder);
+
+        let spawn: serde_json::Value = serde_json::from_str(
+            &runtime.spawn_json(
+                "p1",
+                &serde_json::json!({
+                    "session_id": "s1",
+                    "command": "/bin/bash",
+                    "args": ["-c", "trap 'echo caught; exit 0' INT\nkill -INT $$\nsleep 1\necho missed"],
+                    "cwd": folder,
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(spawn["ok"], true, "spawn: {spawn}");
+
+        let line: serde_json::Value = serde_json::from_str(&runtime.read_line_json(
+            "p1",
+            &serde_json::json!({ "session_id": "s1", "timeout_ms": 5000 }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(line["line"], "caught", "line: {line}");
 
         runtime.end_turn("s1");
     }

@@ -2893,15 +2893,17 @@ pub(crate) fn exec_impl(
     let (inject_env, masker) =
         crate::service::secret_mask::command_env_blocking(db, inv.folder_id.as_deref());
     use std::process::{Command, Stdio};
-    let mut child = match Command::new(command)
-        .args(&req.args)
+    let mut cmd = Command::new(command);
+    cmd.args(&req.args)
         .envs(inject_env.iter().map(|(k, v)| (k, v)))
         .current_dir(&root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // Agent-run commands are mostly shells and shell-driven tools; hand them
+    // default SIGINT/SIGQUIT even when the server inherited them ignored.
+    crate::provider::turn::reset_child_signals_std(&mut cmd);
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return error_json(format!("failed to start '{command}': {e}")),
     };

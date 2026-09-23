@@ -233,6 +233,11 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
         cmd.env(key, value);
     }
 
+    // Default SIGINT/SIGQUIT in the child even when the server inherited them
+    // ignored — otherwise [`graceful_cancel`]'s SIGINT is silently dropped
+    // and every interrupt degrades to the SIGKILL fallback, losing the
+    // CLI's final frame. See [`reset_child_signals`].
+    reset_child_signals(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -594,6 +599,82 @@ async fn emit_line_events(
                 crate::plugin::todo_hook::assistant_text_payload(provider, &text),
             )
             .await;
+        }
+    }
+}
+
+/// Reset SIGINT and SIGQUIT to their default disposition in a child about
+/// to be spawned.
+///
+/// A server started as a shell background job (`peckboard &` from a
+/// non-interactive shell, nohup wrappers, some init scripts) inherits
+/// SIGINT/SIGQUIT *ignored*, and ignored dispositions survive exec into
+/// every descendant. A shell cannot trap an inherited-ignored signal (bash:
+/// "signals ignored upon entry to the shell cannot be trapped or reset"),
+/// so a CLI's own Ctrl-C handling, the shells an agent's Bash tool runs, and
+/// [`graceful_cancel`]'s SIGINT-then-drain all silently stop working. Every
+/// provider spawn site (this module's [`run_turn`], the plugin-provider
+/// `peckboard_provider_spawn` / CLI probe, the plugin `exec` host function,
+/// and the account login flows) calls one of these so the contract holds
+/// however the server itself was launched. Not SIGPIPE: Rust ignores that
+/// in every process on purpose.
+#[cfg(unix)]
+pub fn reset_child_signals(cmd: &mut tokio::process::Command) {
+    // SAFETY: runs in the forked child before exec; `signal` is
+    // async-signal-safe and nothing else executes in that window.
+    unsafe {
+        cmd.pre_exec(reset_signal_dispositions);
+    }
+}
+
+/// [`reset_child_signals`] for a blocking `std::process::Command`.
+#[cfg(unix)]
+pub fn reset_child_signals_std(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: as in `reset_child_signals`.
+    unsafe {
+        cmd.pre_exec(reset_signal_dispositions);
+    }
+}
+
+#[cfg(unix)]
+fn reset_signal_dispositions() -> std::io::Result<()> {
+    // SAFETY: plain signal(2) calls in the child between fork and exec.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn reset_child_signals(_cmd: &mut tokio::process::Command) {}
+
+#[cfg(not(unix))]
+pub fn reset_child_signals_std(_cmd: &mut std::process::Command) {}
+
+/// Test-only: ignore SIGINT process-wide for the guard's lifetime, restoring
+/// the previous disposition on drop. Models a server launched as a shell
+/// background job. Concurrent tests that spawn inside the window inherit the
+/// ignore too — which is exactly what [`reset_child_signals`] makes harmless.
+#[cfg(all(test, unix))]
+pub(crate) struct IgnoreSigint(libc::sighandler_t);
+
+#[cfg(all(test, unix))]
+impl IgnoreSigint {
+    pub(crate) fn new() -> Self {
+        // SAFETY: plain signal(2) on the calling process.
+        let prev = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        Self(prev)
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for IgnoreSigint {
+    fn drop(&mut self) {
+        // SAFETY: restores the handler `new` captured.
+        unsafe {
+            libc::signal(libc::SIGINT, self.0);
         }
     }
 }
@@ -1136,6 +1217,43 @@ mod tests {
             kinds.iter().any(|k| k == "agent-text"),
             "the frame the child emitted after SIGINT reached the transcript: {kinds:?}",
         );
+    }
+
+    /// Regression: the harness must hand the child a *default* SIGINT even
+    /// when the server process itself has SIGINT ignored (inherited from a
+    /// `&` background launch in a non-interactive shell). Without the
+    /// `pre_exec` reset, bash cannot install its INT trap, the self-signal
+    /// below is dropped, and the child reports `missed` — the same failure
+    /// that made `cancel_drains_a_frame_the_child_emits_after_sigint` flake
+    /// whenever the test suite ran as a background job.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_child_gets_default_sigint_even_when_the_server_ignores_it() {
+        let _ignore = IgnoreSigint::new();
+
+        let db = session_db().await;
+        let broadcaster = Broadcaster::new();
+        let env = HashMap::new();
+        // With SIGINT ignored on entry, `trap` is a no-op and the self-kill
+        // is dropped, so bash reaches the `missed` line.
+        let script = "trap 'printf '\\''{\"text\":\"caught\"}\\n'\\''; exit 0' INT\nkill -INT $$\nsleep 1\nprintf '{\"text\":\"missed\"}\\n'\n";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let mut stream = EchoStream::default();
+        let result = run_turn(
+            spec(
+                "bash",
+                &args,
+                &env,
+                &db,
+                &broadcaster,
+                Arc::new(Notify::new()),
+                Some(30),
+            ),
+            &mut stream,
+        )
+        .await;
+        assert!(result.completed, "error: {:?}", result.error);
+        assert_eq!(stream.seen, vec!["caught".to_string()]);
     }
 
     /// A child that ignores SIGINT (`trap '' INT`) still gets stopped —

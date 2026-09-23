@@ -145,6 +145,19 @@ impl AgentProvider for NoopProvider {
     async fn is_running(&self, session_id: &str) -> bool {
         self.blocked.lock().await.contains_key(session_id)
     }
+    /// Block until a cancelled `block`/`ask` run has actually wound down.
+    /// Without this, `SessionManager::cancel_and_wait` fell through to the
+    /// trait's no-op default and returned while the run's 20 ms stop-poll
+    /// loop still had the session registered, so `is_running` kept
+    /// reporting a run that was already cancelled.
+    async fn wait_for_termination(&self, session_id: &str) {
+        for _ in 0..500 {
+            if !self.blocked.lock().await.contains_key(session_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     async fn cleanup(&self) {}
     async fn shutdown(&self) {}
 }

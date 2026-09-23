@@ -98,6 +98,7 @@ impl CodexLoginManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        crate::provider::turn::reset_child_signals(&mut cmd);
 
         let mut child = match cmd.spawn() {
             Ok(child) => child,
