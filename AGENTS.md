@@ -158,6 +158,28 @@ map is recorded evidence, not proof, so the merge gate stays the whole
 suite. Regenerate the map (`scripts/e2e-impact-map.sh`) after adding or
 substantially reworking specs, and commit `web/e2e/impact-map.json`.
 
+## Ship It: Commit, Push, and Release When Done
+
+**When you finish a change and it passes verification, commit, push,
+and cut a release — don't stop at a working tree and ask.** The user
+expects every completed change to go out. The release flow:
+
+1. Bump `version` in `Cargo.toml` (patch bump, e.g. `0.1.26` →
+   `0.1.27`) and let `cargo build` refresh `Cargo.lock`.
+2. Commit only the files you changed plus `Cargo.toml` / `Cargo.lock`
+   (never `git add -A` — the tree holds many untracked scratch files),
+   with a subject of the form `0.1.27: <short summary>` and a body
+   describing the change.
+3. `git push origin main` — `Build Main` builds the release binaries
+   for that commit.
+4. `git tag -a 0.1.27 -m "0.1.27: <short summary>"` then
+   `git push origin 0.1.27` — the tag triggers `Publish Release`
+   (`.github/workflows/release-promote.yml`), which attaches the
+   binaries built for that commit.
+
+If verification surfaces failures, fix them or confirm they are the
+known pre-existing ones before shipping; say which in the commit body.
+
 ## Tests for New Features
 
 Add tests **proportional to the change** — enough to lock in

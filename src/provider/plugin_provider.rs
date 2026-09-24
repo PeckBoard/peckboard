@@ -241,6 +241,17 @@ pub(crate) struct TurnState {
     /// plugin's send returns at this turn's `result` instead of starting
     /// another turn on the same child.
     pub(crate) retire: AtomicBool,
+    /// Set when the plugin reports (via a `System` event with subtype
+    /// [`BACKGROUND_LINGER_SUBTYPE`]) that its turn has settled but the
+    /// child stays alive for in-flight background work. Core treats such a
+    /// turn as idle-but-injectable: new messages are handed to the live
+    /// child instead of waiting in the durable queue until it exits.
+    /// Cleared when the plugin takes the next injected message.
+    pub(crate) lingering: AtomicBool,
+    /// Drain-only completion fired when the turn starts lingering, so
+    /// messages queued during the settled turn are delivered into the
+    /// still-live child. `None` in unit tests.
+    pub(crate) linger_signal: Option<LingerSignal>,
     pub(crate) terminal: std::sync::Mutex<Option<Terminal>>,
     pub(crate) db: Db,
     pub(crate) broadcaster: Arc<Broadcaster>,
@@ -256,6 +267,28 @@ pub(crate) struct TurnState {
     /// Plugin manager for MCP tool dispatch during this turn. `None` in
     /// unit tests that only exercise spawn/read_line.
     pub(crate) plugins: Option<Arc<PluginManager>>,
+}
+
+/// `System` event subtype a plugin emits once its turn has settled but it
+/// keeps the child alive for background work (Claude's in-process
+/// background subagents). See [`TurnState::lingering`].
+pub const BACKGROUND_LINGER_SUBTYPE: &str = "background-linger";
+
+/// Where [`TurnState::linger_signal`] sends its drain-only completion.
+pub(crate) struct LingerSignal {
+    pub(crate) tx: tokio::sync::mpsc::Sender<ProcessCompletion>,
+    pub(crate) run_id: u64,
+}
+
+/// What [`PluginProviderRuntime::end_turn_full`] hands back: the terminal
+/// event the plugin emitted (if any) plus injected messages it never took —
+/// e.g. one delivered in the instant between the plugin's last
+/// `take_message` poll and its return, which would otherwise vanish.
+/// `untaken` stays empty for a stopped turn: cancel/terminate clear the
+/// queue on purpose and must not have a message revived behind them.
+pub(crate) struct EndedTurn {
+    pub(crate) terminal: Option<Terminal>,
+    pub(crate) untaken: Vec<serde_json::Value>,
 }
 
 /// Host-side state shared between every [`PluginProviderAdapter`] and the
@@ -338,13 +371,57 @@ impl PluginProviderRuntime {
 
     /// Remove the turn and report the terminal event it emitted (if any).
     pub(crate) fn end_turn(&self, session_id: &str) -> Option<Terminal> {
+        self.end_turn_full(session_id).terminal
+    }
+
+    /// [`Self::end_turn`], also handing back injected messages the plugin
+    /// never took so the caller can re-queue them.
+    pub(crate) fn end_turn_full(&self, session_id: &str) -> EndedTurn {
         self.kill_child(session_id);
-        let turn = self.turns.lock().ok()?.remove(session_id)?;
-        turn.terminal.lock().ok()?.clone()
+        let turn = self
+            .turns
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(session_id));
+        let Some(turn) = turn else {
+            return EndedTurn {
+                terminal: None,
+                untaken: Vec::new(),
+            };
+        };
+        let untaken: Vec<serde_json::Value> = turn
+            .injected
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default();
+        let stopped = turn.stop.load(Ordering::SeqCst);
+        if stopped && !untaken.is_empty() {
+            tracing::warn!(
+                session_id,
+                dropped = untaken.len(),
+                "Stopped turn ended with untaken injected messages; dropping them"
+            );
+        }
+        EndedTurn {
+            terminal: turn.terminal.lock().ok().and_then(|t| t.clone()),
+            untaken: if stopped { Vec::new() } else { untaken },
+        }
     }
 
     pub fn is_active(&self, session_id: &str) -> bool {
         self.turn(session_id).is_some()
+    }
+
+    /// Whether the turn for `session_id` has settled and is only keeping
+    /// its child alive for background work. See [`TurnState::lingering`].
+    /// A stopped or retired turn never takes another message, so it does
+    /// not count — sends go to the durable queue and drain at its end.
+    pub fn is_lingering(&self, session_id: &str) -> bool {
+        self.turn(session_id).is_some_and(|t| {
+            t.lingering.load(Ordering::SeqCst)
+                && !t.stop.load(Ordering::SeqCst)
+                && !t.retire.load(Ordering::SeqCst)
+        })
     }
 
     /// Cooperative interrupt: flag the turn so the plugin's next
@@ -855,7 +932,14 @@ impl PluginProviderRuntime {
     /// `peckboard_emit_provider_event {session_id, event}` — validate the
     /// caller owns the session's active turn, then feed the event through the
     /// shared `emit_event` path (DB + usage + WS). Records Completed/Crashed
-    /// as the turn's terminal; further emits after a terminal are refused.
+    /// as the turn's terminal (the latest one wins).
+    ///
+    /// Emits after a terminal are accepted: a settled turn can keep its
+    /// child alive (Claude lingers for in-process background subagents and
+    /// delivers injected follow-ups as further turns on the same child), and
+    /// that later output must land. Refusing it here made the plugin's emit
+    /// fail, its send return an error, and `end_turn` kill the child — and
+    /// every background subagent in it — at the first post-result frame.
     pub fn emit_from_plugin(&self, plugin_id: &str, input: &str) -> String {
         #[derive(Deserialize)]
         struct EmitRequest {
@@ -878,9 +962,6 @@ impl PluginProviderRuntime {
             let Ok(mut terminal) = turn.terminal.lock() else {
                 return error_json("turn state poisoned");
             };
-            if terminal.is_some() {
-                return error_json("turn already ended (Completed/Crashed was emitted)");
-            }
             match &event {
                 ProviderEvent::Completed { result_meta, .. } => {
                     *terminal = Some(terminal_from_completed(result_meta));
@@ -904,12 +985,32 @@ impl PluginProviderRuntime {
             ProviderEvent::Text { text } => Some(text.clone()),
             _ => None,
         };
+        let starts_linger = matches!(
+            &event,
+            ProviderEvent::System { subtype, .. } if subtype == BACKGROUND_LINGER_SUBTYPE
+        );
         turn.rt.block_on(emit_event(
             &turn.db,
             &turn.broadcaster,
             &req.session_id,
             event,
         ));
+        if starts_linger {
+            turn.lingering.store(true, Ordering::SeqCst);
+            // Drain-only: the run is still alive and owns its child; the
+            // listener just delivers anything queued during the settled
+            // turn, which dispatch now injects into the lingering child.
+            if let Some(signal) = &turn.linger_signal {
+                let _ = signal.tx.try_send(ProcessCompletion {
+                    session_id: req.session_id.clone(),
+                    completed: true,
+                    error: None,
+                    run_id: signal.run_id,
+                    error_kind: None,
+                    turn_end_only: true,
+                });
+            }
+        }
         // Feed plain assistant text to any `todo`-hook plugin — the same
         // seam the CLI stdout path runs (`provider/turn.rs`), so lifecycle
         // tracking works for plugin-emitted providers too.
@@ -967,7 +1068,13 @@ impl PluginProviderRuntime {
             return error_json("turn state poisoned");
         };
         match queue.pop_front() {
-            Some(message) => serde_json::json!({ "message": message }).to_string(),
+            Some(message) => {
+                // The child starts a fresh turn on this message: it is no
+                // longer idle, so later sends go back to the normal rules
+                // until the plugin reports lingering again.
+                turn.lingering.store(false, Ordering::SeqCst);
+                serde_json::json!({ "message": message }).to_string()
+            }
             None => serde_json::json!({ "message": serde_json::Value::Null }).to_string(),
         }
     }
@@ -1666,6 +1773,8 @@ impl AgentProvider for PluginProviderAdapter {
                     plugin_id: self.plugin_id.clone(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    lingering: AtomicBool::new(false),
+                    linger_signal: None,
                     terminal: std::sync::Mutex::new(None),
                     db: ctx.db.clone(),
                     broadcaster: ctx.broadcaster.clone(),
@@ -1943,6 +2052,8 @@ mod tests {
                     plugin_id: "p1".into(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    lingering: AtomicBool::new(false),
+                    linger_signal: None,
                     terminal: std::sync::Mutex::new(None),
                     injected: Default::default(),
                     stdin_q: Default::default(),
@@ -1971,6 +2082,8 @@ mod tests {
                         plugin_id: "p1".into(),
                         stop: AtomicBool::new(false),
                         retire: AtomicBool::new(false),
+                        lingering: AtomicBool::new(false),
+                        linger_signal: None,
                         terminal: std::sync::Mutex::new(None),
                         injected: Default::default(),
                         stdin_q: Default::default(),
@@ -2064,6 +2177,130 @@ mod tests {
         assert!(!runtime.is_active("s1"));
     }
 
+    /// A settled turn keeps its child for background subagents: output
+    /// after `Completed` must still land (refusing it killed the child and
+    /// every subagent in it), the linger announcement flips the turn
+    /// injectable and fires a drain-only completion, and injected messages
+    /// the plugin never took come back from `end_turn_full` — unless the
+    /// turn was stopped.
+    #[test]
+    fn settled_turn_keeps_emitting_and_lingers_injectably() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let db = Db::in_memory().unwrap();
+        rt.block_on(async {
+            let ts = chrono::Utc::now().to_rfc3339();
+            db.create_folder(crate::db::models::NewFolder {
+                id: "f1".into(),
+                name: "F".into(),
+                path: ".".into(),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+            db.create_session(crate::db::models::NewSession {
+                id: "s1".into(),
+                name: "S".into(),
+                folder_id: "f1".into(),
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let runtime = PluginProviderRuntime::new();
+        let begin = |runtime: &PluginProviderRuntime, tx| {
+            runtime
+                .begin_turn(
+                    "s1",
+                    TurnState {
+                        plugin_id: "p1".into(),
+                        stop: AtomicBool::new(false),
+                        retire: AtomicBool::new(false),
+                        lingering: AtomicBool::new(false),
+                        linger_signal: Some(LingerSignal { tx, run_id: 7 }),
+                        terminal: std::sync::Mutex::new(None),
+                        injected: Default::default(),
+                        stdin_q: Default::default(),
+                        plugins: None,
+                        db: db.clone(),
+                        broadcaster: Broadcaster::new(),
+                        rt: rt.handle().clone(),
+                        snapshot: SessionSnapshot {
+                            folder_path: ".".into(),
+                            folder_id: "f1".into(),
+                            card_id: None,
+                            project_id: None,
+                            is_worker: false,
+                            mcp_config_path: None,
+                        },
+                    },
+                )
+                .unwrap();
+        };
+        let emit = |runtime: &PluginProviderRuntime, ev: ProviderEvent| {
+            runtime.emit_from_plugin(
+                "p1",
+                &serde_json::json!({ "session_id": "s1", "event": ev }).to_string(),
+            )
+        };
+        begin(&runtime, tx.clone());
+
+        let completed = ProviderEvent::Completed {
+            conversation_id: None,
+            result_meta: serde_json::Value::Null,
+        };
+        assert!(emit(&runtime, completed.clone()).contains("ok"));
+        assert!(!runtime.is_lingering("s1"));
+        let late = emit(
+            &runtime,
+            ProviderEvent::Text {
+                text: "background agent output".into(),
+            },
+        );
+        assert!(late.contains("ok"), "post-Completed emit refused: {late}");
+
+        let linger = emit(
+            &runtime,
+            ProviderEvent::System {
+                text: Some("1 background subagent(s) still running".into()),
+                subtype: BACKGROUND_LINGER_SUBTYPE.into(),
+                detail: serde_json::json!({ "ids": ["a1"] }),
+            },
+        );
+        assert!(linger.contains("ok"), "{linger}");
+        assert!(runtime.is_lingering("s1"));
+        let signal = rx.try_recv().expect("linger fires a drain");
+        assert!(signal.turn_end_only && signal.completed);
+        assert_eq!(signal.run_id, 7);
+
+        // Taking an injected message starts a new turn: no longer idle.
+        assert!(runtime.queue_injection("p1", "s1", serde_json::json!({ "text": "next" })));
+        let taken: serde_json::Value =
+            serde_json::from_str(&runtime.take_message_json("p1", r#"{"session_id":"s1"}"#))
+                .unwrap();
+        assert_eq!(taken["message"]["text"], "next");
+        assert!(!runtime.is_lingering("s1"));
+        assert!(emit(&runtime, completed).contains("ok"));
+
+        // One delivered after the plugin's last poll comes back to requeue.
+        assert!(runtime.queue_injection("p1", "s1", serde_json::json!({ "text": "late" })));
+        let ended = runtime.end_turn_full("s1");
+        assert!(matches!(ended.terminal, Some(Terminal::Completed)));
+        assert_eq!(ended.untaken.len(), 1);
+        assert_eq!(ended.untaken[0]["text"], "late");
+
+        // A stopped turn drops them: cancel/terminate cleared the queue.
+        begin(&runtime, tx);
+        assert!(runtime.queue_injection("p1", "s1", serde_json::json!({ "text": "x" })));
+        runtime.request_stop("s1");
+        assert!(runtime.end_turn_full("s1").untaken.is_empty());
+    }
+
     fn begin_test_turn(runtime: &PluginProviderRuntime, folder: &str) -> tokio::runtime::Runtime {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2076,6 +2313,8 @@ mod tests {
                     plugin_id: "p1".into(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    lingering: AtomicBool::new(false),
+                    linger_signal: None,
                     terminal: std::sync::Mutex::new(None),
                     injected: Default::default(),
                     stdin_q: Default::default(),

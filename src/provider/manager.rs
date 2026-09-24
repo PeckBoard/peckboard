@@ -833,6 +833,10 @@ impl SessionManager {
             && self
                 .supports_mid_stream_for_session(session_id, &config.model)
                 .await;
+        // A settled turn whose child only lingers for background work is
+        // idle for dispatch purposes: inject the message as the child's next
+        // turn rather than parking it until the background work ends.
+        let lingering = supports_mid_stream && self.is_lingering(session_id).await;
         let stdin_answers = was_running
             && policy == MidTurnPolicy::Inject
             && self.answer_transport_for_session(session_id).await == AnswerTransport::Stdin;
@@ -851,7 +855,7 @@ impl SessionManager {
             );
         }
 
-        if was_running && (policy == MidTurnPolicy::Queue || !supports_mid_stream) {
+        if was_running && !lingering && (policy == MidTurnPolicy::Queue || !supports_mid_stream) {
             // Attachment ids ride along so a queued send keeps its images —
             // bytes are re-resolved from the attachments dir at delivery.
             let now = chrono::Utc::now().to_rfc3339();
@@ -905,7 +909,7 @@ impl SessionManager {
         self.send_message_locked(&lock, message, db, broadcaster, config)
             .await?;
 
-        if was_running {
+        if was_running && !lingering {
             // Mid-turn inject: tell the session's subscribers the queue
             // changed. No text — they refetch the durable list.
             broadcaster.broadcast(WsEvent {
@@ -990,7 +994,9 @@ impl SessionManager {
     ) -> anyhow::Result<bool> {
         let lock = self.lock_session(session_id).await;
 
-        if self.is_running(session_id).await {
+        // A lingering run (settled turn, child kept alive for background
+        // work) takes the message as its next turn via injection.
+        if self.is_running(session_id).await && !self.is_lingering(session_id).await {
             return Ok(false);
         }
 
@@ -1236,6 +1242,16 @@ impl SessionManager {
 
     pub async fn is_running(&self, session_id: &str) -> bool {
         self.running_provider(session_id).await.is_some()
+    }
+
+    /// Whether `session_id`'s run has settled and is only lingering for
+    /// background work, so a new message can be injected as its next turn.
+    /// See [`AgentProvider::is_lingering`].
+    pub async fn is_lingering(&self, session_id: &str) -> bool {
+        match self.running_provider(session_id).await {
+            Some(p) => p.supports_mid_stream_injection() && p.is_lingering(session_id).await,
+            None => false,
+        }
     }
 
     pub async fn cleanup(&self) {

@@ -17,8 +17,8 @@ use crate::plugin::manager::PluginManager;
 use crate::plugin::settings::SettingsSchema;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
 use crate::provider::plugin_provider::{
-    PluginProviderRuntime, ProviderRegistration, SessionSnapshot, Terminal, TurnState,
-    effective_capabilities, list_accounts_json, message_payload, probe_cli_json,
+    LingerSignal, PluginProviderRuntime, ProviderRegistration, SessionSnapshot, Terminal,
+    TurnState, effective_capabilities, list_accounts_json, message_payload, probe_cli_json,
     validate_refresh_models, validate_registration,
 };
 use crate::provider::registry::{ProviderInfo, ProviderRegistry};
@@ -191,6 +191,11 @@ impl AgentProvider for CrateAgentProvider {
                     plugin_id: self.plugin_id.clone(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    lingering: AtomicBool::new(false),
+                    linger_signal: Some(LingerSignal {
+                        tx: ctx.completion_tx.clone(),
+                        run_id: ctx.run_id,
+                    }),
                     terminal: std::sync::Mutex::new(None),
                     db: ctx.db.clone(),
                     broadcaster: ctx.broadcaster.clone(),
@@ -241,7 +246,9 @@ impl AgentProvider for CrateAgentProvider {
                     .and_then(|r| r),
                 Err(e) => Err(format!("failed to spawn crate provider turn thread: {e}")),
             };
-            let terminal = runtime.end_turn(&session_id);
+            let ended = runtime.end_turn_full(&session_id);
+            requeue_untaken(&db, &broadcaster, &session_id, ended.untaken).await;
+            let terminal = ended.terminal;
             let (completed, error, error_kind) = match terminal {
                 Some(Terminal::Completed) => (true, None, None),
                 Some(Terminal::Crashed { reason, kind }) => {
@@ -329,6 +336,10 @@ impl AgentProvider for CrateAgentProvider {
         self.mid_stream
     }
 
+    async fn is_lingering(&self, session_id: &str) -> bool {
+        self.runtime.is_lingering(session_id)
+    }
+
     async fn is_running(&self, session_id: &str) -> bool {
         self.runtime.is_active(session_id)
     }
@@ -352,6 +363,57 @@ impl AgentProvider for CrateAgentProvider {
 
     async fn shutdown(&self) {
         self.runtime.request_stop_for_plugin(&self.plugin_id);
+    }
+}
+
+/// Put injected messages the turn never took back on the durable queue, so
+/// the completion that follows delivers them as a fresh run instead of
+/// dropping them with the turn. Their `user` event was already appended
+/// (by the route or the drain that injected them). The injection payload
+/// carries attachment bytes but not their ids, so a re-queued message keeps
+/// only its text.
+async fn requeue_untaken(
+    db: &Db,
+    broadcaster: &Arc<crate::ws::broadcaster::Broadcaster>,
+    session_id: &str,
+    untaken: Vec<serde_json::Value>,
+) {
+    for message in untaken {
+        let text = message
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if message
+            .get("attachments")
+            .and_then(|a| a.as_array())
+            .is_some_and(|a| !a.is_empty())
+        {
+            tracing::warn!(
+                session_id,
+                "Re-queuing an untaken injected message without its attachments"
+            );
+        }
+        match db
+            .enqueue_message(crate::db::models::NewQueuedMessage {
+                session_id: session_id.to_string(),
+                text,
+                queued_at: chrono::Utc::now().to_rfc3339(),
+                user_event_appended: true,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(queued) => broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "queue".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({ "action": "set", "id": queued.id }),
+            }),
+            Err(e) => tracing::error!(
+                session_id,
+                "Failed to re-queue an untaken injected message: {e}"
+            ),
+        }
     }
 }
 

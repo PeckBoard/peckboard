@@ -143,6 +143,9 @@ pub fn run(payload: &Value) -> Result<(), String> {
     // on the loop is only lingering for in-flight background subagents
     // (see `background.rs`) and every exit is a clean completion.
     let mut turn_settled = false;
+    // Whether the host has been told this settled turn is lingering (see
+    // `announce_linger`); reset when an injected message starts a new turn.
+    let mut linger_announced = false;
     // Armed only while lingering, so a hung background agent cannot pin
     // the CLI child (and the session's turn slot) forever.
     let mut linger_guard = Watchdog::arm(None);
@@ -167,7 +170,9 @@ pub fn run(payload: &Value) -> Result<(), String> {
             return settle_and_exit(session_id, &background, "stop requested");
         }
 
-        if watchdog.expired() || linger_guard.expired() {
+        // The per-turn watchdog bounds a running turn only; once it settled,
+        // the linger cap alone decides how long background work may run.
+        if (!turn_settled && watchdog.expired()) || linger_guard.expired() {
             if turn_settled {
                 return settle_and_exit(session_id, &background, "linger timeout");
             }
@@ -183,6 +188,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
             watchdog.rearm();
             turn_settled = false;
             linger_guard = Watchdog::arm(None);
+            linger_announced = false;
         }
 
         let line = read_line(session_id, 100)?;
@@ -304,16 +310,16 @@ pub fn run(payload: &Value) -> Result<(), String> {
             }
         }
         for ev in events {
-            emit(session_id, &ev)?;
+            emit_live(session_id, &ev, turn_settled)?;
         }
         for ev in todo_events {
-            emit(session_id, &ev)?;
+            emit_live(session_id, &ev, turn_settled)?;
         }
         if is_result {
             last_result_error = result_error(&json_line);
             let usages = usage.on_result(&json_line, parser.model_name.as_deref());
             for u in usages {
-                emit(
+                emit_live(
                     session_id,
                     &ProviderEvent::Usage {
                         input_tokens: u.slices.input,
@@ -325,6 +331,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                         model: u.model,
                         turn_seq: None,
                     },
+                    turn_settled,
                 )?;
             }
             let mut meta = result_meta(&json_line);
@@ -341,12 +348,13 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     obj.insert("errorKind".into(), json!(CrashKind::classify(err).as_str()));
                 }
             }
-            emit(
+            emit_live(
                 session_id,
                 &ProviderEvent::Completed {
                     conversation_id: parser.conversation_id.clone(),
                     result_meta: meta,
                 },
+                turn_settled,
             )?;
             parser.reset_turn();
             turn_settled = true;
@@ -361,6 +369,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 watchdog.rearm();
                 turn_settled = false;
                 linger_guard = Watchdog::arm(None);
+                linger_announced = false;
                 continue;
             }
             // Background subagents still running inside the CLI: linger —
@@ -370,6 +379,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
             // and settle above.
             if !winding_down && background.pending() > 0 {
                 linger_guard = Watchdog::arm(Some(BACKGROUND_LINGER_CAP_MS));
+                if !linger_announced {
+                    announce_linger(session_id, &background);
+                    linger_announced = true;
+                }
                 continue;
             }
             // One provider.send = one turn. The CLI child is dropped when
@@ -392,6 +405,42 @@ fn is_notification_result(json: &Value) -> bool {
         .and_then(|o| o.get("kind"))
         .and_then(|k| k.as_str())
         == Some("task-notification")
+}
+
+/// `System` subtype that tells the host this settled turn is lingering for
+/// background subagents. Must match the host's
+/// `plugin_provider::BACKGROUND_LINGER_SUBTYPE`: the host then treats the
+/// session as idle and injects new messages into this child as its next
+/// turn instead of queueing them until the linger ends.
+const BACKGROUND_LINGER_SUBTYPE: &str = "background-linger";
+
+/// Tell the host (and the user) the turn settled but the CLI stays up for
+/// in-flight background subagents.
+fn announce_linger(session_id: &str, background: &BackgroundTracker) {
+    let ids = background.pending_ids();
+    let _ = emit(
+        session_id,
+        &ProviderEvent::System {
+            text: format!(
+                "{n} background subagent(s) still running ({list}); keeping the agent \
+                 process alive until they finish. New messages go straight to it.",
+                n = ids.len(),
+                list = ids.join(", "),
+            ),
+            subtype: BACKGROUND_LINGER_SUBTYPE.into(),
+            detail: json!({ "ids": ids }),
+        },
+    );
+}
+
+/// [`emit`], except that once the turn has settled a refused emit does not
+/// abort the send: an error return ends the run, and the host then kills
+/// the child — with every background subagent still running in it.
+fn emit_live(session_id: &str, event: &ProviderEvent, turn_settled: bool) -> Result<(), String> {
+    match emit(session_id, event) {
+        Err(_) if turn_settled => Ok(()),
+        other => other,
+    }
 }
 
 /// Tear down after the turn has settled (possibly mid-linger). If

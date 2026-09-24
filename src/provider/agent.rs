@@ -197,6 +197,17 @@ pub trait AgentProvider: Send + Sync + 'static {
     /// Whether a run is currently in flight for this session.
     async fn is_running(&self, session_id: &str) -> bool;
 
+    /// Whether the run for `session_id` has settled its turn and is only
+    /// keeping its child alive for background work (Claude's in-process
+    /// background subagents). Such a run still reports `is_running`, but
+    /// dispatch treats it as idle: a new message is injected into the live
+    /// child as its next turn instead of waiting in the durable queue until
+    /// the background work ends. Only meaningful for providers with
+    /// `supports_mid_stream_injection`. Default: `false`.
+    async fn is_lingering(&self, _session_id: &str) -> bool {
+        false
+    }
+
     /// Block until any background run for `session_id` has fully wound down
     /// — including emitting any synthetic agent-end / Crashed event from the
     /// cancel path. Returns immediately if no run is tracked.
