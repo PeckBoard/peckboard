@@ -22,8 +22,13 @@
 //!   mean the agent is no longer running).
 //! - manual stop: a `TaskStop` tool call with input `{"task_id": "..."}`
 //!   settles that id with no notification to follow.
+//!
+//! Background shells (`Bash` with `run_in_background: true`) live in the
+//! CLI process the same way and die with it: the result carries a
+//! `backgroundTaskId`, and completion arrives as the same
+//! `task-notification` frame, so they are tracked here too.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -34,6 +39,8 @@ pub struct BackgroundTracker {
     pending: BTreeSet<String>,
     /// tool_use_id → task id for TaskStop calls awaiting their result.
     stop_intents: HashMap<String, String>,
+    /// tool_use_ids of `Bash` calls launched with `run_in_background`.
+    bash_bg_intents: HashSet<String>,
 }
 
 impl BackgroundTracker {
@@ -49,33 +56,58 @@ impl BackgroundTracker {
         self.pending.iter().cloned().collect()
     }
 
-    /// Record a TaskStop intent so its success (seen at tool_end) settles
-    /// the target id.
+    /// Record a TaskStop / KillShell intent so its success (seen at
+    /// tool_end) settles the target id, and a background Bash launch so its
+    /// result's task id is tracked.
     pub fn on_tool_start(&mut self, tool_use_id: &str, name: &str, input: &Value) {
-        if name == "TaskStop"
-            && let Some(id) = input.get("task_id").and_then(|v| v.as_str())
-        {
+        let stop_target = match name {
+            "TaskStop" => input.get("task_id"),
+            "KillShell" | "KillBash" => input.get("shell_id"),
+            _ => None,
+        };
+        if let Some(id) = stop_target.and_then(|v| v.as_str()) {
             self.stop_intents
                 .insert(tool_use_id.to_string(), id.to_string());
+        }
+        if name == "Bash"
+            && input
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        {
+            self.bash_bg_intents.insert(tool_use_id.to_string());
         }
     }
 
     /// Inspect a tool result's structured sibling (`tool_use_result` on the
     /// raw stream line) for a background launch/resume, and settle TaskStop
-    /// intents.
+    /// intents. `output` is the result text: the fallback source of a
+    /// background Bash id.
     pub fn on_tool_end(
         &mut self,
         tool_use_id: &str,
         is_error: bool,
         tool_use_result: Option<&Value>,
+        output: Option<&str>,
     ) {
         if let Some(id) = self.stop_intents.remove(tool_use_id)
             && !is_error
         {
             self.pending.remove(&id);
         }
+        let bash_bg = self.bash_bg_intents.remove(tool_use_id);
         if is_error {
             return;
+        }
+        // Background shell: the CLI reports its id as `backgroundTaskId`;
+        // builds without it only say so in the text ("... with ID: <id>").
+        let shell_id = tool_use_result
+            .and_then(|r| r.get("backgroundTaskId"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| output.filter(|_| bash_bg).and_then(background_id_from_text));
+        if let Some(id) = shell_id {
+            self.pending.insert(id);
         }
         let Some(res) = tool_use_result.filter(|v| v.is_object()) else {
             return;
@@ -97,7 +129,6 @@ impl BackgroundTracker {
             self.pending.insert(id.to_string());
         }
     }
-
     /// Settle from a `task-notification` user frame. Returns the settled id
     /// when the frame was a notification for a tracked agent.
     pub fn on_stream_line(&mut self, json: &Value) -> Option<String> {
@@ -134,6 +165,18 @@ impl BackgroundTracker {
     }
 }
 
+/// `<id>` from a Bash result text like "Command running in background with
+/// ID: bx3k9. Output is being written to: ...".
+fn background_id_from_text(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once("with ID:")?;
+    let id: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,11 +208,15 @@ mod tests {
             },
         })
     }
-
     #[test]
     fn launch_then_notification_settles() {
         let mut t = BackgroundTracker::new();
-        t.on_tool_end("tu1", false, Some(&launch_result("a45ed88e4cb59c48a")));
+        t.on_tool_end(
+            "tu1",
+            false,
+            Some(&launch_result("a45ed88e4cb59c48a")),
+            None,
+        );
         assert_eq!(t.pending(), 1);
         assert_eq!(
             t.on_stream_line(&notification_frame("a45ed88e4cb59c48a")),
@@ -179,11 +226,47 @@ mod tests {
     }
 
     #[test]
+    fn background_bash_tracks_until_its_notification() {
+        let mut t = BackgroundTracker::new();
+        let bg = json!({"command": "sleep 20", "run_in_background": true});
+        // Structured id.
+        t.on_tool_start("tu1", "Bash", &bg);
+        t.on_tool_end(
+            "tu1",
+            false,
+            Some(&json!({"stdout": "", "stderr": "", "backgroundTaskId": "bx3k9"})),
+            None,
+        );
+        // Text-only fallback.
+        t.on_tool_start("tu2", "Bash", &bg);
+        t.on_tool_end(
+            "tu2",
+            false,
+            None,
+            Some("Command running in background with ID: b7q2. Output is being written to: /tmp/x"),
+        );
+        // A foreground Bash quoting the same text tracks nothing.
+        t.on_tool_start("tu3", "Bash", &json!({"command": "cat log"}));
+        t.on_tool_end("tu3", false, None, Some("... with ID: zz9 ..."));
+        assert_eq!(
+            t.pending_ids(),
+            vec!["b7q2".to_string(), "bx3k9".to_string()]
+        );
+        assert_eq!(
+            t.on_stream_line(&notification_frame("bx3k9")),
+            Some("bx3k9".to_string())
+        );
+        t.on_tool_start("tu4", "KillShell", &json!({"shell_id": "b7q2"}));
+        t.on_tool_end("tu4", false, None, None);
+        assert_eq!(t.pending(), 0);
+    }
+
+    #[test]
     fn errored_launch_and_plain_tools_track_nothing() {
         let mut t = BackgroundTracker::new();
-        t.on_tool_end("tu1", true, Some(&launch_result("a1")));
-        t.on_tool_end("tu2", false, Some(&json!({"ok": true})));
-        t.on_tool_end("tu3", false, None);
+        t.on_tool_end("tu1", true, Some(&launch_result("a1")), None);
+        t.on_tool_end("tu2", false, Some(&json!({"ok": true})), None);
+        t.on_tool_end("tu3", false, None, None);
         assert_eq!(t.pending(), 0);
     }
 
@@ -199,6 +282,7 @@ mod tests {
                 "message": "resumed from transcript in the background",
                 "resumedAgentId": "a45ed88e4cb59c48a",
             })),
+            None,
         );
         assert_eq!(t.pending_ids(), vec!["a45ed88e4cb59c48a".to_string()]);
     }
@@ -206,25 +290,25 @@ mod tests {
     #[test]
     fn task_stop_settles_without_a_notification() {
         let mut t = BackgroundTracker::new();
-        t.on_tool_end("tu1", false, Some(&launch_result("b5snf8l6o")));
+        t.on_tool_end("tu1", false, Some(&launch_result("b5snf8l6o")), None);
         t.on_tool_start("tu2", "TaskStop", &json!({"task_id": "b5snf8l6o"}));
-        t.on_tool_end("tu2", false, None);
+        t.on_tool_end("tu2", false, None, None);
         assert_eq!(t.pending(), 0);
     }
 
     #[test]
     fn failed_task_stop_keeps_the_agent_pending() {
         let mut t = BackgroundTracker::new();
-        t.on_tool_end("tu1", false, Some(&launch_result("b5snf8l6o")));
+        t.on_tool_end("tu1", false, Some(&launch_result("b5snf8l6o")), None);
         t.on_tool_start("tu2", "TaskStop", &json!({"task_id": "b5snf8l6o"}));
-        t.on_tool_end("tu2", true, None);
+        t.on_tool_end("tu2", true, None, None);
         assert_eq!(t.pending(), 1);
     }
 
     #[test]
     fn foreign_and_unknown_notifications_are_ignored() {
         let mut t = BackgroundTracker::new();
-        t.on_tool_end("tu1", false, Some(&launch_result("a1")));
+        t.on_tool_end("tu1", false, Some(&launch_result("a1")), None);
         // Unknown id: not ours.
         assert_eq!(t.on_stream_line(&notification_frame("zz")), None);
         // Ordinary user frame without the origin stamp.

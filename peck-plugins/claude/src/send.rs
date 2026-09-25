@@ -288,7 +288,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     }
                 }
                 ProviderEvent::ToolEnd {
-                    tool_use_id, error, ..
+                    tool_use_id,
+                    output,
+                    error,
+                    ..
                 } => {
                     // The structured result (where TaskCreate's assigned id
                     // lives) is a sibling of `message` on the raw line, not
@@ -297,6 +300,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                         tool_use_id,
                         error.is_some(),
                         json_line.get("tool_use_result"),
+                        output.as_deref(),
                     );
                     if let Some(todos) = tasks.on_tool_end(
                         tool_use_id,
@@ -422,7 +426,7 @@ fn announce_linger(session_id: &str, background: &BackgroundTracker) {
         session_id,
         &ProviderEvent::System {
             text: format!(
-                "{n} background subagent(s) still running ({list}); keeping the agent \
+                "{n} background task(s) still running ({list}); keeping the agent \
                  process alive until they finish. New messages go straight to it.",
                 n = ids.len(),
                 list = ids.join(", "),
@@ -457,7 +461,7 @@ fn settle_and_exit(
             session_id,
             &ProviderEvent::System {
                 text: format!(
-                    "{n} background subagent(s) still running ({list}) were terminated ({why}); \
+                    "{n} background task(s) still running ({list}) were terminated ({why}); \
                      they will be reported as stopped next turn",
                     n = background.pending(),
                     list = ids.join(", "),
