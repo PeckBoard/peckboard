@@ -743,7 +743,7 @@ async fn compaction_mid_turn_on_a_per_turn_provider_still_runs_the_doc_turn() {
     drop(lock);
     assert!(state.session_manager.is_running("s1").await);
 
-    peckboard::handover::begin_compaction(&state, "s1")
+    peckboard::handover::begin_compaction(&state, "s1", None, None)
         .await
         .expect("compaction dispatches");
 

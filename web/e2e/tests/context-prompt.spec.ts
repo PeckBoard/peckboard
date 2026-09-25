@@ -124,6 +124,58 @@ test('interactive session prompts to manage context, dismisses, and re-prompts a
   await pushContext(request, authHeader, session.id, 185_000)
   await expect(banner).toBeVisible({ timeout: 10_000 })
 })
+test('compact can continue on another model under the same provider and account', async ({
+  request,
+  page,
+  baseURL,
+}) => {
+  expect(baseURL, 'baseURL configured').toBeTruthy()
+  const { token, authHeader } = await authenticate(request)
+  const folder = await seedFolder(request, authHeader, 'compact-model')
+
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'compact model pick', folder_id: folder.id, model: 'mock:ctx' },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const session = (await sessionRes.json()) as { id: string }
+
+  await loadAppAt(page, token, `/sessions/${session.id}`)
+  await pushContext(request, authHeader, session.id, 160_000)
+  await expect(page.getByTestId('chat-context-prompt')).toBeVisible({ timeout: 10_000 })
+  await page.getByTestId('chat-context-compact').click()
+
+  const dialog = page.getByTestId('confirm-compact')
+  await expect(dialog).toBeVisible()
+  const select = dialog.getByTestId('compact-model-select')
+  // Defaults to the current model; only same provider+account models are
+  // offered — a Claude model would be a handover, not a compaction.
+  await expect(select).toHaveValue('mock:ctx')
+  await expect(select.locator('option[value="mock:echo"]')).toHaveCount(1)
+  await expect(select.locator('option[value^="claude:"]')).toHaveCount(0)
+
+  await select.selectOption('mock:echo')
+  await dialog.getByTestId('confirm-dialog-confirm').click()
+  await expect(dialog).toBeHidden({ timeout: 10_000 })
+
+  // The current model wrote the summary; the session continues on the pick.
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`/api/sessions/${session.id}`, { headers: authHeader })
+        return ((await res.json()) as { model: string | null }).model
+      },
+      { timeout: 15_000 },
+    )
+    .toBe('mock:echo')
+  const events = (await (
+    await request.get(`/api/sessions/${session.id}/events?limit=1000`, { headers: authHeader })
+  ).json()) as { kind: string; data: Record<string, unknown> }[]
+  const handover = events.find((e) => e.kind === 'handover')
+  expect(handover?.data.compaction).toBe(true)
+  expect(handover?.data.from).toBe('mock:ctx')
+  expect(handover?.data.to).toBe('mock:echo')
+})
 
 async function waitForWorkerSession(
   request: APIRequestContext,

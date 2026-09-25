@@ -41,7 +41,9 @@
 //! `conversation_id` untouched, so the switch simply doesn't happen and no
 //! context is lost. The user can therefore cancel a handover mid-flight.
 //!
-//! **Compaction** reuses the same machinery with `from == to`: when a
+//! **Compaction** reuses the same machinery with `from` and `to` sharing a
+//! continuity key (usually `from == to`; a manual compaction may continue
+//! on another model of the same provider/account): when a
 //! **worker** session's context occupancy crosses
 //! [`WORKER_COMPACT_CONTEXT_THRESHOLD`], the Claude stream loop recycles its
 //! child after the turn and the completion listener calls
@@ -598,10 +600,11 @@ fn doc_turn_config(from_model: &str) -> SpawnConfig {
     }
 }
 
-/// The doc-generation prompt: a compaction when the model isn't changing,
-/// a cross-provider handover otherwise.
+/// The doc-generation prompt: a compaction when the continuity key isn't
+/// changing (same model, or a same-provider/account model picked at compact
+/// time), a cross-provider handover otherwise.
 fn doc_turn_message(from_model: &str, to_model: &str) -> UserMessage {
-    UserMessage::from_text(if from_model == to_model {
+    UserMessage::from_text(if !needs_handover(from_model, to_model) {
         compaction_prompt().to_string()
     } else {
         handover_prompt(to_model)
@@ -623,7 +626,7 @@ async fn append_handover_start(
     let start_data = serde_json::json!({
         "from": from_model,
         "to": to_model,
-        "compaction": from_model == to_model,
+        "compaction": !needs_handover(from_model, to_model),
     });
     if let Ok(ev) = state
         .db
@@ -664,7 +667,7 @@ async fn append_handover_start(
 ///
 /// Preconditions (enforced by the callers): for a model switch, `from` and
 /// `to` cross a continuity boundary and the session has real history to
-/// summarize; for a compaction, `from == to`.
+/// summarize; for a compaction, `from` and `to` share a continuity key.
 pub async fn begin_handover(
     state: &Arc<AppState>,
     session_id: &str,
@@ -893,12 +896,21 @@ async fn card_resumes_session(state: &Arc<AppState>, session: &crate::db::models
 }
 
 /// Manual compaction (`POST /api/sessions/:id/compact`), valid at any
-/// occupancy. Same-model handover: the model writes a continuation doc, the
-/// conversation restarts fresh with the doc injected. Errors describe why
-/// the session is ineligible. Interactive sessions only — workers compact
-/// automatically between chunks via [`maybe_auto_compact`], where the card
-/// resume-link eligibility is checked.
-pub async fn begin_compaction(state: &Arc<AppState>, session_id: &str) -> anyhow::Result<()> {
+/// occupancy. The current model writes a continuation doc, the conversation
+/// restarts fresh with the doc injected. `target` picks the model that
+/// continues afterwards (`None` = the current one); it must share the
+/// session's continuity key — crossing provider/account is a handover, not a
+/// compaction. `effort` follows PATCH semantics (`Some(None)` clears a stale
+/// level the target doesn't offer). Errors describe why the session is
+/// ineligible. Interactive sessions only — workers compact automatically
+/// between chunks via [`maybe_auto_compact`], where the card resume-link
+/// eligibility is checked.
+pub async fn begin_compaction(
+    state: &Arc<AppState>,
+    session_id: &str,
+    target: Option<&str>,
+    effort: Option<Option<String>>,
+) -> anyhow::Result<()> {
     let Some(session) = state.db.get_session(session_id).await? else {
         anyhow::bail!("session not found");
     };
@@ -911,6 +923,16 @@ pub async fn begin_compaction(state: &Arc<AppState>, session_id: &str) -> anyhow
     if session.pending_handover_doc.is_some() {
         anyhow::bail!("a handover/compaction doc is still waiting to be delivered");
     }
+    let model = session.model.clone().unwrap_or_else(|| "default".into());
+    let target = target
+        .filter(|t| !t.is_empty())
+        .unwrap_or(&model)
+        .to_string();
+    if needs_handover(&model, &target) {
+        anyhow::bail!(
+            "compaction can only continue on a model under the same provider and account"
+        );
+    }
     let occupancy = state
         .db
         .latest_context_tokens(session_id)
@@ -920,9 +942,20 @@ pub async fn begin_compaction(state: &Arc<AppState>, session_id: &str) -> anyhow
     if occupancy == 0 {
         anyhow::bail!("nothing to compact yet — the session has no recorded context");
     }
-    let model = session.model.clone().unwrap_or_else(|| "default".into());
-    tracing::info!(session_id = %session_id, occupancy, "Manual compaction dispatching");
-    begin_handover(state, session_id, &model, &model, None).await
+    if let Some(effort) = effort {
+        state
+            .db
+            .update_session(
+                session_id,
+                UpdateSession {
+                    effort: Some(effort),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
+    tracing::info!(session_id = %session_id, occupancy, to = %target, "Manual compaction dispatching");
+    begin_handover(state, session_id, &model, &target, None).await
 }
 
 /// Complete a handover after the outgoing model's doc-generation turn
@@ -949,7 +982,7 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
         .await;
 
     let doc = collect_handover_doc(state, session_id).await;
-    if doc.trim().is_empty() && from_model == to_model {
+    if doc.trim().is_empty() && !needs_handover(&from_model, &to_model) {
         // A compaction that produced no summary must NOT finalize:
         // dropping the conversation with nothing to inject would destroy
         // the very context the compaction was meant to preserve. Roll it
@@ -977,7 +1010,7 @@ pub async fn finalize_handover(state: &Arc<AppState>, session_id: &str) -> anyho
         "from": from_model,
         "to": to_model,
         "doc": doc,
-        "compaction": from_model == to_model,
+        "compaction": !needs_handover(&from_model, &to_model),
     });
     if let Ok(ev) = state
         .db
@@ -1076,7 +1109,7 @@ pub async fn abort_handover(
     let data = serde_json::json!({
         "from": from_model,
         "to": to_model,
-        "compaction": from_model == to_model,
+        "compaction": !needs_handover(&from_model, &to_model),
         "reason": reason,
     });
     if let Ok(ev) = state
@@ -2087,6 +2120,79 @@ mod tests {
             events.iter().any(|e| e.kind == "handover-aborted"),
             "expected a handover-aborted marker, got kinds: {:?}",
             events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// Manual compaction may continue on another model under the same
+    /// provider + account: a cross-account target is refused up front, and
+    /// a parked same-account target finalizes as a *compaction* (not a
+    /// handover) and flips `model` to the chosen one.
+    #[tokio::test]
+    async fn compaction_can_continue_on_a_same_account_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        let ts = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(crate::db::models::NewFolder {
+                id: "f1".into(),
+                name: "F".into(),
+                path: dir.path().to_string_lossy().into_owned(),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .create_session(crate::db::models::NewSession {
+                id: "s1".into(),
+                name: "Chat".into(),
+                folder_id: "f1".into(),
+                model: Some("claude:opus@a".into()),
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let err = begin_compaction(&state, "s1", Some("claude:haiku@b"), None)
+            .await
+            .expect_err("a cross-account target is a handover, not a compaction");
+        assert!(
+            err.to_string().contains("same provider and account"),
+            "got: {err}"
+        );
+
+        // Park a same-account compaction as begin_handover would, with the
+        // doc turn's output already in the log.
+        state
+            .db
+            .update_session(
+                "s1",
+                UpdateSession {
+                    handover_to_model: Some(Some("claude:haiku@a".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        append_handover_start(&state, "s1", "claude:opus@a", "claude:haiku@a").await;
+        state
+            .db
+            .append_event("s1", "agent-text", serde_json::json!({ "text": "the doc" }))
+            .await
+            .unwrap();
+
+        finalize_handover(&state, "s1").await.unwrap();
+
+        let session = state.db.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(session.model.as_deref(), Some("claude:haiku@a"));
+        assert_eq!(session.pending_handover_doc.as_deref(), Some("the doc"));
+        let meta = latest_handover_meta(&state.db, "s1").await.unwrap();
+        assert!(
+            meta.compaction,
+            "same-account switch must finalize as a compaction"
         );
     }
 

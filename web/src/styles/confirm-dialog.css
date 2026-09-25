@@ -98,6 +98,31 @@
   color: var(--text2);
   line-height: 1.5;
 }
+/* A single labelled picker under the message (e.g. Compact's "Continue
+   with" model). Pulled up like the checkbox row so it reads as part of
+   the question. */
+.confirm-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -8px 0 20px;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
+
+.confirm-dialog-field select {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.confirm-dialog-field select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 /* Failure of the confirmed action itself. The dialog stays open so the
    user can read what went wrong and retry from the same place they
    started — closing on failure was indistinguishable from success. */

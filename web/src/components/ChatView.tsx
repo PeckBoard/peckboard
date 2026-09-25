@@ -1019,6 +1019,10 @@ type ConfirmActionState = {
   confirmLabel?: string
   testId?: string
   failMessage: string
+  /** Render the Compact dialog's "Continue with" model picker. A flag, not
+   *  a render callback: the picker must read live state, and this object
+   *  is built once when the dialog opens. */
+  compactModelPicker?: boolean
   run: () => Promise<void>
 }
 
@@ -1795,7 +1799,19 @@ export default function ChatView({
     })
   }
 
+  // The model that continues after a compaction. The current model always
+  // writes the summary (only it holds the context); the user may hand the
+  // fresh conversation to another model under the same provider + account.
+  // Mirrored in a ref because the confirm's `run` closure is built once.
+  const [compactTarget, setCompactTarget] = useState('')
+  const compactTargetRef = useRef('')
+  const pickCompactTarget = (id: string) => {
+    compactTargetRef.current = id
+    setCompactTarget(id)
+  }
   const handleCompact = () => {
+    const current = sessionDetail?.model || appDefaultModel || ''
+    pickCompactTarget(current)
     openConfirm({
       title: 'Compact context',
       message:
@@ -1803,14 +1819,50 @@ export default function ChatView({
       confirmLabel: 'Compact',
       testId: 'confirm-compact',
       failMessage: "Couldn't compact the context. Please try again.",
+      compactModelPicker: true,
       run: async () => {
-        const res = await authedFetch(`/api/sessions/${sessionId}/compact`, { method: 'POST' })
+        const target = compactTargetRef.current
+        const body =
+          target && target !== current
+            ? JSON.stringify(sessionModelPatch(target, sessionDetail?.effort, availableProviders))
+            : undefined
+        const res = await authedFetch(`/api/sessions/${sessionId}/compact`, {
+          method: 'POST',
+          ...(body ? { headers: { 'Content-Type': 'application/json' }, body } : {}),
+        })
         if (!res.ok) {
           const err = (await res.json().catch(() => null)) as { error?: string } | null
           throw new Error(err?.error ?? `Compaction failed (${res.status}).`)
         }
       },
     })
+  }
+  // Same-provider/account models only — anything else would be a handover.
+  const renderCompactModelPicker = () => {
+    const current = sessionDetail?.model || appDefaultModel || ''
+    const key = continuityKey(current)
+    const options = availableModels.filter((m) => continuityKey(m.id) === key)
+    if (current && !options.some((m) => m.id === current)) {
+      options.unshift({ id: current, display_name: modelDisplayName(current) } as ModelInfo)
+    }
+    return (
+      <label className="confirm-dialog-field">
+        <span>Continue with</span>
+        <select
+          value={compactTarget}
+          disabled={confirmBusy}
+          onChange={(e) => pickCompactTarget(e.target.value)}
+          data-testid="compact-model-select"
+        >
+          {options.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.display_name}
+              {m.id === current ? ' (current)' : ''}
+            </option>
+          ))}
+        </select>
+      </label>
+    )
   }
 
   // "Plugin evals → Init eval suite": the in-session equivalent of the
@@ -2708,7 +2760,9 @@ export default function ChatView({
             setConfirmAction(null)
             setConfirmError(null)
           }}
-        />
+        >
+          {confirmAction.compactModelPicker && renderCompactModelPicker()}
+        </ConfirmDialog>
       )}
       {renameOpen && (
         <RenameModal

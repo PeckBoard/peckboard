@@ -914,20 +914,35 @@ async fn mark_read(
 /// POST /api/sessions/:id/compact — manual context compaction, valid at any
 /// occupancy (threshold-crossing compaction is dispatched automatically by
 /// the completion listener). Dispatches the same-model handover doc turn and
-/// returns 202; the conversation restarts fresh once the doc lands. 409 with
-/// a reason when the session is ineligible (worker, handover already in
-/// flight, nothing to compact).
+/// returns 202; the conversation restarts fresh once the doc lands. Optional
+/// body `{ model, effort }` picks the model that continues afterwards — it
+/// must share the session's provider + account. 409 with a reason when the
+/// session is ineligible (worker, handover already in flight, nothing to
+/// compact, target crosses the continuity boundary).
 async fn compact_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    body: Option<Json<CompactRequest>>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    match crate::handover::begin_compaction(&state, &id).await {
+    let (model, effort) = body.map(|Json(b)| (b.model, b.effort)).unwrap_or_default();
+    match crate::handover::begin_compaction(&state, &id, model.as_deref(), effort).await {
         Ok(()) => Ok(StatusCode::ACCEPTED),
         Err(e) => Err((
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": e.to_string() })),
         )),
     }
+}
+
+#[derive(Deserialize)]
+struct CompactRequest {
+    /// Model to continue on after compaction; absent = the current model.
+    #[serde(default)]
+    model: Option<String>,
+    /// Same semantics as PATCH: explicit `null` clears a stale effort the
+    /// target model doesn't offer; absent leaves the stored effort.
+    #[serde(default, deserialize_with = "explicit_null")]
+    effort: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
