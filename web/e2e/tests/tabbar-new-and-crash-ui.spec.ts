@@ -77,9 +77,9 @@ test('tab bar exposes a trailing "+" button that opens the New Session modal', a
   await expect(newBtn).toHaveText('+')
 
   // The button must sit AFTER all opened-tab chips in DOM order (far
-  // right of the strip).
-  const lastChild = page.locator('.tabbar > *').last()
-  await expect(lastChild).toHaveClass(/tab-new/)
+  // right of the strip), followed only by its `▾` create-options half.
+  await expect(page.locator('.tabbar > *').last()).toHaveClass(/tab-new-more/)
+  await expect(page.locator('.tabbar > *').nth(-2)).toHaveClass(/tab-new(\s|$)/)
 
   await newBtn.click()
   await expect(page.locator('.modal, .new-session-modal').first()).toBeVisible({

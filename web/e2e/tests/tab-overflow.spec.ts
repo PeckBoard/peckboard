@@ -127,12 +127,15 @@ for (const vp of [
     const clipped = await clippedLabels(page)
     expect(clipped.length, 'the strip should be clipping chips').toBeGreaterThan(0)
 
-    // 2. `+` is still on screen and still the last child of the bar — it
-    //    lives outside the scroller, so no amount of tabs can push it off.
+    // 2. `+` (and its `▾`) are still on screen and still end the bar —
+    //    they live outside the scroller, so no amount of tabs can push
+    //    them off.
     const newBtn = page.locator('.tab-new')
     await expect(newBtn).toBeVisible()
     await expect(newBtn).toBeInViewport()
-    await expect(page.locator('.tabbar > *').last()).toHaveClass(/tab-new/)
+    await expect(page.locator('.tab-new-more')).toBeInViewport()
+    await expect(page.locator('.tabbar > *').last()).toHaveClass(/tab-new-more/)
+    await expect(page.locator('.tabbar > *').nth(-2)).toHaveClass(/tab-new(\s|$)/)
 
     // 3. The overflow trigger lists exactly the clipped chips.
     const trigger = page.getByTestId('tab-overflow')

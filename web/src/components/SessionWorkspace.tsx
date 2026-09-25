@@ -22,6 +22,11 @@ const PRIMARY = '@primary'
 /** Most panes on screen at once, the parent included. */
 const MAX_PANES = 6
 const MODE_KEY = 'peckboard.subagentPanes'
+/** Per-parent list of child panes the user closed: `{ [parentId]: leafId[] }`.
+ *  Auto mode never reopens these, across remounts and reloads. */
+const CLOSED_KEY = 'peckboard.subagentPanes.closed'
+/** Parents remembered before the oldest entries are dropped. */
+const MAX_CLOSED_PARENTS = 200
 
 type PaneMode = 'auto' | 'off'
 
@@ -30,6 +35,36 @@ function readMode(): PaneMode {
     return localStorage.getItem(MODE_KEY) === 'off' ? 'off' : 'auto'
   } catch {
     return 'auto'
+  }
+}
+
+function readClosedMap(): Record<string, string[]> {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(CLOSED_KEY) ?? '{}')
+    return raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, string[]>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function readClosed(parentId: string): string[] {
+  const list = readClosedMap()[parentId]
+  return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []
+}
+
+function writeClosed(parentId: string, closed: string[]) {
+  try {
+    const map = readClosedMap()
+    delete map[parentId]
+    if (closed.length > 0) map[parentId] = closed
+    // Insertion order = recency; trim the oldest parents.
+    const keys = Object.keys(map)
+    for (const k of keys.slice(0, Math.max(0, keys.length - MAX_CLOSED_PARENTS))) delete map[k]
+    localStorage.setItem(CLOSED_KEY, JSON.stringify(map))
+  } catch {
+    /* storage unavailable — closed state lives for this mount only */
   }
 }
 
@@ -60,6 +95,8 @@ interface WorkspaceState {
   known: string[]
   /** Children currently given a pane, in insertion order. */
   shown: string[]
+  /** Children the user closed; auto mode leaves these closed. */
+  closed: string[]
   layout: LayoutNode | null
   handledNonce: number
 }
@@ -159,15 +196,19 @@ export default function SessionWorkspace({
     parentId: sessionId,
     known: [],
     shown: [],
+    closed: readClosed(sessionId),
     layout: leaf(PRIMARY),
     handledNonce: request?.nonce ?? 0,
   }))
   const [focusedKey, setFocusedKey] = useState<string | null>(null)
 
-  /** Give `id` a pane: append while there's room, else swap it in for the
-   *  focused child pane (or the newest one). */
+  /** Give `id` a pane (reopening it if it was closed): append while there's
+   *  room, else swap it in for the focused child pane (or the newest one). */
   const showIn = useCallback(
-    (state: WorkspaceState, id: string): WorkspaceState => {
+    (prev: WorkspaceState, id: string): WorkspaceState => {
+      const state = prev.closed.includes(id)
+        ? { ...prev, closed: prev.closed.filter((x) => x !== id) }
+        : prev
       if (state.shown.includes(id)) return state
       if (state.shown.length < MAX_PANES - 1) return withShown(state, [...state.shown, id])
       const target =
@@ -192,6 +233,7 @@ export default function SessionWorkspace({
       parentId: sessionId,
       known: [],
       shown: [],
+      closed: readClosed(sessionId),
       layout: leaf(PRIMARY),
       handledNonce: next.handledNonce,
     }
@@ -201,6 +243,7 @@ export default function SessionWorkspace({
     next = { ...next, known: childIds }
     if (mode === 'auto') {
       for (const id of fresh) {
+        if (next.closed.includes(id)) continue
         if (next.shown.length < MAX_PANES - 1) next = withShown(next, [...next.shown, id])
       }
     }
@@ -211,6 +254,11 @@ export default function SessionWorkspace({
   }
   if (next !== ws) setWs(next)
   const state = next
+
+  const closedSig = state.closed.join('|')
+  useEffect(() => {
+    writeClosed(state.parentId, closedSig ? closedSig.split('|') : [])
+  }, [state.parentId, closedSig])
 
   // Tool cards only offer "Show pane" while this workspace is mounted.
   useEffect(() => {
@@ -238,7 +286,8 @@ export default function SessionWorkspace({
           onClick={() => {
             const m: PaneMode = mode === 'auto' ? 'off' : 'auto'
             setMode(m)
-            setWs(withShown(state, m === 'auto' ? state.known.slice(0, MAX_PANES - 1) : []))
+            const open = state.known.filter((id) => !state.closed.includes(id))
+            setWs(withShown(state, m === 'auto' ? open.slice(0, MAX_PANES - 1) : []))
           }}
         >
           Subagent panes: {mode === 'auto' ? 'Auto' : 'Off'}
@@ -297,12 +346,13 @@ export default function SessionWorkspace({
       layout={state.layout}
       onChange={(layout) => setWs({ ...state, layout: layout ?? leaf(PRIMARY) })}
       onClosePane={(entry) => {
-        setWs((cur) =>
-          withShown(
+        setWs((cur) => ({
+          ...withShown(
             cur,
             cur.shown.filter((x) => x !== entry.key),
           ),
-        )
+          closed: cur.closed.includes(entry.key) ? cur.closed : [...cur.closed, entry.key],
+        }))
       }}
       onOpenAsTab={(entry) => entry.sessionId && onOpenSessionTab(entry.sessionId)}
       onFocusChange={setFocusedKey}

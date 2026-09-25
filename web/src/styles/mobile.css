@@ -330,11 +330,14 @@
   .tab-wrap {
     height: 28px;
     padding: 0 4px 0 10px;
-  }
-  .tab-new {
-    width: 28px;
-    height: 28px;
-    font-size: 16px;
+    .tab-new {
+      width: 28px;
+      height: 28px;
+      font-size: 16px;
+    }
+    .tab-new-more {
+      height: 28px;
+    }
   }
   .chat-bubble {
     max-width: 95%;
@@ -548,6 +551,35 @@
   background: var(--accent);
   color: var(--text-inverse);
 }
+/* Split-button: `+` (New session) and `▾` (more create options) read as
+   one pill, split down the middle. */
+.tab-new-split {
+  border-radius: var(--radius-full) 0 0 var(--radius-full);
+}
+.tab-new-more {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 32px;
+  margin-left: -6px; /* cancel the bar's gap so + and ▾ touch */
+  padding: 0 4px 0 2px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--radius-full) var(--radius-full) 0;
+  background: var(--surface2);
+  color: var(--text2);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.tab-new-more:hover,
+.tab-new-more[aria-expanded='true'] {
+  background: var(--surface3);
+  color: var(--text);
+}
 /* Off-screen-tab overflow trigger. Sits between the scrolling strip and
    `+`, mirroring the `+` pill so the two read as one trailing control
    cluster. Only in the DOM while chips are actually clipped; `+` stays
@@ -582,6 +614,10 @@
     width: 36px;
     height: 36px;
     font-size: 20px;
+  }
+  .tab-new-more {
+    width: 24px;
+    height: 36px;
   }
 }
 .tab-dot {

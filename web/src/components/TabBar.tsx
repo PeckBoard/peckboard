@@ -12,6 +12,9 @@ interface TabBarProps {
   kinds: TabKindRegistry
   /** Open the New Session modal. Renders as a trailing `+` button. */
   onNewSession: () => void
+  /** Open the New View (multi-session split view) dialog. Renders as a
+   *  `▾` beside `+`, so `+` itself stays a one-click New session. */
+  onNewView?: () => void
 }
 
 /**
@@ -41,7 +44,7 @@ interface TabBarProps {
  *   Everywhere (incl. touch, where native drag doesn't fire): the
  *     context menu's Move left / Move right entries.
  */
-export default function TabBar({ kinds, onNewSession }: TabBarProps) {
+export default function TabBar({ kinds, onNewSession, onNewView }: TabBarProps) {
   const tabs = useTabsStore((s) => s.tabs)
   const closeTab = useTabsStore((s) => s.closeTab)
   const moveTab = useTabsStore((s) => s.moveTab)
@@ -323,8 +326,8 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
         })}
       </div>
       {/* Off-screen tabs. Rendered only while the strip is actually
-          clipping something, and BEFORE `+` so the new-session button
-          stays the last child of the bar. */}
+          clipping something, and BEFORE `+` so the create controls
+          (`+`, then its `▾`) stay at the end of the bar. */}
       {hiddenTabs.length > 0 && (
         <MenuButton
           items={hiddenTabs.map((t) => ({ label: labelOf(t), onSelect: () => revealTab(t) }))}
@@ -338,13 +341,29 @@ export default function TabBar({ kinds, onNewSession }: TabBarProps) {
       )}
       <button
         type="button"
-        className="tab-new"
+        className={onNewView ? 'tab-new tab-new-split' : 'tab-new'}
         title="New session"
         aria-label="New session"
         onClick={onNewSession}
       >
         +
       </button>
+      {onNewView && (
+        <MenuButton
+          items={[
+            { label: 'New session', onSelect: onNewSession, testId: 'tab-new-menu-session' },
+            { label: 'New split view', onSelect: onNewView, testId: 'tab-new-menu-view' },
+          ]}
+          ariaLabel="More new options"
+          title="New session or split view"
+          testId="tab-new-more"
+          triggerClassName="tab-new-more"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
+            <path d="M1.5 3.5h7L5 7.5z" />
+          </svg>
+        </MenuButton>
+      )}
     </div>
   )
 }

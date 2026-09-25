@@ -9,7 +9,7 @@ import { useProjectsStore } from './store/projects'
 import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
 import SessionWorkspace from './components/SessionWorkspace'
-import ViewsPage from './components/ViewsPage'
+import ViewsPage, { NewViewModal } from './components/ViewsPage'
 import type { MenuItem } from './components/Dropdown'
 import SessionTodosView from './components/SessionTodosView'
 import List from './components/List'
@@ -371,6 +371,7 @@ function App() {
   const [activeReportId, setActiveReportId] = useState<string | null>(initialReportId)
   const repeatingTasks = useRepeatingTasksStore((s) => s.tasks)
   const [showNewSession, setShowNewSession] = useState(false)
+  const [showNewView, setShowNewView] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -1656,7 +1657,11 @@ function App() {
 
       {/* Main Content */}
       <main className="content">
-        <TabBar kinds={tabKindRegistry} onNewSession={() => setShowNewSession(true)} />
+        <TabBar
+          kinds={tabKindRegistry}
+          onNewSession={() => setShowNewSession(true)}
+          onNewView={() => setShowNewView(true)}
+        />
         {announcement && (
           <div className="announcement-banner">
             <div className="announcement-content">
@@ -2037,6 +2042,16 @@ function App() {
 
       {authenticated && <SoundsListener />}
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
+      {showNewView && (
+        <NewViewModal
+          onClose={() => setShowNewView(false)}
+          onCreated={(id) => {
+            setShowNewView(false)
+            setActiveViewId(id)
+            navigate('views', id)
+          }}
+        />
+      )}
       {showNewSession && (
         <NewSessionModal
           onClose={() => setShowNewSession(false)}

@@ -173,6 +173,46 @@ test.describe('session view subagent panes', () => {
     })
     await expect(workspace.getByTestId('split-pane')).toHaveCount(1)
   })
+
+  test('a closed subagent pane stays closed in Auto, across reloads', async ({ request, page }) => {
+    const auth = await authenticate(request)
+    const folder = await createFolder(request, auth, 'multiview-closed')
+    const childA = await createSession(request, auth, folder, 'closed alpha')
+    const childB = await createSession(request, auth, folder, 'closed beta')
+    const parent = await createSession(request, auth, folder, 'closed parent')
+
+    await openSession(page, auth.token, parent)
+    const workspace = page.getByTestId('session-workspace')
+    const panes = workspace.getByTestId('split-pane')
+    const paneA = workspace.locator(`[data-pane-id="${childA}"]`)
+
+    await send(request, auth, parent, childA, 'mock:subagent')
+    await expect(paneA).toBeVisible({ timeout: 15_000 })
+    await paneA.getByTestId('split-pane-close').click()
+    await expect(paneA).toHaveCount(0)
+    await expect(page.getByTestId('subagent-panes-toggle')).toHaveAttribute('data-mode', 'auto')
+
+    // A new subagent still auto-opens; the closed one does not come back.
+    await send(request, auth, parent, childB, 'mock:subagent')
+    await expect(workspace.locator(`[data-pane-id="${childB}"]`)).toBeVisible({
+      timeout: 15_000,
+    })
+    await expect(panes).toHaveCount(2)
+    await expect(paneA).toHaveCount(0)
+
+    await page.reload()
+    await expect(workspace.locator(`[data-pane-id="${childB}"]`)).toBeVisible({
+      timeout: 15_000,
+    })
+    await expect(panes).toHaveCount(2)
+    await expect(paneA).toHaveCount(0)
+
+    // Explicitly reopening it from the overflow chip brings it back.
+    await page.getByTestId('subagent-overflow-chip').click()
+    await page.getByTestId('subagent-overflow-item').click()
+    await expect(paneA).toBeVisible()
+    await expect(panes).toHaveCount(3)
+  })
 })
 
 test.describe('saved multi-session views', () => {
@@ -273,6 +313,36 @@ test.describe('saved multi-session views', () => {
     await expect(
       editor.locator('[data-testid="split-divider"][data-dir="row"]').first(),
     ).toHaveAttribute('aria-valuenow', String(resized))
+  })
+
+  test('+ ▾ New split view creates a view and adds sessions to it', async ({ request, page }) => {
+    await page.setViewportSize({ width: 1400, height: 900 })
+    const auth = await authenticate(request)
+    const folder = await createFolder(request, auth, 'multiview-plus')
+    const tag = `plus${Date.now()}`
+    const one = await createSession(request, auth, folder, `${tag} one`)
+    const two = await createSession(request, auth, folder, `${tag} two`)
+
+    await loadAt(page, auth.token, '/')
+    await page.getByTestId('tab-new-more').click()
+    await page.getByTestId('tab-new-menu-view').click()
+    const modal = page.getByTestId('new-view-modal')
+    await expect(modal).toBeVisible()
+    await modal.getByTestId('new-view-name').fill(`${tag} view`)
+    await modal.getByTestId('new-view-session-search').fill(tag)
+    await modal.locator(`[data-testid="new-view-session-option"][data-session-id="${one}"]`).click()
+    await modal.getByTestId('new-view-submit').click()
+
+    const editor = page.getByTestId('view-editor')
+    await expect(editor).toBeVisible({ timeout: 15_000 })
+    await expect(page).toHaveURL(/\/views\/[^/]+$/)
+    await expect(editor.locator(`[data-pane-id="${one}"]`)).toBeVisible()
+
+    await editor.getByTestId('view-add-session').click()
+    await page.getByTestId('view-add-session-search').fill(`${tag} two`)
+    await page.getByRole('option', { name: `${tag} two` }).click()
+    await expect(editor.locator(`[data-pane-id="${two}"]`)).toBeVisible()
+    await expect(editor.getByTestId('split-pane')).toHaveCount(2)
   })
 
   test('narrow viewport shows a pane switcher instead of dividers', async ({ request, page }) => {

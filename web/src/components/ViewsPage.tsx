@@ -189,7 +189,9 @@ function ViewsList({ onOpen }: { onOpen: (id: string) => void }) {
   )
 }
 
-function NewViewModal({
+/** New View dialog: name, sessions, starter layout. Also opened from the
+ *  tab bar's `+ ▾` menu ("New split view"). */
+export function NewViewModal({
   onClose,
   onCreated,
 }: {
