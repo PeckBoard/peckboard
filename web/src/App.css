@@ -28,6 +28,7 @@
 @import './styles/worker-comms.css';
 @import './styles/repeating-tasks.css';
 @import './styles/usage.css';
+@import './styles/split-layout.css';
 @import './styles/feedback.css';
 @import './styles/mobile.css';
 /* Last: its static, non-!important replacements must win over the

@@ -100,6 +100,8 @@ export type DisplayItem =
       endTs?: number
       /** Unified diff attached from a `file-diff` event (edit/write tools). */
       diff?: FileDiff
+      /** Provider tool_use id — ties an Agent/Task card to its subagent pane. */
+      toolUseId?: string
       key: string
     }
   | { type: 'file-diff'; diff: FileDiff; ts: number; key: string }
@@ -671,7 +673,15 @@ function foldEvent(st: FoldState, ev: Event): void {
       if (st.seenToolIds.has(toolUseId)) break
       st.seenToolIds.add(toolUseId)
       const idx = items.length
-      items.push({ type: 'tool', toolName, input, isRunning: true, key: ev.id, startTs: ev.ts })
+      items.push({
+        type: 'tool',
+        toolName,
+        input,
+        isRunning: true,
+        key: ev.id,
+        startTs: ev.ts,
+        toolUseId,
+      })
       st.openTools.set(toolUseId, idx)
       break
     }
@@ -705,6 +715,7 @@ function foldEvent(st: FoldState, ev: Event): void {
           images,
           isRunning: false,
           key: ev.id,
+          toolUseId: toolUseId || undefined,
         })
       }
       break
@@ -1089,7 +1100,13 @@ function foldResult(st: FoldState): DisplayItem[] {
  * Item object identity is stable across calls unless the item actually
  * changed, so `React.memo` rows skip re-rendering untouched history.
  */
-export function createDisplayItemsFolder(): (events: Event[]) => DisplayItem[] {
+export function createDisplayItemsFolder(opts?: {
+  /** Fold only the events of the Claude-native subagent spawned by this
+   *  Agent/Task tool_use id. Unset = the top-level feed, which leaves those
+   *  events out (they render in the subagent's own pane). */
+  subagentOf?: string
+}): (events: Event[]) => DisplayItem[] {
+  const subagentOf = opts?.subagentOf
   let st = newFoldState()
   return (events: Event[]) => {
     const stale =
@@ -1099,6 +1116,8 @@ export function createDisplayItemsFolder(): (events: Event[]) => DisplayItem[] {
         events[st.consumed - 1]?.id !== st.lastEventId)
     if (stale) st = newFoldState()
     for (let i = st.consumed; i < events.length; i++) {
+      const parent = parentToolUseIdOf(events[i])
+      if (subagentOf === undefined ? parent !== null : parent !== subagentOf) continue
       foldEvent(st, events[i])
     }
     st.consumed = events.length
@@ -1106,6 +1125,92 @@ export function createDisplayItemsFolder(): (events: Event[]) => DisplayItem[] {
     st.lastEventId = events.length > 0 ? events[events.length - 1].id : null
     return foldResult(st)
   }
+}
+
+/** The Agent/Task tool_use id a Claude-native subagent event streams under,
+ *  or null for a top-level event. */
+export function parentToolUseIdOf(ev: Event): string | null {
+  const p = ev.data?.parentToolUseId
+  return typeof p === 'string' && p !== '' ? p : null
+}
+
+/** Bare tool names of Claude's built-in subagent launcher. */
+const NATIVE_AGENT_TOOLS = new Set(['Agent', 'Task'])
+
+export function isNativeAgentTool(toolName: string): boolean {
+  return NATIVE_AGENT_TOOLS.has(toolName.replace(/^mcp__.+?__/, ''))
+}
+
+/** One subagent a parent session launched, in launch order. */
+export type SubagentRef =
+  | {
+      kind: 'native'
+      toolUseId: string
+      description: string
+      subagentType: string
+      running: boolean
+      error: boolean
+    }
+  | { kind: 'session'; sessionId: string }
+
+const SUBAGENT_ID_RE = /"subagent_session_id"\s*:\s*"([^"]+)"/
+
+/** `subagent_session_id` from a spawn_subagent tool result — a structured
+ *  object (mock/plugin providers) or JSON text echoed by the CLI. */
+function spawnedSessionId(output: unknown): string | null {
+  if (output && typeof output === 'object') {
+    const id = (output as Record<string, unknown>).subagent_session_id
+    if (typeof id === 'string' && id) return id
+    return SUBAGENT_ID_RE.exec(JSON.stringify(output))?.[1] ?? null
+  }
+  if (typeof output === 'string') return SUBAGENT_ID_RE.exec(output)?.[1] ?? null
+  return null
+}
+
+/** Every subagent visible in a parent's event stream: Claude-native Agent /
+ *  Task calls (top-level only) and Peckboard spawn_subagent children. */
+export function collectSubagents(events: Event[]): SubagentRef[] {
+  const out: SubagentRef[] = []
+  const native = new Map<string, number>()
+  const sessions = new Set<string>()
+  for (const ev of events) {
+    if (parentToolUseIdOf(ev) !== null) continue
+    if (ev.kind === 'agent-tool-start') {
+      const name = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? ''
+      const id = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ''
+      if (!id || !isNativeAgentTool(name) || native.has(id)) continue
+      const input = (ev.data.input as Record<string, unknown>) ?? {}
+      native.set(id, out.length)
+      out.push({
+        kind: 'native',
+        toolUseId: id,
+        description: typeof input.description === 'string' ? input.description : '',
+        subagentType: typeof input.subagent_type === 'string' ? input.subagent_type : '',
+        running: true,
+        error: false,
+      })
+    } else if (ev.kind === 'agent-tool-end') {
+      const id = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ''
+      const idx = native.get(id)
+      if (idx !== undefined) {
+        const cur = out[idx]
+        if (cur.kind === 'native') out[idx] = { ...cur, running: false, error: !!ev.data.error }
+        continue
+      }
+      const child = spawnedSessionId(ev.data.output)
+      if (child && !sessions.has(child)) {
+        sessions.add(child)
+        out.push({ kind: 'session', sessionId: child })
+      }
+    } else if (ev.kind === 'agent-end') {
+      // A turn that ended (crash / interrupt) leaves no subagent running.
+      for (const [, idx] of native) {
+        const cur = out[idx]
+        if (cur.kind === 'native' && cur.running) out[idx] = { ...cur, running: false }
+      }
+    }
+  }
+  return out
 }
 
 /** One-shot build — a fresh fold over the full list. */

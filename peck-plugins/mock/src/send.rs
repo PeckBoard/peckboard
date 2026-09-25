@@ -298,6 +298,7 @@ impl Ctx<'_> {
             "system-blob" => self.system_blob()?,
             "screenshot" => self.screenshot()?,
             "diff" => self.diff()?,
+            "subagent-native" => self.subagent_native()?,
             "thinking" => self.thinking()?,
             "tool-orphan-crash" => return self.tool_orphan_crash(),
             "crash" => return self.crash(),
@@ -430,6 +431,60 @@ impl Ctx<'_> {
             return Ok(());
         }
         self.emit_text("Subagent spawned.")
+    }
+
+    /// A Claude-style built-in Task/Agent subagent: the child's events are
+    /// stamped with the Agent call's `parent_tool_use_id`, exactly as the
+    /// Claude parser does for sidechain frames.
+    fn subagent_native(&mut self) -> Result<(), String> {
+        const PARENT: &str = "toolu_native_1";
+        let child = |mut event: Value| {
+            event["parent_tool_use_id"] = json!(PARENT);
+            event
+        };
+        self.tool_start(
+            PARENT,
+            "Agent",
+            json!({
+                "description": "Explore repo",
+                "prompt": "Look around",
+                "subagent_type": "Explore",
+            }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit(child(
+            json!({ "kind": "text", "text": "Child is looking around" }),
+        ))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        let read_id = self.tool_id();
+        self.emit(child(json!({
+            "kind": "tool_start",
+            "tool_use_id": read_id,
+            "name": "Read",
+            "input": { "file_path": "README.md" },
+        })))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit(child(json!({
+            "kind": "tool_end",
+            "tool_use_id": read_id,
+            "output": "# README",
+            "error": null,
+            "images": [],
+        })))?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(PARENT, "Child finished")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("Parent done")
     }
 
     fn usage(&mut self) -> Result<(), String> {

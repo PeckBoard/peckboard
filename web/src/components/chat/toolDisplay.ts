@@ -59,6 +59,9 @@ const TOOL_LABELS: Record<string, string> = {
   // Agent plumbing.
   toolsearch: 'Tool search',
   agent: 'Sub-agent',
+  // Claude's older name for Agent. Case-folded exact match, so the
+  // TaskCreate / TaskUpdate family below is unaffected.
+  task: 'Sub-agent',
   spawn_subagent: 'Sub-agent',
   notebookedit: 'Edit notebook',
   todowrite: 'Tasks',

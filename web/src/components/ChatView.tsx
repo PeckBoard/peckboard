@@ -163,6 +163,14 @@ interface ChatViewProps {
   pluginItems?: PluginItem[]
   /** Open a plugin entry's full-page view by its item id. */
   onOpenPlugin?: (itemId: string) => void
+  /** Slim chrome for a split pane: the pane header already names the
+   *  session, so the toolbar drops its `h1`. */
+  compact?: boolean
+  /** Extra toolbar controls (e.g. the subagent-panes toggle). */
+  toolbarExtras?: React.ReactNode
+  /** Handle window-level shortcuts (Ctrl/Cmd+F). Split layouts enable it
+   *  only on the focused pane so one keypress opens one search bar. */
+  shortcutsEnabled?: boolean
 }
 
 /**
@@ -500,7 +508,7 @@ function AuthFailureRemedy({ sessionId }: { sessionId: string }) {
  * for untouched history, so a streamed token chunk re-renders only the
  * growing bubble instead of every mounted row.
  */
-const ChatRow = memo(function ChatRow({
+export const ChatRow = memo(function ChatRow({
   item,
   sessionId,
   costTable,
@@ -745,6 +753,7 @@ const ChatRow = memo(function ChatRow({
             startTs={item.startTs}
             endTs={item.endTs}
             diff={item.diff}
+            toolUseId={item.toolUseId}
           />
         </div>
       )
@@ -1031,6 +1040,9 @@ export default function ChatView({
   onOpenTodos,
   pluginItems,
   onOpenPlugin,
+  compact = false,
+  toolbarExtras,
+  shortcutsEnabled = true,
 }: ChatViewProps) {
   const events = useSessionsStore((s) => s.eventsBySession[sessionId] ?? EMPTY_EVENTS)
   const loading = useSessionsStore((s) => s.loadingEventsBySession[sessionId] ?? true)
@@ -1456,6 +1468,21 @@ export default function ChatView({
     }
   }, [events, virtualTotal])
 
+  // A split pane resizing around the feed (a subagent pane sliding in, a
+  // divider drag) changes the viewport without a new event or row
+  // measurement, so the pin above never re-runs and the newest message
+  // ends up below the fold. Re-pin on resize unless the user scrolled up.
+  const feedMounted = events.length > 0 || (!loading && !eventsError)
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || !feedMounted || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      if (!userScrolledUp.current) el.scrollTop = el.scrollHeight
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [feedMounted])
+
   const jumpToLatest = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
@@ -1530,6 +1557,7 @@ export default function ChatView({
 
   // Ctrl/Cmd+F while a chat is open searches the transcript, not the DOM.
   useEffect(() => {
+    if (!shortcutsEnabled) return
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
         e.preventDefault()
@@ -1539,7 +1567,7 @@ export default function ChatView({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [shortcutsEnabled])
 
   // "Load full history": page through the remaining backlog so matches
   // cover the whole conversation, not just what's loaded. Stops on error
@@ -2267,7 +2295,7 @@ export default function ChatView({
   }
 
   return (
-    <div className="chat-container">
+    <div className={`chat-container${compact ? ' chat-container-compact' : ''}`}>
       {/* Conversation live region: always mounted and initially empty, so a
           screen reader is already observing it when the first announcement
           lands. Fed by the turn-boundary effect above. */}
@@ -2277,8 +2305,9 @@ export default function ChatView({
 
       {/* Toolbar */}
       <div className="chat-toolbar">
-        {/* The session name is this view's `h1` — one per view. */}
-        <h1 className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</h1>
+        {/* The session name is this view's `h1` — one per view. A compact
+            (split) pane shows it in the pane header instead. */}
+        {!compact && <h1 className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</h1>}
         <ModelPicker
           value={sessionDetail?.model ?? ''}
           onChange={(id) => requestModelChange(id)}
@@ -2315,6 +2344,7 @@ export default function ChatView({
             {Math.round(contextTokens / 1000)}k ctx
           </span>
         )}
+        {toolbarExtras}
         <button
           type="button"
           className="chat-toolbar-search"

@@ -23,10 +23,16 @@ enum BlockKind {
 }
 
 impl BlockKind {
-    fn event(self, text: String) -> ProviderEvent {
+    fn event(self, text: String, parent_tool_use_id: Option<String>) -> ProviderEvent {
         match self {
-            BlockKind::Text => ProviderEvent::Text { text },
-            BlockKind::Thinking => ProviderEvent::Thinking { text },
+            BlockKind::Text => ProviderEvent::Text {
+                text,
+                parent_tool_use_id,
+            },
+            BlockKind::Thinking => ProviderEvent::Thinking {
+                text,
+                parent_tool_use_id,
+            },
         }
     }
 }
@@ -35,8 +41,12 @@ impl BlockKind {
 /// stream, `pending` is buffered awaiting a coalescing flush. The entry
 /// lives until the block's `assistant` snapshot consumes it, which is how
 /// snapshot text avoids being re-emitted on top of streamed deltas.
+/// `parent` is the subagent `parent_tool_use_id` the block streams under,
+/// so a subagent's deltas never merge into the top-level block (or vice
+/// versa).
 struct BlockProgress {
     kind: BlockKind,
+    parent: Option<String>,
     emitted: String,
     pending: String,
 }
@@ -72,24 +82,38 @@ impl ParserState {
         self.blocks.clear();
     }
 
-    fn on_block_start(&mut self, kind: BlockKind) {
+    fn on_block_start(&mut self, kind: BlockKind, parent: Option<&str>) {
         self.blocks.push_back(BlockProgress {
             kind,
+            parent: parent.map(str::to_string),
             emitted: String::new(),
             pending: String::new(),
         });
     }
 
+    /// Most recent tracked block streaming under `parent`.
+    fn last_block_mut(&mut self, parent: Option<&str>) -> Option<&mut BlockProgress> {
+        self.blocks
+            .iter_mut()
+            .rev()
+            .find(|b| b.parent.as_deref() == parent)
+    }
+
     /// Buffer a streamed delta; returns a coalesced event once the buffer
     /// crosses the flush threshold. Deltas arriving without a tracked block
     /// (older CLIs sending bare deltas) pass through unbuffered.
-    fn on_delta(&mut self, kind: BlockKind, text: &str) -> Option<ProviderEvent> {
+    fn on_delta(
+        &mut self,
+        kind: BlockKind,
+        text: &str,
+        parent: Option<&str>,
+    ) -> Option<ProviderEvent> {
         if text.is_empty() {
             return None;
         }
-        let block = match self.blocks.back_mut() {
+        let block = match self.last_block_mut(parent) {
             Some(b) if b.kind == kind => b,
-            _ => return Some(kind.event(text.to_string())),
+            _ => return Some(kind.event(text.to_string(), parent.map(str::to_string))),
         };
         block.pending.push_str(text);
         if block.pending.len() < DELTA_FLUSH_BYTES {
@@ -97,37 +121,47 @@ impl ParserState {
         }
         let chunk = std::mem::take(&mut block.pending);
         block.emitted.push_str(&chunk);
-        Some(kind.event(chunk))
+        Some(kind.event(chunk, block.parent.clone()))
     }
 
     /// Flush whatever the open block still has buffered. The block entry
     /// stays queued for its snapshot (which on the live CLI arrives just
     /// BEFORE content_block_stop and has removed it already — then this is
     /// a no-op).
-    fn on_block_stop(&mut self) -> Option<ProviderEvent> {
-        let block = self.blocks.back_mut()?;
+    fn on_block_stop(&mut self, parent: Option<&str>) -> Option<ProviderEvent> {
+        let block = self.last_block_mut(parent)?;
         if block.pending.is_empty() {
             return None;
         }
         let chunk = std::mem::take(&mut block.pending);
         block.emitted.push_str(&chunk);
-        Some(block.kind.event(chunk))
+        Some(block.kind.event(chunk, block.parent.clone()))
     }
 
     /// A per-block `assistant` snapshot arrived with the block's full text.
     /// Emit only the part streaming hasn't already emitted: everything, when
     /// partials are off and nothing streamed; nothing, when the deltas
     /// covered the whole block.
-    fn consume_snapshot(&mut self, kind: BlockKind, full_text: &str) -> Option<ProviderEvent> {
-        let Some(idx) = self.blocks.iter().position(|b| b.kind == kind) else {
+    fn consume_snapshot(
+        &mut self,
+        kind: BlockKind,
+        full_text: &str,
+        parent: Option<&str>,
+    ) -> Option<ProviderEvent> {
+        let owned_parent = || parent.map(str::to_string);
+        let Some(idx) = self
+            .blocks
+            .iter()
+            .position(|b| b.kind == kind && b.parent.as_deref() == parent)
+        else {
             if full_text.is_empty() {
                 return None;
             }
-            return Some(kind.event(full_text.to_string()));
+            return Some(kind.event(full_text.to_string(), owned_parent()));
         };
         let block = self.blocks.remove(idx)?;
         match full_text.strip_prefix(&block.emitted) {
-            Some(rest) if !rest.is_empty() => Some(kind.event(rest.to_string())),
+            Some(rest) if !rest.is_empty() => Some(kind.event(rest.to_string(), owned_parent())),
             Some(_) => None,
             None => {
                 // Snapshot disagrees with what already streamed — emitting it
@@ -251,19 +285,39 @@ fn parse_image_block(block: &serde_json::Value) -> Option<ToolImage> {
 /// Streamed text/thinking deltas are coalesced in [`ParserState`] and
 /// deduplicated against the per-block `assistant` snapshots, so each
 /// block's content reaches the event stream exactly once.
+///
+/// Frames produced inside a built-in Task/Agent subagent carry a top-level
+/// `parent_tool_use_id`; it is stamped onto every Text/Thinking/ToolStart/
+/// ToolEnd the frame yields so the chat can nest the subagent's work.
 pub(super) fn parse_stream_json(
     json: &serde_json::Value,
     state: &mut ParserState,
 ) -> Vec<ProviderEvent> {
+    parse_frame(json, state, parent_tool_use_id_of(json))
+}
+
+fn parent_tool_use_id_of(json: &serde_json::Value) -> Option<&str> {
+    json.get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+fn parse_frame(
+    json: &serde_json::Value,
+    state: &mut ParserState,
+    parent: Option<&str>,
+) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
+    let owned_parent = || parent.map(str::to_string);
 
     let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     // With --include-partial-messages the CLI wraps raw Anthropic stream
-    // events in a `{"type":"stream_event","event":{...}}` envelope.
+    // events in a `{"type":"stream_event","event":{...}}` envelope; the
+    // subagent marker lives on the envelope, not the inner event.
     if msg_type == "stream_event" {
         return match json.get("event") {
-            Some(inner) => parse_stream_json(inner, state),
+            Some(inner) => parse_frame(inner, state, parent.or(parent_tool_use_id_of(inner))),
             None => events,
         };
     }
@@ -332,8 +386,8 @@ pub(super) fn parse_stream_json(
         "content_block_start" => {
             if let Some(block) = json.get("content_block") {
                 match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-                    "text" => state.on_block_start(BlockKind::Text),
-                    "thinking" => state.on_block_start(BlockKind::Thinking),
+                    "text" => state.on_block_start(BlockKind::Text, parent),
+                    "thinking" => state.on_block_start(BlockKind::Thinking, parent),
                     // tool_use: no event here — the input hasn't streamed
                     // yet (it arrives via input_json_delta), and the
                     // per-block `assistant` snapshot carries the complete
@@ -350,12 +404,12 @@ pub(super) fn parse_stream_json(
                 match delta_type {
                     "text_delta" => {
                         if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                            events.extend(state.on_delta(BlockKind::Text, text));
+                            events.extend(state.on_delta(BlockKind::Text, text, parent));
                         }
                     }
                     "thinking_delta" => {
                         if let Some(text) = delta.get("thinking").and_then(|v| v.as_str()) {
-                            events.extend(state.on_delta(BlockKind::Thinking, text));
+                            events.extend(state.on_delta(BlockKind::Thinking, text, parent));
                         }
                     }
                     "input_json_delta" => {
@@ -375,7 +429,7 @@ pub(super) fn parse_stream_json(
             // ToolEnd here: a tool_use block stopping only means its input
             // finished streaming — the result arrives later as a `user`
             // tool_result.
-            events.extend(state.on_block_stop());
+            events.extend(state.on_block_stop(parent));
         }
 
         // ── assistant message snapshot ───────────────────────────
@@ -392,18 +446,26 @@ pub(super) fn parse_stream_json(
                             // dedupe-consume path.
                             "text" => {
                                 if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                                    events.extend(state.consume_snapshot(BlockKind::Text, text));
+                                    events.extend(state.consume_snapshot(
+                                        BlockKind::Text,
+                                        text,
+                                        parent,
+                                    ));
                                 }
                             }
                             "thinking" => {
                                 if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
-                                    events
-                                        .extend(state.consume_snapshot(BlockKind::Thinking, text));
+                                    events.extend(state.consume_snapshot(
+                                        BlockKind::Thinking,
+                                        text,
+                                        parent,
+                                    ));
                                 }
                             }
                             "redacted_thinking" => {
                                 events.push(ProviderEvent::Thinking {
                                     text: "[redacted thinking]".to_string(),
+                                    parent_tool_use_id: owned_parent(),
                                 });
                             }
                             "tool_use" => {
@@ -425,6 +487,7 @@ pub(super) fn parse_stream_json(
                                     tool_use_id: tool_id,
                                     name,
                                     input,
+                                    parent_tool_use_id: owned_parent(),
                                 });
                             }
                             "tool_result" => {
@@ -444,6 +507,7 @@ pub(super) fn parse_stream_json(
                                     output: if is_error { None } else { output },
                                     error,
                                     images,
+                                    parent_tool_use_id: owned_parent(),
                                 });
                             }
                             _ => {}
@@ -476,6 +540,7 @@ pub(super) fn parse_stream_json(
                                 output: if is_error { None } else { output },
                                 error,
                                 images,
+                                parent_tool_use_id: owned_parent(),
                             });
                         }
                     }
@@ -658,7 +723,7 @@ mod tests {
         let events = parse_stream_json(&json, &mut state);
 
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ProviderEvent::Text { text } if text == "Hello world"));
+        assert!(matches!(&events[0], ProviderEvent::Text { text, .. } if text == "Hello world"));
     }
 
     #[test]
@@ -710,7 +775,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
-            ProviderEvent::ToolStart { tool_use_id, name, input }
+            ProviderEvent::ToolStart { tool_use_id, name, input, .. }
             if tool_use_id == "tool_123" && name == "Read" && input["file_path"] == "x.rs"
         ));
     }
@@ -748,6 +813,7 @@ mod tests {
             output,
             error,
             images,
+            ..
         } = &events[0]
         else {
             panic!("expected ToolEnd, got {:?}", events[0]);
@@ -823,6 +889,7 @@ mod tests {
             output,
             error,
             images,
+            ..
         } = &events[0]
         else {
             panic!("expected ToolEnd, got {:?}", events[0]);
@@ -935,7 +1002,7 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         assert!(
-            matches!(&events[0], ProviderEvent::Text { text } if text == "Here is the answer.")
+            matches!(&events[0], ProviderEvent::Text { text, .. } if text == "Here is the answer.")
         );
         assert!(matches!(
             &events[1],
@@ -972,7 +1039,7 @@ mod tests {
         });
         let events = parse_stream_json(&delta, &mut state);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ProviderEvent::Thinking { text } if text == "hmm, "));
+        assert!(matches!(&events[0], ProviderEvent::Thinking { text, .. } if text == "hmm, "));
 
         // Assistant snapshot form, including the redacted variant.
         let snapshot = serde_json::json!({
@@ -985,11 +1052,13 @@ mod tests {
         });
         let events = parse_stream_json(&snapshot, &mut state);
         assert_eq!(events.len(), 3, "got: {events:?}");
-        assert!(matches!(&events[0], ProviderEvent::Thinking { text } if text == "reasoning here"));
         assert!(
-            matches!(&events[1], ProviderEvent::Thinking { text } if text == "[redacted thinking]")
+            matches!(&events[0], ProviderEvent::Thinking { text, .. } if text == "reasoning here")
         );
-        assert!(matches!(&events[2], ProviderEvent::Text { text } if text == "answer"));
+        assert!(
+            matches!(&events[1], ProviderEvent::Thinking { text, .. } if text == "[redacted thinking]")
+        );
+        assert!(matches!(&events[2], ProviderEvent::Text { text, .. } if text == "answer"));
     }
 
     #[test]
@@ -1040,14 +1109,14 @@ mod tests {
         let events = parse_stream_json(&text_delta(&big), &mut state);
         assert_eq!(events.len(), 1);
         let expected = format!("Hello {big}");
-        assert!(matches!(&events[0], ProviderEvent::Text { text } if *text == expected));
+        assert!(matches!(&events[0], ProviderEvent::Text { text, .. } if *text == expected));
 
         // A trailing fragment flushes when the block ends.
         assert!(parse_stream_json(&text_delta("tail"), &mut state).is_empty());
         let stop = envelope(serde_json::json!({ "type": "content_block_stop", "index": 0 }));
         let events = parse_stream_json(&stop, &mut state);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ProviderEvent::Text { text } if text == "tail"));
+        assert!(matches!(&events[0], ProviderEvent::Text { text, .. } if text == "tail"));
     }
 
     #[test]
@@ -1077,7 +1146,7 @@ mod tests {
         });
         let events = parse_stream_json(&snapshot, &mut state);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ProviderEvent::Text { text } if text == " tail"));
+        assert!(matches!(&events[0], ProviderEvent::Text { text, .. } if text == " tail"));
 
         // Block already consumed by the snapshot — stop emits nothing.
         let stop = envelope(serde_json::json!({ "type": "content_block_stop", "index": 0 }));
@@ -1117,7 +1186,7 @@ mod tests {
         });
         let events = parse_stream_json(&snapshot, &mut state);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ProviderEvent::Thinking { text } if text == "hmm, done."));
+        assert!(matches!(&events[0], ProviderEvent::Thinking { text, .. } if text == "hmm, done."));
 
         let stop = envelope(serde_json::json!({ "type": "content_block_stop", "index": 0 }));
         assert!(parse_stream_json(&stop, &mut state).is_empty());
@@ -1220,5 +1289,97 @@ mod tests {
         let json = serde_json::json!({ "type": "system" });
         let mut state = started_state();
         assert!(parse_stream_json(&json, &mut state).is_empty());
+    }
+
+    #[test]
+    fn subagent_frames_carry_parent_tool_use_id_and_stream_separately() {
+        let mut state = started_state();
+        let parent = "toolu_parent";
+        let sub = |event: serde_json::Value| {
+            serde_json::json!({
+                "type": "stream_event",
+                "event": event,
+                "parent_tool_use_id": parent,
+            })
+        };
+
+        // Top-level text block opens and buffers a fragment.
+        let top_start = envelope(serde_json::json!({
+            "type": "content_block_start", "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }));
+        assert!(parse_stream_json(&top_start, &mut state).is_empty());
+        assert!(parse_stream_json(&text_delta("top "), &mut state).is_empty());
+
+        // Subagent text streams into its own block, not the parent's buffer.
+        let sub_start = sub(serde_json::json!({
+            "type": "content_block_start", "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }));
+        assert!(parse_stream_json(&sub_start, &mut state).is_empty());
+        let sub_delta = sub(serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": { "type": "text_delta", "text": "child" }
+        }));
+        assert!(parse_stream_json(&sub_delta, &mut state).is_empty());
+        let sub_stop = sub(serde_json::json!({ "type": "content_block_stop", "index": 0 }));
+        let events = parse_stream_json(&sub_stop, &mut state);
+        assert!(matches!(
+            &events[..],
+            [ProviderEvent::Text { text, parent_tool_use_id: Some(p) }]
+                if text == "child" && p == parent
+        ));
+
+        // The parent's buffer still holds only its own text.
+        let stop = envelope(serde_json::json!({ "type": "content_block_stop", "index": 0 }));
+        let events = parse_stream_json(&stop, &mut state);
+        assert!(matches!(
+            &events[..],
+            [ProviderEvent::Text { text, parent_tool_use_id: None }] if text == "top "
+        ));
+
+        // Subagent assistant / user snapshots stamp the parent id too.
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "parent_tool_use_id": parent,
+            "message": { "content": [
+                { "type": "tool_use", "id": "toolu_child", "name": "Read", "input": {} }
+            ]}
+        });
+        let events = parse_stream_json(&assistant, &mut state);
+        assert!(matches!(
+            &events[..],
+            [ProviderEvent::ToolStart { parent_tool_use_id: Some(p), .. }] if p == parent
+        ));
+        let user = serde_json::json!({
+            "type": "user",
+            "parent_tool_use_id": parent,
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "toolu_child", "content": "ok" }
+            ]}
+        });
+        let events = parse_stream_json(&user, &mut state);
+        assert!(matches!(
+            &events[..],
+            [ProviderEvent::ToolEnd { parent_tool_use_id: Some(p), .. }] if p == parent
+        ));
+
+        // A null marker (top level) yields no parent, and serializes without the key.
+        let mut state = started_state();
+        let top = serde_json::json!({
+            "type": "assistant",
+            "parent_tool_use_id": null,
+            "message": { "content": [{ "type": "text", "text": "hi" }] }
+        });
+        let events = parse_stream_json(&top, &mut state);
+        assert!(matches!(
+            &events[..],
+            [ProviderEvent::Text {
+                parent_tool_use_id: None,
+                ..
+            }]
+        ));
+        let wire = serde_json::to_value(&events[0]).unwrap();
+        assert!(wire.get("parent_tool_use_id").is_none());
     }
 }

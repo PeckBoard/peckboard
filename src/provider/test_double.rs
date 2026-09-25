@@ -105,6 +105,7 @@ impl AgentProvider for NoopProvider {
             &ctx.session_id,
             ProviderEvent::Text {
                 text: ctx.message.text.clone(),
+                parent_tool_use_id: None,
             },
         )
         .await;

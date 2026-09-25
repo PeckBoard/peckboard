@@ -982,7 +982,11 @@ impl PluginProviderRuntime {
             }
         }
         let assistant_text = match &event {
-            ProviderEvent::Text { text } => Some(text.clone()),
+            // A native subagent's text is not the assistant's own answer.
+            ProviderEvent::Text {
+                text,
+                parent_tool_use_id: None,
+            } => Some(text.clone()),
             _ => None,
         };
         let starts_linger = matches!(
@@ -2260,6 +2264,7 @@ mod tests {
             &runtime,
             ProviderEvent::Text {
                 text: "background agent output".into(),
+                parent_tool_use_id: None,
             },
         );
         assert!(late.contains("ok"), "post-Completed emit refused: {late}");

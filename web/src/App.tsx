@@ -8,7 +8,9 @@ import { useSessionsStore } from './store/sessions'
 import { useProjectsStore } from './store/projects'
 import { useFoldersStore } from './store/folders'
 import LoginModal from './components/LoginModal'
-import ChatView from './components/ChatView'
+import SessionWorkspace from './components/SessionWorkspace'
+import ViewsPage from './components/ViewsPage'
+import type { MenuItem } from './components/Dropdown'
 import SessionTodosView from './components/SessionTodosView'
 import List from './components/List'
 import ListViewHeader from './components/ListViewHeader'
@@ -67,6 +69,7 @@ type View =
   | 'plan'
   | 'docReview'
   | 'agents'
+  | 'views'
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -153,6 +156,9 @@ function parseRoute(): {
       return { view: 'usage', activeId: null, sub: 'chat' }
     case 'repeating-tasks':
       return { view: 'repeatingTasks', activeId: id, sub: 'chat' }
+    case 'views':
+      // `/views` — saved multi-session views; `/views/<id>` — one view.
+      return { view: 'views', activeId: id, sub: 'chat' }
     case 'agents':
       return { view: 'agents', activeId: null, sub: 'chat' }
     case 'folders':
@@ -421,6 +427,10 @@ function App() {
   const [activeReviewId, setActiveReviewId] = useState<string | null>(
     initialRoute.view === 'docReview' ? initialRoute.activeId : null,
   )
+  // Saved multi-session view open at `/views/<id>`; null on the list.
+  const [activeViewId, setActiveViewId] = useState<string | null>(
+    initialRoute.view === 'views' ? initialRoute.activeId : null,
+  )
   // Plugin-contributed full-page entries for the project / session pages, and
   // for a Folders page row (scoped to that folder).
   const [projectItems, setProjectItems] = useState<SidebarItem[]>([])
@@ -557,6 +567,8 @@ function App() {
         setActivePlanId(route.activeId)
       } else if (route.view === 'docReview') {
         setActiveReviewId(route.activeId)
+      } else if (route.view === 'views') {
+        setActiveViewId(route.activeId)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -653,6 +665,15 @@ function App() {
     }
   }, [view, activeReportId])
 
+  // When the active saved view changes, update URL.
+  useEffect(() => {
+    if (view === 'views') {
+      const path = buildPath('views', activeViewId)
+      if (window.location.pathname !== path) {
+        history.pushState(null, '', path)
+      }
+    }
+  }, [view, activeViewId])
   // When the active document review changes, update URL.
   useEffect(() => {
     if (view === 'docReview') {
@@ -1110,6 +1131,65 @@ function App() {
   // so re-building the registry each render is cheaper than tracking
   // every dep. The TabBar takes the registry as a plain prop and the
   // OpenedTab rows aren't memoized either.
+  // The session menu shared by the tab strip and every split-pane header,
+  // so the labels and order match across surfaces. `flags` comes from the
+  // tab when there is one (worker sessions aren't in the sessions list).
+  const sessionMenuItemsFor = (
+    id: string,
+    flags?: { isTemp: boolean; isWorker: boolean; isRepeatingTaskSession: boolean },
+  ): MenuItem[] => {
+    const s = sessionMap.get(id)
+    const tab = flags
+      ? undefined
+      : useTabsStore.getState().tabs.find((t) => t.itemType === 'session' && t.itemId === id)
+    const isTemp = flags?.isTemp ?? tab?.isTemp ?? s?.is_temp ?? false
+    const isWorker = flags?.isWorker ?? tab?.isWorker ?? s?.is_worker ?? false
+    const isRepeating =
+      flags?.isRepeatingTaskSession ?? tab?.isRepeatingTaskSession ?? !!s?.repeating_task_id
+    return [
+      { label: 'Rename', onSelect: () => handleRenameItem('session', id) },
+      {
+        label: 'Auto-switch model',
+        hint: sessionAutoswitchOn(id) ? 'On' : 'Off',
+        active: sessionAutoswitchOn(id),
+        onSelect: () => void setSessionAutoswitch(id, !sessionAutoswitchOn(id)),
+        testId: 'session-menu-autoswitch',
+      },
+      // Temp sessions delete themselves when their last tab closes;
+      // "Keep session" clears the flag so the session outlives its tab.
+      {
+        label: 'Keep session',
+        onSelect: () => void keepSession(id),
+        hidden: !isTemp,
+        testId: 'session-menu-keep',
+      },
+      // Worker sessions are owned by their card and repeating-task
+      // sessions are a schedule's run history. Both have their
+      // transcript guarded server-side (POST /clear → 409); hide the
+      // menu entry rather than render a button that always errors.
+      {
+        label: 'Clear session',
+        onSelect: () => setConfirmClearSessionId(id),
+        hidden: isWorker || isRepeating,
+      },
+      { label: 'Terminate agent', onSelect: () => setConfirmTerminateSessionId(id) },
+      // Same reasoning for delete on worker sessions: backend refuses
+      // DELETE /api/sessions/:id with 409. Repeating-task sessions
+      // delete fine (just removes the run from the task's history),
+      // so the entry stays for them.
+      {
+        label: 'Delete session',
+        danger: true,
+        onSelect: () => setConfirmDeleteId(id),
+        hidden: isWorker,
+      },
+    ]
+  }
+  const openSessionTab = (id: string) => {
+    setActiveSession(id)
+    navigate('sessions', id)
+    void useTabsStore.getState().openTab('session', id)
+  }
   const sessionKind: TabKindHandler = {
     isActive: (tab) => view === 'sessions' && activeSessionId === tab.itemId,
     getLiveName: (tab) => sessionMap.get(tab.itemId)?.name ?? null,
@@ -1130,44 +1210,7 @@ function App() {
       setActiveSession(null)
       if (view === 'sessions') navigate('sessions', null)
     },
-    getMenuItems: (tab) => [
-      { label: 'Rename', onSelect: () => handleRenameItem('session', tab.itemId) },
-      {
-        label: 'Auto-switch model',
-        hint: sessionAutoswitchOn(tab.itemId) ? 'On' : 'Off',
-        active: sessionAutoswitchOn(tab.itemId),
-        onSelect: () => void setSessionAutoswitch(tab.itemId, !sessionAutoswitchOn(tab.itemId)),
-        testId: 'session-menu-autoswitch',
-      },
-      // Temp sessions delete themselves when their last tab closes;
-      // "Keep session" clears the flag so the session outlives its tab.
-      {
-        label: 'Keep session',
-        onSelect: () => void keepSession(tab.itemId),
-        hidden: !tab.isTemp,
-        testId: 'session-menu-keep',
-      },
-      // Worker sessions are owned by their card and repeating-task
-      // sessions are a schedule's run history. Both have their
-      // transcript guarded server-side (POST /clear → 409); hide the
-      // menu entry rather than render a button that always errors.
-      {
-        label: 'Clear session',
-        onSelect: () => setConfirmClearSessionId(tab.itemId),
-        hidden: tab.isWorker || tab.isRepeatingTaskSession,
-      },
-      { label: 'Terminate agent', onSelect: () => setConfirmTerminateSessionId(tab.itemId) },
-      // Same reasoning for delete on worker sessions: backend refuses
-      // DELETE /api/sessions/:id with 409. Repeating-task sessions
-      // delete fine (just removes the run from the task's history),
-      // so the entry stays for them.
-      {
-        label: 'Delete session',
-        danger: true,
-        onSelect: () => setConfirmDeleteId(tab.itemId),
-        hidden: tab.isWorker,
-      },
-    ],
+    getMenuItems: (tab) => sessionMenuItemsFor(tab.itemId, tab),
   }
   const projectKind: TabKindHandler = {
     isActive: (tab) => view === 'projects' && activeProjectId === tab.itemId,
@@ -1430,6 +1473,31 @@ function App() {
             </svg>
           </button>
           <button
+            className={`rail-btn ${view === 'views' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveViewId(null)
+              navigate('views', null)
+            }}
+            title="Views"
+            aria-label="Views"
+            data-testid="rail-views"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <line x1="12" y1="3" x2="12" y2="21" />
+              <line x1="12" y1="12" x2="21" y2="12" />
+            </svg>
+          </button>
+          <button
             className={`rail-btn ${view === 'docReview' ? 'active' : ''}`}
             onClick={() => {
               setActiveReviewId(null)
@@ -1632,11 +1700,13 @@ function App() {
                     )
                   })()
                 ) : (
-                  <ChatView
+                  <SessionWorkspace
                     sessionId={activeSessionId}
                     onOpenTodos={() => navigate('sessions', activeSessionId, 'todos')}
                     pluginItems={sessionItems}
                     onOpenPlugin={(id) => navigate('sessions', activeSessionId, `plugin:${id}`)}
+                    getSessionMenuItems={(id) => sessionMenuItemsFor(id)}
+                    onOpenSessionTab={openSessionTab}
                   />
                 )
               ) : (
@@ -1789,6 +1859,17 @@ function App() {
               />
             )}
             {view === 'agents' && <AgentsView />}
+            {view === 'views' && (
+              <ViewsPage
+                activeViewId={activeViewId}
+                onNavigate={(id) => {
+                  setActiveViewId(id)
+                  navigate('views', id)
+                }}
+                getSessionMenuItems={(id) => sessionMenuItemsFor(id)}
+                onOpenSessionTab={openSessionTab}
+              />
+            )}
             {view === 'usage' && <UsageDashboard />}
             {view === 'pluginPage' &&
               (() => {

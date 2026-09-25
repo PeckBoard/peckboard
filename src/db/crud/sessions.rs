@@ -212,6 +212,20 @@ impl Db {
         .await
     }
 
+    /// Every session spawned by `parent_id` (`parent_session_id = parent_id`),
+    /// oldest first — powers `GET /api/sessions/:id/children`.
+    pub async fn list_child_sessions(&self, parent_id: &str) -> anyhow::Result<Vec<Session>> {
+        let parent_id = parent_id.to_string();
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::parent_session_id.eq(&parent_id))
+                .select(Session::as_select())
+                .order((sessions::created_at.asc(), sessions::id.asc()))
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
     /// Count `parent_id`'s subagent sessions that have not yet reported
     /// back (`subagent_completed_at IS NULL`) — enforces the parent's
     /// concurrent-subagent cap in `spawn_subagent`.

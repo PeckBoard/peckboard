@@ -281,6 +281,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     tool_use_id,
                     name,
                     input,
+                    ..
                 } => {
                     background.on_tool_start(tool_use_id, name, input);
                     if let Some(todos) = tasks.on_tool_start(tool_use_id, name, input) {

@@ -31,6 +31,10 @@ async function authenticate(
 async function loadAt(page: Page, token: string, route: string) {
   await page.addInitScript((t) => {
     localStorage.setItem('peckboard_token', t)
+    // Auto subagent panes would mount the child's own ChatView, whose
+    // backfill fetch would be counted below; this spec is about the inline
+    // transcript alone.
+    localStorage.setItem('peckboard.subagentPanes', 'off')
   }, token)
   await page.goto(route)
 }

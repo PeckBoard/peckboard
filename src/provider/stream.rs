@@ -161,15 +161,29 @@ pub enum ProviderEvent {
         metadata: serde_json::Value,
     },
     /// Streamed text chunk.
-    Text { text: String },
+    ///
+    /// `parent_tool_use_id` (here and on `Thinking` / `ToolStart` /
+    /// `ToolEnd`) names the built-in Task/Agent subagent call the event was
+    /// produced inside; `None` at top level. Additive on the wire.
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
+    },
     /// Streamed reasoning/thinking chunk (extended-thinking models). Shown
     /// collapsed in the chat; never part of the assistant's answer text.
-    Thinking { text: String },
+    Thinking {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
+    },
     /// Agent invoked a tool.
     ToolStart {
         tool_use_id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     /// Tool finished.
     ToolEnd {
@@ -181,6 +195,8 @@ pub enum ProviderEvent {
         /// the chat can render them under the tool block.
         #[serde(default)]
         images: Vec<ToolImage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     /// A file the agent edited, as a unified diff — the chat's diff card.
     /// PeckBoard's own `edit_file`/`write_file` MCP tools emit this from the
@@ -299,35 +315,48 @@ impl ProviderEvent {
                 "conversationId": conversation_id,
                 "metadata": metadata,
             }),
-            ProviderEvent::Text { text } => serde_json::json!({ "text": text }),
-            ProviderEvent::Thinking { text } => serde_json::json!({ "text": text }),
+            ProviderEvent::Text {
+                text,
+                parent_tool_use_id,
+            }
+            | ProviderEvent::Thinking {
+                text,
+                parent_tool_use_id,
+            } => with_parent(serde_json::json!({ "text": text }), parent_tool_use_id),
             ProviderEvent::ToolStart {
                 tool_use_id,
                 name,
                 input,
-            } => serde_json::json!({
-                "toolUseId": tool_use_id,
-                "name": name,
-                "input": input,
-            }),
+                parent_tool_use_id,
+            } => with_parent(
+                serde_json::json!({
+                    "toolUseId": tool_use_id,
+                    "name": name,
+                    "input": input,
+                }),
+                parent_tool_use_id,
+            ),
             ProviderEvent::ToolEnd {
                 tool_use_id,
                 output,
                 error,
                 images,
-            } => serde_json::json!({
-                "toolUseId": tool_use_id,
-                "output": output,
-                "error": error,
-                "images": images
-                    .iter()
-                    .map(|img| serde_json::json!({
-                        "mimeType": img.mime_type,
-                        "dataBase64": img.data_base64,
-                    }))
-                    .collect::<Vec<_>>(),
-            }),
-            // Same payload the `edit_file`/`write_file` tool handler emits,
+                parent_tool_use_id,
+            } => with_parent(
+                serde_json::json!({
+                    "toolUseId": tool_use_id,
+                    "output": output,
+                    "error": error,
+                    "images": images
+                        .iter()
+                        .map(|img| serde_json::json!({
+                            "mimeType": img.mime_type,
+                            "dataBase64": img.data_base64,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+                parent_tool_use_id,
+            ),
             // so the chat's existing `file-diff` card renders it unchanged.
             ProviderEvent::FileDiff {
                 path,
@@ -419,6 +448,15 @@ impl ProviderEvent {
             }),
         }
     }
+}
+
+/// Stamp `parentToolUseId` onto a persisted event payload — only when the
+/// event came from inside a subagent, so top-level rows stay unchanged.
+fn with_parent(mut data: serde_json::Value, parent: &Option<String>) -> serde_json::Value {
+    if let (Some(parent), Some(obj)) = (parent, data.as_object_mut()) {
+        obj.insert("parentToolUseId".into(), parent.clone().into());
+    }
+    data
 }
 
 /// Configuration for spawning an agent run.
@@ -589,7 +627,11 @@ mod tests {
             "agent-start"
         );
         assert_eq!(
-            ProviderEvent::Text { text: "hi".into() }.event_kind(),
+            ProviderEvent::Text {
+                text: "hi".into(),
+                parent_tool_use_id: None,
+            }
+            .event_kind(),
             "agent-text"
         );
         assert_eq!(
@@ -616,9 +658,19 @@ mod tests {
     fn test_event_data_serialization() {
         let event = ProviderEvent::Text {
             text: "hello".into(),
+            parent_tool_use_id: None,
         };
         let data = event.event_data();
         assert_eq!(data["text"], "hello");
+        assert!(data.get("parentToolUseId").is_none());
+
+        let event = ProviderEvent::ToolStart {
+            tool_use_id: "toolu_child".into(),
+            name: "Read".into(),
+            input: serde_json::json!({}),
+            parent_tool_use_id: Some("toolu_parent".into()),
+        };
+        assert_eq!(event.event_data()["parentToolUseId"], "toolu_parent");
 
         let event = ProviderEvent::Crashed {
             reason: "timeout".into(),

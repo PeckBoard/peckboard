@@ -3851,4 +3851,195 @@ mod tests {
             Some(r#"{"hostname":"example.com"}"#)
         );
     }
+
+    // ── saved multi-session views + child sessions ─────────────────
+
+    async fn seed_user_folder_sessions(db: &Db, sessions: &[(&str, Option<&str>)]) {
+        let ts = now();
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for u in ["u1", "u2"] {
+            db.create_user(NewUser {
+                id: u.into(),
+                username: u.into(),
+                email: None,
+                password_hash: "h".into(),
+                role: "user".into(),
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        for (i, (id, parent)) in sessions.iter().enumerate() {
+            // Distinct, ordered created_at so child ordering is deterministic.
+            let created = format!("2026-01-01T00:00:0{i}+00:00");
+            db.create_session(NewSession {
+                id: (*id).into(),
+                name: (*id).into(),
+                folder_id: "f".into(),
+                created_at: created.clone(),
+                last_activity: created,
+                parent_session_id: parent.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn session_views_round_trip_replace_and_session_delete() {
+        use crate::db::crud::{SplitDir, ViewLayout};
+        let db = test_db();
+        seed_user_folder_sessions(&db, &[("a", None), ("b", None), ("c", None)]).await;
+
+        let leaf = |s: &str| ViewLayout::Leaf {
+            session_id: Some(s.into()),
+        };
+        let layout = ViewLayout::Split {
+            dir: SplitDir::Row,
+            children: vec![
+                leaf("a"),
+                ViewLayout::Split {
+                    dir: SplitDir::Col,
+                    children: vec![leaf("b"), ViewLayout::Leaf { session_id: None }],
+                    ratios: vec![2.0, 1.0],
+                },
+            ],
+            ratios: vec![0.3, 0.7],
+        };
+        let (view, got) = db
+            .create_session_view("u1", "Pair", layout.clone())
+            .await
+            .unwrap();
+        assert_eq!(got, layout);
+        assert_eq!(
+            db.get_session_view("u1", &view.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            layout
+        );
+        // Views are per-user: another user can neither see nor touch it.
+        assert!(db.get_session_view("u2", &view.id).await.unwrap().is_none());
+        assert!(db.list_session_views("u2").await.unwrap().is_empty());
+        assert!(!db.delete_session_view("u2", &view.id).await.unwrap());
+
+        // Wire shape.
+        let wire = serde_json::to_value(&layout).unwrap();
+        assert_eq!(wire["kind"], "split");
+        assert_eq!(wire["dir"], "row");
+        assert_eq!(wire["children"][0]["sessionId"], "a");
+        assert_eq!(
+            wire["children"][1]["children"][1]["sessionId"],
+            serde_json::Value::Null
+        );
+
+        // Layout replace swaps the whole tree; rename sticks.
+        let replaced = ViewLayout::Split {
+            dir: SplitDir::Col,
+            children: vec![leaf("c"), leaf("a")],
+            ratios: vec![1.0, 1.0],
+        };
+        let (view2, got) = db
+            .update_session_view(
+                "u1",
+                &view.id,
+                Some("Renamed".into()),
+                Some(replaced.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view2.name, "Renamed");
+        assert_eq!(got, replaced);
+        let node_count: i64 = db
+            .with_conn(|conn| {
+                use crate::db::schema::session_view_nodes;
+                use diesel::prelude::*;
+                session_view_nodes::table
+                    .count()
+                    .get_result(conn)
+                    .map_err(Into::into)
+            })
+            .await
+            .unwrap();
+        assert_eq!(node_count, 3, "old nodes must be gone after replace");
+
+        // Deleting a session blanks its leaf instead of breaking the view.
+        assert!(db.delete_session("c").await.unwrap());
+        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
+        assert_eq!(
+            after,
+            ViewLayout::Split {
+                dir: SplitDir::Col,
+                children: vec![ViewLayout::Leaf { session_id: None }, leaf("a")],
+                ratios: vec![1.0, 1.0],
+            }
+        );
+
+        assert!(db.delete_session_view("u1", &view.id).await.unwrap());
+        assert!(db.list_session_views("u1").await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn view_layout_validation_limits() {
+        use crate::db::crud::{SplitDir, ViewLayout};
+        let leaf = || ViewLayout::Leaf { session_id: None };
+        let split = |children: Vec<ViewLayout>| ViewLayout::Split {
+            dir: SplitDir::Row,
+            ratios: vec![1.0; children.len()],
+            children,
+        };
+        assert!(split(vec![leaf(), leaf()]).validate().is_ok());
+        assert!(
+            split(vec![leaf()]).validate().is_err(),
+            "split needs 2 children"
+        );
+        let mut bad_ratios = split(vec![leaf(), leaf()]);
+        if let ViewLayout::Split { ratios, .. } = &mut bad_ratios {
+            ratios.pop();
+        }
+        assert!(bad_ratios.validate().is_err());
+        assert!(split(vec![leaf(); 17]).validate().is_err(), "max 16 leaves");
+        let mut deep = leaf();
+        for _ in 0..8 {
+            deep = split(vec![deep, leaf()]);
+        }
+        assert!(deep.validate().is_err(), "depth 9 rejected");
+        assert!(crate::db::crud::validate_view_name("  ").is_err());
+        assert!(crate::db::crud::validate_view_name(&"x".repeat(101)).is_err());
+    }
+
+    #[tokio::test]
+    async fn list_child_sessions_returns_children_oldest_first() {
+        let db = test_db();
+        seed_user_folder_sessions(
+            &db,
+            &[
+                ("p", None),
+                ("c1", Some("p")),
+                ("other", None),
+                ("c2", Some("p")),
+            ],
+        )
+        .await;
+        let ids: Vec<String> = db
+            .list_child_sessions("p")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, ["c1", "c2"]);
+        assert!(db.list_child_sessions("c1").await.unwrap().is_empty());
+    }
 }

@@ -586,7 +586,13 @@ async fn emit_line_events(
         // Assistant text is the one thing a todo-hook plugin can parse;
         // clone it before the event is moved into the persistence path.
         let todo_text = match (&event, plugins) {
-            (ProviderEvent::Text { text }, Some(_)) => Some(text.clone()),
+            (
+                ProviderEvent::Text {
+                    text,
+                    parent_tool_use_id: None,
+                },
+                Some(_),
+            ) => Some(text.clone()),
             _ => None,
         };
         emit_event(db, broadcaster, session_id, event).await;
@@ -842,6 +848,7 @@ pub async fn notify_attachments_dropped(
                  to a provider with image support (Claude, Ollama).",
                 if count == 1 { "was" } else { "were" }
             ),
+            parent_tool_use_id: None,
         },
     )
     .await;
@@ -991,6 +998,7 @@ mod tests {
                 self.seen.push(text.to_string());
                 return vec![ProviderEvent::Text {
                     text: text.to_string(),
+                    parent_tool_use_id: None,
                 }];
             }
             if json.get("start").is_some() {

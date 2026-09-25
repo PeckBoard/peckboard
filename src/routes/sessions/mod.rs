@@ -119,6 +119,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/sessions/{id}/events",
             get(events::list_events).post(events::append_event),
         )
+        .route("/api/sessions/{id}/children", get(list_children))
         .route("/api/sessions/{id}/todos", get(events::get_session_todos))
         .route("/api/sessions/{id}/read", post(mark_read))
         .route("/api/sessions/{id}/clear", post(clear_session))
@@ -311,6 +312,25 @@ async fn list_sessions(
     })))
 }
 
+/// GET /api/sessions/:id/children — sessions spawned by this one
+/// (`parent_session_id = id`), oldest first, in the same shape as the
+/// session list items. Access is gated on the parent session.
+async fn list_children(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    state
+        .db
+        .list_child_sessions(&id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })
+}
 /// GET /api/sessions/:id
 async fn get_session(
     State(state): State<Arc<AppState>>,

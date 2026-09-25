@@ -5,8 +5,9 @@ import Modal from './Modal'
 import DiffBlock from './DiffBlock'
 import SafeMarkdown from './SafeMarkdown'
 import SubagentTranscript from './SubagentTranscript'
-import type { FileDiff, ToolImage } from './chat/events'
+import { isNativeAgentTool, type FileDiff, type ToolImage } from './chat/events'
 import { authedFetch } from '../store/auth'
+import { nativeLeafId, useSubagentPanesStore } from '../store/subagentPanes'
 import {
   bareToolName,
   getCommandLine,
@@ -30,6 +31,8 @@ interface ToolUseBlockProps {
   endTs?: number
   /** Diff payload attached from a `file-diff` event. */
   diff?: FileDiff
+  /** Provider tool_use id — lets an Agent/Task card open its subagent pane. */
+  toolUseId?: string
 }
 
 /** Build a `data:` URL from a legacy inline tool image, or null when the
@@ -505,6 +508,7 @@ export default function ToolUseBlock({
   startTs,
   endTs,
   diff,
+  toolUseId,
 }: ToolUseBlockProps) {
   // The user's explicit toggle; null means "follow the default". A tool that
   // errored defaults to open: during a long autonomous run the feed is a wall
@@ -546,6 +550,14 @@ export default function ToolUseBlock({
       ? (outObj.subagent_session_id as string)
       : undefined
   const done = !isRunning && !error
+  // "Show pane" only makes sense while this session's split workspace is
+  // mounted (the normal session view), not in a read-only pane or a View.
+  const workspaceMounted = useSubagentPanesStore((s) => s.workspaceSessionId === sessionId)
+  const paneLeafId = subagentSessionId
+    ? subagentSessionId
+    : toolUseId && isNativeAgentTool(toolName)
+      ? nativeLeafId(toolUseId)
+      : undefined
 
   const hasDetails = (input && Object.keys(input).length > 0) || out !== undefined || error
 
@@ -637,6 +649,18 @@ export default function ToolUseBlock({
           >
             ▶ View replay
           </a>
+        </div>
+      )}
+      {paneLeafId && workspaceMounted && (
+        <div className="tool-replay">
+          <button
+            type="button"
+            className="tool-mini-btn"
+            data-testid="tool-show-pane"
+            onClick={() => useSubagentPanesStore.getState().requestPane(sessionId, paneLeafId)}
+          >
+            Show pane
+          </button>
         </div>
       )}
       {subagentSessionId && <SubagentTranscript sessionId={subagentSessionId} />}

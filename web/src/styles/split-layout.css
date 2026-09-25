@@ -1,0 +1,451 @@
+/* ═══════════════════════════════════════════════════
+   Split Layout — tiled multi-pane engine (SplitLayout.tsx)
+   ═══════════════════════════════════════════════════
+   Panes are absolutely positioned siblings; their rects animate on
+   left/top/width/height so a new pane slides in from its split edge and
+   a closed pane folds away. reduced-motion.css collapses the transitions
+   globally; the media query at the bottom covers the OS preference too. */
+
+.split-layout {
+  --split-anim: 250ms;
+  --split-gap: 3px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.split-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.split-layout-empty .split-stage {
+  display: flex;
+  flex-direction: column;
+}
+
+.split-pane {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  transition:
+    left var(--split-anim) ease,
+    top var(--split-anim) ease,
+    width var(--split-anim) ease,
+    height var(--split-anim) ease;
+}
+
+.split-resizing .split-pane {
+  transition: none;
+}
+
+.split-resizing,
+.split-resizing * {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.split-pane-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.split-pane-frame {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  margin: var(--split-gap);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color var(--transition);
+}
+
+.split-pane.focused .split-pane-frame {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* A lone pane is indistinguishable from the plain view it replaced. */
+.split-pane-bare .split-pane-frame {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.split-pane-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Content rides in from the split edge while the pane grows open. */
+.split-pane-entering .split-pane-body,
+.split-pane-closing .split-pane-body {
+  opacity: 0;
+}
+
+.split-pane-live .split-pane-body {
+  animation: split-content-in var(--split-anim) ease;
+}
+
+.split-from-left.split-pane-live .split-pane-body {
+  --split-dx: -32px;
+  --split-dy: 0;
+}
+.split-from-right.split-pane-live .split-pane-body {
+  --split-dx: 32px;
+  --split-dy: 0;
+}
+.split-from-top.split-pane-live .split-pane-body {
+  --split-dx: 0;
+  --split-dy: -32px;
+}
+.split-from-bottom.split-pane-live .split-pane-body {
+  --split-dx: 0;
+  --split-dy: 32px;
+}
+
+.split-pane-bare .split-pane-body {
+  animation: none;
+}
+
+@keyframes split-content-in {
+  from {
+    opacity: 0;
+    transform: translate(var(--split-dx, 0), var(--split-dy, 0));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.split-pane-closing .split-pane-body {
+  transition: opacity var(--split-anim) ease;
+}
+
+/* ─── Pane header ─── */
+
+.split-pane-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 30px;
+  padding: 2px var(--space-2) 2px var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  flex-shrink: 0;
+}
+
+.split-pane-header[draggable='true'] {
+  cursor: grab;
+}
+
+.split-pane-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.split-pane-badge {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid var(--success);
+}
+
+.split-pane-spacer {
+  flex: 1;
+}
+
+.split-pane-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text2);
+  font-size: var(--text-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.split-pane-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.split-pane-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+/* ─── Dividers ─── */
+
+.split-divider {
+  position: absolute;
+  z-index: 2;
+  touch-action: none;
+}
+
+.split-divider-row {
+  width: 10px;
+  transform: translateX(-50%);
+  cursor: col-resize;
+}
+
+.split-divider-col {
+  height: 10px;
+  transform: translateY(-50%);
+  cursor: row-resize;
+}
+
+.split-divider::after {
+  content: '';
+  position: absolute;
+  border-radius: var(--radius-full);
+  background: transparent;
+  transition: background var(--transition);
+}
+
+.split-divider-row::after {
+  top: 8px;
+  bottom: 8px;
+  left: 4px;
+  width: 2px;
+}
+
+.split-divider-col::after {
+  left: 8px;
+  right: 8px;
+  top: 4px;
+  height: 2px;
+}
+
+.split-divider:hover::after,
+.split-divider:focus-visible::after,
+.split-resizing .split-divider::after {
+  background: var(--accent);
+}
+
+.split-divider:focus-visible {
+  outline: none;
+}
+
+/* ─── Drag-to-rearrange drop zones ─── */
+
+.split-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+.split-drop-zone {
+  position: absolute;
+  border-radius: var(--radius);
+  transition: background var(--transition);
+}
+
+.split-drop-zone-left {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 25%;
+}
+.split-drop-zone-right {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 25%;
+}
+.split-drop-zone-top {
+  left: 25%;
+  right: 25%;
+  top: 0;
+  height: 25%;
+}
+.split-drop-zone-bottom {
+  left: 25%;
+  right: 25%;
+  bottom: 0;
+  height: 25%;
+}
+.split-drop-zone-center {
+  left: 25%;
+  right: 25%;
+  top: 25%;
+  bottom: 25%;
+}
+
+.split-drop-zone.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
+/* ─── Narrow widths: segmented pane switcher ─── */
+
+.split-switcher {
+  display: flex;
+  gap: 2px;
+  padding: var(--space-1);
+  margin: var(--space-1) var(--space-2) 0;
+  background: var(--surface2);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.split-switcher-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 80px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.split-switcher-tab.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.split-switcher-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Session workspace extras (subagent panes) ─── */
+
+.subagent-panes-toggle,
+.subagent-overflow-chip {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.subagent-panes-toggle[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.subagent-overflow-chip {
+  font-weight: 600;
+}
+
+/* Read-only Claude-native subagent pane. */
+.native-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.native-pane-meta {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text3);
+  border-bottom: 1px solid var(--border);
+}
+
+.native-pane-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Empty / deleted-session leaf in a saved View. */
+.split-empty-leaf {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--text2);
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .split-pane,
+  .split-pane-frame,
+  .split-pane-closing .split-pane-body {
+    transition: none;
+  }
+  .split-pane-live .split-pane-body {
+    animation: none;
+  }
+}
+
+/* ─── Saved View page ─── */
+
+.view-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.view-editor .split-layout {
+  padding: 0 var(--space-1) var(--space-1);
+}
+
+.view-save-state {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  min-width: 4.5em;
+  text-align: right;
+}
+
+.view-save-state[data-state='error'] {
+  color: var(--danger);
+}

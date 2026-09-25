@@ -29,6 +29,7 @@ mod projects;
 mod push;
 mod queued;
 mod repeating_tasks;
+mod session_views;
 mod sessions;
 mod ssh_keys;
 mod system_prompts;
@@ -44,6 +45,9 @@ pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
+pub use session_views::{
+    MAX_VIEW_DEPTH, MAX_VIEW_LEAVES, MAX_VIEW_NAME_CHARS, SplitDir, ViewLayout, validate_view_name,
+};
 pub use todos::ProjectCardTodos;
 pub use usage::{UsageRollupRow, UsageWindow};
 

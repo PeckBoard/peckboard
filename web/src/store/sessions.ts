@@ -604,6 +604,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   },
 
   applySessionDeleted: (id: string) => {
+    // Multi-pane views keep a leaf pointing at the session; tell them so
+    // the pane can flip to its "Session deleted" picker.
+    window.dispatchEvent(
+      new CustomEvent('peckboard:session-removed', { detail: { sessionId: id } }),
+    )
     set((s) => {
       const { [id]: _drop, ...remainingEvents } = s.eventsBySession
       const { [id]: _dropPending, ...remainingPending } = s.pendingUserMessages

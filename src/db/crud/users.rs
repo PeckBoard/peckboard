@@ -97,6 +97,18 @@ impl Db {
                     .execute(conn)?;
                 diesel::delete(user_tabs::table.filter(user_tabs::user_id.eq(&id)))
                     .execute(conn)?;
+                diesel::delete(
+                    session_view_nodes::table.filter(
+                        session_view_nodes::view_id.eq_any(
+                            session_views::table
+                                .filter(session_views::user_id.eq(&id))
+                                .select(session_views::id),
+                        ),
+                    ),
+                )
+                .execute(conn)?;
+                diesel::delete(session_views::table.filter(session_views::user_id.eq(&id)))
+                    .execute(conn)?;
                 let count = diesel::delete(users::table.find(&id)).execute(conn)?;
                 Ok(count > 0)
             })

@@ -631,6 +631,34 @@ pub struct UserTab {
     pub last_active: String,
 }
 
+// ── Saved multi-session views ───────────────────────────────────────────
+
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Debug, Clone)]
+#[diesel(table_name = session_views)]
+pub struct SessionView {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One node of a saved view's layout tree. `kind` is `split` (with `dir`)
+/// or `leaf` (with an optional `session_id`); `ratio` is this node's share
+/// of its parent split and `position` orders siblings.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone)]
+#[diesel(table_name = session_view_nodes)]
+pub struct SessionViewNode {
+    pub id: String,
+    pub view_id: String,
+    pub parent_node_id: Option<String>,
+    pub position: i32,
+    pub kind: String,
+    pub dir: Option<String>,
+    pub ratio: f64,
+    pub session_id: Option<String>,
+}
+
 // ── Project workflow instructions ────────────────────────────────────
 
 #[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]

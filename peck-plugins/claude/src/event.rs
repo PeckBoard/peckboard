@@ -153,14 +153,22 @@ pub enum ProviderEvent {
     },
     Text {
         text: String,
+        /// `tool_use_id` of the built-in Task/Agent subagent call this
+        /// frame belongs to; `None` at top level.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     Thinking {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     ToolStart {
         tool_use_id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     ToolEnd {
         tool_use_id: String,
@@ -168,6 +176,8 @@ pub enum ProviderEvent {
         error: Option<String>,
         #[serde(default)]
         images: Vec<ToolImage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     FileDiff {
         path: String,

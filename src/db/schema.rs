@@ -215,6 +215,29 @@ diesel::table! {
 }
 
 diesel::table! {
+    session_views (id) {
+        id -> Text,
+        user_id -> Text,
+        name -> Text,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    session_view_nodes (id) {
+        id -> Text,
+        view_id -> Text,
+        parent_node_id -> Nullable<Text>,
+        position -> Integer,
+        kind -> Text,
+        dir -> Nullable<Text>,
+        ratio -> Double,
+        session_id -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     todos (session_id, position) {
         session_id -> Text,
         position -> Integer,
@@ -619,6 +642,8 @@ diesel::joinable!(mfa_methods -> users (user_id));
 diesel::joinable!(mfa_recovery_codes -> users (user_id));
 diesel::joinable!(mfa_challenges -> users (user_id));
 diesel::joinable!(mfa_pending -> users (user_id));
+diesel::joinable!(session_views -> users (user_id));
+diesel::joinable!(session_view_nodes -> session_views (view_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -662,4 +687,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     doc_review_pr_links,
     devices,
     device_activity,
+    session_views,
+    session_view_nodes,
 );
