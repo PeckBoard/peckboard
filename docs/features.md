@@ -13,6 +13,14 @@ Messages accept image attachments — paste or drop them in — and `@` mentions
 
 Every session shows its agent's live tool calls as structured blocks — a diff for an edit, a table for a search, a replay link for a browser run — its todo list, and, when the agent spawns subagents with `spawn_subagent`, each subagent's transcript nested under the parent. Chat sessions can be handed a named _system prompt_ from the prompt library (Settings → System Prompts), and every session and card carries an _effort_ level (low to max) alongside its model. Cost-aware model autoswitch, on by default for workers and opt-in for chats, drops a session to a cheaper model when a turn does not need the expensive one.
 
+## Subagent Panes
+
+When a session launches subagents — PeckBoard children via `spawn_subagent` or Claude-native Agent/Task subagents — each running one slides into its own live split pane beside the parent chat, and the panes tile into a grid as more arrive. A pane stays open exactly as long as its subagent runs, including background subagents that outlive the parent's turn, then closes. The **Subagent panes: Auto / Off** toggle in the session view controls this. A pane you close stays closed across reloads; running subagents without a pane stay one click away on a `+N` chip, and a finished subagent reopens from its tool card's _Show pane_. To group arbitrary sessions side by side, pick _New split view_ from the tab bar's `+ ▾` menu.
+
+## Background Processes
+
+Agents start long-running jobs — dev servers, builds, long test runs — with the `run_background` MCP tool instead of backgrounding them in a shell. It follows the same approval gate and exec rules as `run_command`, returns a task id immediately, and PeckBoard owns the child: it runs in its own process group, which is killed as a whole on `stop_background`, on timeout, when the session is deleted, and on server shutdown. Output goes to a capped log under the data directory. When the job finishes, fails, times out, or is stopped, a report with the last 40 lines lands in the originating session and wakes it, so the agent picks up where it left off. `background_status` and `list_background` let the agent check in meanwhile, and the **Background** chip in the chat toolbar opens a panel listing each task with its output tail and a Stop button.
+
 ## Plans
 
 Ask a chat session for a plan and it lands as a versioned document you can read and comment on from the Plans view — each comment becomes feedback the model revises against. When the plan is right, the implement wizard turns it into cards on a project board, so the plan-to-work handoff is explicit instead of buried in chat history.

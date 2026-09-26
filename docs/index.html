@@ -135,6 +135,25 @@ layout: null
           <h2>Fresh From the Latest Releases</h2>
           <div class="extra-grid">
             <div class="extra">
+              <h3>Subagent panes grid (0.1.31–0.1.35)</h3>
+              <p>
+                When an agent launches subagents, each one slides into its own
+                live pane beside the parent chat, tiled into a grid. Panes open
+                while a subagent runs and close when it truly finishes; toggle
+                Auto or Off, and reopen any finished one with “Show pane”.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Background processes (0.1.33)</h3>
+              <p>
+                Agents start dev servers, builds, and long test runs with
+                <code>run_background</code> instead of shell <code>&amp;</code>.
+                PeckBoard owns the process group, keeps the log, and wakes the
+                session with the tail when the job ends. A Background chip lists
+                every task with output and a Stop button.
+              </p>
+            </div>
+            <div class="extra">
               <h3>Remote-control agents (0.1.17)</h3>
               <p>
                 Enroll another machine with the
@@ -145,23 +164,6 @@ layout: null
                 daemon and drive it from your sessions — commands, servers,
                 screenshots, mouse and keyboard. Binaries for every platform
                 ship with each release as of 0.1.18.
-              </p>
-            </div>
-            <div class="extra">
-              <h3>Providers are installable plugins (0.1.13)</h3>
-              <p>
-                Claude, Grok, Codex, Kimi, Cursor, and Ollama each live in their
-                own plugin. Fresh installs start clean and you add just the
-                providers you use — third-party providers plug in as WASM.
-              </p>
-            </div>
-            <div class="extra">
-              <h3>Sturdier long sessions (0.1.15–0.1.18)</h3>
-              <p>
-                Large-context compaction no longer dies at 30 seconds,
-                background subagents survive the end of a turn, and a CLI killed
-                by the OS now says so — signal and likely cause — instead of
-                “exited without a result”.
               </p>
             </div>
           </div>
@@ -390,6 +392,23 @@ layout: null
                 An agent proposes a plan you can read, comment on, and revise; a
                 wizard then turns the approved plan into cards the flock works
                 through.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Subagents side by side</h3>
+              <p>
+                Every running subagent gets its own split pane next to the
+                parent chat — streaming live, closable, and gone when the
+                subagent finishes. Group any sessions into a saved split view
+                from the tab bar's + ▾ menu.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Background jobs that report back</h3>
+              <p>
+                Long-running commands run under PeckBoard, not a stray shell:
+                killed with their whole process tree on stop, timeout, or
+                session delete, and reported to the agent when they finish.
               </p>
             </div>
             <div class="extra">
