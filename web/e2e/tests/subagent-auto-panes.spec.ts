@@ -19,6 +19,9 @@ import { DatabaseSync } from 'node:sqlite'
  *  3. Auto mode opens a pane for EVERY active child — seven at once, no
  *     overflow chip — and closes each as it finishes (`mock:slow`, with
  *     the concurrent-subagent limit raised above the default of 5).
+ *  4. The overflow chip lists ACTIVE subagents only: with panes Off it
+ *     names each running child and drops each one live as it finishes,
+ *     disappearing once none is left (`mock:slow`).
  *
  * Children are spawned for real through `spawn_subagent` (a `mock:mcp`
  * parent running the ```mcp blocks in its message), so the server-side
@@ -239,10 +242,10 @@ test.describe('auto subagent panes follow the subagent lifetime', () => {
     await expect(pane).toBeVisible()
     await expect(chip).toHaveCount(0)
 
-    // The settle event names the launching tool_use_id: pane closes, the
-    // finished subagent moves to the overflow.
+    // The settle event names the launching tool_use_id: pane closes, and
+    // the finished subagent is not listed in the overflow either.
     await expect(pane).toHaveCount(0, { timeout: 15_000 })
-    await expect(chip).toHaveText('+1')
+    await expect(chip).toHaveCount(0)
     await expect.poll(() => lastLifecycle(request, auth, parent)).toBe('agent-end')
 
     const settled = (await events(request, auth, parent)).find(
@@ -316,7 +319,7 @@ test.describe('auto subagent panes follow the subagent lifetime', () => {
         )
         .not.toBeNull()
       await expect(paneChild).toHaveCount(0, { timeout: 15_000 })
-      await expect(page.getByTestId('subagent-overflow-chip')).toHaveText('+1')
+      await expect(page.getByTestId('subagent-overflow-chip')).toHaveCount(0)
     })
   })
 
@@ -369,13 +372,66 @@ test.describe('auto subagent panes follow the subagent lifetime', () => {
       for (const id of short)
         await expect(workspace.locator(`[data-pane-id="${id}"]`)).toHaveCount(0)
       for (const id of long) await expect(workspace.locator(`[data-pane-id="${id}"]`)).toBeVisible()
-      await expect(chip).toHaveText('+4')
+      // Finished children are not listed in the overflow chip.
+      await expect(chip).toHaveCount(0)
 
       // Then the long ones.
       await expect(panes).toHaveCount(1, { timeout: 25_000 })
-      await expect(chip).toHaveText('+7')
+      await expect(chip).toHaveCount(0)
     } finally {
       setSubagentLimit(null)
     }
+  })
+
+  test('the overflow chip lists only active subagents and drops each as it finishes', async ({
+    request,
+    page,
+  }) => {
+    test.setTimeout(60_000)
+    const auth = await authenticate(request)
+    const folder = await createFolder(request, auth, 'autopane-active-list')
+    const parent = await createSession(request, auth, folder, 'active list parent', 'mock:mcp')
+
+    // Panes Off: every running child sits in the overflow chip instead.
+    await page.addInitScript(() => localStorage.setItem('peckboard.subagentPanes', 'off'))
+    await openSession(page, auth.token, parent)
+    const workspace = page.getByTestId('session-workspace')
+    const chip = page.getByTestId('subagent-overflow-chip')
+    const items = page.getByTestId('subagent-overflow-item')
+
+    await send(
+      request,
+      auth,
+      parent,
+      [spawnBlock('quick', 'mock:slow'), spawnBlock('lasting', 'mock:slow')].join('\n'),
+      'mock:mcp',
+    )
+    const kids = await waitForChildren(request, auth, parent, 2)
+    const byName = new Map(kids.map((s) => [s.name.replace(/^sub: /, ''), s.id]))
+    await send(request, auth, byName.get('quick')!, 'sleep:3', 'mock:slow')
+    await send(request, auth, byName.get('lasting')!, 'sleep:9', 'mock:slow')
+
+    // Both active: both listed, no panes.
+    await expect(page.getByTestId('subagent-panes-toggle')).toHaveAttribute('data-mode', 'off')
+    await expect(chip).toHaveText('+2', { timeout: 15_000 })
+    await chip.click()
+    await expect(items).toHaveCount(2)
+    await expect(items.filter({ hasText: 'quick' })).toHaveCount(1)
+    await expect(items.filter({ hasText: 'lasting' })).toHaveCount(1)
+    await page.keyboard.press('Escape')
+    // Only the parent's own pane — no child panes while Off.
+    await expect(workspace.getByTestId('split-pane')).toHaveCount(1)
+
+    // The quick one finishes: it drops out live, the other stays listed.
+    await expect(chip).toHaveText('+1', { timeout: 20_000 })
+    await chip.click()
+    await expect(items).toHaveCount(1)
+    await expect(items.first()).toContainText('lasting')
+    await page.keyboard.press('Escape')
+
+    // The last one finishes: nothing active, so no chip at all.
+    await expect(chip).toHaveCount(0, { timeout: 20_000 })
+    // The toggle stays so panes can still be switched back on.
+    await expect(page.getByTestId('subagent-panes-toggle')).toBeVisible()
   })
 })

@@ -364,7 +364,11 @@ export default function SessionWorkspace({
     return () => useSubagentPanesStore.getState().setWorkspace(null)
   }, [sessionId])
 
-  const overflow = state.known.filter((id) => !state.shown.includes(id))
+  // The overflow chip lists only ACTIVE subagents without a pane — the same
+  // `runningIds` predicate auto mode opens panes by — so a finished child
+  // drops out live. Finished ones stay reachable via their tool card's
+  // "Show pane"; with no active subagent hidden, the chip is not rendered.
+  const overflow = state.known.filter((id) => runningIds.has(id) && !state.shown.includes(id))
   const childLabel = (id: string): string => {
     const n = nativeById.get(id)
     if (n) return n.description || n.subagentType || 'Sub-agent'
@@ -394,7 +398,7 @@ export default function SessionWorkspace({
         </button>
         {overflow.length > 0 && (
           <MenuButton
-            ariaLabel={`${overflow.length} more subagents`}
+            ariaLabel={`${overflow.length} more active subagents`}
             triggerClassName="subagent-overflow-chip"
             testId="subagent-overflow-chip"
             items={overflow.map((id) => ({

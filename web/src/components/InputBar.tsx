@@ -105,6 +105,24 @@ export default function InputBar({
     resizeTextarea()
   }, [text, resizeTextarea])
 
+  // Re-measure when the textarea's width changes. A split-view pane mounts
+  // at a collapsed (near-zero-width) rect and animates open; measured then,
+  // the placeholder wraps a character per line and pins the height at the
+  // cap, and nothing re-runs the text-keyed effect above once it widens.
+  useEffect(() => {
+    const ta = textareaRef.current
+    if (!ta || typeof ResizeObserver === 'undefined') return
+    let lastWidth = ta.clientWidth
+    const ro = new ResizeObserver(() => {
+      // Height changes come from resizeTextarea itself; only width matters.
+      if (ta.clientWidth === lastWidth) return
+      lastWidth = ta.clientWidth
+      resizeTextarea()
+    })
+    ro.observe(ta)
+    return () => ro.disconnect()
+  }, [resizeTextarea])
+
   // Keep the keyboard cursor visible in the (scrollable) mention list.
   useEffect(() => {
     if (!showAutocomplete) return

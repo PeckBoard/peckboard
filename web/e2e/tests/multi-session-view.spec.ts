@@ -96,7 +96,7 @@ async function openSession(page: Page, token: string, sessionId: string) {
 }
 
 test.describe('session view subagent panes', () => {
-  test('a finished native Agent subagent leaves Auto; overflow reopens it', async ({
+  test('a finished native Agent subagent leaves Auto; its tool card reopens it', async ({
     request,
     page,
   }) => {
@@ -115,9 +115,10 @@ test.describe('session view subagent panes', () => {
     await expect(workspace).toContainText('Parent done', { timeout: 15_000 })
     const pane = page.getByTestId('native-subagent-pane')
     await expect(pane).toHaveCount(0)
-
-    await page.getByTestId('subagent-overflow-chip').click()
-    await page.getByTestId('subagent-overflow-item').click()
+    // Finished subagents are not listed in the overflow chip (active only);
+    // the Agent tool card's "Show pane" still reopens it.
+    await expect(page.getByTestId('subagent-overflow-chip')).toHaveCount(0)
+    await workspace.getByTestId('tool-show-pane').first().click()
     await expect(pane).toBeVisible()
     await expect(pane).toContainText('Child is looking around')
     await expect(pane).toContainText('Finished')
@@ -149,7 +150,7 @@ test.describe('session view subagent panes', () => {
     await send(request, auth, child, 'hello', 'mock:happy-path')
     await expect(paneChild).toHaveCount(0, { timeout: 15_000 })
     await expect(workspace.getByTestId('split-pane')).toHaveCount(1)
-    await expect(page.getByTestId('subagent-overflow-chip')).toHaveText('+1')
+    await expect(page.getByTestId('subagent-overflow-chip')).toHaveCount(0)
   })
 
   test('each spawn_subagent child gets a pane; toggle Off hides them', async ({
@@ -373,6 +374,14 @@ test.describe('saved multi-session views', () => {
     await page.getByRole('option', { name: `${tag} two` }).click()
     await expect(editor.locator(`[data-pane-id="${two}"]`)).toBeVisible()
     await expect(editor.getByTestId('split-pane')).toHaveCount(2)
+
+    // The added pane mounts collapsed and slides open; its composer must
+    // re-measure at the final width, not stay pinned at the autosize cap.
+    const composer = editor.locator(`[data-pane-id="${two}"] .input-textarea`)
+    await expect(composer).toBeVisible()
+    await expect
+      .poll(async () => (await composer.boundingBox())!.height, { timeout: 5_000 })
+      .toBeLessThan(60)
   })
 
   test('narrow viewport shows a pane switcher instead of dividers', async ({ request, page }) => {
