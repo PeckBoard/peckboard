@@ -6,8 +6,9 @@ use crate::db::schema::*;
 
 impl Db {
     /// Append a message to the session's FIFO queue. Every message queued
-    /// while the agent is busy is kept — delivery is oldest-first, one
-    /// agent turn per message, driven by the completion listener.
+    /// while the agent is busy is kept — when the run ends the completion
+    /// listener drains the whole backlog as one merged agent turn
+    /// (oldest first); "Send now" still forces a single message.
     pub async fn enqueue_message(&self, new: NewQueuedMessage) -> anyhow::Result<QueuedMessage> {
         self.with_conn(move |conn| {
             diesel::insert_into(queued_messages::table)

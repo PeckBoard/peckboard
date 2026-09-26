@@ -1469,21 +1469,22 @@ pub async fn drain_queue_for_session(
         return Ok(());
     }
 
-    // Peek at the next queued message so we can use the model/effort the
-    // user picked when they enqueued, if any. Falls back to the session →
-    // card → project chain. The drain helper itself re-checks the queue
-    // under the per-session lock, so this peek does NOT consume.
+    // Peek at the queue so we can use the model/effort the user picked
+    // when they enqueued, if any. The whole backlog drains as one turn,
+    // so the newest row that set a model (and, separately, the newest
+    // that set an effort) wins. Falls back to the session → card →
+    // project chain. The drain helper itself re-checks the queue under
+    // the per-session lock, so this peek does NOT consume.
     let queued_peek = state
         .db
-        .next_queued_message(session_id)
+        .list_queued_messages(session_id)
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_default();
     let config = queued_resume_config(
         state,
         &session,
-        queued_peek.as_ref().and_then(|q| q.model.clone()),
-        queued_peek.as_ref().and_then(|q| q.effort.clone()),
+        queued_peek.iter().rev().find_map(|q| q.model.clone()),
+        queued_peek.iter().rev().find_map(|q| q.effort.clone()),
     )
     .await;
 

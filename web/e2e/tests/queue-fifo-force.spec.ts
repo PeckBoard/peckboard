@@ -8,8 +8,10 @@ import path from 'node:path'
  *
  *  - Messages sent while the agent is busy NEVER interrupt it: they park
  *    in the per-session FIFO. TWO queued messages must both survive (the
- *    old single-slot queue silently overwrote the first) and drain in
- *    send order, one agent turn each, once the busy run ends.
+ *    old single-slot queue silently overwrote the first) and, once the
+ *    busy run ends, drain together as ONE merged agent turn — texts
+ *    joined with "\n\n" in FIFO order — rather than one turn per
+ *    queued message.
  *  - Each queued message renders as a chip with a "Send now" button that
  *    forces it through immediately — for a per-turn provider that means
  *    the busy run is cancelled and the forced message dispatched next,
@@ -97,7 +99,21 @@ async function echoedTexts(
     .filter((t) => t.startsWith('drain-'))
 }
 
-test('two messages queued while busy both survive and drain in FIFO order', async ({ request }) => {
+/** Count of agent-start events so far, via the REST event log. */
+async function agentStartCount(
+  request: APIRequestContext,
+  authHeader: Record<string, string>,
+  sessionId: string,
+) {
+  const res = await request.get(`/api/sessions/${sessionId}/events`, { headers: authHeader })
+  expect(res.ok()).toBeTruthy()
+  const events = (await res.json()) as { kind: string }[]
+  return events.filter((e) => e.kind === 'agent-start').length
+}
+
+test('two messages queued while busy both survive and drain as one merged turn', async ({
+  request,
+}) => {
   const { authHeader } = await authenticate(request)
   const sessionId = await seedSession(request, authHeader)
 
@@ -111,8 +127,12 @@ test('two messages queued while busy both survive and drain in FIFO order', asyn
   // queue overwrote 'drain-first').
   expect(await queuedTexts(request, authHeader, sessionId)).toEqual(['drain-first', 'drain-second'])
 
-  // Release the blocked run; the completion listener drains one message
-  // per agent turn, in order.
+  // Exactly one agent-start so far: the blocked run.
+  expect(await agentStartCount(request, authHeader, sessionId)).toBe(1)
+
+  // Release the blocked run; the completion listener merges the whole
+  // queue into ONE new agent turn (texts joined with "\n\n"), instead
+  // of draining one message per turn.
   const interruptRes = await request.post(`/api/sessions/${sessionId}/interrupt`, {
     headers: authHeader,
   })
@@ -120,8 +140,12 @@ test('two messages queued while busy both survive and drain in FIFO order', asyn
 
   await expect
     .poll(() => echoedTexts(request, authHeader, sessionId), { timeout: 15_000 })
-    .toEqual(['drain-first', 'drain-second'])
+    .toEqual(['drain-first\n\ndrain-second'])
   expect(await queuedTexts(request, authHeader, sessionId)).toEqual([])
+
+  // Only one additional agent-start for the merged drain: two total,
+  // not three (one per queued message).
+  expect(await agentStartCount(request, authHeader, sessionId)).toBe(2)
 })
 
 test('"Send now" forces a queued message through, interrupting the busy agent', async ({

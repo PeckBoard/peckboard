@@ -967,19 +967,20 @@ impl SessionManager {
             .unwrap_or(AnswerTransport::NewTurn)
     }
 
-    /// Drain the next queued message (oldest first) for `session_id` and
-    /// dispatch it as a fresh agent run. Idempotent: if the queue is
-    /// empty or an agent is already running, it returns `Ok(false)`
-    /// triggers the next drain, so a backlog delivers as separate turns
-    /// in FIFO order.
+    /// Drain every queued message for `session_id` and dispatch them as
+    /// ONE fresh agent run. Idempotent: if the queue is empty or an agent
+    /// is already running, it returns `Ok(false)` and does nothing. A
+    /// backlog of N messages becomes a single turn whose text is the
+    /// messages joined with a blank line in FIFO order (attachments
+    /// concatenated likewise); the transcript still shows one `user`
+    /// event per message.
     ///
-    /// The row is deleted only AFTER delivery succeeded. Dispatch fails
+    /// The rows are deleted only AFTER delivery succeeded. Dispatch fails
     /// for reasons that have nothing to do with the message (folder
     /// gone, provider/account deleted, spawn error) and the completion
-    /// listener only logs the error — popping the row first meant the
-    /// message vanished with no transcript trace, and every later
-    /// completion ate the next row the same way. A failed drain leaves
-    /// the head queued where the user can see it, force it, or delete
+    /// listener only logs the error — popping the rows first meant the
+    /// messages vanished with no transcript trace. A failed drain leaves
+    /// every row queued where the user can see it, force it, or delete
     /// it; it starts no run, so nothing re-fires the drain in a loop.
     ///
     /// Holds the per-session lock so it can't race with `send_or_queue`,
@@ -1000,27 +1001,30 @@ impl SessionManager {
             return Ok(false);
         }
 
-        let queued = match db.next_queued_message(session_id).await? {
-            Some(q) => q,
-            None => return Ok(false),
-        };
+        let queued = db.list_queued_messages(session_id).await?;
+        if queued.is_empty() {
+            return Ok(false);
+        }
 
+        let queued_ids: Vec<i64> = queued.iter().map(|q| q.id).collect();
         tracing::info!(
             session_id = %session_id,
-            queued_id = queued.id,
-            "Draining queued message and spawning agent run"
+            queued_ids = ?queued_ids,
+            "Draining queued messages as one agent run"
         );
-        let queued_id = queued.id;
-        self.deliver_queued_row(&lock, queued, db, broadcaster, config, data_dir)
+        self.deliver_queued_rows(&lock, queued, db, broadcaster, config, data_dir)
             .await?;
-        // Delivered — only now drop the row and announce the drain. A
-        // failed dispatch returns above and leaves the row queued.
-        let _ = db.delete_queued_message_by_id(session_id, queued_id).await;
-        broadcaster.broadcast(WsEvent {
-            event_type: "queue".into(),
-            session_id: session_id.to_string(),
-            data: serde_json::json!({ "action": "drained", "id": queued_id }),
-        });
+        // Delivered — only now drop exactly the delivered rows (anything
+        // enqueued meanwhile stays) and announce each drain. A failed
+        // dispatch returns above and leaves the rows queued.
+        for queued_id in queued_ids {
+            let _ = db.delete_queued_message_by_id(session_id, queued_id).await;
+            broadcaster.broadcast(WsEvent {
+                event_type: "queue".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({ "action": "drained", "id": queued_id }),
+            });
+        }
         Ok(true)
     }
 
@@ -1065,7 +1069,7 @@ impl SessionManager {
         }
 
         let queued_id = queued.id;
-        self.deliver_queued_row(&lock, queued, db, broadcaster, config, data_dir)
+        self.deliver_queued_rows(&lock, vec![queued], db, broadcaster, config, data_dir)
             .await?;
         // The caller already removed the row; announce the drain now that
         // dispatch actually succeeded.
@@ -1078,13 +1082,14 @@ impl SessionManager {
     }
 
     /// Shared delivery tail for `drain_queued` / `force_queued`: append
-    /// the `user` event when the enqueuer didn't, rebuild attachments
-    /// from their ids, and dispatch. Callers announce the drain
-    /// themselves, once the row is actually gone.
-    async fn deliver_queued_row(
+    /// the `user` event for each row the enqueuer didn't record, merge
+    /// the rows (FIFO) into one message, rebuild attachments from their
+    /// ids, and dispatch once. Callers announce the drain themselves,
+    /// once the rows are actually gone.
+    async fn deliver_queued_rows(
         &self,
         lock: &SessionLock,
-        queued: QueuedMessage,
+        queued: Vec<QueuedMessage>,
         db: &Db,
         broadcaster: &Arc<Broadcaster>,
         config: SpawnConfig,
@@ -1092,58 +1097,65 @@ impl SessionManager {
     ) -> anyhow::Result<()> {
         let session_id = lock.session_id().to_string();
 
-        // The /message route appends the `user` event at enqueue time so
-        // the transcript shows the message where the user typed it; rows
-        // queued by machine paths (POST /queue, agent-to-agent sends)
-        // haven't been recorded yet, so the drain writes the event at
-        // delivery. Exactly one of the two happens per message.
-        if !queued.user_event_appended {
-            let user_data = serde_json::json!({ "text": queued.text });
-            match db
-                .append_event(&session_id, "user", user_data.clone())
-                .await
-            {
-                Ok(ev) => {
-                    broadcaster.broadcast(WsEvent {
-                        event_type: "event".into(),
-                        session_id: session_id.clone(),
-                        data: serde_json::json!({
-                            "id": ev.id,
-                            "seq": ev.seq,
-                            "ts": ev.ts,
-                            "kind": ev.kind,
-                            "data": user_data,
-                        }),
-                    });
-                    // The event is durable now. Persist that fact so a
-                    // retry of this row (dispatch below can still fail,
-                    // and the drain leaves a failed row queued) doesn't
-                    // append a second copy of the same user message.
-                    if let Err(e) = db
-                        .mark_queued_message_user_event_appended(&session_id, queued.id)
-                        .await
-                    {
-                        tracing::warn!(
+        let mut texts = Vec::with_capacity(queued.len());
+        let mut attachment_ids: Vec<String> = Vec::new();
+        for row in queued {
+            // The /message route appends the `user` event at enqueue time
+            // so the transcript shows the message where the user typed it;
+            // rows queued by machine paths (POST /queue, agent-to-agent
+            // sends) haven't been recorded yet, so the drain writes the
+            // event at delivery. Exactly one of the two happens per message.
+            if !row.user_event_appended {
+                let user_data = serde_json::json!({ "text": row.text });
+                match db
+                    .append_event(&session_id, "user", user_data.clone())
+                    .await
+                {
+                    Ok(ev) => {
+                        broadcaster.broadcast(WsEvent {
+                            event_type: "event".into(),
+                            session_id: session_id.clone(),
+                            data: serde_json::json!({
+                                "id": ev.id,
+                                "seq": ev.seq,
+                                "ts": ev.ts,
+                                "kind": ev.kind,
+                                "data": user_data,
+                            }),
+                        });
+                        // The event is durable now. Persist that fact so a
+                        // retry of this row (dispatch below can still fail,
+                        // and the drain leaves a failed row queued) doesn't
+                        // append a second copy of the same user message.
+                        if let Err(e) = db
+                            .mark_queued_message_user_event_appended(&session_id, row.id)
+                            .await
+                        {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                queued_id = row.id,
+                                "deliver_queued_rows: failed to mark user event appended: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
                             session_id = %session_id,
-                            queued_id = queued.id,
-                            "deliver_queued_row: failed to mark user event appended: {e}"
+                            "deliver_queued_rows: failed to append user event: {e}"
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::error!(
-                        session_id = %session_id,
-                        "deliver_queued_row: failed to append user event: {e}"
-                    );
-                }
             }
+
+            attachment_ids.extend(
+                row.attachment_ids
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                    .unwrap_or_default(),
+            );
+            texts.push(row.text);
         }
 
-        let attachment_ids: Vec<String> = queued
-            .attachment_ids
-            .as_deref()
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_default();
         let mut attachments = Vec::with_capacity(attachment_ids.len());
         for aid in &attachment_ids {
             match crate::routes::attachments::load_attachment_payload(data_dir, &session_id, aid)
@@ -1165,7 +1177,7 @@ impl SessionManager {
         self.send_message_locked(
             lock,
             UserMessage {
-                text: queued.text,
+                text: texts.join("\n\n"),
                 attachments,
                 attachment_ids,
             },
@@ -2011,6 +2023,72 @@ mod tests {
         assert!(matches!(outcome, SendOutcome::Queued));
         let queued = db.next_queued_message("s1").await.unwrap().unwrap();
         assert_eq!(queued.attachment_ids.as_deref(), Some("[\"att-42\"]"));
+    }
+
+    #[tokio::test]
+    async fn drain_delivers_the_whole_backlog_as_one_turn() {
+        let m = manager_with(vec![claude_stub(false), mock_stub(false)]).await;
+        let db = crate::db::Db::in_memory().unwrap();
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // "a" was recorded by the /message route at enqueue time; "b" came
+        // from a machine path, so the drain must append its user event.
+        for (text, appended) in [("a", true), ("b", false)] {
+            db.enqueue_message(crate::db::models::NewQueuedMessage {
+                session_id: "s1".into(),
+                text: text.into(),
+                queued_at: now.clone(),
+                user_event_appended: appended,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        let drained = m
+            .drain_queued(
+                "s1",
+                &db,
+                &broadcaster,
+                SpawnConfig {
+                    model: "mock:echo".into(),
+                    ..Default::default()
+                },
+                std::path::Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert!(drained);
+        assert!(db.list_queued_messages("s1").await.unwrap().is_empty());
+        let turn = m.last_dispatched_turn("s1").await.unwrap();
+        assert_eq!(turn.text, "a\n\nb");
+        let user_events: Vec<_> = db
+            .list_events_by_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user")
+            .collect();
+        assert_eq!(user_events.len(), 1, "only the unrecorded row appends");
     }
 
     /// The incident this guard exists for: a handover from Claude to Codex
