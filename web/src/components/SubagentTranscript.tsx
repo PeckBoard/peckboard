@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Event } from '../types/api'
+import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useTabsStore } from '../store/tabs'
 import { useWsStore } from '../store/ws'
@@ -21,6 +21,7 @@ export default function SubagentTranscript({ sessionId }: { sessionId: string })
   const [expanded, setExpanded] = useState(false)
   const [events, setEvents] = useState<Event[] | null>(null)
   const [error, setError] = useState(false)
+  const [completedAt, setCompletedAt] = useState<string | null>(null)
   const connected = useUiStore((s) => s.connected)
   const subscribe = useWsStore((s) => s.subscribe)
   const unsubscribe = useWsStore((s) => s.unsubscribe)
@@ -39,13 +40,32 @@ export default function SubagentTranscript({ sessionId }: { sessionId: string })
     }
   }, [sessionId])
 
-  const finished = events?.some((e) => e.kind === 'agent-end') ?? false
+  const loadSession = useCallback(async () => {
+    try {
+      const res = await authedFetch(`/api/sessions/${sessionId}`)
+      if (!res.ok) return
+      const row = (await res.json()) as Session
+      setCompletedAt(row.subagent_completed_at ?? null)
+    } catch {
+      /* best effort — the WS session-updated push below still lands */
+    }
+  }, [sessionId])
+
+  // A spawn_subagent child is only truly done once the server stamps
+  // `subagent_completed_at` — its own agent-start/agent-end mark a turn
+  // boundary, not the subagent's lifetime: it can idle waiting on a
+  // background task and resume for another turn. Mirrors the rule
+  // SessionWorkspace's `runningIds` applies to auto-pane state.
+  const finished = completedAt !== null
 
   useEffect(() => {
     if (!expanded || finished) return
     // Backfill goes through a timer so the effect body itself never triggers
     // a synchronous setState cascade (react-hooks/set-state-in-effect).
-    const kick = setTimeout(() => void load(), 0)
+    const kick = setTimeout(() => {
+      void load()
+      void loadSession()
+    }, 0)
     subscribe(sessionId)
     const listener = (event: Event) => {
       if (event.session_id !== sessionId) return
@@ -62,11 +82,30 @@ export default function SubagentTranscript({ sessionId }: { sessionId: string })
     finished,
     sessionId,
     load,
+    loadSession,
     subscribe,
     unsubscribe,
     addEventListener,
     removeEventListener,
   ])
+
+  // Completion lands via the server's `session-updated` broadcast the
+  // moment it claims `subagent_completed_at` (see SessionWorkspace's
+  // identical listener) — not from this session's own agent-end, which
+  // only marks a turn boundary and fires again for every follow-up turn
+  // (background task wake, queued message) before the subagent is
+  // actually done.
+  useEffect(() => {
+    const onUpdated = (e: CustomEvent<{ session_id: string; data: Session }>) => {
+      const updated = e.detail?.data
+      if (!updated || typeof updated !== 'object' || updated.id !== sessionId) return
+      setCompletedAt(updated.subagent_completed_at ?? null)
+    }
+    window.addEventListener('peckboard:session-updated', onUpdated as EventListener)
+    return () => {
+      window.removeEventListener('peckboard:session-updated', onUpdated as EventListener)
+    }
+  }, [sessionId])
 
   // Socket dropped mid-transcript and came back: the WS store replays from
   // its own last-seq cache, not this component's, so a manual backfill on
