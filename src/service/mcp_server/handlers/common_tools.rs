@@ -9,6 +9,7 @@
 use serde_json::Value;
 
 use super::super::McpToolRegistry;
+use crate::background::{Attached, TaskStatus};
 use crate::service::mcp_server::common_tools::{self, cli};
 use crate::service::mcp_server::context::ToolCallContext;
 use crate::service::mcp_server::spawn::emit_plugin_question;
@@ -83,6 +84,14 @@ impl McpToolRegistry {
     /// session's own folder, and a human answer would stall the pipeline),
     /// and the host-wide bypass escape hatch (Settings → Agent Tool
     /// Permissions), which applies to every provider.
+    ///
+    /// A command that may run past [`RUN_COMMAND_SYNC_WINDOW_SECS`] never
+    /// holds the tool call open that long: the agent CLI's MCP transport cuts
+    /// a call off at ~60s ("The operation timed out.") while the command
+    /// keeps running server-side, orphaned. Such commands start as hidden
+    /// background tasks instead (`BackgroundRegistry::spawn_attached`):
+    /// finished inside the window → inline result; otherwise handed off as a
+    /// background task that reports on exit.
     pub(crate) async fn handle_run_command(
         &self,
         args: Value,
@@ -97,17 +106,79 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, command = %command, "MCP tool: run_command");
 
+        let timeout_secs = timeout
+            .unwrap_or(RUN_COMMAND_DEFAULT_TIMEOUT_SECS)
+            .clamp(1, RUN_COMMAND_MAX_TIMEOUT_SECS);
+        let registry = ctx.background.clone().filter(|r| r.is_bound());
         let auto_approve = auto_approve_for(ctx).await;
         let db = ctx.db.clone();
         let inv = common_tools::inv_from_ctx(ctx);
         let session_id = ctx.session_id.clone();
         let cmd = command.clone();
         let av = argv.clone();
-        let decision = tokio::task::spawn_blocking(move || {
-            cli::decide(&db, &inv, &session_id, &cmd, &av, timeout, auto_approve)
-        })
-        .await?
-        .map_err(|e| anyhow::anyhow!(e))?;
+
+        let decision = match registry {
+            Some(ref registry) if timeout_secs > RUN_COMMAND_SYNC_WINDOW_SECS => {
+                let (approval, prepared) = tokio::task::spawn_blocking(move || {
+                    let key = cli::pending_key(&session_id, &cmd, &av);
+                    let approval = cli::decide_approval(&db, &inv, &key, &cmd, &av, auto_approve)?;
+                    let prepared = match approval {
+                        cli::Approval::Approved(_) => Some(crate::plugin::host::prepare_exec(
+                            &db, &cmd, &inv, false, None,
+                        )?),
+                        _ => None,
+                    };
+                    Ok::<_, String>((approval, prepared))
+                })
+                .await?
+                .map_err(|e| anyhow::anyhow!(e))?;
+                match approval {
+                    cli::Approval::Approved(via) => {
+                        let prepared = prepared.expect("prepared when approved");
+                        let attached = registry
+                            .spawn_attached(
+                                &ctx.session_id,
+                                prepared,
+                                argv.clone(),
+                                timeout_secs,
+                                std::time::Duration::from_secs(RUN_COMMAND_SYNC_WINDOW_SECS),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                        return Ok(attached_result(&command, &argv, via, attached));
+                    }
+                    cli::Approval::Denied(m) => cli::Decision::Denied(m),
+                    cli::Approval::StillWaiting(d) => cli::Decision::StillWaiting(d),
+                    cli::Approval::NeedsPrompt {
+                        token,
+                        display,
+                        options,
+                    } => cli::Decision::NeedsPrompt {
+                        token,
+                        display,
+                        options,
+                    },
+                }
+            }
+            _ => {
+                // Fits the window (or no usable registry): run inline, never
+                // past the window — the transport would drop the call anyway.
+                let exec_timeout = timeout_secs.min(RUN_COMMAND_SYNC_WINDOW_SECS);
+                tokio::task::spawn_blocking(move || {
+                    cli::decide(
+                        &db,
+                        &inv,
+                        &session_id,
+                        &cmd,
+                        &av,
+                        Some(exec_timeout),
+                        auto_approve,
+                    )
+                })
+                .await?
+                .map_err(|e| anyhow::anyhow!(e))?
+            }
+        };
 
         match decision {
             cli::Decision::Ran(v) => Ok(v),
@@ -130,6 +201,62 @@ impl McpToolRegistry {
                 .await
             }
         }
+    }
+}
+
+/// `run_command`'s default `timeout_secs`.
+const RUN_COMMAND_DEFAULT_TIMEOUT_SECS: u64 = 120;
+/// `run_command`'s maximum `timeout_secs`.
+const RUN_COMMAND_MAX_TIMEOUT_SECS: u64 = 600;
+/// How long a `run_command` call may block before a still-running command is
+/// handed off to the background. Must stay under the agent CLI's ~60s MCP
+/// tool-call transport timeout.
+pub(crate) const RUN_COMMAND_SYNC_WINDOW_SECS: u64 = 50;
+
+/// The `run_command` result for a command run through
+/// [`crate::background::BackgroundRegistry::spawn_attached`].
+fn attached_result(command: &str, argv: &[String], via: &str, attached: Attached) -> Value {
+    let display = cli::display(command, argv);
+    match attached {
+        Attached::Finished(info, lines) => {
+            let mut v = serde_json::json!({
+                "exit_code": info.exit_code,
+                "stdout": lines.join("\n"),
+                "stderr": "",
+                "output_merged": true,
+                "timed_out": info.status == TaskStatus::TimedOut,
+                "command": display,
+                "approved_via": via,
+            });
+            if info.status == TaskStatus::TimedOut {
+                v["message"] = serde_json::json!(format!(
+                    "killed after the {}s command timeout (timeout_secs; max \
+                     {RUN_COMMAND_MAX_TIMEOUT_SECS})",
+                    info.timeout_secs
+                ));
+            }
+            v
+        }
+        Attached::Detached(info, lines) => serde_json::json!({
+            "status": "running",
+            "task_id": info.id,
+            "pid": info.pid,
+            "log_path": info.log_path,
+            "timeout_secs": info.timeout_secs,
+            "output_so_far": lines,
+            "command": display,
+            "approved_via": via,
+            "message": format!(
+                "Still running after run_command's {RUN_COMMAND_SYNC_WINDOW_SECS}s inline window \
+                 (a tool call cannot stay open longer), so it continues as background task \
+                 {id} (killed after timeout_secs={t}). When it exits you will be notified \
+                 automatically in this session with its status and last output lines \u{2014} \
+                 do NOT poll or sleep-wait for it; continue with other work or end your turn. \
+                 Use background_status / stop_background with this task_id.",
+                id = info.id,
+                t = info.timeout_secs,
+            ),
+        }),
     }
 }
 

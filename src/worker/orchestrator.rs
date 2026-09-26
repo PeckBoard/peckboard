@@ -922,6 +922,19 @@ async fn spawn_worker_for_card(
         release_claim("resume target still running").await;
         return Ok(());
     }
+    // A worker that ended its turn waiting on its own background task isn't
+    // stalled: the task's exit report wakes it. Resuming it now would only
+    // re-prompt an agent with nothing to do yet.
+    if is_resume && state.background.has_running_for_session(&session_id) {
+        drop(lock);
+        tracing::info!(
+            session_id = %session_id,
+            card_id = %card.id,
+            "Resume target is waiting on a background task; releasing claim"
+        );
+        release_claim("resume target has a running background task").await;
+        return Ok(());
+    }
     let dispatched = state
         .session_manager
         .send_message_locked(

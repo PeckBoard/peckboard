@@ -68,6 +68,8 @@ const MAX_LINE_BYTES: usize = 16 * 1024;
 const MAX_LOG_TAIL_READ: u64 = 8 * 1024 * 1024;
 /// Finished tasks are forgotten (and their logs deleted) after this long.
 const FINISHED_RETENTION_SECS: i64 = 24 * 60 * 60;
+/// Output lines an attached caller gets back inline.
+const ATTACHED_RESULT_LINES: usize = 400;
 /// After the process exits, how long to wait for its pipes to drain (a
 /// daemonized grandchild may hold them open forever).
 const DRAIN_WAIT: Duration = Duration::from_secs(2);
@@ -120,6 +122,19 @@ pub struct TaskInfo {
     pub stopping: bool,
 }
 
+/// Outcome of [`BackgroundRegistry::spawn_attached`].
+pub enum Attached {
+    /// Finished inside the window: final snapshot + last output lines. The
+    /// task is already forgotten (no listing, no report).
+    Finished(TaskInfo, Vec<String>),
+    /// Still running when the window closed: now an ordinary background task
+    /// (listed, reported on exit). Carries the output so far.
+    Detached(TaskInfo, Vec<String>),
+}
+/// The inline result handed to an attached (`run_command`) caller: the final
+/// task snapshot plus its last output lines.
+type AttachedResult = (TaskInfo, Vec<String>);
+
 struct Task {
     info: Mutex<TaskInfo>,
     tail: Mutex<VecDeque<String>>,
@@ -128,6 +143,17 @@ struct Task {
     stop_requested: AtomicBool,
     /// Suppress the completion report (session deleted / server shutdown).
     silent: AtomicBool,
+    /// Set while a `run_command` caller waits inline. Whichever side takes
+    /// it first wins: `supervise` (finished inside the window → result goes
+    /// inline, no report) or the caller (window over → handed off, reported
+    /// like any background task).
+    attached: Mutex<Option<tokio::sync::oneshot::Sender<AttachedResult>>>,
+    /// Not yet shown as a background task (attached, still inside the
+    /// window): kept out of listings.
+    hidden: AtomicBool,
+    /// Don't kill the process group when the leader exits on its own —
+    /// `run_command`'s `x &` detaches on purpose.
+    keep_group_on_exit: bool,
 }
 
 impl Task {
@@ -222,6 +248,11 @@ impl BackgroundRegistry {
         }
     }
 
+    /// Whether [`Self::bind`] ran (an unbound registry refuses to spawn).
+    pub fn is_bound(&self) -> bool {
+        self.reporter.get().is_some()
+    }
+
     /// Bind where reports go. `dispatcher` wakes the session; without one
     /// the report is still persisted + broadcast, just not driven. First
     /// bind wins.
@@ -257,6 +288,7 @@ impl BackgroundRegistry {
         self.prune_finished();
         let mut out: Vec<(Instant, TaskInfo)> = lock(&self.tasks)
             .values()
+            .filter(|t| !t.hidden.load(Ordering::SeqCst))
             .map(|t| (t.started, t.info()))
             .filter(|(_, i)| i.session_id == session_id)
             .collect();
@@ -325,6 +357,66 @@ impl BackgroundRegistry {
         label: Option<String>,
         timeout_secs: Option<u64>,
     ) -> Result<TaskInfo, String> {
+        self.spawn_inner(session_id, prepared, args, label, timeout_secs, None)
+            .await
+            .map(|t| t.info())
+    }
+
+    /// `run_command`'s long path: start the command as a hidden task and
+    /// wait up to `window` for it. Finished in time → the result comes back
+    /// inline and the task leaves no trace. Otherwise it becomes an ordinary
+    /// background task (listed, reported on exit) and the caller gets its
+    /// handle — so a command outliving the agent's tool-call transport limit
+    /// keeps running instead of being orphaned behind a client timeout.
+    pub(crate) async fn spawn_attached(
+        self: &Arc<Self>,
+        session_id: &str,
+        prepared: PreparedExec,
+        args: Vec<String>,
+        timeout_secs: u64,
+        window: Duration,
+    ) -> Result<Attached, String> {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let task = self
+            .spawn_inner(
+                session_id,
+                prepared,
+                args,
+                None,
+                Some(timeout_secs),
+                Some(tx),
+            )
+            .await?;
+        if let Ok(Ok((info, lines))) = tokio::time::timeout(window, &mut rx).await {
+            return Ok(Attached::Finished(info, lines));
+        }
+        {
+            let mut slot = lock(&task.attached);
+            if slot.take().is_some() {
+                // Handed off. Announce under the slot lock so this "started"
+                // can't land after `supervise`'s "finished".
+                task.hidden.store(false, Ordering::SeqCst);
+                let info = task.info();
+                self.broadcast("started", &info);
+                drop(slot);
+                return Ok(Attached::Detached(info, task.last_lines(REPORT_LINES)));
+            }
+        }
+        // `supervise` took the sender first: its result is on the way.
+        rx.await
+            .map(|(info, lines)| Attached::Finished(info, lines))
+            .map_err(|_| "the command ended without reporting a result".to_string())
+    }
+
+    async fn spawn_inner(
+        self: &Arc<Self>,
+        session_id: &str,
+        prepared: PreparedExec,
+        args: Vec<String>,
+        label: Option<String>,
+        timeout_secs: Option<u64>,
+        attached: Option<tokio::sync::oneshot::Sender<AttachedResult>>,
+    ) -> Result<Arc<Task>, String> {
         if self.reporter.get().is_none() {
             return Err("background tasks are not configured on this server".into());
         }
@@ -393,6 +485,7 @@ impl BackgroundRegistry {
             timeout_secs,
             stopping: false,
         };
+        let hidden = attached.is_some();
         let task = Arc::new(Task {
             info: Mutex::new(info.clone()),
             tail: Mutex::new(VecDeque::with_capacity(TAIL_LINES)),
@@ -400,6 +493,9 @@ impl BackgroundRegistry {
             stop: Notify::new(),
             stop_requested: AtomicBool::new(false),
             silent: AtomicBool::new(false),
+            keep_group_on_exit: hidden,
+            attached: Mutex::new(attached),
+            hidden: AtomicBool::new(hidden),
         });
         {
             let mut tasks = lock(&self.tasks);
@@ -418,7 +514,9 @@ impl BackgroundRegistry {
             }
             tasks.insert(id, task.clone());
         }
-        self.broadcast("started", &info);
+        if !hidden {
+            self.broadcast("started", &info);
+        }
         tracing::info!(
             session_id = %info.session_id,
             task_id = %info.id,
@@ -447,12 +545,13 @@ impl BackgroundRegistry {
         .collect();
 
         let registry = self.clone();
+        let handle = task.clone();
         tokio::spawn(async move {
             registry
                 .supervise(task, child, pumps, sink, Duration::from_secs(timeout_secs))
                 .await;
         });
-        Ok(info)
+        Ok(handle)
     }
 
     /// Ask a running task to stop: SIGTERM to its process group, SIGKILL
@@ -614,8 +713,11 @@ impl BackgroundRegistry {
                 // Leader gone on its own: take down anything it left in the
                 // group (`sh -c "x &"`, `npm run dev`'s children) so nothing
                 // outlives the task untracked. Safe right after the reap: the
-                // pgid can't be reused while members remain.
-                signal_group(pid, Signal::Kill);
+                // pgid can't be reused while members remain. `run_command`
+                // tasks keep them: detaching `x &` is the caller's intent.
+                if !task.keep_group_on_exit {
+                    signal_group(pid, Signal::Kill);
+                }
                 (s, false, false)
             }
             End::TimedOut => (terminate(&mut child, pid).await, true, false),
@@ -673,6 +775,21 @@ impl BackgroundRegistry {
             exit_code = ?info.exit_code,
             "background task finished after {elapsed}s"
         );
+        // A `run_command` caller still inside its sync window takes the
+        // result inline: no UI event, no report, nothing left behind.
+        if let Some(tx) = lock(&task.attached).take() {
+            let lines = if info.log_truncated {
+                task.last_lines(TAIL_LINES)
+            } else {
+                read_log_tail(Path::new(&info.log_path), ATTACHED_RESULT_LINES)
+                    .unwrap_or_else(|_| task.last_lines(TAIL_LINES))
+            };
+            if tx.send((info.clone(), lines)).is_ok() {
+                lock(&self.tasks).remove(&info.id);
+                let _ = std::fs::remove_file(&info.log_path);
+                return;
+            }
+        }
 
         if task.silent.load(Ordering::SeqCst) {
             if self.task(&info.id).is_none() {

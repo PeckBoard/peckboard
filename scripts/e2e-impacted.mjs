@@ -65,8 +65,14 @@ const ALWAYS_ALL = [
   /^build\.rs$/,
 ];
 
+// maxBuffer: a working tree with many untracked scratch files overflows the
+// 1 MiB default (`spawnSync git ENOBUFS`).
 const git = (args) =>
-  execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" })
+  execFileSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+  })
     .split("\n")
     .filter(Boolean);
 

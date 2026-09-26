@@ -41,7 +41,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use extism::*;
@@ -2750,6 +2750,9 @@ pub(crate) fn http_request_impl(input: &str, max_timeout_secs: u64) -> String {
 const EXEC_MAX_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MiB per stream
 const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 120;
 const EXEC_MAX_TIMEOUT_SECS: u64 = 600;
+/// How long a finished command's pipes may stay open (held by a process it
+/// backgrounded) before exec returns without them.
+const EXEC_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Scratch working directory (under the data dir) for a folder-less
 /// full-authority exec. Never the data dir itself — that is where
@@ -2776,37 +2779,54 @@ struct ExecRequest {
     timeout_secs: Option<u64>,
 }
 
+/// Output drained so far from one child pipe.
+#[derive(Default)]
+struct Drained {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
 /// Drain a child pipe into a byte-capped buffer on its own thread. Reading to
 /// EOF (even past the cap, discarding the overflow) keeps the child from
-/// blocking on a full pipe. Returns `(bytes, truncated)`.
+/// blocking on a full pipe. The buffer is shared so the caller can snapshot
+/// it without waiting for EOF: a process the command backgrounded may hold
+/// the pipe open long after the command itself exited (the thread then lives
+/// on until that process closes it, and its later output is discarded).
 fn drain_capped<R: std::io::Read + Send + 'static>(
     mut r: R,
-) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
-    std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let mut truncated = false;
+) -> (Arc<Mutex<Drained>>, std::thread::JoinHandle<()>) {
+    let shared = Arc::new(Mutex::new(Drained::default()));
+    let sink = shared.clone();
+    let handle = std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
             match r.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if out.len() < EXEC_MAX_OUTPUT_BYTES {
-                        let room = EXEC_MAX_OUTPUT_BYTES - out.len();
+                    let mut d = sink.lock().unwrap_or_else(|p| p.into_inner());
+                    if d.bytes.len() < EXEC_MAX_OUTPUT_BYTES {
+                        let room = EXEC_MAX_OUTPUT_BYTES - d.bytes.len();
                         if n > room {
-                            out.extend_from_slice(&buf[..room]);
-                            truncated = true;
+                            d.bytes.extend_from_slice(&buf[..room]);
+                            d.truncated = true;
                         } else {
-                            out.extend_from_slice(&buf[..n]);
+                            d.bytes.extend_from_slice(&buf[..n]);
                         }
                     } else {
-                        truncated = true;
+                        d.truncated = true;
                     }
                 }
                 Err(_) => break,
             }
         }
-        (out, truncated)
-    })
+    });
+    (shared, handle)
+}
+
+/// Snapshot a drained pipe: `(bytes, truncated)`.
+fn drained(d: &Arc<Mutex<Drained>>) -> (Vec<u8>, bool) {
+    let d = d.lock().unwrap_or_else(|p| p.into_inner());
+    (d.bytes.clone(), d.truncated)
 }
 
 /// Proof token: bearer has validated a program name and resolved its cwd/env
@@ -2941,11 +2961,11 @@ pub(crate) fn exec_impl(
         Ok(p) => p,
         Err(e) => return error_json(e),
     };
-    let timeout = Duration::from_secs(
-        req.timeout_secs
-            .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
-            .clamp(1, EXEC_MAX_TIMEOUT_SECS),
-    );
+    let timeout_secs = req
+        .timeout_secs
+        .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
+        .clamp(1, EXEC_MAX_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(timeout_secs);
 
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(command);
@@ -2955,6 +2975,10 @@ pub(crate) fn exec_impl(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group, so a timeout takes down the whole tree (a `bash -c`
+    // loop's `sleep` too), not just the leader.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     // Agent-run commands are mostly shells and shell-driven tools; hand them
     // default SIGINT/SIGQUIT even when the server inherited them ignored.
     crate::provider::turn::reset_child_signals_std(&mut cmd);
@@ -2974,6 +2998,14 @@ pub(crate) fn exec_impl(
             Ok(Some(s)) => break Some(s),
             Ok(None) => {
                 if start.elapsed() >= timeout {
+                    // Group first, while the unreaped leader still pins the
+                    // pgid (no reuse risk), then the leader itself.
+                    #[cfg(unix)]
+                    // SAFETY: plain syscall; negative pid addresses the
+                    // group created by `process_group(0)` above.
+                    unsafe {
+                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     timed_out = true;
@@ -2985,26 +3017,51 @@ pub(crate) fn exec_impl(
         }
     };
 
-    let (stdout, stdout_truncated) = stdout_h
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
-    let (stderr, stderr_truncated) = stderr_h
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
+    // The command is done, but a process it backgrounded (`x &`, `nohup x &`
+    // whose redirect sits inside the backgrounded list) may still hold the
+    // pipes open. Give the drains a short grace for trailing output, then
+    // return what we have instead of waiting for that process to end.
+    let drain_deadline = std::time::Instant::now() + EXEC_DRAIN_GRACE;
+    let mut output_detached = false;
+    for (_, h) in stdout_h.iter().chain(stderr_h.iter()) {
+        while !h.is_finished() {
+            if std::time::Instant::now() >= drain_deadline {
+                output_detached = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let (stdout, stdout_truncated) = stdout_h.map(|(d, _)| drained(&d)).unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_h.map(|(d, _)| drained(&d)).unwrap_or_default();
 
     // Console output is the one surface where an env secret could reach the
     // agent — mask known secret values (verbatim or interleaved) with `*`.
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "exit_code": status.and_then(|s| s.code()),
         "stdout": masker.mask(&stdout),
         "stderr": masker.mask(&stderr),
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
         "timed_out": timed_out,
-    })
-    .to_string()
+    });
+    if timed_out {
+        out["message"] = serde_json::json!(format!(
+            "killed after the {timeout_secs}s command timeout (timeout_secs; max \
+             {EXEC_MAX_TIMEOUT_SECS})"
+        ));
+    } else if output_detached {
+        out["output_detached"] = serde_json::json!(true);
+        out["message"] = serde_json::json!(
+            "the command exited but a process it started in the background still holds \
+             its stdout/stderr; returned without waiting for it (later output is discarded \
+             \u{2014} redirect a background process's output to a file, e.g. \
+             `(x > log 2>&1 &)`, or use run_background)"
+        );
+    }
+    out.to_string()
 }
 
 /// Run a JSON envelope's `stdout`/`stderr` fields through the secret masker
@@ -7039,6 +7096,53 @@ mod tests {
         .await
         .unwrap();
         serde_json::from_str(&out).unwrap()
+    }
+
+    /// `a && b > log &` backgrounds a subshell whose stdout is exec's pipe:
+    /// exec must return right after the command exits, not when the
+    /// backgrounded process finally closes the pipe.
+    #[tokio::test]
+    async fn exec_returns_while_a_backgrounded_child_holds_the_pipe() {
+        let (db, _dir) = exec_fixture().await;
+        let start = std::time::Instant::now();
+        let v = exec_sh(&db, "true && sleep 30 >/dev/null & echo started").await;
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(v["exit_code"], 0, "envelope: {v}");
+        assert!(v["stdout"].as_str().unwrap().contains("started"), "{v}");
+        assert_eq!(v["output_detached"], true, "{v}");
+    }
+
+    /// A timeout takes down the whole process group, so a shell loop's
+    /// children can't keep the pipes (and the call) alive past it.
+    #[tokio::test]
+    async fn exec_timeout_kills_the_whole_group() {
+        let (db, _dir) = exec_fixture().await;
+        let db2 = db.clone();
+        let start = std::time::Instant::now();
+        let out = tokio::task::spawn_blocking(move || {
+            let req = serde_json::json!({
+                "command": "sh",
+                "args": ["-c", "sleep 30; echo never"],
+                "timeout_secs": 1,
+            })
+            .to_string();
+            exec_impl(&db2, &req, &exec_inv(), false, None)
+        })
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(v["timed_out"], true, "{v}");
+        assert_eq!(v["output_detached"], serde_json::Value::Null, "{v}");
+        assert!(v["message"].as_str().unwrap().contains("1s"), "{v}");
     }
 
     #[tokio::test]

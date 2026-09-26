@@ -177,6 +177,85 @@ async fn nonzero_exit_reports_failed() {
     assert_eq!(data["background_task"]["exit_code"], 3);
     assert_eq!(f.registry.get(&info.id).unwrap().status, TaskStatus::Failed);
 }
+async fn start_attached(f: &Fixture, script: &str, window: Duration) -> Attached {
+    let db = f.db.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        let inv = InvocationContext {
+            session_id: Some("s-1".into()),
+            folder_id: Some("f-1".into()),
+            ..Default::default()
+        };
+        prepare_exec(&db, "sh", &inv, false, None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    f.registry
+        .spawn_attached(
+            "s-1",
+            prepared,
+            vec!["-c".into(), script.into()],
+            60,
+            window,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn attached_finish_inside_window_returns_inline_without_report() {
+    let f = fixture().await;
+    let Attached::Finished(info, lines) =
+        start_attached(&f, "echo inline-out; exit 2", Duration::from_secs(10)).await
+    else {
+        panic!("a quick command must finish inline");
+    };
+    assert_eq!(info.exit_code, Some(2));
+    assert!(lines.iter().any(|l| l.contains("inline-out")), "{lines:?}");
+    // Consumed inline: forgotten, never listed, no report.
+    assert!(f.registry.get(&info.id).is_none());
+    assert!(f.registry.list_for_session("s-1").is_empty());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(f.dispatcher.resumed.lock().unwrap().is_empty());
+    assert!(f.db.events_tail("s-1", 20).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn attached_overrun_hands_off_to_a_reported_background_task() {
+    let f = fixture().await;
+    let Attached::Detached(info, _) = start_attached(
+        &f,
+        "echo early; sleep 1; echo late-out",
+        Duration::from_millis(200),
+    )
+    .await
+    else {
+        panic!("a command outliving the window must be handed off");
+    };
+    assert_eq!(info.status, TaskStatus::Running);
+    assert_eq!(f.registry.list_for_session("s-1").len(), 1);
+    let data = wait_for_report(&f).await;
+    let text = data["text"].as_str().unwrap();
+    assert!(text.contains("late-out"), "{text}");
+    assert_eq!(data["background_task"]["id"], info.id.as_str());
+}
+
+#[tokio::test]
+async fn attached_leader_exit_keeps_detached_children() {
+    let f = fixture().await;
+    let marker = f._dir.path().join("project").join("survived");
+    let script = format!("(sleep 0.5; touch {}) >/dev/null 2>&1 &", marker.display());
+    let Attached::Finished(..) = start_attached(&f, &script, Duration::from_secs(10)).await else {
+        panic!("the leader exits at once");
+    };
+    for _ in 0..60 {
+        if marker.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("run_command's backgrounded child was killed with the leader");
+}
 
 #[tokio::test]
 async fn stop_kills_the_process_and_reports_stopped() {

@@ -1549,7 +1549,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "run_command".into(),
-            description: "Run an arbitrary command in the project folder. Worker sessions run commands immediately, no approval needed (exec is always scoped to the project folder). Chat sessions are gated by USER APPROVAL: allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny \u{2014} their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped and timed out. Commands receive the configured environment variables, but secret values are masked as ******** in the returned output \u{2014} work with secrets by passing them along to programs, not by reading them. ALWAYS pass `reason` \u{2014} one short sentence, shown to the user in the chat, explaining why you are running this command.".into(),
+            description: "Run an arbitrary command in the project folder. Worker sessions run commands immediately, no approval needed (exec is always scoped to the project folder). Chat sessions are gated by USER APPROVAL: allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny \u{2014} their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped. A call returns within ~50s: a command still running then is handed off as a background task (status 'running' + task_id; its exit is reported to you automatically \u{2014} never sleep-poll it). For anything long (builds, test suites, waiting on CI) prefer run_background directly. A process you background inside a shell (`x &`) keeps running but its output is dropped \u{2014} redirect it to a file. Commands receive the configured environment variables, but secret values are masked as ******** in the returned output \u{2014} work with secrets by passing them along to programs, not by reading them. ALWAYS pass `reason` \u{2014} one short sentence, shown to the user in the chat, explaining why you are running this command.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1570,7 +1570,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                                 },
                                 "timeout_secs": {
                                                 "type": "integer",
-                                                "description": "Optional timeout (default 120, max 600)."
+                                                "description": "Optional timeout (default 120, max 600). A call blocks at most 50s: a command still running then continues as a background task (result has status 'running' + task_id) and you are notified automatically when it exits."
                                 }
                 },
                 "required": [
