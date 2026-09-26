@@ -299,6 +299,9 @@ impl Ctx<'_> {
             "screenshot" => self.screenshot()?,
             "diff" => self.diff()?,
             "subagent-native" => self.subagent_native()?,
+            "subagent-background" => self.subagent_background()?,
+            "subagent-bg-child" => self.subagent_bg_child()?,
+            "slow" => self.slow()?,
             "thinking" => self.thinking()?,
             "tool-orphan-crash" => return self.tool_orphan_crash(),
             "crash" => return self.crash(),
@@ -486,6 +489,120 @@ impl Ctx<'_> {
             return Ok(());
         }
         self.emit_text("Parent done")
+    }
+
+    /// A Claude-style Agent launched with `run_in_background: true`, the
+    /// way the Claude plugin reports one: the launch settles at once (the
+    /// tool_end carries the async-launch receipt), the turn settles and
+    /// lingers (`background-linger`), then after a short delay the task
+    /// settles (`background-task-settled` naming the launching
+    /// `tool_use_id`) and the turn ends.
+    fn subagent_background(&mut self) -> Result<(), String> {
+        const PARENT: &str = "toolu_native_bg_1";
+        const TASK_ID: &str = "mock-bg-agent-1";
+        self.tool_start(
+            PARENT,
+            "Agent",
+            json!({
+                "description": "Background explore",
+                "prompt": "Look around in the background",
+                "subagent_type": "Explore",
+                "run_in_background": true,
+            }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.tool_end_ok(
+            PARENT,
+            &json!({ "isAsync": true, "status": "async_launched", "agentId": TASK_ID }).to_string(),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit_text("Parent turn settled")?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        self.emit(json!({
+            "kind": "system",
+            "text": format!(
+                "1 background task(s) still running ({TASK_ID}); keeping the agent \
+                 process alive until they finish. New messages go straight to it."
+            ),
+            "subtype": "background-linger",
+            "detail": { "ids": [TASK_ID] },
+        }))?;
+        // The background child keeps working while the turn lingers.
+        self.emit(json!({
+            "kind": "text",
+            "text": "Background child is looking around",
+            "parent_tool_use_id": PARENT,
+        }))?;
+        if !self.wait_ms(3_000)? {
+            return Ok(());
+        }
+        self.emit(json!({
+            "kind": "system",
+            "text": format!("background task {TASK_ID} completed"),
+            "subtype": "background-task-settled",
+            "detail": { "task_id": TASK_ID, "tool_use_id": PARENT, "status": "completed" },
+        }))
+    }
+
+    /// A spawn_subagent child that starts a peckboard-managed background
+    /// task (`sleep 3` through the REAL `run_background` tool) and ends its
+    /// turn. The task's exit report wakes it; that turn replies with a
+    /// distinctive final text — the reply the parent must receive, not the
+    /// launch turn's.
+    fn subagent_bg_child(&mut self) -> Result<(), String> {
+        if !parse_background_reports(self.message).is_empty() {
+            return self.emit_text(SUBAGENT_BG_CHILD_FINAL);
+        }
+        let res = self.call_mcp_tool(
+            "run_background",
+            json!({
+                "command": "sleep",
+                "args": ["3"],
+                "label": "child-work",
+                "reason": "Do the child's work in the background.",
+            }),
+        )?;
+        if !self.tick()? {
+            return Ok(());
+        }
+        match res {
+            Some(r) if r.get("task_id").is_some() => {
+                self.emit_text("child launched background work")
+            }
+            _ => self.emit_text("child failed to launch background work"),
+        }
+    }
+
+    /// A turn that takes a while: `sleep:<secs>` anywhere in the message
+    /// sets how long (default 3, capped at 30). Lets a parent hold several
+    /// children running at once, deterministically.
+    fn slow(&self) -> Result<(), String> {
+        let secs = parse_sleep_secs(self.message);
+        self.emit_text(&format!("slow child working for {secs}s"))?;
+        if !self.wait_ms(secs * 1_000)? {
+            return Ok(());
+        }
+        self.emit_text("slow child done")
+    }
+
+    /// Wait `ms`, polling the stop flag every 100ms so an interrupt lands
+    /// promptly. Returns `false` when the turn was aborted. The wasm build
+    /// has no clock, so it only polls.
+    fn wait_ms(&self, ms: u64) -> Result<bool, String> {
+        for _ in 0..ms.div_ceil(100) {
+            if !self.tick()? {
+                return Ok(false);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        self.tick()
     }
 
     fn usage(&mut self) -> Result<(), String> {
@@ -1288,10 +1405,25 @@ fn parse_background_reports(message: &str) -> Vec<(String, &'static str)> {
     out
 }
 
+/// Final reply of `subagent-bg-child` after its background task reports.
+pub const SUBAGENT_BG_CHILD_FINAL: &str = "CHILD FINAL: background work done";
+
+/// Seconds from the first `sleep:<digits>` in `message` — default 3,
+/// capped at 30 so a typo can't park a turn for good.
+fn parse_sleep_secs(message: &str) -> u64 {
+    message
+        .split_once("sleep:")
+        .and_then(|(_, rest)| {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<u64>().ok()
+        })
+        .unwrap_or(3)
+        .min(30)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_mcp_blocks, parse_background_reports};
-
+    use super::{extract_mcp_blocks, parse_background_reports, parse_sleep_secs};
     #[test]
     fn extracts_multiple_blocks_and_skips_malformed() {
         let msg = "intro\n```mcp\n{\"tool\":\"a\",\"args\":{\"x\":1}}\n```\nmiddle\n```mcp\nnot json\n```\n```mcp\n{\"tool\":\"b\"}\n```\n";
@@ -1319,5 +1451,13 @@ mod tests {
             ]
         );
         assert!(parse_background_reports("start the tasks").is_empty());
+    }
+
+    #[test]
+    fn parses_sleep_seconds_with_default_and_cap() {
+        assert_eq!(parse_sleep_secs("please sleep:7 now"), 7);
+        assert_eq!(parse_sleep_secs("no hint"), 3);
+        assert_eq!(parse_sleep_secs("sleep:"), 3);
+        assert_eq!(parse_sleep_secs("sleep:900"), 30);
     }
 }

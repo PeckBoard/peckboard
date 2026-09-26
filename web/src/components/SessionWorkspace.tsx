@@ -20,7 +20,8 @@ import {
 /** Leaf id of the parent session's own pane. Constant (not the session id)
  *  so switching sessions reuses the same pane and ChatView instance. */
 const PRIMARY = '@primary'
-/** Most panes on screen at once, the parent included. */
+/** Cap on panes a manual "Show pane" of a finished child may fill (the
+ *  parent included); every running child always gets a pane in auto mode. */
 const MAX_PANES = 6
 const MODE_KEY = 'peckboard.subagentPanes'
 /** Per-parent list of child panes the user closed: `{ [parentId]: leafId[] }`.
@@ -87,7 +88,8 @@ function refLeafId(r: SubagentRef): string {
 }
 
 /** Running state from a session's live stream — the latest agent-start /
- *  agent-end — or null when the stream carries neither yet. */
+ *  agent-end — or null when the stream carries neither yet. Only a fallback
+ *  for children the server has no parent link for (so no completion stamp). */
 function liveRunning(events: Event[] | undefined): boolean | null {
   if (!events) return null
   for (let i = events.length - 1; i >= 0; i--) {
@@ -108,8 +110,8 @@ interface WorkspaceState {
   shown: string[]
   /** Children the user closed; auto mode leaves these closed. */
   closed: string[]
-  /** Children the user opened explicitly; auto mode keeps these open
-   *  after they finish. */
+  /** Children the user opened after they had finished; auto mode keeps
+   *  these open (a pane opened while running closes with the child). */
   pinned: string[]
   /** Running children last reconciled against (`|`-joined). */
   runningSig: string
@@ -189,6 +191,29 @@ export default function SessionWorkspace({
       cancelled = true
     }
   }, [sessionId, spawnedCount])
+  // Completion lands live: the server broadcasts `session-updated` with the
+  // child's row (incl. `subagent_completed_at`) when it marks it finished.
+  useEffect(() => {
+    const onUpdated = (e: CustomEvent<{ session_id: string; data: Session }>) => {
+      const updated = e.detail?.data
+      if (!updated || typeof updated !== 'object' || typeof updated.id !== 'string') return
+      const parentOf = (updated as { parent_session_id?: unknown }).parent_session_id
+      setFetched((prev) => {
+        if (prev.parentId !== sessionId) return prev
+        const i = prev.list.findIndex((s) => s.id === updated.id)
+        if (i < 0) {
+          return parentOf === sessionId ? { ...prev, list: [...prev.list, updated] } : prev
+        }
+        const list = prev.list.slice()
+        list[i] = updated
+        return { ...prev, list }
+      })
+    }
+    window.addEventListener('peckboard:session-updated', onUpdated as EventListener)
+    return () => {
+      window.removeEventListener('peckboard:session-updated', onUpdated as EventListener)
+    }
+  }, [sessionId])
   const fetchedList = useMemo(
     () => (fetched.parentId === sessionId ? fetched.list : []),
     [fetched, sessionId],
@@ -205,8 +230,8 @@ export default function SessionWorkspace({
     return ids
   }, [fetchedList, refs, sessionId])
 
-  // Child sessions stream over their own subscriptions; watch them all so
-  // auto mode can follow each one's running state without a pane open.
+  // Child sessions' `session-updated` frames only reach subscribers; keep
+  // every child subscribed so completion lands without a pane open.
   const sessionChildSig = childIds.filter((id) => !nativeById.has(id)).join('|')
   useEffect(() => {
     if (!sessionChildSig) return
@@ -231,12 +256,13 @@ export default function SessionWorkspace({
     for (const [id, r] of nativeById) if (r.running) set.add(id)
     const ids = sessionChildSig ? sessionChildSig.split('|') : []
     ids.forEach((id, i) => {
-      const live = liveSig[i]
-      // No live lifecycle event yet: trust the server's completion stamp (a
-      // child missing from the fetched list was only just spawned).
-      const running =
-        live === '1' ||
-        (live !== '0' && !fetchedList.find((s) => s.id === id)?.subagent_completed_at)
+      // A child session is active until the server stamps its completion.
+      // Its own agent-start / agent-end are no signal: it idles between
+      // turns while waiting on background tasks. Only a child the server
+      // doesn't list (just spawned, or no parent link) falls back to its
+      // live stream.
+      const row = fetchedList.find((s) => s.id === id)
+      const running = row ? !row.subagent_completed_at : liveSig[i] !== '0'
       if (running) set.add(id)
     })
     return set
@@ -259,20 +285,26 @@ export default function SessionWorkspace({
   }))
   const [focusedKey, setFocusedKey] = useState<string | null>(null)
 
-  /** Give `id` a pane (reopening it if it was closed): append while there's
-   *  room, else swap it in for the focused child pane (or the newest one). */
+  /** Give `id` a pane (reopening it if it was closed). A running child is
+   *  appended outright — auto mode has no cap. A finished one is pinned so
+   *  auto mode keeps it, appended while there's room, else swapped in for
+   *  the focused finished pane (or the newest one). */
   const showIn = useCallback(
     (prev: WorkspaceState, id: string): WorkspaceState => {
       const base = prev.closed.includes(id)
         ? { ...prev, closed: prev.closed.filter((x) => x !== id) }
         : prev
-      const state = base.pinned.includes(id) ? base : { ...base, pinned: [...base.pinned, id] }
+      const running = runningIds.has(id)
+      const state =
+        running || base.pinned.includes(id) ? base : { ...base, pinned: [...base.pinned, id] }
       if (state.shown.includes(id)) return state
-      if (state.shown.length < MAX_PANES - 1) return withShown(state, [...state.shown, id])
+      if (running || state.shown.length < MAX_PANES - 1) {
+        return withShown(state, [...state.shown, id])
+      }
+      const swappable = state.shown.filter((x) => !runningIds.has(x))
+      if (swappable.length === 0) return withShown(state, [...state.shown, id])
       const target =
-        focusedKey && state.shown.includes(focusedKey)
-          ? focusedKey
-          : state.shown[state.shown.length - 1]
+        focusedKey && swappable.includes(focusedKey) ? focusedKey : swappable[swappable.length - 1]
       const shown = state.shown.map((x) => (x === target ? id : x))
       return {
         ...state,
@@ -280,7 +312,7 @@ export default function SessionWorkspace({
         layout: state.layout ? replaceLeafSession(state.layout, target, id) : state.layout,
       }
     },
-    [focusedKey],
+    [focusedKey, runningIds],
   )
 
   // Reconcile discovery + "Show pane" requests while rendering (React's
@@ -298,8 +330,8 @@ export default function SessionWorkspace({
       handledNonce: next.handledNonce,
     }
   }
-  // Auto mode shows only running children (plus any the user opened):
-  // new runners slide in, finished ones slide out.
+  // Auto mode shows every running child (plus any pinned after finishing):
+  // new runners slide in, finished ones slide out. No cap.
   const runningList = childIds.filter((id) => runningIds.has(id))
   const runningSig = runningList.join('|')
   if (next.known.join('|') !== childIds.join('|') || next.runningSig !== runningSig) {
@@ -309,7 +341,7 @@ export default function SessionWorkspace({
       const shown = next.shown.filter((id) => pinned.includes(id) || runningIds.has(id))
       for (const id of runningList) {
         if (closed.includes(id) || shown.includes(id)) continue
-        if (shown.length < MAX_PANES - 1) shown.push(id)
+        shown.push(id)
       }
       if (shown.join('|') !== next.shown.join('|')) next = withShown(next, shown)
     }
@@ -355,9 +387,7 @@ export default function SessionWorkspace({
             const open = state.known.filter(
               (id) => runningIds.has(id) && !state.closed.includes(id),
             )
-            setWs(
-              withShown({ ...state, pinned: [] }, m === 'auto' ? open.slice(0, MAX_PANES - 1) : []),
-            )
+            setWs(withShown({ ...state, pinned: [] }, m === 'auto' ? open : []))
           }}
         >
           Subagent panes: {mode === 'auto' ? 'Auto' : 'Off'}

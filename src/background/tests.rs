@@ -260,6 +260,32 @@ async fn leader_exit_kills_orphaned_grandchildren() {
 }
 
 #[tokio::test]
+async fn silent_session_stop_ends_tasks_without_waking_the_session() {
+    let f = fixture().await;
+    let info = start(&f, "sleep", &["30"]).await;
+    assert!(f.registry.has_running_for_session("s-1"));
+    assert!(!f.registry.has_running_for_session("other"));
+
+    f.registry.stop_session_silently("s-1");
+    for _ in 0..200 {
+        if !f.registry.has_running_for_session("s-1") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!f.registry.has_running_for_session("s-1"));
+    assert_eq!(
+        f.registry.get(&info.id).unwrap().status,
+        TaskStatus::Stopped
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(f.dispatcher.resumed.lock().unwrap().is_empty());
+    assert!(f.db.events_tail("s-1", 20).await.unwrap().is_empty());
+    // Not a tombstone: the session can still start tasks.
+    try_start(&f, "sh", &["-c", "true"]).await.unwrap();
+}
+
+#[tokio::test]
 async fn deleted_session_refuses_new_tasks() {
     let f = fixture().await;
     f.registry.kill_session("s-1");

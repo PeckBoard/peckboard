@@ -180,7 +180,7 @@ async fn claim_and_compose_reports_final_reply_once() {
     .unwrap();
 
     let session = db.get_session("sub: scout").await.unwrap().unwrap();
-    let (parent, text) = peckboard::subagent::claim_and_compose(&db, &session, true, None)
+    let (parent, text) = peckboard::subagent::claim_and_compose(&db, &session, true, None, false)
         .await
         .unwrap();
     assert_eq!(parent, "parent");
@@ -192,10 +192,74 @@ async fn claim_and_compose_reports_final_reply_once() {
 
     // Idempotent: the second claim reports nothing.
     assert!(
-        peckboard::subagent::claim_and_compose(&db, &session, true, None)
+        peckboard::subagent::claim_and_compose(&db, &session, true, None, false)
             .await
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn claim_and_compose_waits_for_running_background_tasks() {
+    let db = Db::in_memory().unwrap();
+    seed_folder(&db, "f1").await;
+    seed_session(&db, "parent", "f1", None).await;
+    seed_session(&db, "sub: a", "f1", Some("parent")).await;
+    seed_session(&db, "sub: b", "f1", Some("parent")).await;
+    db.append_event("sub: a", "user", serde_json::json!({ "text": "task" }))
+        .await
+        .unwrap();
+    db.append_event(
+        "sub: a",
+        "agent-text",
+        serde_json::json!({ "text": "started build" }),
+    )
+    .await
+    .unwrap();
+
+    // Turn ended with a background task still running: not done, no claim.
+    let a = db.get_session("sub: a").await.unwrap().unwrap();
+    assert!(
+        peckboard::subagent::claim_and_compose(&db, &a, true, None, true)
+            .await
+            .is_none()
+    );
+    let a = db.get_session("sub: a").await.unwrap().unwrap();
+    assert!(a.subagent_completed_at.is_none());
+
+    // The task's exit report resumed it; that turn's completion reports.
+    db.append_event(
+        "sub: a",
+        "user",
+        serde_json::json!({ "text": "task exited" }),
+    )
+    .await
+    .unwrap();
+    db.append_event(
+        "sub: a",
+        "agent-text",
+        serde_json::json!({ "text": "build green" }),
+    )
+    .await
+    .unwrap();
+    let (_, text) = peckboard::subagent::claim_and_compose(&db, &a, true, None, false)
+        .await
+        .unwrap();
+    assert!(text.contains("build green"));
+    assert!(
+        db.get_session("sub: a")
+            .await
+            .unwrap()
+            .unwrap()
+            .subagent_completed_at
+            .is_some()
+    );
+
+    // A crash reports at once even with tasks running.
+    let b = db.get_session("sub: b").await.unwrap().unwrap();
+    let (_, text) = peckboard::subagent::claim_and_compose(&db, &b, false, Some("boom"), true)
+        .await
+        .unwrap();
+    assert!(text.contains("CRASHED"));
 }
 
 #[tokio::test]
@@ -235,7 +299,7 @@ async fn claim_and_compose_folds_streamed_chunks_verbatim() {
     .unwrap();
 
     let session = db.get_session("sub: scout").await.unwrap().unwrap();
-    let (_, text) = peckboard::subagent::claim_and_compose(&db, &session, true, None)
+    let (_, text) = peckboard::subagent::claim_and_compose(&db, &session, true, None, false)
         .await
         .unwrap();
     assert!(text.contains("/app/components/payment_manager_v2/service.rb:115"));
@@ -250,7 +314,7 @@ async fn claim_and_compose_crash_and_missing_parent() {
     seed_session(&db, "sub: b", "f1", Some("ghost-parent")).await;
 
     let a = db.get_session("sub: a").await.unwrap().unwrap();
-    let (_, text) = peckboard::subagent::claim_and_compose(&db, &a, false, Some("boom"))
+    let (_, text) = peckboard::subagent::claim_and_compose(&db, &a, false, Some("boom"), false)
         .await
         .unwrap();
     assert!(text.contains("CRASHED"));
@@ -259,7 +323,7 @@ async fn claim_and_compose_crash_and_missing_parent() {
     // Parent gone → nothing to deliver (but the claim is still consumed).
     let b = db.get_session("sub: b").await.unwrap().unwrap();
     assert!(
-        peckboard::subagent::claim_and_compose(&db, &b, true, None)
+        peckboard::subagent::claim_and_compose(&db, &b, true, None, false)
             .await
             .is_none()
     );

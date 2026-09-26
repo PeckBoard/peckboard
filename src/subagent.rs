@@ -18,11 +18,14 @@
 //!    link.
 //! 3. [`handle_subagent_done`] claims the completion (idempotent), pulls the
 //!    child's final reply, and delivers it to the parent exactly like a user
-//!    message (spawn if idle, queue/inject if running).
+//!    message (spawn if idle, queue/inject if running). A child that ended
+//!    its turn with `run_background` tasks still running is not done: the
+//!    claim waits for the turn the last task's exit report resumes.
 
 use std::sync::Arc;
 
 use crate::state::AppState;
+use crate::ws::broadcaster::WsEvent;
 
 /// `sessions.expert_kind` value marking a subagent session.
 pub const SUBAGENT_EXPERT_KIND: &str = "subagent";
@@ -128,16 +131,43 @@ pub fn build_subagent_prompt(name: &str, parent_session_id: &str, task: &str) ->
 /// Report a completed (or crashed) subagent back to its parent session.
 /// Idempotent via `claim_subagent_completion`; called from the completion
 /// listener for every session that carries a `parent_session_id`.
+///
+/// A completed turn with background tasks still running is skipped (no
+/// claim, slot kept): each task's exit report resumes the child, and the
+/// completion of that turn re-runs this check. A crash reports at once and
+/// silently stops the child's tasks, so a later exit can't wake a child
+/// whose result has already been delivered.
 pub async fn handle_subagent_done(
     state: &Arc<AppState>,
     session: &crate::db::models::Session,
     completed: bool,
     error: Option<&str>,
 ) {
-    let Some((parent_id, text)) = claim_and_compose(&state.db, session, completed, error).await
+    let background = crate::background::global();
+    if !completed && let Some(bg) = &background {
+        bg.stop_session_silently(&session.id);
+    }
+    // Pending work = a running background task, or a message (typically a
+    // task's exit report that landed mid-turn) waiting in the durable queue:
+    // the drain after this listener starts another turn, whose result must
+    // not be dropped by an early claim.
+    let has_running_tasks = completed
+        && (background.is_some_and(|bg| bg.has_running_for_session(&session.id))
+            || matches!(state.db.next_queued_message(&session.id).await, Ok(Some(_))));
+    let Some((parent_id, text)) =
+        claim_and_compose(&state.db, session, completed, error, has_running_tasks).await
     else {
         return;
     };
+
+    // The claim stamped `subagent_completed_at`; tell the UI.
+    if let Ok(Some(child)) = state.db.get_session(&session.id).await {
+        state.broadcaster.broadcast(WsEvent {
+            event_type: "session-updated".into(),
+            session_id: child.id.clone(),
+            data: serde_json::to_value(&child).unwrap_or(serde_json::Value::Null),
+        });
+    }
 
     // Persist + broadcast on the parent first, then resume it exactly like
     // an incoming user message.
@@ -182,14 +212,20 @@ pub async fn fail_subagent_dispatch(state: &Arc<AppState>, child_id: &str, error
 /// The DB half of [`handle_subagent_done`], separated so it is testable
 /// without an `AppState`: claim the completion (idempotent) and compose the
 /// report text. Returns `(parent_session_id, text)` only for the call that
-/// won the claim while the parent still exists.
+/// won the claim while the parent still exists. `has_running_tasks` (the
+/// child still owns running background tasks) defers a *completed* turn:
+/// nothing is claimed, so a later completion can still report.
 pub async fn claim_and_compose(
     db: &crate::db::Db,
     session: &crate::db::models::Session,
     completed: bool,
     error: Option<&str>,
+    has_running_tasks: bool,
 ) -> Option<(String, String)> {
     let parent_id = session.parent_session_id.as_deref()?;
+    if completed && has_running_tasks {
+        return None; // not done: a task's exit report will resume it
+    }
     let now = chrono::Utc::now().to_rfc3339();
     match db.claim_subagent_completion(&session.id, &now).await {
         Ok(true) => {}
@@ -316,7 +352,7 @@ pub async fn reconcile_orphan_subagents(db: &crate::db::Db) -> usize {
     let mut reconciled = 0usize;
     for session in &orphans {
         let Some((parent_id, text)) =
-            claim_and_compose(db, session, false, Some(RESTART_REASON)).await
+            claim_and_compose(db, session, false, Some(RESTART_REASON), false).await
         else {
             continue;
         };

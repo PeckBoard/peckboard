@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use crate::argv::{self, CliSpec};
-use crate::background::BackgroundTracker;
+use crate::background::{BackgroundTracker, Settled};
 use crate::event::{CrashKind, ProviderEvent};
 use crate::host::{self, HostFn};
 use crate::parser::{self, ParserState};
@@ -270,8 +270,8 @@ pub fn run(payload: &Value) -> Result<(), String> {
         let events = parser::parse_stream_json(&json_line, &mut parser);
         // Background-subagent bookkeeping: a task-notification user frame
         // settles its pending id (the frame itself carries no tool blocks,
-        // so the parser emits nothing for it).
-        background.on_stream_line(&json_line);
+        // so the parser emits nothing for it — `settled` reports it).
+        let mut settled: Vec<Settled> = background.on_stream_line(&json_line).into_iter().collect();
         // Assemble TodoWrite / TaskCreate / TaskUpdate calls into replace-
         // all `todo` snapshots as the tools stream (0.1.11's task_tracker).
         let mut todo_events: Vec<ProviderEvent> = Vec::new();
@@ -297,12 +297,12 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     // The structured result (where TaskCreate's assigned id
                     // lives) is a sibling of `message` on the raw line, not
                     // part of the tool_result block the parser consumes.
-                    background.on_tool_end(
+                    settled.extend(background.on_tool_end(
                         tool_use_id,
                         error.is_some(),
                         json_line.get("tool_use_result"),
                         output.as_deref(),
-                    );
+                    ));
                     if let Some(todos) = tasks.on_tool_end(
                         tool_use_id,
                         error.is_some(),
@@ -319,6 +319,9 @@ pub fn run(payload: &Value) -> Result<(), String> {
         }
         for ev in todo_events {
             emit_live(session_id, &ev, turn_settled)?;
+        }
+        for s in settled {
+            emit_live(session_id, &settled_event(s), turn_settled)?;
         }
         if is_result {
             last_result_error = result_error(&json_line);
@@ -419,6 +422,23 @@ fn is_notification_result(json: &Value) -> bool {
 /// turn instead of queueing them until the linger ends.
 const BACKGROUND_LINGER_SUBTYPE: &str = "background-linger";
 
+/// `System` subtype reporting that one tracked background task (subagent
+/// or background shell) stopped running — its task-notification arrived or
+/// a TaskStop / KillShell succeeded.
+const BACKGROUND_TASK_SETTLED_SUBTYPE: &str = "background-task-settled";
+
+fn settled_event(s: Settled) -> ProviderEvent {
+    ProviderEvent::System {
+        text: format!("background task {} {}", s.task_id, s.status),
+        subtype: BACKGROUND_TASK_SETTLED_SUBTYPE.into(),
+        detail: json!({
+            "task_id": s.task_id,
+            "tool_use_id": s.tool_use_id,
+            "status": s.status,
+        }),
+    }
+}
+
 /// Tell the host (and the user) the turn settled but the CLI stays up for
 /// in-flight background subagents.
 fn announce_linger(session_id: &str, background: &BackgroundTracker) {
@@ -467,8 +487,12 @@ fn settle_and_exit(
                     n = background.pending(),
                     list = ids.join(", "),
                 ),
+                detail: json!({
+                    "ids": ids,
+                    "tool_use_ids": background.pending_tool_use_ids(),
+                    "reason": why,
+                }),
                 subtype: "background-subagents".into(),
-                detail: json!({ "ids": ids, "reason": why }),
             },
         );
     }

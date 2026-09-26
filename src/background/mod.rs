@@ -264,6 +264,42 @@ impl BackgroundRegistry {
         out.into_iter().map(|(_, i)| i).collect()
     }
 
+    /// Whether `session_id` owns any still-running task. A subagent with one
+    /// isn't done yet: the task's exit report resumes it (see
+    /// `crate::subagent::handle_subagent_done`).
+    pub fn has_running_for_session(&self, session_id: &str) -> bool {
+        lock(&self.tasks).values().any(|t| {
+            let i = lock(&t.info);
+            i.session_id == session_id && i.status == TaskStatus::Running
+        })
+    }
+
+    /// Stop every running task of `session_id` with no completion report,
+    /// so the exit can't resume the session. Unlike [`Self::kill_session`]
+    /// the tasks stay listed and later spawns are still allowed. Used when
+    /// a subagent crashed and its result was already reported.
+    pub fn stop_session_silently(&self, session_id: &str) {
+        let running: Vec<Arc<Task>> = lock(&self.tasks)
+            .values()
+            .filter(|t| {
+                let i = lock(&t.info);
+                i.session_id == session_id && i.status == TaskStatus::Running
+            })
+            .cloned()
+            .collect();
+        for task in running {
+            task.silent.store(true, Ordering::SeqCst);
+            task.stop_requested.store(true, Ordering::SeqCst);
+            task.stop.notify_one();
+            let info = {
+                let mut i = lock(&task.info);
+                i.stopping = true;
+                i.clone()
+            };
+            self.broadcast("updated", &info);
+        }
+    }
+
     /// The last `lines` (secret-masked) output lines. Served from the ring
     /// when it can; larger requests read the log file's tail.
     pub fn tail(&self, id: &str, lines: usize) -> Option<Vec<String>> {
@@ -639,9 +675,12 @@ impl BackgroundRegistry {
         );
 
         if task.silent.load(Ordering::SeqCst) {
-            // Session deleted: the task was already dropped from the map.
             if self.task(&info.id).is_none() {
+                // Session deleted: the task was already dropped from the map.
                 let _ = std::fs::remove_file(&info.log_path);
+            } else {
+                // Still listed (silent stop / shutdown): update the UI, no report.
+                self.broadcast("finished", &info);
             }
             return;
         }

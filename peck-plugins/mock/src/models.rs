@@ -49,6 +49,24 @@ pub fn seed_models() -> serde_json::Value {
             "tier": 2
         },
         {
+            "id": "subagent-background",
+            "display_name": "Mock: native subagent run in the background",
+            "capabilities": ["mock", "tools"],
+            "tier": 2
+        },
+        {
+            "id": "subagent-bg-child",
+            "display_name": "Mock: subagent child with a background task",
+            "capabilities": ["mock", "tools"],
+            "tier": 2
+        },
+        {
+            "id": "slow",
+            "display_name": "Mock: slow turn (sleep:<secs>)",
+            "capabilities": ["mock"],
+            "tier": 1
+        },
+        {
             "id": "mcp",
             "display_name": "Mock: run mcp blocks from the message",
             "capabilities": ["mock", "tools", "reasoning"],

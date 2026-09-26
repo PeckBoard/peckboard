@@ -549,6 +549,10 @@ export default function ToolUseBlock({
     bareToolName(toolName) === 'spawn_subagent'
       ? (outObj.subagent_session_id as string)
       : undefined
+  // An Agent/Task launched in the background already has its launch receipt
+  // as output while the subagent still runs; the fold keeps `isRunning` on
+  // until the settle event, so flag why the spinner outlives the result.
+  const backgroundAgent = !!isRunning && out !== undefined && isNativeAgentTool(toolName)
   const done = !isRunning && !error
   // "Show pane" only makes sense while this session's split workspace is
   // mounted (the normal session view), not in a read-only pane or a View.
@@ -604,6 +608,14 @@ export default function ToolUseBlock({
         {isRunning && <span className="tool-spinner" role="status" aria-label="Running" />}
         {isRunning && elapsedSec !== null && elapsedSec >= 1 && (
           <span className="tool-elapsed">{formatDuration(elapsedSec * 1000)}</span>
+        )}
+        {backgroundAgent && (
+          <span
+            className="tool-status-badge tool-badge-running"
+            data-testid="tool-background-badge"
+          >
+            Background
+          </span>
         )}
         {durationMs >= 1000 && <span className="tool-duration">{formatDuration(durationMs)}</span>}
         {done && timedOut && <span className="tool-status-badge tool-badge-error">Timeout</span>}

@@ -477,6 +477,10 @@ interface FoldState {
   thinkingTs: number
   /** tool_use_id -> index in items, for tool blocks still running. */
   openTools: Map<string, number>
+  /** tool_use_id -> index in items, for Agent/Task cards whose result was
+   *  an async launch: the subagent keeps running after the tool-end until a
+   *  `background-task-settled` system event names it. */
+  backgroundTools: Map<string, number>
   /** Dedupe tool starts from streaming + snapshot. */
   seenToolIds: Set<string>
   pendingInterrupt: boolean
@@ -508,6 +512,7 @@ function newFoldState(): FoldState {
     thinkingKey: '',
     thinkingTs: 0,
     openTools: new Map(),
+    backgroundTools: new Map(),
     seenToolIds: new Set(),
     pendingInterrupt: false,
     errorStreak: 0,
@@ -724,15 +729,22 @@ function foldEvent(st: FoldState, ev: Event): void {
         const existing = items[idx] as Extract<DisplayItem, { type: 'tool' }>
         const errorText = ev.data.error as string | undefined
         const output = (ev.data.output as Record<string, unknown> | string) ?? undefined
+        // A background Agent/Task launch returns at once while the subagent
+        // keeps running; the card stays running until the settle event.
+        const background =
+          !errorText &&
+          isNativeAgentTool(existing.toolName) &&
+          isBackgroundAgentLaunch(existing.input, output)
         items[idx] = {
           ...existing,
-          isRunning: false,
+          isRunning: background,
           output,
           error: errorText,
           images,
-          endTs: ev.ts,
+          endTs: background ? undefined : ev.ts,
         }
         st.openTools.delete(toolUseId)
+        if (background) st.backgroundTools.set(toolUseId, idx)
       } else {
         const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
         const errorText = ev.data.error as string | undefined
@@ -771,6 +783,15 @@ function foldEvent(st: FoldState, ev: Event): void {
     case 'agent-end': {
       flushAssistant(st)
       closeOpenTools(items, st.openTools, 'agent ended before tool completed', ev.ts)
+      if (agentEndKillsBackground(ev)) {
+        for (const idx of st.backgroundTools.values()) {
+          const item = items[idx]
+          if (item?.type === 'tool' && item.isRunning) {
+            items[idx] = { ...item, isRunning: false, endTs: ev.ts }
+          }
+        }
+        st.backgroundTools.clear()
+      }
       const reason = (ev.data.reason as string) ?? 'unknown error'
       const wasInterrupted = st.pendingInterrupt && reason === 'interrupted'
       st.pendingInterrupt = false
@@ -901,6 +922,16 @@ function foldEvent(st: FoldState, ev: Event): void {
     }
     case 'system': {
       flushAssistant(st)
+      const settled = backgroundSettlement(ev)
+      if (settled) {
+        for (const id of settled.toolUseIds) {
+          const idx = st.backgroundTools.get(id)
+          if (idx === undefined) continue
+          const item = items[idx]
+          if (item?.type === 'tool') items[idx] = { ...item, isRunning: false, endTs: ev.ts }
+          st.backgroundTools.delete(id)
+        }
+      }
       const rawText =
         typeof ev.data.text === 'string'
           ? ev.data.text
@@ -1178,11 +1209,14 @@ export type SubagentRef =
       toolUseId: string
       description: string
       subagentType: string
+      /** Launched with `run_in_background` (or the tool result was an async
+       *  launch): stays running past its tool-end and past a clean turn end
+       *  until a settle event names it. */
+      background: boolean
       running: boolean
       error: boolean
     }
   | { kind: 'session'; sessionId: string }
-
 const SUBAGENT_ID_RE = /"subagent_session_id"\s*:\s*"([^"]+)"/
 
 /** `subagent_session_id` from a spawn_subagent tool result — a structured
@@ -1197,12 +1231,69 @@ function spawnedSessionId(output: unknown): string | null {
   return null
 }
 
+/** Whether an Agent/Task call ran its subagent in the background: asked for
+ *  via `run_in_background`, or the tool result is the CLI's immediate async
+ *  launch receipt rather than the subagent's report. */
+export function isBackgroundAgentLaunch(input: unknown, output: unknown): boolean {
+  if (
+    input &&
+    typeof input === 'object' &&
+    (input as Record<string, unknown>).run_in_background === true
+  ) {
+    return true
+  }
+  if (output === undefined || output === null) return false
+  const text = typeof output === 'string' ? output : JSON.stringify(output)
+  return /async_launched|async agent launched/i.test(text)
+}
+
+/** Plugin `system` subtypes that report background tasks no longer running:
+ *  one task settling (its notification arrived / it was stopped), or the
+ *  whole set killed when the agent process was torn down. */
+const BACKGROUND_SETTLED_SUBTYPES = new Set(['background-task-settled', 'background-subagents'])
+
+/** The launching tool_use_ids a plugin `system` event reports as settled,
+ *  or null for any other event. `failed` when the settle status reads as a
+ *  failure. Event data shape: `{ subtype, detail: { tool_use_id | tool_use_ids, status } }`. */
+export function backgroundSettlement(ev: Event): { toolUseIds: string[]; failed: boolean } | null {
+  if (ev.kind !== 'system') return null
+  const subtype = ev.data.subtype
+  if (typeof subtype !== 'string' || !BACKGROUND_SETTLED_SUBTYPES.has(subtype)) return null
+  const detail =
+    ev.data.detail && typeof ev.data.detail === 'object'
+      ? (ev.data.detail as Record<string, unknown>)
+      : {}
+  const toolUseIds: string[] = []
+  if (typeof detail.tool_use_id === 'string' && detail.tool_use_id) {
+    toolUseIds.push(detail.tool_use_id)
+  }
+  if (Array.isArray(detail.tool_use_ids)) {
+    for (const x of detail.tool_use_ids) if (typeof x === 'string' && x) toolUseIds.push(x)
+  }
+  const status = typeof detail.status === 'string' ? detail.status : ''
+  return { toolUseIds, failed: /fail|error|crash/i.test(status) }
+}
+
+/** An `agent-end` that took the agent process down with it — crash, error
+ *  result, or interrupt — so its background subagents died too. A clean
+ *  end lingers for them instead, and they settle on their own. */
+export function agentEndKillsBackground(ev: Event): boolean {
+  const status = (ev.data.status as string) ?? (ev.data.agent_status as string)
+  if (status === 'crashed') return true
+  if (typeof ev.data.error === 'string' && ev.data.error !== '') return true
+  return ev.data.reason === 'interrupted'
+}
+
 /** Every subagent visible in a parent's event stream: Claude-native Agent /
  *  Task calls (top-level only) and Peckboard spawn_subagent children. */
 export function collectSubagents(events: Event[]): SubagentRef[] {
   const out: SubagentRef[] = []
   const native = new Map<string, number>()
   const sessions = new Set<string>()
+  const finishNative = (idx: number, error: boolean) => {
+    const cur = out[idx]
+    if (cur.kind === 'native' && cur.running) out[idx] = { ...cur, running: false, error }
+  }
   for (const ev of events) {
     if (parentToolUseIdOf(ev) !== null) continue
     if (ev.kind === 'agent-tool-start') {
@@ -1216,6 +1307,7 @@ export function collectSubagents(events: Event[]): SubagentRef[] {
         toolUseId: id,
         description: typeof input.description === 'string' ? input.description : '',
         subagentType: typeof input.subagent_type === 'string' ? input.subagent_type : '',
+        background: input.run_in_background === true,
         running: true,
         error: false,
       })
@@ -1224,7 +1316,14 @@ export function collectSubagents(events: Event[]): SubagentRef[] {
       const idx = native.get(id)
       if (idx !== undefined) {
         const cur = out[idx]
-        if (cur.kind === 'native') out[idx] = { ...cur, running: false, error: !!ev.data.error }
+        if (cur.kind === 'native') {
+          const error = !!ev.data.error
+          // The tool-end of a background launch is only the launch receipt;
+          // the subagent runs on until a settle event names it.
+          const background =
+            !error && (cur.background || isBackgroundAgentLaunch(undefined, ev.data.output))
+          out[idx] = { ...cur, background, running: background, error }
+        }
         continue
       }
       const child = spawnedSessionId(ev.data.output)
@@ -1232,11 +1331,22 @@ export function collectSubagents(events: Event[]): SubagentRef[] {
         sessions.add(child)
         out.push({ kind: 'session', sessionId: child })
       }
+    } else if (ev.kind === 'system') {
+      const settled = backgroundSettlement(ev)
+      if (!settled) continue
+      for (const id of settled.toolUseIds) {
+        const idx = native.get(id)
+        if (idx !== undefined) finishNative(idx, settled.failed)
+      }
     } else if (ev.kind === 'agent-end') {
-      // A turn that ended (crash / interrupt) leaves no subagent running.
+      // A turn end leaves no foreground subagent running. Background ones
+      // outlive a clean end (the process lingers for them) but not a crash,
+      // error or interrupt, which kill the process.
+      const all = agentEndKillsBackground(ev)
       for (const [, idx] of native) {
         const cur = out[idx]
-        if (cur.kind === 'native' && cur.running) out[idx] = { ...cur, running: false }
+        if (cur.kind === 'native' && cur.running && (all || !cur.background))
+          finishNative(idx, false)
       }
     }
   }

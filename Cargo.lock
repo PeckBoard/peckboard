@@ -4129,7 +4129,7 @@ dependencies = [
 
 [[package]]
 name = "peckboard"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "aes-gcm",
  "anyhow",
