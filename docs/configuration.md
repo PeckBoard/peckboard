@@ -122,7 +122,7 @@ All state lives in the data directory — `~/.peckboard` unless `--data-dir` or 
 | `certs/`          | Self-signed TLS certificate and key                       |
 | `vapid_keys.json` | Keys for web push notifications                           |
 | `attachments/`    | Files uploaded to sessions                                |
-| `reports/`        | Markdown reports written by workers and experts           |
+| `reports/`        | Markdown reports written by agents                        |
 | `worker-mcp/`     | Per-session configuration consumed by the Claude CLI      |
 | `plugins/`        | Drop-in directory for WASM plugins, empty by default      |
 

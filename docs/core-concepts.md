@@ -16,7 +16,7 @@ graph LR
 
 ## Projects and Folders
 
-A *folder* is a path on your machine that you register once under a name — typically a checked-out repository — and then pick from a list whenever a project, session, or repeating task needs somewhere to work. A *project* is a kanban board attached to one folder: every agent working that project's cards reads and writes files in that folder. When you create a project you give it a name, the folder it works in, a default model, and a *workflow* — the ordered steps its cards pass through.
+A _folder_ is a path on your machine that you register once under a name — typically a checked-out repository — and then pick from a list whenever a project, session, or repeating task needs somewhere to work. A _project_ is a kanban board attached to one folder: every agent working that project's cards reads and writes files in that folder. When you create a project you give it a name, the folder it works in, a default model, and a _workflow_ — the ordered steps its cards pass through.
 
 ![The Projects view listing two projects, with a button to create a new one]({{ "/assets/screenshots/project.png" | relative_url }})
 
@@ -24,7 +24,7 @@ The Projects view lists every board; opening one shows its cards.
 
 ## Cards and the Board
 
-A *card* is one task: a title, a description of what should be done, and a priority from Critical down to Low. The board shows the columns Backlog, In Progress, Review, and Done, plus a Won't Do column for cards that were dropped rather than finished. A new card starts in Backlog, and agents move it across the board as the work progresses — you never have to drag it yourself, though you can.
+A _card_ is one task: a title, a description of what should be done, and a priority from Critical down to Low. The board shows the columns Backlog, In Progress, Review, and Done, plus a Won't Do column for cards that were dropped rather than finished. A new card starts in Backlog, and agents move it across the board as the work progresses — you never have to drag it yourself, though you can.
 
 ![A project board with cards spread across Backlog, In Progress, Review, and Done columns]({{ "/assets/screenshots/board.png" | relative_url }})
 
@@ -39,7 +39,7 @@ Every few seconds PeckBoard checks each active project. A card is ready when no 
 
 ## Chat Sessions and Worker Sessions
 
-A *session* is one conversation with an agent. A *chat session* is driven by you: you open it from the Sessions list, type messages, and the agent answers. A *worker session* is an agent launched to complete one card on the board — it works autonomously until it finishes the card, hands it to the next step, or gives up. Worker sessions stay out of the Sessions list so they do not drown your chats; while one runs, its card shows a Worker badge on the board, and the card's menu has a View Session item that opens the worker's conversation in the same chat view.
+A _session_ is one conversation with an agent. A _chat session_ is driven by you: you open it from the Sessions list, type messages, and the agent answers. A _worker session_ is an agent launched to complete one card on the board — it works autonomously until it finishes the card, hands it to the next step, or gives up. Worker sessions stay out of the Sessions list so they do not drown your chats; while one runs, its card shows a Worker badge on the board, and the card's menu has a View Session item that opens the worker's conversation in the same chat view.
 
 <details markdown="1">
 <summary>Steps, handoffs, and multi-step workflows</summary>
@@ -61,12 +61,12 @@ Only Done satisfies a dependency. A prerequisite moved to Won't Do keeps its dep
 
 ## Repeating Tasks
 
-A *repeating task* is a saved prompt on a schedule — every N minutes, daily at a set time, or weekly. Each time it fires, PeckBoard starts a fresh session in the task's folder and sends it the prompt; it does not create a card. Use it for recurring chores like a nightly dependency check or a morning summary. The Repeating Tasks view lists each task with its schedule and lets you pause, edit, or run it immediately.
+A _repeating task_ is a saved prompt on a schedule — every N minutes, daily at a set time, or weekly. Each time it fires, PeckBoard starts a fresh session in the task's folder and sends it the prompt; it does not create a card. Use it for recurring chores like a nightly dependency check or a morning summary. The Repeating Tasks view lists each task with its schedule and lets you pause, edit, or run it immediately.
 
 ## Reports
 
-A *report* is a markdown document an agent writes for you to read later — a research summary, an audit result, a record of what a worker found. Reports accumulate in the Reports view, grouped by folder, where you can read or download each one. Workers write them with a dedicated tool, so anything worth keeping survives after the session that produced it is gone.
+A _report_ is a markdown document an agent writes for you to read later — a research summary, an audit result, a record of what a worker found. Reports accumulate in the Reports view, grouped by folder, where you can read or download each one. Workers write them with a dedicated tool, so anything worth keeping survives after the session that produced it is gone.
 
 ## Where to Go Next
 
-[Experts]({{ "/experts.html" | relative_url }}) covers the long-lived sessions workers consult for answers, and [Architecture]({{ "/architecture.html" | relative_url }}) explains how the server, database, and agents fit together.
+The [Feature Tour]({{ "/features.html" | relative_url }}) covers everything else a working install gives you, and [Architecture]({{ "/architecture.html" | relative_url }}) explains how the server, database, and agents fit together.

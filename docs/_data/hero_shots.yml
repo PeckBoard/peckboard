@@ -16,9 +16,6 @@
 - file: document-review.png
   caption: Document review
   alt: The review screen with a markdown document on the left and annotations with resolution notes in a rail on the right
-- file: experts.png
-  caption: Experts
-  alt: Experts view listing expert sessions grouped by scope, with Question, Knowledge, and PM badges
 - file: providers.png
   caption: Providers & accounts
   alt: The Providers & Accounts settings page with provider toggles, plan usage, and signed-in accounts

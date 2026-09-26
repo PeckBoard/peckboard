@@ -38,7 +38,6 @@ Every plugin in the official registry. The name links to the plugin's page, whic
 
 | Plugin                                                        | What it adds     | MCP tools                                                                                  |
 | ------------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------ | --- |
-| [Experts]({{ "/experts.html"                                  | relative_url }}) | Knowledge, question, and PM expert sessions plus the Experts view                          | 8   |
 | [App Manager]({{ "/plugins/app-manager.html"                  | relative_url }}) | Install and remove developer apps on the host and SSH targets, with a dashboard            | 7   |
 | [Chicken Coop]({{ "/plugins/chicken-coop.html"                | relative_url }}) | A 3D chicken run visualizing every live session as a bird                                  | —   |
 | [Diff Viewer]({{ "/plugins/diff-viewer.html"                  | relative_url }}) | A side-by-side diff and editor for every repo in the folder, on projects and sessions      | —   |

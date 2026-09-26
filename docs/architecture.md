@@ -16,7 +16,7 @@ graph LR
   end
   browser[Browser] <-->|HTTP + WebSocket| server
   server <--> db[(SQLite file)]
-  server -.->|spawns| agents[AI Worker and Expert Sessions]
+  server -.->|spawns| agents[AI Worker and Chat Sessions]
   agents -->|tool calls| mcp
 ```
 
@@ -35,7 +35,7 @@ The async runtime is Tokio, with axum 0.8 (and its `ws` feature) on top for rout
 
 ## Agent Sessions and the MCP Server
 
-An _agent session_ is an AI process the server spawns and supervises: a _worker session_ completes one card on the board, and an _expert session_ answers questions about one part of the codebase. These sessions need a way to act on the board — create cards, write reports, ask the user a question, consult an expert. They do this over [MCP](https://modelcontextprotocol.io/) (Model Context Protocol), a standard that lets an AI session call tools exposed by another program.
+An _agent session_ is an AI process the server spawns and supervises: a _worker session_ completes one card on the board, a _chat session_ is one you talk to directly, and a _subagent_ is a child session an agent starts to work part of a task in parallel. These sessions need a way to act on the board — create cards, write reports, ask the user a question, start a subagent. They do this over [MCP](https://modelcontextprotocol.io/) (Model Context Protocol), a standard that lets an AI session call tools exposed by another program.
 
 The server embeds its own MCP server as an HTTP endpoint that only accepts connections from the local machine. Each spawned session gets its own access token and an explicit list of allowed tools, so a session holds only the capabilities its role needs. Every tool call lands in the same process that owns the database, which keeps board state changes in one place.
 
@@ -66,6 +66,6 @@ Testing happens at two layers. `cargo test` runs Rust unit and integration tests
 <details markdown="1">
 <summary>Test setup in detail</summary>
 
-The Rust integration tests in `tests/` boot the application with an in-memory database and cover session lifecycle, card completion, and the mock provider's scripted scenarios; expert consultation now lives with the experts WASM plugin (`tests/experts_plugin.rs`), not core. The Playwright configuration starts `target/release/peckboard` with a fresh temporary data directory for every run, so each suite begins from a clean state. End-to-end specs select mock model ids (for example `mock:happy-path`) to script agent behaviour deterministically.
+The Rust integration tests in `tests/` boot the application with an in-memory database and cover session lifecycle, card completion, and the mock provider's scripted scenarios. The Playwright configuration starts `target/release/peckboard` with a fresh temporary data directory for every run, so each suite begins from a clean state. End-to-end specs select mock model ids (for example `mock:happy-path`) to script agent behaviour deterministically.
 
 </details>

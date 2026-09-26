@@ -32,9 +32,9 @@ This block is itself the working example: it collapsed until you opened it.
 
 State what the software does. Never rate it — no "revolutionary", "amazing", "powerful", or any adjective whose job is praise rather than information.
 
-| Bad                                                                     | Good                                                                |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| PeckBoard's powerful expert system gives you amazing answers instantly. | An expert session answers questions about one part of the codebase. |
+| Bad                                                                        | Good                                                                                  |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| PeckBoard's powerful subagent system supercharges your workflow instantly. | A subagent is a child session an agent starts to work one part of a task in parallel. |
 
 ## Prose, Not Bullet Dumps
 
@@ -42,7 +42,7 @@ Explain things in short paragraphs, the way this page does. A bullet list is acc
 
 ## Plain Words Before Jargon
 
-When a PeckBoard term is unavoidable, define it in plain words the first time it appears, then give one example sentence. For instance: an _expert_ is a long-running session that has read one part of the codebase and answers questions about it, as in "the worker asked the docs expert where screenshots live." Likewise a _worker session_ is an agent launched to complete one card on the board. A reader should never need another page to decode the current one.
+When a PeckBoard term is unavoidable, define it in plain words the first time it appears, then give one example sentence. For instance: a _subagent_ is a child session an agent starts to handle one part of a task in parallel, as in "the worker spawned a subagent to scan the staging logs." Likewise a _worker session_ is an agent launched to complete one card on the board. A reader should never need another page to decode the current one.
 
 ## Code and Diagrams
 

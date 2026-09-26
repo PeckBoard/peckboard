@@ -674,22 +674,6 @@ blocks on a run (respecting the 2 s call timeout). Headless/test managers leave
 the live host unbound, so those functions cleanly return `live dispatch
 unavailable`.
 
-The **experts plugin** (`peck-plugins/experts`, written in **TypeScript** and
-compiled with the Extism js-pdk) is the reference consumer of this surface, and
-owns the **entire** experts feature — there is no experts logic left in core. It
-provides the `spin_up_experts` / `list_experts` / `ask_expert` MCP tools,
-partitions a project's files (`list_project_files`) into knowledge experts
-(`create_session` + `session_meta_set`, which is what tags a session as an
-"expert" — not a core column), fires their capture runs (`dispatch_capture`),
-and delivers consultations (`resume_session`). It also owns the **question
-expert** — fed each user answer via the `session.user.answer` notification — and
-the **PM expert**: the `pm_record_decision` / `pm_check_decisions` /
-`pm_escalate_to_user` MCP tools, with PM decisions and supersession grants kept
-in the plugin's own document store (`peckboard_store_*`), not a core table.
-Finally it serves the authenticated Experts and PM views (`ui_routes` over
-`http.request.authed`, under `user_authority`) that the web app's React UI
-calls.
-
 ### SSH Key Vault
 
 SSH keys can be stored server-side instead of a plugin holding password/key

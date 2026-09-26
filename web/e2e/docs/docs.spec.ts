@@ -14,7 +14,6 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 const PAGES: Array<{ path: string; title: string }> = [
   { path: 'getting-started.html', title: 'Getting Started' },
   { path: 'core-concepts.html', title: 'Core Concepts' },
-  { path: 'experts.html', title: 'Experts' },
   { path: 'review.html', title: 'Document Review' },
   { path: 'plugins.html', title: 'Plugins' },
   { path: 'architecture.html', title: 'Architecture' },

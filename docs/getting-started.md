@@ -82,4 +82,4 @@ The last step is to create a project. A _project_ pairs a folder on your machine
 
 ![A project board with cards in Backlog, In Progress, Review, and Done columns]({{ "/assets/screenshots/board.png" | relative_url }})
 
-Each column is a step in the project's workflow, and agents move cards across the board as they finish them. [Core Concepts]({{ "/core-concepts.html" | relative_url }}) explains how cards, workers, and experts fit together.
+Each column is a step in the project's workflow, and agents move cards across the board as they finish them. [Core Concepts]({{ "/core-concepts.html" | relative_url }}) explains how cards, workers, and sessions fit together.

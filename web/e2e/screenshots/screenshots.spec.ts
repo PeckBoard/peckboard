@@ -14,7 +14,6 @@ import { fileURLToPath } from 'node:url'
  *
  *   - board.png             — per-project kanban with cards across columns
  *   - chat.png              — a chat session with a completed mock agent run
- *   - experts.png           — the experts view with knowledge/question/PM experts
  *   - project.png           — the projects overview list
  *   - plugin-registry.png   — Settings → Plugin Registry browse (real registry.json)
  *   - playwright-player.png — the Playwright Tests replay player mid-run
@@ -52,8 +51,7 @@ async function authenticate(request: APIRequestContext): Promise<AuthBundle> {
   return { token, authHeader: { Authorization: `Bearer ${token}` } }
 }
 
-/** Temp source tree with sizeable topic dirs so `spin_up_experts`
- *  partitions it into a couple of knowledge experts. */
+/** Temp source tree so the seeded project's folder holds real code. */
 function makeSourceTree(): string {
   const root = mkdtempSync(path.join(tmpdir(), 'peckboard-shots-src-'))
   const body = 'pub fn handler() { /* logic */ }\n'.repeat(1400)
@@ -63,18 +61,6 @@ function makeSourceTree(): string {
   }
   return root
 }
-
-/** Read the MCP bearer token the server wrote for a session. */
-function readMcpToken(sessionId: string): string {
-  const dataDir = process.env.PECKBOARD_E2E_DATA_DIR
-  expect(dataDir, 'PECKBOARD_E2E_DATA_DIR exported by playwright.config.ts').toBeTruthy()
-  const cfgPath = path.join(dataDir!, 'worker-mcp', `${sessionId}.json`)
-  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as {
-    mcpServers: { peckboard: { headers: { Authorization: string } } }
-  }
-  return cfg.mcpServers.peckboard.headers.Authorization.replace(/^Bearer /, '')
-}
-
 async function createFolder(
   request: APIRequestContext,
   authHeader: AuthBundle['authHeader'],
@@ -98,8 +84,8 @@ async function createProject(
   const res = await request.post('/api/projects', {
     headers: authHeader,
     // worker_count: 0 so the orchestrator never picks cards up and
-    // mutates their step mid-capture; mock:echo so any expert capture
-    // dispatch stays on the mock provider.
+    // mutates their step mid-capture; mock:echo so any dispatch stays on
+    // the mock provider.
     data: { name, folder_id: folderId, model: 'mock:echo', workflow: 'task', worker_count: 0 },
   })
   expect(res.ok(), `create project ${name} failed: ${await res.text()}`).toBeTruthy()
@@ -228,43 +214,6 @@ test('capture docs screenshots @screenshot', async ({ request, page, baseURL }) 
   expect(msg2.ok(), `second message failed: ${await msg2.text()}`).toBeTruthy()
   await waitForAgentEnds(request, authHeader, session.id, 2)
 
-  // ── Seed: knowledge experts on the main project via spin_up_experts ──
-  // The tool ships in the experts WASM plugin (staged into the data dir
-  // by playwright.screenshots.config.ts when peck-plugins/experts/dist
-  // exists); it loads inert, so approve it first. Without the wasm the
-  // experts seeding — and experts.png — is skipped, keeping the rest of
-  // the captures alive on machines that haven't built the plugin.
-  const approval = await request.post('/api/plugins/experts/approval', {
-    headers: authHeader,
-    data: { decision: 'approve' },
-  })
-  const expertsAvailable = approval.ok()
-  if (!expertsAvailable) {
-    console.warn(
-      `[screenshots] experts plugin not loaded (approval HTTP ${approval.status()}) — ` +
-        'skipping experts seeding and the experts.png capture. Build ' +
-        'peck-plugins/experts (npm run build) to restore it.',
-    )
-  }
-  if (expertsAvailable) {
-    const mcpToken = readMcpToken(session.id)
-    const mcpRes = await request.post('/mcp', {
-      headers: { Authorization: `Bearer ${mcpToken}` },
-      data: {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'spin_up_experts',
-          arguments: { project_id: projectA, max_experts: 3 },
-        },
-      },
-    })
-    expect(mcpRes.ok(), `spin_up_experts failed: ${await mcpRes.text()}`).toBeTruthy()
-    const mcpJson = (await mcpRes.json()) as { error?: { message: string } }
-    expect(mcpJson.error, `spin_up_experts error: ${JSON.stringify(mcpJson.error)}`).toBeFalsy()
-  }
-
   // ── Capture ──
   await page.addInitScript((t) => {
     localStorage.setItem('peckboard_token', t as string)
@@ -299,15 +248,6 @@ test('capture docs screenshots @screenshot', async ({ request, page, baseURL }) 
   await page.goto(`/sessions/${session.id}`)
   await expect(page.getByText('Done.').last()).toBeVisible({ timeout: 10_000 })
   await capture(page, 'chat.png')
-
-  // experts.png — the experts view, now a plugin-served page in an
-  // iframe (the experts plugin's `experts` sidebar item).
-  if (expertsAvailable) {
-    await page.goto('/plugin-page/experts/experts')
-    const expertsView = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
-    await expect(expertsView.locator('.expert-name').first()).toBeVisible({ timeout: 15_000 })
-    await capture(page, 'experts.png')
-  }
 })
 
 // ─────────────────────────────────────────────────────────────────────
@@ -995,14 +935,6 @@ test('capture document review screenshot @screenshot', async ({ request, page })
     expect(res.ok(), `annotate failed: ${await res.text()}`).toBeTruthy()
   }
 
-  // The screenshots config stages the experts wasm into the data dir; an
-  // unapproved plugin overlays every page with its approval prompt. Approve
-  // it so the shot shows the review screen, not the modal (404 when the
-  // wasm wasn't built — fine, then there is no modal either).
-  await request.post('/api/plugins/experts/approval', {
-    headers: authHeader,
-    data: { decision: 'approve' },
-  })
   await loadAppAt(page, token, `/review/${reviewId}`)
   await expect(page.getByTestId('review-view')).toBeVisible({ timeout: 15_000 })
   await expect(page.getByTestId('review-annotation-item')).toHaveCount(3, { timeout: 10_000 })
@@ -1065,10 +997,6 @@ test('capture subagent panes screenshot @screenshot', async ({ request, page }) 
   test.setTimeout(90_000)
   mkdirSync(OUT_DIR, { recursive: true })
   const { token, authHeader } = await authenticate(request)
-  await request.post('/api/plugins/experts/approval', {
-    headers: authHeader,
-    data: { decision: 'approve' },
-  })
   const folder = await createFolder(
     request,
     authHeader,
@@ -1186,10 +1114,6 @@ test('capture background tasks screenshot @screenshot', async ({ request, page }
   test.setTimeout(90_000)
   mkdirSync(OUT_DIR, { recursive: true })
   const { token, authHeader } = await authenticate(request)
-  await request.post('/api/plugins/experts/approval', {
-    headers: authHeader,
-    data: { decision: 'approve' },
-  })
   const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-shots-bg-'))
   // Real scripts in the folder, so each task's command line reads like a
   // project's own tooling (`sh scripts/dev.sh`) rather than inline shell.
