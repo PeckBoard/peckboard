@@ -1,0 +1,33 @@
+# Screens that scroll through the landing-page hero marquee, in order.
+# Files live in assets/screenshots/ and are captured by
+# web/e2e/screenshots/screenshots.spec.ts (`cd web && npm run screenshots`).
+- file: board.png
+  caption: Project board
+  alt: A project board with cards spread across Backlog, In Progress, Review, and Done columns
+- file: chat.png
+  caption: Live sessions
+  alt: Chat view of a session showing user messages, agent replies, and a collapsed tool call
+- file: subagent-panes.png
+  caption: Subagent panes
+  alt: A session with three running subagents, each streaming in its own split pane beside the parent chat
+- file: background-tasks.png
+  caption: Background processes
+  alt: The Background tasks panel listing a running dev server, a passed test run, and a failed lint, with the dev server's output
+- file: document-review.png
+  caption: Document review
+  alt: The review screen with a markdown document on the left and annotations with resolution notes in a rail on the right
+- file: experts.png
+  caption: Experts
+  alt: Experts view listing expert sessions grouped by scope, with Question, Knowledge, and PM badges
+- file: providers.png
+  caption: Providers & accounts
+  alt: The Providers & Accounts settings page with provider toggles, plan usage, and signed-in accounts
+- file: plugin-registry.png
+  caption: Plugin registry
+  alt: The plugin registry's Browse tab listing installable plugins and MCP server templates
+- file: playwright-player.png
+  caption: Test replay
+  alt: A recorded browser test replayed with a frame stage, cursor, event timeline, and a network waterfall
+- file: project.png
+  caption: Projects
+  alt: The projects overview list

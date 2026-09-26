@@ -19,6 +19,8 @@ import { fileURLToPath } from 'node:url'
  *   - plugin-registry.png   — Settings → Plugin Registry browse (real registry.json)
  *   - playwright-player.png — the Playwright Tests replay player mid-run
  *   - providers.png         — Settings → Providers & Accounts with accounts
+ *   - subagent-panes.png    — a session with running subagents tiled in split panes
+ *   - background-tasks.png  — the Background tasks panel over a chat session
  *
  * The last three run against the same live server but stub the relevant
  * API routes in the page (same convention as the tests/ specs): the
@@ -322,8 +324,9 @@ const REGISTRY_JSON = path.resolve(HERE, '..', '..', '..', '..', 'plugins', 'reg
  *  no backticks, `${`, or backslash escapes (see the file's header), so
  *  the raw literal body IS the html — extract it from the source text
  *  rather than importing across the CJS package boundary (which the
- *  test-runner's TS loader refuses to compile). */
-const PLAYWRIGHT_TESTS_PAGE = (() => {
+ *  test-runner's TS loader refuses to compile). Read lazily so the other
+ *  captures still load when that sibling checkout is absent. */
+const playwrightTestsPage = (): string => {
   const src = readFileSync(
     path.resolve(
       HERE,
@@ -342,7 +345,7 @@ const PLAYWRIGHT_TESTS_PAGE = (() => {
   const end = src.lastIndexOf('`')
   if (start <= 0 || end <= start) throw new Error('PAGE literal not found in page.ts')
   return src.slice(start, end)
-})()
+}
 
 async function loadAppAt(page: Page, token: string, route: string): Promise<void> {
   await page.addInitScript((t) => {
@@ -520,7 +523,7 @@ test('capture playwright player screenshot @screenshot', async ({ request, page 
 
   // The iframe src — the real plugin page html.
   await page.route('**/plugin-api/v1/playwright-video', (route) =>
-    route.fulfill({ contentType: 'text/html; charset=utf-8', body: PLAYWRIGHT_TESTS_PAGE }),
+    route.fulfill({ contentType: 'text/html; charset=utf-8', body: playwrightTestsPage() }),
   )
 
   // Capture the three replay frames from the fake app.
@@ -1005,4 +1008,288 @@ test('capture document review screenshot @screenshot', async ({ request, page })
   await expect(page.getByTestId('review-annotation-item')).toHaveCount(3, { timeout: 10_000 })
   await expect(page.getByTestId('review-run-pass')).toBeVisible()
   await capture(page, 'document-review.png')
+})
+
+/** A ```mcp block that `mock:mcp` runs against the real MCP handler. */
+function mcpBlock(tool: string, args: Record<string, unknown>): string {
+  return '```mcp\n' + JSON.stringify({ tool, args }) + '\n```'
+}
+
+/** `run_background` shares `run_command`'s approval gate; flip the
+ *  host-wide bypass on for the capture and restore it after. */
+async function withBypass(
+  request: APIRequestContext,
+  authHeader: AuthBundle['authHeader'],
+  body: () => Promise<void>,
+): Promise<void> {
+  const prior = await request.get('/api/settings/tool-permissions', { headers: authHeader })
+  expect(prior.ok()).toBeTruthy()
+  const { bypass } = (await prior.json()) as { bypass: boolean }
+  await request.put('/api/settings/tool-permissions', {
+    headers: authHeader,
+    data: { bypass: true },
+  })
+  try {
+    await body()
+  } finally {
+    await request.put('/api/settings/tool-permissions', { headers: authHeader, data: { bypass } })
+  }
+}
+type ShotEvent = { seq: number; kind: string; data: { text?: string; source?: string } }
+
+/** Serve each session's event backfill through `edit`, so mock-provider
+ *  scaffolding (```mcp JSON, `sleep:N` markers, mock status lines) reads
+ *  like a real transcript. Takes effect on the next page load. */
+async function polishEvents(
+  page: Page,
+  edit: (sessionId: string, events: ShotEvent[]) => ShotEvent[],
+): Promise<void> {
+  await page.route('**/api/sessions/*/events**', async (route) => {
+    const res = await route.fetch()
+    const body = (await res.json()) as unknown
+    const sessionId = new URL(route.request().url()).pathname.split('/')[3]
+    const json = Array.isArray(body) ? edit(sessionId, body as ShotEvent[]) : body
+    await route.fulfill({ response: res, json })
+  })
+}
+
+/** Replace an event's text in place. */
+function withText(e: ShotEvent, text: string): ShotEvent {
+  return { ...e, data: { ...e.data, text } }
+}
+
+// subagent-panes.png — a parent session that spawned three real
+// spawn_subagent children, each mid-turn (`mock:slow`), so Auto mode
+// tiles a live pane per child beside the parent chat.
+test('capture subagent panes screenshot @screenshot', async ({ request, page }) => {
+  test.setTimeout(90_000)
+  mkdirSync(OUT_DIR, { recursive: true })
+  const { token, authHeader } = await authenticate(request)
+  await request.post('/api/plugins/experts/approval', {
+    headers: authHeader,
+    data: { decision: 'approve' },
+  })
+  const folder = await createFolder(
+    request,
+    authHeader,
+    'payments-service',
+    mkdtempSync(path.join(tmpdir(), 'peckboard-shots-subagents-')),
+  )
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'Harden WebSocket reconnect', folder_id: folder, model: 'mock:mcp' },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const parent = ((await sessionRes.json()) as { id: string }).id
+
+  await loadAppAt(page, token, `/sessions/${parent}`)
+  await expect(page.getByTestId('session-workspace')).toBeVisible({ timeout: 15_000 })
+
+  const tasks: [name: string, prompt: string, status: string][] = [
+    [
+      'Trace reconnect backoff',
+      'Trace the reconnect backoff in ws/client.ts.',
+      'Reading ws/client.ts — the backoff resets on every heartbeat, not on a successful open.',
+    ],
+    [
+      'Scan staging logs',
+      'Scan the staging logs for dropped sockets.',
+      'Grepping 4.2k staging log lines for close code 1006 and grouping by client build.',
+    ],
+    [
+      'Draft regression test',
+      'Draft a regression test for the reconnect path.',
+      'Writing a test that kills the socket mid-stream and asserts one reconnect within 2s.',
+    ],
+  ]
+  const intro = 'Split the reconnect investigation across three subagents.'
+  const spawn = await request.post(`/api/sessions/${parent}/message`, {
+    headers: authHeader,
+    data: {
+      text: [
+        intro,
+        ...tasks.map(([name, prompt]) =>
+          mcpBlock('spawn_subagent', { name, prompt, model: 'mock:slow' }),
+        ),
+      ].join('\n'),
+      model: 'mock:mcp',
+    },
+  })
+  expect(spawn.ok(), `spawn failed: ${await spawn.text()}`).toBeTruthy()
+
+  let kids: { id: string; name: string }[] = []
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`/api/sessions/${parent}/children`, { headers: authHeader })
+        const body = (await res.json()) as { id: string; name: string }[] | { children?: [] }
+        kids = Array.isArray(body) ? body : (body.children ?? [])
+        return kids.length
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(tasks.length)
+  // The provider-side spawn does not drive the child's first turn; send it.
+  const kidTask = new Map<string, (typeof tasks)[number]>()
+  for (const task of tasks) {
+    const kid = kids.find((k) => k.name.endsWith(task[0]))
+    expect(kid, `child ${task[0]}`).toBeTruthy()
+    kidTask.set(kid!.id, task)
+    await request.post(`/api/sessions/${kid!.id}/message`, {
+      headers: authHeader,
+      data: { text: `${task[1]} sleep:30`, model: 'mock:slow' },
+    })
+  }
+
+  const workspace = page.getByTestId('session-workspace')
+  await expect(workspace.getByTestId('split-pane')).toHaveCount(tasks.length + 1, {
+    timeout: 15_000,
+  })
+
+  // Reload with the backfill polished: the parent's prompt without its
+  // ```mcp blocks, each child's own task and a plausible status line.
+  await polishEvents(page, (sessionId, events) =>
+    events.map((e) => {
+      const task = kidTask.get(sessionId)
+      if (e.kind === 'user' && !e.data.source) {
+        return withText(e, task ? task[1] : intro)
+      }
+      if (e.kind === 'agent-text' && task) return withText(e, task[2])
+      if (e.kind === 'agent-text' && e.data.text?.startsWith('ran ')) {
+        return withText(e, "Three subagents are on it — I'll merge their findings as they report.")
+      }
+      return e
+    }),
+  )
+  await page.reload()
+  await expect(workspace.getByTestId('split-pane')).toHaveCount(tasks.length + 1, {
+    timeout: 15_000,
+  })
+  for (const [id, task] of kidTask) {
+    await expect(workspace.locator(`[data-pane-id="${id}"]`)).toContainText(task[2], {
+      timeout: 10_000,
+    })
+  }
+  // Let the slide-in animation settle.
+  await page.waitForTimeout(1_000)
+  await capture(page, 'subagent-panes.png')
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  // Drop the session so its tab doesn't show up in later captures.
+  await request.delete(`/api/sessions/${parent}`, { headers: authHeader })
+})
+
+// background-tasks.png — a session that started three real background
+// processes through run_background (`mock:mcp`): a finished test run, a
+// failed lint, and a dev server still running, with the Background tasks
+// panel open on the dev server's output.
+test('capture background tasks screenshot @screenshot', async ({ request, page }) => {
+  test.setTimeout(90_000)
+  mkdirSync(OUT_DIR, { recursive: true })
+  const { token, authHeader } = await authenticate(request)
+  await request.post('/api/plugins/experts/approval', {
+    headers: authHeader,
+    data: { decision: 'approve' },
+  })
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-shots-bg-'))
+  // Real scripts in the folder, so each task's command line reads like a
+  // project's own tooling (`sh scripts/dev.sh`) rather than inline shell.
+  const scripts: Record<string, string> = {
+    'test.sh': [
+      'echo "running 142 tests"',
+      'echo "test checkout::totals ... ok"',
+      'echo "test checkout::coupons ... ok"',
+      'echo "test result: ok. 142 passed; 0 failed"',
+    ].join('\n'),
+    'lint.sh': [
+      'echo "src/checkout/Summary.tsx"',
+      `echo "  41:7  error  'total' is assigned but never used"`,
+      'echo "1 problem (1 error, 0 warnings)"',
+      'exit 1',
+    ].join('\n'),
+    'dev.sh': [
+      'echo "  VITE v6.2.0  ready in 312 ms"',
+      'echo',
+      'echo "  ➜  Local:   http://localhost:5173/"',
+      'echo "  ➜  Network: use --host to expose"',
+      'echo "12:04:31 [vite] hmr update /src/checkout/Summary.tsx"',
+      'sleep 60',
+    ].join('\n'),
+  }
+  mkdirSync(path.join(folderPath, 'scripts'))
+  for (const [file, body] of Object.entries(scripts)) {
+    writeFileSync(path.join(folderPath, 'scripts', file), body + '\n')
+  }
+  const folder = await createFolder(request, authHeader, 'storefront', folderPath)
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    // Pinned: completion reports wake the session on its own model.
+    data: { name: 'Checkout page redesign', folder_id: folder, model: 'mock:mcp' },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const sessionId = ((await sessionRes.json()) as { id: string }).id
+
+  await withBypass(request, authHeader, async () => {
+    await loadAppAt(page, token, `/sessions/${sessionId}`)
+    await expect(page.getByTestId('session-workspace')).toBeVisible({ timeout: 15_000 })
+
+    const reason = 'Keep long-running jobs under peckboard'
+    const intro = 'Start the dev server, and run the tests and the linter in the background.'
+    const job = (label: string, file: string) =>
+      mcpBlock('run_background', { command: 'sh', args: [`scripts/${file}`], label, reason })
+    const prompt = [
+      intro,
+      job('unit tests', 'test.sh'),
+      job('lint', 'lint.sh'),
+      job('dev server', 'dev.sh'),
+    ].join('\n')
+    const sendRes = await request.post(`/api/sessions/${sessionId}/message`, {
+      headers: authHeader,
+      data: { text: prompt, model: 'mock:mcp' },
+    })
+    expect(sendRes.ok(), `send failed: ${await sendRes.text()}`).toBeTruthy()
+
+    await expect(
+      page.locator('[data-testid="chat-bg-notice"][data-status="succeeded"]'),
+    ).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-testid="chat-bg-notice"][data-status="failed"]')).toBeVisible({
+      timeout: 20_000,
+    })
+    // Both reports wake the session; let those mock turns finish.
+    await waitForAgentEnds(request, authHeader, sessionId, 3)
+
+    // Reload with the backfill polished: the prompt without its ```mcp
+    // blocks, and the mock's replies to the wake-ups ("no ```mcp blocks")
+    // dropped so the completion notices sit under the launch turn.
+    await polishEvents(page, (_id, events) => {
+      const firstEnd = events.find((e) => e.kind === 'agent-end')?.seq ?? Infinity
+      return events
+        .filter(
+          (e) => e.seq <= firstEnd || !['agent-start', 'agent-end', 'agent-text'].includes(e.kind),
+        )
+        .map((e) => {
+          if (e.kind === 'user' && !e.data.source) return withText(e, intro)
+          if (e.kind === 'agent-text' && e.data.text?.startsWith('ran ')) {
+            return withText(
+              e,
+              "All three are running in the background — I'll pick up each result as it lands.",
+            )
+          }
+          return e
+        })
+    })
+    await page.reload()
+    const toggle = page.getByTestId('bg-tasks-toggle')
+    await expect(toggle).toHaveAttribute('data-running', '1', { timeout: 15_000 })
+    await toggle.click()
+    const panel = page.getByTestId('bg-tasks-panel')
+    await expect(panel.getByTestId('bg-task-row')).toHaveCount(3)
+    await panel.getByTestId('bg-task-row').filter({ hasText: 'dev server' }).click()
+    await expect(panel.getByTestId('bg-task-output-pre')).toContainText('ready in 312 ms')
+    await page.waitForTimeout(500)
+    await capture(page, 'background-tasks.png')
+
+    // Stop the dev server so no process outlives the capture.
+    await panel.getByTestId('bg-task-output').getByTestId('bg-task-stop').click()
+    await page.getByTestId('bg-task-stop-confirm').getByTestId('confirm-dialog-confirm').click()
+  })
 })

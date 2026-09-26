@@ -109,10 +109,35 @@ layout: null
             alt=""
             aria-hidden="true"
           />
-          <img
-            src="{{ '/assets/screenshots/board.png' | relative_url }}"
-            alt="A project board with cards spread across Backlog, In Progress, Review, and Done columns"
-          />
+          <div
+            class="shot-marquee"
+            role="region"
+            aria-label="PeckBoard screens"
+          >
+            <div class="shot-track">
+              {% for shot in site.data.hero_shots %}
+              <figure>
+                <img
+                  src="{{ '/assets/screenshots/' | append: shot.file | relative_url }}"
+                  alt="{{ shot.alt }}"
+                  width="1280"
+                  height="800"
+                />
+                <figcaption>{{ shot.caption }}</figcaption>
+              </figure>
+              {% endfor %} {% for shot in site.data.hero_shots %}
+              <figure class="dup" aria-hidden="true">
+                <img
+                  src="{{ '/assets/screenshots/' | append: shot.file | relative_url }}"
+                  alt=""
+                  width="1280"
+                  height="800"
+                />
+                <figcaption>{{ shot.caption }}</figcaption>
+              </figure>
+              {% endfor %}
+            </div>
+          </div>
         </div>
         <div class="marquee" aria-hidden="true">
           <div class="marquee-track">
@@ -233,6 +258,57 @@ layout: null
               <img
                 src="{{ '/assets/screenshots/chat.png' | relative_url }}"
                 alt="Chat view of a session showing user messages, agent replies, and a collapsed tool call"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Subagents</span>
+              <h3>Watch every subagent at once</h3>
+              <p>
+                When an agent fans work out to subagents, each running one
+                slides into its own live pane beside the parent chat, tiled into
+                a grid. A pane lasts exactly as long as its subagent — even one
+                that outlives the parent's turn — then closes itself. Switch
+                panes Off, and finished subagents reopen from their tool card.
+              </p>
+              <a
+                class="more"
+                href="{{ '/features.html#subagent-panes' | relative_url }}"
+                >Subagent panes →</a
+              >
+            </div>
+            <div class="feature-shot f-subagents">
+              <img
+                src="{{ '/assets/screenshots/subagent-panes.png' | relative_url }}"
+                alt="A session with three running subagents, each streaming in its own split pane beside the parent chat"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Background</span>
+              <h3>Long jobs that report back</h3>
+              <p>
+                Dev servers, builds, and long test runs start through
+                <code>run_background</code>, not a stray shell. PeckBoard owns
+                the whole process tree, keeps the log, stops it on timeout or
+                session delete, and wakes the agent with the tail when the job
+                ends. The Background chip shows every task, its output, and a
+                Stop button.
+              </p>
+              <a
+                class="more"
+                href="{{ '/features.html#background-processes' | relative_url }}"
+                >Background processes →</a
+              >
+            </div>
+            <div class="feature-shot f-background">
+              <img
+                src="{{ '/assets/screenshots/background-tasks.png' | relative_url }}"
+                alt="The Background tasks panel listing a running dev server, a passed test run, and a failed lint, with the dev server's output"
               />
             </div>
           </div>
