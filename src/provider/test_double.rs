@@ -47,6 +47,9 @@ impl AgentProvider for NoopProvider {
     }
     async fn send_message(&self, ctx: SendMessageContext) -> anyhow::Result<()> {
         let conv = format!("mock-{}-1", ctx.session_id);
+        let scenario = scenario(&ctx.config.model);
+        // Same metadata shape as the mock plugin's `Started`, so tests can
+        // assert the dispatched working dir (`tests/worktree_dispatch.rs`).
         emit_event(
             &ctx.db,
             &ctx.broadcaster,
@@ -54,12 +57,14 @@ impl AgentProvider for NoopProvider {
             ProviderEvent::Started {
                 model: ctx.config.model.clone(),
                 conversation_id: Some(conv.clone()),
-                metadata: serde_json::Value::Null,
+                metadata: serde_json::json!({
+                    "scenario": scenario,
+                    "working_dir": ctx.config.working_dir,
+                }),
             },
         )
         .await;
 
-        let scenario = scenario(&ctx.config.model);
         if matches!(scenario, "block" | "ask") {
             let stop = Arc::new(AtomicBool::new(false));
             self.blocked

@@ -525,14 +525,24 @@ async fn concurrent_send_or_queue_never_double_spawns() {
     );
     assert_eq!(queued, 1, "the other must be queued");
 
-    // Exactly one agent-start event must exist in the log.
-    let agent_starts = db
-        .events_tail("s7", 100)
-        .await
-        .unwrap()
-        .iter()
-        .filter(|e| e.kind == "agent-start")
-        .count();
+    // Exactly one agent-start event must exist in the log. The crate mock
+    // emits `Started` from its own turn thread after `send_or_queue`
+    // returns, so wait for the first one, then give a would-be second
+    // spawn time to land before counting.
+    let count_starts = || async {
+        db.events_tail("s7", 100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "agent-start")
+            .count()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while count_starts().await == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let agent_starts = count_starts().await;
     assert_eq!(
         agent_starts, 1,
         "concurrent send_or_queue must not double-spawn (got {agent_starts} agent-start events)"
