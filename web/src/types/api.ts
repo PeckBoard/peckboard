@@ -45,6 +45,9 @@ export interface Session {
   context_tokens?: number
   /** Named system prompt to inject at the top of the context. */
   system_prompt_name?: string | null
+  /** Subagent sessions only: when its completion was reported to the
+   *  parent. null while the subagent is still running. */
+  subagent_completed_at?: string | null
 }
 
 /** Token/cost preview for a recovery-mode account/provider switch.

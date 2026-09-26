@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Event, Session } from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useSessionsStore } from '../store/sessions'
+import { useWsStore } from '../store/ws'
 import { nativeLeafId, useSubagentPanesStore } from '../store/subagentPanes'
 import ChatView from './ChatView'
 import SplitLayout, { type PaneInfo } from './SplitLayout'
@@ -85,6 +86,16 @@ function refLeafId(r: SubagentRef): string {
   return r.kind === 'native' ? nativeLeafId(r.toolUseId) : r.sessionId
 }
 
+/** Running state from a session's live stream — the latest agent-start /
+ *  agent-end — or null when the stream carries neither yet. */
+function liveRunning(events: Event[] | undefined): boolean | null {
+  if (!events) return null
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'agent-start') return true
+    if (events[i].kind === 'agent-end') return false
+  }
+  return null
+}
 function viewportAspect(): number {
   return window.innerHeight > 0 ? window.innerWidth / window.innerHeight : 16 / 9
 }
@@ -97,6 +108,11 @@ interface WorkspaceState {
   shown: string[]
   /** Children the user closed; auto mode leaves these closed. */
   closed: string[]
+  /** Children the user opened explicitly; auto mode keeps these open
+   *  after they finish. */
+  pinned: string[]
+  /** Running children last reconciled against (`|`-joined). */
+  runningSig: string
   layout: LayoutNode | null
   handledNonce: number
 }
@@ -139,6 +155,15 @@ export default function SessionWorkspace({
     }
   }
 
+  const sig = useSessionsStore((s) => subagentSig(s.eventsBySession[sessionId]))
+  const refs = useMemo(() => JSON.parse(sig) as SubagentRef[], [sig])
+  const nativeById = useMemo(() => {
+    const m = new Map<string, Extract<SubagentRef, { kind: 'native' }>>()
+    for (const r of refs) if (r.kind === 'native') m.set(refLeafId(r), r)
+    return m
+  }, [refs])
+  // Refetch when the parent spawns another child, for its completion state.
+  const spawnedCount = refs.filter((r) => r.kind === 'session').length
   // Peckboard child sessions known to the server (spawned before this open).
   const [fetched, setFetched] = useState<{ parentId: string; list: Session[] }>({
     parentId: sessionId,
@@ -163,19 +188,12 @@ export default function SessionWorkspace({
     return () => {
       cancelled = true
     }
-  }, [sessionId])
+  }, [sessionId, spawnedCount])
   const fetchedList = useMemo(
     () => (fetched.parentId === sessionId ? fetched.list : []),
     [fetched, sessionId],
   )
 
-  const sig = useSessionsStore((s) => subagentSig(s.eventsBySession[sessionId]))
-  const refs = useMemo(() => JSON.parse(sig) as SubagentRef[], [sig])
-  const nativeById = useMemo(() => {
-    const m = new Map<string, Extract<SubagentRef, { kind: 'native' }>>()
-    for (const r of refs) if (r.kind === 'native') m.set(refLeafId(r), r)
-    return m
-  }, [refs])
   const childIds = useMemo(() => {
     const ids: string[] = []
     const seen = new Set<string>()
@@ -187,6 +205,43 @@ export default function SessionWorkspace({
     return ids
   }, [fetchedList, refs, sessionId])
 
+  // Child sessions stream over their own subscriptions; watch them all so
+  // auto mode can follow each one's running state without a pane open.
+  const sessionChildSig = childIds.filter((id) => !nativeById.has(id)).join('|')
+  useEffect(() => {
+    if (!sessionChildSig) return
+    const ids = sessionChildSig.split('|')
+    const wsStore = useWsStore.getState()
+    ids.forEach((id) => wsStore.subscribe(id))
+    return () => ids.forEach((id) => wsStore.unsubscribe(id))
+  }, [sessionChildSig])
+  const liveSig = useWsStore((s) =>
+    sessionChildSig
+      ? sessionChildSig
+          .split('|')
+          .map((id) => {
+            const r = liveRunning(s.eventsBySession[id])
+            return r === null ? '-' : r ? '1' : '0'
+          })
+          .join('')
+      : '',
+  )
+  const runningIds = useMemo(() => {
+    const set = new Set<string>()
+    for (const [id, r] of nativeById) if (r.running) set.add(id)
+    const ids = sessionChildSig ? sessionChildSig.split('|') : []
+    ids.forEach((id, i) => {
+      const live = liveSig[i]
+      // No live lifecycle event yet: trust the server's completion stamp (a
+      // child missing from the fetched list was only just spawned).
+      const running =
+        live === '1' ||
+        (live !== '0' && !fetchedList.find((s) => s.id === id)?.subagent_completed_at)
+      if (running) set.add(id)
+    })
+    return set
+  }, [nativeById, sessionChildSig, liveSig, fetchedList])
+
   const sessions = useSessionsStore((s) => s.sessions)
   const nameOf = (id: string): string =>
     sessions.find((s) => s.id === id)?.name ?? fetchedList.find((s) => s.id === id)?.name ?? ''
@@ -197,6 +252,8 @@ export default function SessionWorkspace({
     known: [],
     shown: [],
     closed: readClosed(sessionId),
+    pinned: [],
+    runningSig: '',
     layout: leaf(PRIMARY),
     handledNonce: request?.nonce ?? 0,
   }))
@@ -206,9 +263,10 @@ export default function SessionWorkspace({
    *  room, else swap it in for the focused child pane (or the newest one). */
   const showIn = useCallback(
     (prev: WorkspaceState, id: string): WorkspaceState => {
-      const state = prev.closed.includes(id)
+      const base = prev.closed.includes(id)
         ? { ...prev, closed: prev.closed.filter((x) => x !== id) }
         : prev
+      const state = base.pinned.includes(id) ? base : { ...base, pinned: [...base.pinned, id] }
       if (state.shown.includes(id)) return state
       if (state.shown.length < MAX_PANES - 1) return withShown(state, [...state.shown, id])
       const target =
@@ -234,18 +292,26 @@ export default function SessionWorkspace({
       known: [],
       shown: [],
       closed: readClosed(sessionId),
+      pinned: [],
+      runningSig: '',
       layout: leaf(PRIMARY),
       handledNonce: next.handledNonce,
     }
   }
-  if (next.known.join('|') !== childIds.join('|')) {
-    const fresh = childIds.filter((id) => !next.known.includes(id))
-    next = { ...next, known: childIds }
+  // Auto mode shows only running children (plus any the user opened):
+  // new runners slide in, finished ones slide out.
+  const runningList = childIds.filter((id) => runningIds.has(id))
+  const runningSig = runningList.join('|')
+  if (next.known.join('|') !== childIds.join('|') || next.runningSig !== runningSig) {
+    next = { ...next, known: childIds, runningSig }
     if (mode === 'auto') {
-      for (const id of fresh) {
-        if (next.closed.includes(id)) continue
-        if (next.shown.length < MAX_PANES - 1) next = withShown(next, [...next.shown, id])
+      const { pinned, closed } = next
+      const shown = next.shown.filter((id) => pinned.includes(id) || runningIds.has(id))
+      for (const id of runningList) {
+        if (closed.includes(id) || shown.includes(id)) continue
+        if (shown.length < MAX_PANES - 1) shown.push(id)
       }
+      if (shown.join('|') !== next.shown.join('|')) next = withShown(next, shown)
     }
   }
   if (request && request.nonce !== next.handledNonce) {
@@ -282,12 +348,16 @@ export default function SessionWorkspace({
           aria-pressed={mode === 'auto'}
           data-testid="subagent-panes-toggle"
           data-mode={mode}
-          title="Open a pane for each subagent automatically"
+          title="Open a pane for each running subagent automatically"
           onClick={() => {
             const m: PaneMode = mode === 'auto' ? 'off' : 'auto'
             setMode(m)
-            const open = state.known.filter((id) => !state.closed.includes(id))
-            setWs(withShown(state, m === 'auto' ? open.slice(0, MAX_PANES - 1) : []))
+            const open = state.known.filter(
+              (id) => runningIds.has(id) && !state.closed.includes(id),
+            )
+            setWs(
+              withShown({ ...state, pinned: [] }, m === 'auto' ? open.slice(0, MAX_PANES - 1) : []),
+            )
           }}
         >
           Subagent panes: {mode === 'auto' ? 'Auto' : 'Off'}
@@ -352,6 +422,7 @@ export default function SessionWorkspace({
             cur.shown.filter((x) => x !== entry.key),
           ),
           closed: cur.closed.includes(entry.key) ? cur.closed : [...cur.closed, entry.key],
+          pinned: cur.pinned.filter((x) => x !== entry.key),
         }))
       }}
       onOpenAsTab={(entry) => entry.sessionId && onOpenSessionTab(entry.sessionId)}

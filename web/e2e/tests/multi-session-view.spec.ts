@@ -96,7 +96,10 @@ async function openSession(page: Page, token: string, sessionId: string) {
 }
 
 test.describe('session view subagent panes', () => {
-  test('native Agent subagent slides into its own pane', async ({ request, page }) => {
+  test('a finished native Agent subagent leaves Auto; overflow reopens it', async ({
+    request,
+    page,
+  }) => {
     const auth = await authenticate(request)
     const folder = await createFolder(request, auth, 'multiview-native')
     const parent = await createSession(request, auth, folder, 'native parent')
@@ -108,18 +111,45 @@ test.describe('session view subagent panes', () => {
 
     await send(request, auth, parent, 'explore', 'mock:subagent-native')
 
+    // Auto shows running subagents only: once the child finishes, no pane.
+    await expect(workspace).toContainText('Parent done', { timeout: 15_000 })
     const pane = page.getByTestId('native-subagent-pane')
-    await expect(pane).toBeVisible({ timeout: 15_000 })
+    await expect(pane).toHaveCount(0)
+
+    await page.getByTestId('subagent-overflow-chip').click()
+    await page.getByTestId('subagent-overflow-item').click()
+    await expect(pane).toBeVisible()
     await expect(pane).toContainText('Child is looking around')
-    await expect(pane).toContainText('Finished', { timeout: 15_000 })
+    await expect(pane).toContainText('Finished')
 
     const primary = page.locator('[data-testid="split-pane"][data-pane-id="@primary"]')
-    await expect(primary).toContainText('Parent done', { timeout: 15_000 })
     await expect(primary).not.toContainText('Child is looking around')
-
     const nativePane = page.getByTestId('split-pane').filter({ has: pane })
     await expect(nativePane.getByTestId('split-pane-header')).toContainText('Explore repo')
     await expect(nativePane.getByTestId('split-pane-badge')).toHaveText('Done')
+  })
+
+  test('a spawn_subagent child pane slides out of Auto when it finishes', async ({
+    request,
+    page,
+  }) => {
+    const auth = await authenticate(request)
+    const folder = await createFolder(request, auth, 'multiview-finish')
+    const child = await createSession(request, auth, folder, 'finish child')
+    const parent = await createSession(request, auth, folder, 'finish parent')
+
+    await openSession(page, auth.token, parent)
+    const workspace = page.getByTestId('session-workspace')
+    const paneChild = workspace.locator(`[data-pane-id="${child}"]`)
+
+    await send(request, auth, parent, child, 'mock:subagent')
+    await expect(paneChild).toBeVisible({ timeout: 15_000 })
+
+    // The child runs one turn and ends: its pane leaves the auto view.
+    await send(request, auth, child, 'hello', 'mock:happy-path')
+    await expect(paneChild).toHaveCount(0, { timeout: 15_000 })
+    await expect(workspace.getByTestId('split-pane')).toHaveCount(1)
+    await expect(page.getByTestId('subagent-overflow-chip')).toHaveText('+1')
   })
 
   test('each spawn_subagent child gets a pane; toggle Off hides them', async ({
