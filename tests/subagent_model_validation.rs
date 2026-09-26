@@ -56,6 +56,7 @@ async fn unknown_explicit_model_is_rejected_before_creating_a_child_row() {
     register_mock_provider(&provider_registry).await;
 
     let ctx = ToolCallContext {
+        background: None,
         session_id: "parent".into(),
         project_id: None,
         card_id: None,
@@ -95,6 +96,7 @@ async fn known_model_still_spawns_normally() {
     register_mock_provider(&provider_registry).await;
 
     let ctx = ToolCallContext {
+        background: None,
         session_id: "parent".into(),
         project_id: None,
         card_id: None,
@@ -145,6 +147,7 @@ async fn inherited_model_from_caller_is_also_validated() {
     register_mock_provider(&provider_registry).await;
 
     let ctx = ToolCallContext {
+        background: None,
         session_id: "parent".into(),
         project_id: None,
         card_id: None,

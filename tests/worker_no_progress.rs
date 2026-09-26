@@ -43,6 +43,7 @@ async fn build_state() -> Arc<AppState> {
     let session_manager = SessionManager::new(registry.clone()).with_plugins(plugins.clone());
 
     Arc::new(AppState {
+        background: Default::default(),
         plugin_ws_tickets: Default::default(),
         device_registry: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),

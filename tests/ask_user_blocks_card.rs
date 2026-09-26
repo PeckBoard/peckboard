@@ -49,6 +49,7 @@ async fn build_state() -> Arc<AppState> {
     let session_manager = SessionManager::new(registry.clone()).with_plugins(plugins.clone());
 
     Arc::new(AppState {
+        background: Default::default(),
         plugin_ws_tickets: Default::default(),
         device_registry: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
@@ -178,6 +179,7 @@ async fn ask_user_parks_card_until_answered_then_resumes_once() {
     // The worker asks the user, through the real MCP tool.
     let tools = McpToolRegistry::new();
     let ctx = ToolCallContext {
+        background: None,
         session_id: session_id.clone(),
         project_id: Some("p1".into()),
         card_id: Some("c1".into()),
@@ -322,6 +324,7 @@ async fn answered_question_does_not_reblock_card_on_plain_turn_end() {
 
     let tools = McpToolRegistry::new();
     let ctx = ToolCallContext {
+        background: None,
         session_id: session_id.clone(),
         project_id: Some("p1".into()),
         card_id: Some("c1".into()),

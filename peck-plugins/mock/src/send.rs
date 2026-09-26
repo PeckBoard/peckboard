@@ -308,6 +308,7 @@ impl Ctx<'_> {
                     return Ok(());
                 }
             }
+            "background" => self.background()?,
             "resume-error" => {
                 if self.resume_error()? {
                     return Ok(());
@@ -1168,6 +1169,49 @@ impl Ctx<'_> {
             "turn_seq": null,
         }))
     }
+
+    /// Peckboard-managed background tasks. A plain user message starts
+    /// three via the REAL `run_background` tool — `echo hello` ("ok"),
+    /// `false` ("fail"), `sleep 30` ("long") — and ends the turn. A message
+    /// carrying background-task reports (the wake-up peckboard injects when
+    /// a task exits) is acknowledged one line per report:
+    /// `ack background <label> <status>`.
+    fn background(&mut self) -> Result<(), String> {
+        let reports = parse_background_reports(self.message);
+        if !reports.is_empty() {
+            for (label, status) in reports {
+                self.emit_text(&format!("ack background {label} {status}"))?;
+                if !self.tick()? {
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+        let tasks: [(&str, &str, &[&str]); 3] = [
+            ("ok", "echo", &["hello"]),
+            ("fail", "false", &[]),
+            ("long", "sleep", &["30"]),
+        ];
+        let mut started = 0usize;
+        for (label, command, args) in tasks {
+            let res = self.call_mcp_tool(
+                "run_background",
+                json!({
+                    "command": command,
+                    "args": args,
+                    "label": label,
+                    "reason": format!("Start the '{label}' background task."),
+                }),
+            )?;
+            if res.is_some_and(|r| r.get("task_id").is_some()) {
+                started += 1;
+            }
+            if !self.tick()? {
+                return Ok(());
+            }
+        }
+        self.emit_text(&format!("started {started}/3 background tasks"))
+    }
 }
 
 fn mock_revised_markdown(markdown: &str, version: i64, insert_only: bool) -> String {
@@ -1210,10 +1254,43 @@ fn extract_mcp_blocks(message: &str) -> Vec<Value> {
     }
     out
 }
+/// `(label, status)` for every background-task report headline in
+/// `message` — `[background task "<label>" (<id>) <outcome>]`, where the
+/// outcome maps to the task's status name.
+fn parse_background_reports(message: &str) -> Vec<(String, &'static str)> {
+    const HEAD: &str = "[background task \"";
+    let mut out = Vec::new();
+    let mut rest = message;
+    while let Some(start) = rest.find(HEAD) {
+        let after = &rest[start + HEAD.len()..];
+        let Some(label_end) = after.find("\" (") else {
+            break;
+        };
+        let label = &after[..label_end];
+        let tail = &after[label_end..];
+        let Some(close) = tail.find(") ") else { break };
+        let outcome_all = &tail[close + 2..];
+        let outcome = &outcome_all[..outcome_all.find(']').unwrap_or(outcome_all.len())];
+        let status = if outcome.starts_with("finished") {
+            "succeeded"
+        } else if outcome.starts_with("FAILED") {
+            "failed"
+        } else if outcome.starts_with("TIMED OUT") {
+            "timed_out"
+        } else if outcome.starts_with("STOPPED") {
+            "stopped"
+        } else {
+            "running"
+        };
+        out.push((label.to_string(), status));
+        rest = outcome_all;
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
-    use super::extract_mcp_blocks;
+    use super::{extract_mcp_blocks, parse_background_reports};
 
     #[test]
     fn extracts_multiple_blocks_and_skips_malformed() {
@@ -1223,5 +1300,24 @@ mod tests {
         assert_eq!(blocks[0]["tool"], "a");
         assert_eq!(blocks[1]["tool"], "b");
         assert!(extract_mcp_blocks("no blocks here").is_empty());
+    }
+
+    #[test]
+    fn parses_background_report_headlines() {
+        let msg = "[background task \"ok\" (a-1) finished: exit 0 after 0s]\n\n$ echo hello\n\n\
+                   [background task \"fail\" (b-2) FAILED: exit 1 after 0s]\n\
+                   [background task \"long\" (c-3) STOPPED after 2s]\n\
+                   [background task \"slow\" (d-4) TIMED OUT after 1s (timeout 1s)]";
+        let got = parse_background_reports(msg);
+        assert_eq!(
+            got,
+            vec![
+                ("ok".to_string(), "succeeded"),
+                ("fail".to_string(), "failed"),
+                ("long".to_string(), "stopped"),
+                ("slow".to_string(), "timed_out"),
+            ]
+        );
+        assert!(parse_background_reports("start the tasks").is_empty());
     }
 }

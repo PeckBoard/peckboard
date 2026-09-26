@@ -552,30 +552,47 @@ impl ExpertDispatcher for AppExpertDispatcher {
         session_id: &'a str,
         text: &'a str,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            let state = &self.state;
-            let config = self
-                .spawn_config_for(session_id, serde_json::Value::Null)
-                .await?;
+        // No user event exists yet, so a queued delivery appends one.
+        Box::pin(self.resume(session_id, text, false))
+    }
 
-            // Resume exactly like a user message: send_or_queue spawns a
-            // fresh run if idle, or parks the text in the durable queue if
-            // a turn is in flight (delivered when it finishes — never
-            // interrupts). No user event exists yet, so the drain appends
-            // one at delivery.
-            state
-                .session_manager
-                .send_or_queue(
-                    session_id,
-                    crate::provider::message::UserMessage::from_text(text),
-                    &state.db,
-                    &state.broadcaster,
-                    config,
-                    crate::provider::manager::MidTurnPolicy::Queue,
-                    false,
-                )
-                .await?;
-            Ok(())
-        })
+    fn resume_session_appended<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        // The caller already persisted the user event: a queued delivery
+        // must not append a second one.
+        Box::pin(self.resume(session_id, text, true))
+    }
+}
+
+impl AppExpertDispatcher {
+    /// Resume exactly like a user message: send_or_queue spawns a fresh run
+    /// if idle, or parks the text in the durable queue if a turn is in
+    /// flight (delivered when it finishes — never interrupts).
+    async fn resume(
+        &self,
+        session_id: &str,
+        text: &str,
+        user_event_appended: bool,
+    ) -> anyhow::Result<()> {
+        let state = &self.state;
+        let config = self
+            .spawn_config_for(session_id, serde_json::Value::Null)
+            .await?;
+        state
+            .session_manager
+            .send_or_queue(
+                session_id,
+                crate::provider::message::UserMessage::from_text(text),
+                &state.db,
+                &state.broadcaster,
+                config,
+                crate::provider::manager::MidTurnPolicy::Queue,
+                user_event_appended,
+            )
+            .await?;
+        Ok(())
     }
 }

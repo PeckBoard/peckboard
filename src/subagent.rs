@@ -139,28 +139,20 @@ pub async fn handle_subagent_done(
         return;
     };
 
-    // Persist on the parent first (the dispatcher only drives the agent),
-    // then resume it exactly like an incoming user message.
-    if let Err(e) = state
-        .db
-        .append_event(
-            &parent_id,
-            "user",
-            serde_json::json!({ "text": &text, "source": "subagent-result" }),
-        )
-        .await
+    // Persist + broadcast on the parent first, then resume it exactly like
+    // an incoming user message.
+    let dispatcher = crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
+    if let Err(e) = crate::service::session_notify::notify_session(
+        &state.db,
+        &state.broadcaster,
+        Some(&dispatcher),
+        &parent_id,
+        &text,
+        serde_json::json!({ "source": "subagent-result" }),
+    )
+    .await
     {
         tracing::warn!(parent_session_id = %parent_id, "subagent result event append failed: {e}");
-    }
-    let dispatcher = crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
-    if let Err(e) =
-        crate::service::mcp_server::ExpertDispatcher::resume_session(&dispatcher, &parent_id, &text)
-            .await
-    {
-        tracing::warn!(
-            parent_session_id = %parent_id,
-            "subagent result delivery failed (parent sees the persisted event on its next turn): {e}"
-        );
     }
 }
 

@@ -2809,6 +2809,101 @@ fn drain_capped<R: std::io::Read + Send + 'static>(
     })
 }
 
+/// Proof token: bearer has validated a program name and resolved its cwd/env
+/// through [`prepare_exec`] (bare executable name, caller-folder cwd, custom
+/// env + output masker). Fields are private so the only way to obtain one is
+/// that function — `crate::background::BackgroundRegistry::spawn` takes it by
+/// value, so a background task can never run an unvalidated program or cwd.
+/// See `handle_run_background` for an example.
+pub(crate) struct PreparedExec {
+    program: String,
+    cwd: PathBuf,
+    env: Vec<(String, String)>,
+    masker: crate::service::secret_mask::SecretMasker,
+}
+
+impl PreparedExec {
+    /// `(program, cwd, env, masker)`.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        PathBuf,
+        Vec<(String, String)>,
+        crate::service::secret_mask::SecretMasker,
+    ) {
+        (self.program, self.cwd, self.env, self.masker)
+    }
+}
+
+/// Validate `command` and resolve the cwd/env for running it on behalf of
+/// `inv`. Blocking (DB reads) — call from a blocking thread only.
+///
+/// `enforce_allowlist` / `authority_root`: see [`exec_impl`].
+pub(crate) fn prepare_exec(
+    db: &Db,
+    command: &str,
+    inv: &InvocationContext,
+    enforce_allowlist: bool,
+    authority_root: Option<&std::path::Path>,
+) -> Result<PreparedExec, String> {
+    if command.is_empty() {
+        return Err("command is required".into());
+    }
+    // Bare executable name only — no path component, no shell metacharacters.
+    // This holds even for the unrestricted variant: args are an argv array, so
+    // there is never a shell to interpret metacharacters, and the program is
+    // resolved by name via PATH inside the folder-pinned cwd.
+    if command.contains('/')
+        || command.contains('\\')
+        || command.contains(|c: char| c.is_whitespace())
+    {
+        return Err("command must be a bare executable name".into());
+    }
+    if enforce_allowlist && !EXEC_ALLOWLIST.contains(&command) {
+        return Err(format!(
+            "command '{command}' is not on the allowlist; permitted: {}",
+            EXEC_ALLOWLIST.join(", ")
+        ));
+    }
+    let authority_fallback = authority_root
+        .filter(|_| inv.authority && inv.folder_id.is_none())
+        .map(|p| p.join(PLUGIN_EXEC_DIR));
+    let cwd = match caller_folder_root(db, inv) {
+        Ok(r) => r,
+        // The exec cwd is a working directory, not a jail (unlike the
+        // fs_jail-backed file functions): what bounds this call is the
+        // permission grant plus the bare-name check, both already applied.
+        // It is still deliberately a scratch dir rather than the data dir —
+        // see `authority_root` on `exec_impl`.
+        Err(_) if authority_fallback.is_some() => {
+            let dir = authority_fallback.unwrap();
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("failed to prepare the exec working directory: {e}"))?;
+            dir
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Commands run WITH the custom env vars (Settings → Environment
+    // Variables) visible to this folder — globals plus the folder's own,
+    // folder winning on a name collision; plain always, encrypted while ANY
+    // user's unlock cache is warm (a deliberate DB-wide sharing decision —
+    // see the doc comment on `command_env_blocking`) — layered over the
+    // inherited host env (custom wins on collision: user-configured beats
+    // ambient). The agent itself never gets these values: its own process
+    // env carries no custom vars, and any secret a command prints is masked
+    // with the returned masker before the agent can read it.
+    let (env, masker) =
+        crate::service::secret_mask::command_env_blocking(db, inv.folder_id.as_deref());
+    Ok(PreparedExec {
+        program: command.to_string(),
+        cwd,
+        env,
+        masker,
+    })
+}
+
 /// `peckboard_exec` — run an allowlisted command in the caller's project
 /// folder. Input: `{"command", "args"?: [..], "timeout_secs"?}`. Output:
 /// `{"exit_code", "stdout", "stderr", "stdout_truncated", "stderr_truncated",
@@ -2837,42 +2932,13 @@ pub(crate) fn exec_impl(
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
     let command = req.command.trim();
-    if command.is_empty() {
-        return error_json("command is required");
-    }
-    // Bare executable name only — no path component, no shell metacharacters.
-    // This holds even for the unrestricted variant: args are an argv array, so
-    // there is never a shell to interpret metacharacters, and the program is
-    // resolved by name via PATH inside the folder-pinned cwd.
-    if command.contains('/')
-        || command.contains('\\')
-        || command.contains(|c: char| c.is_whitespace())
-    {
-        return error_json("command must be a bare executable name");
-    }
-    if enforce_allowlist && !EXEC_ALLOWLIST.contains(&command) {
-        return error_json(format!(
-            "command '{command}' is not on the allowlist; permitted: {}",
-            EXEC_ALLOWLIST.join(", ")
-        ));
-    }
-    let authority_fallback = authority_root
-        .filter(|_| inv.authority && inv.folder_id.is_none())
-        .map(|p| p.join(PLUGIN_EXEC_DIR));
-    let root = match caller_folder_root(db, inv) {
-        Ok(r) => r,
-        // The exec cwd is a working directory, not a jail (unlike the
-        // fs_jail-backed file functions): what bounds this call is the
-        // permission grant plus the bare-name check, both already applied.
-        // It is still deliberately a scratch dir rather than the data dir —
-        // see `authority_root` above.
-        Err(_) if authority_fallback.is_some() => {
-            let dir = authority_fallback.unwrap();
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                return error_json(format!("failed to prepare the exec working directory: {e}"));
-            }
-            dir
-        }
+    let PreparedExec {
+        cwd: root,
+        env: inject_env,
+        masker,
+        ..
+    } = match prepare_exec(db, command, inv, enforce_allowlist, authority_root) {
+        Ok(p) => p,
         Err(e) => return error_json(e),
     };
     let timeout = Duration::from_secs(
@@ -2881,17 +2947,6 @@ pub(crate) fn exec_impl(
             .clamp(1, EXEC_MAX_TIMEOUT_SECS),
     );
 
-    // Commands run WITH the custom env vars (Settings → Environment
-    // Variables) visible to this folder — globals plus the folder's own,
-    // folder winning on a name collision; plain always, encrypted while ANY
-    // user's unlock cache is warm (a deliberate DB-wide sharing decision —
-    // see the doc comment on `command_env_blocking`) — layered over the
-    // inherited host env (custom wins on collision: user-configured beats
-    // ambient). The agent itself never gets these values: its own process
-    // env carries no custom vars, and any secret a command prints is masked
-    // below before the agent can read it.
-    let (inject_env, masker) =
-        crate::service::secret_mask::command_env_blocking(db, inv.folder_id.as_deref());
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(command);
     cmd.args(&req.args)

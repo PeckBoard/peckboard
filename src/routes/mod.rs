@@ -3,6 +3,7 @@ pub mod agent_vars;
 pub mod askpass;
 pub mod attachments;
 pub mod auth;
+pub mod background;
 pub mod backup;
 pub mod claude_accounts;
 pub mod codex_accounts;
@@ -81,6 +82,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(attachments::router(state.clone()))
         .merge(tool_images::router(state.clone()))
         .merge(notifications::router(state.clone()))
+        .merge(background::router(state.clone()))
         .merge(me::router(state.clone()))
         .merge(views::router(state.clone()))
         .merge(agent_vars::router(state.clone()))

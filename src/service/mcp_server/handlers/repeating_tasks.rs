@@ -400,6 +400,7 @@ mod tests {
             data_dir: None,
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         }
     }
 

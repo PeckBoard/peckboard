@@ -49,6 +49,7 @@ async fn build_state() -> Arc<AppState> {
     let session_manager = SessionManager::new(registry.clone()).with_plugins(plugins.clone());
 
     Arc::new(AppState {
+        background: Default::default(),
         plugin_ws_tickets: Default::default(),
         device_registry: Default::default(),
         env_unlock: Arc::new(peckboard::service::env_vars::EnvUnlockRegistry::new()),
@@ -187,6 +188,7 @@ async fn seed_card_with_worker(
 
 fn ctx_for_card(state: &Arc<AppState>, session_id: &str, card_id: &str) -> ToolCallContext {
     ToolCallContext {
+        background: None,
         session_id: session_id.to_string(),
         project_id: Some("p1".into()),
         card_id: Some(card_id.to_string()),
@@ -885,6 +887,7 @@ async fn seed_project_with_worker(state: &Arc<AppState>) -> String {
 
 fn ctx_for_project(state: &Arc<AppState>, session_id: &str) -> ToolCallContext {
     ToolCallContext {
+        background: None,
         session_id: session_id.to_string(),
         project_id: Some("p1".into()),
         card_id: None,
@@ -1061,6 +1064,7 @@ fn ctx_with_registry(
     registry: Arc<ProviderRegistry>,
 ) -> ToolCallContext {
     ToolCallContext {
+        background: None,
         session_id: session_id.to_string(),
         project_id: Some("p1".into()),
         card_id: Some(card_id.to_string()),
@@ -1262,6 +1266,7 @@ async fn seed_plain_card(state: &Arc<AppState>, id: &str, step: &str, descriptio
 
 fn unscoped_ctx(state: &Arc<AppState>) -> ToolCallContext {
     ToolCallContext {
+        background: None,
         session_id: "chat".into(),
         project_id: None,
         card_id: None,

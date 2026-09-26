@@ -1242,6 +1242,9 @@ impl PluginProviderRuntime {
             provider_registry: plugins.bound_provider_registry(),
             data_dir: Some(plugins.data_dir()),
             device_registry: None,
+            // No AppState on this path; the boot-registered global is the
+            // same registry the `/mcp` route hands out.
+            background: crate::background::global(),
         };
         let registry = crate::service::mcp_server::McpToolRegistry::new();
         match turn

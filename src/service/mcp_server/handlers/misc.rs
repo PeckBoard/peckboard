@@ -538,6 +538,7 @@ mod fetch_url_tests {
             provider_registry: None,
             data_dir: None,
             device_registry: None,
+            background: None,
         };
         (ctx, dir)
     }

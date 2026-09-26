@@ -131,6 +131,10 @@ impl McpToolRegistry {
                 self.handle_browser_tool(tool_name, args, ctx).await
             }
             "run_command" => self.handle_run_command(args, ctx).await,
+            "run_background" => self.handle_run_background(args, ctx).await,
+            "background_status" => self.handle_background_status(args, ctx).await,
+            "list_background" => self.handle_list_background(ctx).await,
+            "stop_background" => self.handle_stop_background(args, ctx).await,
             name if name.starts_with("remote_agent_") => {
                 self.handle_remote_agent_tool(name, args, ctx).await
             }
@@ -518,7 +522,12 @@ mod tests {
         assert!(names.contains(&"remote_agent_screenshot"));
         assert!(names.contains(&"remote_agent_lock"));
         assert!(names.contains(&"remote_agent_unlock"));
-        assert_eq!(names.len(), 84);
+        // Peckboard-managed background processes.
+        assert!(names.contains(&"run_background"));
+        assert!(names.contains(&"background_status"));
+        assert!(names.contains(&"list_background"));
+        assert!(names.contains(&"stop_background"));
+        assert_eq!(names.len(), 88);
     }
 
     #[test]
@@ -545,6 +554,7 @@ mod tests {
             data_dir: None,
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         };
 
         let result = registry
@@ -568,6 +578,7 @@ mod tests {
             data_dir: None,
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         };
 
         // Global GREETING, folder GREETING (default scope), global TARGET.
@@ -680,6 +691,7 @@ mod tests {
             data_dir: None,
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         };
 
         let err = dispatch_tool_call(
@@ -737,6 +749,7 @@ mod tests {
             data_dir: Some(tmp.path().to_path_buf()),
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         };
 
         let written = registry
@@ -814,6 +827,7 @@ mod tests {
             data_dir: None,
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         };
 
         // Two prerequisites via create_card (no deps yet).
@@ -976,6 +990,7 @@ mod tests {
             data_dir: None,
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         };
 
         let a = registry
@@ -1119,6 +1134,7 @@ mod tests {
             data_dir: None,
             folder_id: "f1".into(),
             device_registry: None,
+            background: None,
         };
 
         let result = registry

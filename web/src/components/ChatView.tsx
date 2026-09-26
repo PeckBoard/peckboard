@@ -30,6 +30,12 @@ import RenameModal from './RenameModal'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
+import {
+  BackgroundTaskNotice,
+  BackgroundTasksButton,
+  BackgroundTasksPanel,
+} from './chat/BackgroundTasks'
+import { useBackgroundPanel } from '../hooks/useBackgroundPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
 import { chatMarkdownComponents } from './chat/markdown'
 import { type AnswerValue, answerText, selectedOptions, toggleOption } from '../lib/questionAnswers'
@@ -898,6 +904,8 @@ export const ChatRow = memo(function ChatRow({
       )
     case 'worktree-merge':
       return <WorktreeMergeRow item={item} />
+    case 'background-task':
+      return <BackgroundTaskNotice item={item} sessionId={sessionId} />
     case 'unknown':
       // Fallback for event kinds this build doesn't recognize (plugin
       // providers, future backend kinds) — visible, with the payload on
@@ -1163,6 +1171,7 @@ export default function ChatView({
   const deleteSession = useSessionsStore((s) => s.deleteSession)
   const interruptSession = useSessionsStore((s) => s.interruptSession)
   const terminateAgent = useSessionsStore((s) => s.terminateAgent)
+  const bgPanel = useBackgroundPanel(sessionId)
 
   // Fetch session detail on mount
   useEffect(() => {
@@ -2344,6 +2353,12 @@ export default function ChatView({
             {Math.round(contextTokens / 1000)}k ctx
           </span>
         )}
+        <BackgroundTasksButton
+          total={bgPanel.tasks.length}
+          running={bgPanel.running}
+          open={bgPanel.open}
+          onToggle={() => bgPanel.setOpen(!bgPanel.open)}
+        />
         {toolbarExtras}
         <button
           type="button"
@@ -2519,6 +2534,15 @@ export default function ChatView({
         )}
 
       <TodoPanel todos={todos} />
+
+      {bgPanel.open && bgPanel.tasks.length > 0 && (
+        <BackgroundTasksPanel
+          tasks={bgPanel.tasks}
+          selectedId={bgPanel.selectedId}
+          onSelect={bgPanel.setSelectedId}
+          onClose={() => bgPanel.setOpen(false)}
+        />
+      )}
 
       <div
         className="chat-messages"

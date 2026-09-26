@@ -160,6 +160,9 @@ pub struct AppState {
     /// socket handle. Arc so MCP tool calls (`ToolCallContext`) can hold a
     /// shared handle. See [`crate::ws::agent::DeviceRegistry`].
     pub device_registry: Arc<crate::ws::agent::DeviceRegistry>,
+    /// Peckboard-managed background processes started by agents via
+    /// `run_background`. In-memory only. See [`crate::background`].
+    pub background: Arc<crate::background::BackgroundRegistry>,
     pub tls: Arc<TlsState>,
 }
 

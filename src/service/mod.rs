@@ -17,6 +17,7 @@ pub mod repo_diff;
 pub mod repo_scan;
 pub mod retention;
 pub mod secret_mask;
+pub mod session_notify;
 pub mod ssh_keys;
 pub mod tls;
 pub mod tool_images;

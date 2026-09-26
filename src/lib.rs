@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod auth;
+pub mod background;
 pub mod card_policy;
 pub mod config;
 pub mod db;

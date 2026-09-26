@@ -4,6 +4,7 @@ import { useUiStore } from './ui'
 import { useSessionsStore } from './sessions'
 import { appendEventOrdered, nextLastSeq } from './eventOrder'
 import { getToken } from './auth'
+import { useBackgroundStore } from './background'
 
 const SEQ_KEY = 'peckboard_last_seq'
 
@@ -315,6 +316,14 @@ export const useWsStore = create<WsState>((set, get) => ({
             new CustomEvent('peckboard:session-cleared', { detail: { sessionId } }),
           )
         }
+        return
+      }
+
+      if (msg.type === 'background_task') {
+        // A peckboard-managed background task started / changed / finished
+        // (`{action, task}`) — per-session, so only subscribers get it.
+        const sessionId = msg.session_id as string
+        if (sessionId) useBackgroundStore.getState().applyWsEvent(sessionId, msg.data)
         return
       }
 

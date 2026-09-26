@@ -37,6 +37,21 @@ pub trait ExpertDispatcher: Send + Sync {
         session_id: &'a str,
         text: &'a str,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+
+    /// [`Self::resume_session`] for a caller that has ALREADY appended (and
+    /// broadcast) the matching durable `user` event — e.g. a subagent result
+    /// or a background-task report. The difference only matters when the
+    /// session is mid-turn: the message is queued with
+    /// `user_event_appended = true`, so the drain doesn't append a duplicate
+    /// user event at delivery. The default forwards to `resume_session` (test
+    /// doubles don't care).
+    fn resume_session_appended<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        self.resume_session(session_id, text)
+    }
 }
 
 /// Context scoped from the MCP token — identifies what session/project/card
@@ -65,6 +80,11 @@ pub struct ToolCallContext {
     /// the in-process plugin-provider path and in unit tests, where those
     /// tools report themselves unavailable instead of panicking.
     pub device_registry: Option<Arc<crate::ws::agent::DeviceRegistry>>,
+    /// Peckboard-managed background processes (`run_background` & co.).
+    /// `Some` on real tool calls (cloned off `AppState`); `None` in unit
+    /// tests that don't exercise them, where those tools report themselves
+    /// unavailable.
+    pub background: Option<Arc<crate::background::BackgroundRegistry>>,
 }
 
 /// Proof token: a project id verified against the current MCP token's
@@ -354,6 +374,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             device_registry: None,
+            background: None,
         }
     }
 
@@ -411,6 +432,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             device_registry: None,
+            background: None,
         };
         let err = ctx.scope_project(Some("p-2")).await.unwrap_err();
         // "not found", not "forbidden" — don't leak the project's existence.
@@ -483,6 +505,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             device_registry: None,
+            background: None,
         }
     }
 

@@ -84,6 +84,20 @@ export type DisplayItem =
        *  filtered out of the rendered feed. */
       superseded?: boolean
     }
+  | {
+      /** A `user` event injected by peckboard when a `run_background` task
+       *  exits (`source: "background-task"`): rendered as a compact notice,
+       *  not a user bubble — the user didn't type it. */
+      type: 'background-task'
+      /** The full report the agent received (status + last output lines). */
+      text: string
+      taskId: string
+      label: string
+      status: string
+      exitCode: number | null
+      key: string
+      ts: number
+    }
   | { type: 'assistant'; text: string; key: string; ts: number }
   | {
       type: 'tool'
@@ -243,6 +257,7 @@ export function displayItemSearchText(item: DisplayItem): string {
     case 'user':
       return item.preHatchOriginal ? `${item.text}\n${item.preHatchOriginal}` : item.text
     case 'pre-hatch':
+    case 'background-task':
     case 'assistant':
     case 'thinking':
     case 'status':
@@ -588,6 +603,21 @@ function foldEvent(st: FoldState, ev: Event): void {
       // `pre_ignite` is the legacy spelling from before the pre-hatcher
       // rename — old transcripts keep rendering.
       const pi = (ev.data.pre_hatch ?? ev.data.pre_ignite) as Record<string, unknown> | undefined
+      const bg = ev.data.source === 'background-task' ? ev.data.background_task : undefined
+      if (bg && typeof bg === 'object') {
+        const b = bg as Record<string, unknown>
+        items.push({
+          type: 'background-task',
+          text: typeof ev.data.text === 'string' ? ev.data.text : '',
+          taskId: typeof b.id === 'string' ? b.id : '',
+          label: typeof b.label === 'string' ? b.label : '',
+          status: typeof b.status === 'string' ? b.status : '',
+          exitCode: typeof b.exit_code === 'number' ? b.exit_code : null,
+          key: ev.id,
+          ts: ev.ts,
+        })
+        break
+      }
       items.push({
         type: 'user',
         text,

@@ -84,6 +84,7 @@ async fn seed_chat_session(db: &Db, id: &str, folder_id: &str, owner: &str) {
 
 fn ctx(db: &Arc<Db>, session_id: &str, folder_id: &str) -> ToolCallContext {
     ToolCallContext {
+        background: None,
         session_id: session_id.into(),
         project_id: None,
         card_id: None,

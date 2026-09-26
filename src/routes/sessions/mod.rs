@@ -817,6 +817,9 @@ pub async fn delete_session_core(state: &AppState, id: &str) -> anyhow::Result<b
     // before the row goes away also stops a live turn from appending
     // events against a session id whose FK is about to break.
     state.session_manager.cancel_and_wait(id).await;
+    // Its background tasks die with it — silently: there is no session
+    // left to report to.
+    state.background.kill_session(id);
 
     // Delete associated events first
     state.db.delete_events_by_session(id).await?;

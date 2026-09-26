@@ -27,6 +27,11 @@ const TOOL_LABELS: Record<string, string> = {
   run_command: 'Terminal',
   run_terminal_cmd: 'Terminal',
   execute_command: 'Terminal',
+  // Peckboard-managed background processes.
+  run_background: 'Background task',
+  background_status: 'Background status',
+  list_background: 'List background tasks',
+  stop_background: 'Stop background task',
   // Files.
   read: 'Read file',
   read_file: 'Read file',
@@ -307,6 +312,21 @@ export function getSummary(toolName: string, input?: Record<string, unknown>): s
     case 'spawn_subagent': {
       const n = input.name as string | undefined
       return n ?? ''
+    }
+    // Background tasks: the command line (or the agent's label) for a
+    // start; the task id for status / stop.
+    case 'run_background': {
+      const cmd = input.command
+      const label = typeof input.label === 'string' ? input.label.trim() : ''
+      if (typeof cmd !== 'string' || cmd === '') return label
+      const args = joinStringArgs(input.args)
+      const line = args ? `${cmd} ${args}` : cmd
+      return label && label !== line ? `${label} (${line})` : line
+    }
+    case 'background_status':
+    case 'stop_background': {
+      const id = input.task_id as string | undefined
+      return id ?? ''
     }
     default:
       return genericSummary(input)

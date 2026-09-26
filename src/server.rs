@@ -167,10 +167,20 @@ pub async fn run_server(
     let repeating_task_manager = RepeatingTaskManager::new();
     let run_auditor = RunAuditor::new();
 
+    // In-memory background-process registry. Logs from a previous run are
+    // unreachable (the registry that knew them died with that process), so
+    // clear them before any new task writes there.
+    let background_log_dir = config.data_dir.join(crate::background::LOG_DIR);
+    crate::background::clear_stale_logs(&background_log_dir);
+    let background = Arc::new(crate::background::BackgroundRegistry::new(
+        background_log_dir,
+    ));
+    crate::background::set_global(background.clone());
     let mcp_tokens = McpTokenRegistry::new();
     let push_service = PushService::new(&config.data_dir);
 
     let state = Arc::new(AppState {
+        background,
         plugin_ws_tickets: Default::default(),
         device_registry: Default::default(),
         config,
@@ -203,6 +213,14 @@ pub async fn run_server(
             &state,
             tokio::runtime::Handle::current(),
         )));
+
+    // Background tasks report back to their session through the app's
+    // dispatcher (weakly held: state → background → dispatcher → state).
+    state.background.bind(
+        state.db.clone(),
+        state.broadcaster.clone(),
+        Some(crate::background::WeakAppDispatcher::new(&state)),
+    );
 
     // Bind the provider registry and apply any plugin-registered AI
     // providers (plugins declaring the `provider.register` hook). Runs after
@@ -726,6 +744,7 @@ pub async fn run_server(
     .with_graceful_shutdown(async move {
         shutdown_signal(window_closed).await;
         tracing::info!("Shutdown signal received, shutting down gracefully...");
+        shutdown_state.background.shutdown_all().await;
         shutdown_state.session_manager.shutdown().await;
         shutdown_state.plugins.shutdown().await;
         tracing::info!("Shutdown complete");

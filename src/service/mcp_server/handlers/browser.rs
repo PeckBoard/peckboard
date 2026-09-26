@@ -374,6 +374,7 @@ mod tests {
             provider_registry: None,
             data_dir,
             device_registry: None,
+            background: None,
         }
     }
 

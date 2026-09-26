@@ -156,6 +156,8 @@ fn read_only_tool_names() -> &'static [&'static str] {
         "browser_screenshot",
         "remote_agent_list",
         "remote_agent_screenshot",
+        "background_status",
+        "list_background",
     ]
 }
 
@@ -173,6 +175,8 @@ fn destructive_tool_names() -> &'static [&'static str] {
         "write_file",
         "edit_file",
         "run_command",
+        "run_background",
+        "stop_background",
         "git",
         "upgrade_plugin",
         "browser_act",
@@ -193,6 +197,7 @@ fn open_world_tool_names() -> &'static [&'static str] {
         "parse_web",
         "search_web",
         "run_command",
+        "run_background",
         "run_tests",
         "git",
         "browser_open",
@@ -1574,6 +1579,72 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                 ],
                 "additionalProperties": false
 }),
+        },
+        McpToolDef {
+            name: "run_background".into(),
+            description: "Start a long-running command (build, test suite, dev server, watcher) as a peckboard-managed background task and return IMMEDIATELY with {task_id, pid, log_path}. PREFER THIS over Bash run_in_background, `nohup`, `&`, or sleep-polling for anything that takes more than a minute or two. When the process exits (success, nonzero exit, timeout, or stop) you are notified AUTOMATICALLY in this session with its status and last output lines \u{2014} even if you are idle, a new turn starts \u{2014} so do NOT poll or wait for it: continue with other work or end your turn. Approval works exactly like run_command (workers and bypass run immediately; chats may get 'awaiting_approval' \u{2014} re-call with the SAME command after the user answers). Args are argv (no shell); cwd = project folder; configured env vars are injected and secrets are masked in captured output. Use background_status to peek at output, stop_background to stop it, list_background to see this session's tasks. ALWAYS pass `reason`.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Bare executable name (no path, no shell), e.g. \"cargo\"."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "argv after the command, e.g. [\"test\", \"--release\"]."
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Short human-readable name shown in the UI and in the completion report (defaults to the command line)."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "One short sentence, shown to the user in the chat: why you are running this command."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Kill the task (reported as TIMED OUT) after this many seconds. Default and max 86400 (24h)."
+                    }
+                },
+                "required": ["command", "reason"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "background_status".into(),
+            description: "Status and recent output of one of this session's background tasks (started with run_background). You do NOT need this to learn when a task finishes \u{2014} that report arrives automatically; use it to peek at progress or read more output after the report.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "The task_id returned by run_background." },
+                    "lines": { "type": "integer", "description": "How many trailing output lines to return (default 40, max 2000)." }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "list_background".into(),
+            description: "List this session's background tasks (running and recently finished) with their status, exit code, and log path.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "stop_background".into(),
+            description: "Stop one of this session's running background tasks: SIGTERM to its whole process group, SIGKILL after 5s. The STOPPED report still arrives automatically.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "The task_id returned by run_background." }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
         },
         McpToolDef {
             name: "run_tests".into(),

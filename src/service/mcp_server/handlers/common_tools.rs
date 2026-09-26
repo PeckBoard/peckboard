@@ -88,6 +88,61 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
+        let CommandArgs {
+            command,
+            argv,
+            timeout,
+            reason,
+        } = CommandArgs::parse(&args)?;
+
+        tracing::info!(session_id = %ctx.session_id, command = %command, "MCP tool: run_command");
+
+        let auto_approve = auto_approve_for(ctx).await;
+        let db = ctx.db.clone();
+        let inv = common_tools::inv_from_ctx(ctx);
+        let session_id = ctx.session_id.clone();
+        let cmd = command.clone();
+        let av = argv.clone();
+        let decision = tokio::task::spawn_blocking(move || {
+            cli::decide(&db, &inv, &session_id, &cmd, &av, timeout, auto_approve)
+        })
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+        match decision {
+            cli::Decision::Ran(v) => Ok(v),
+            cli::Decision::Denied(m) => Err(anyhow::anyhow!(m)),
+            cli::Decision::StillWaiting(display) => Ok(still_waiting(&display)),
+            cli::Decision::NeedsPrompt {
+                token,
+                display,
+                options,
+            } => {
+                prompt_for_approval(
+                    ctx,
+                    "Approve running this command?",
+                    "run_command",
+                    reason.as_deref(),
+                    &display,
+                    &options,
+                    &token,
+                )
+                .await
+            }
+        }
+    }
+}
+
+/// The argv-shaped arguments shared by `run_command` and `run_background`.
+pub(super) struct CommandArgs {
+    pub command: String,
+    pub argv: Vec<String>,
+    pub timeout: Option<u64>,
+    pub reason: Option<String>,
+}
+
+impl CommandArgs {
+    pub(super) fn parse(args: &Value) -> anyhow::Result<Self> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -118,79 +173,81 @@ impl McpToolRegistry {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-
-        tracing::info!(session_id = %ctx.session_id, command = %command, "MCP tool: run_command");
-
-        // Workers run without prompting — their exec is already scoped to the
-        // session's own folder, and a human answer would stall the pipeline.
-        // The host-wide bypass setting does the same for chat sessions: an
-        // admin turned the permission gate off, so asking again would make
-        // the setting a lie.
-        let is_worker = ctx
-            .db
-            .get_session(&ctx.session_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.is_worker)
-            .unwrap_or(false);
-        let auto_approve = if is_worker {
-            Some(cli::AutoApprove::Worker)
-        } else if crate::routes::settings::bypass_permissions_for_db((*ctx.db).clone()).await {
-            Some(cli::AutoApprove::Bypass)
-        } else {
-            None
-        };
-        let db = ctx.db.clone();
-        let inv = common_tools::inv_from_ctx(ctx);
-        let session_id = ctx.session_id.clone();
-        let cmd = command.clone();
-        let av = argv.clone();
-        let decision = tokio::task::spawn_blocking(move || {
-            cli::decide(&db, &inv, &session_id, &cmd, &av, timeout, auto_approve)
+        Ok(Self {
+            command,
+            argv,
+            timeout,
+            reason,
         })
-        .await?
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-        match decision {
-            cli::Decision::Ran(v) => Ok(v),
-            cli::Decision::Denied(m) => Err(anyhow::anyhow!(m)),
-            cli::Decision::StillWaiting(display) => Ok(serde_json::json!({
-                "status": "awaiting_approval",
-                "command": display,
-                "message": "Still waiting for the user to approve this command.",
-            })),
-            cli::Decision::NeedsPrompt {
-                token,
-                display,
-                options,
-            } => {
-                emit_plugin_question(
-                    &ctx.db,
-                    &ctx.broadcaster,
-                    &ctx.session_id,
-                    &match &reason {
-                        Some(r) => {
-                            format!("Approve running this command?\n\n    {display}\n\nWhy: {r}")
-                        }
-                        None => format!("Approve running this command?\n\n    {display}"),
-                    },
-                    &options,
-                    &token,
-                    None,
-                )
-                .await?;
-                Ok(serde_json::json!({
-                    "status": "awaiting_approval",
-                    "command": display,
-                    "message": format!(
-                        "Asked the user to approve running `{display}`. Their answer will resume \
-                         this session; then re-call run_command with the same command to proceed."
-                    ),
-                }))
-            }
-        }
     }
+}
+
+/// Whether the caller may skip the interactive approval prompt.
+///
+/// Workers run without prompting — their exec is already scoped to the
+/// session's own folder, and a human answer would stall the pipeline. The
+/// host-wide bypass setting does the same for chat sessions: an admin turned
+/// the permission gate off, so asking again would make the setting a lie.
+pub(super) async fn auto_approve_for(ctx: &ToolCallContext) -> Option<cli::AutoApprove> {
+    let is_worker = ctx
+        .db
+        .get_session(&ctx.session_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.is_worker)
+        .unwrap_or(false);
+    if is_worker {
+        Some(cli::AutoApprove::Worker)
+    } else if crate::routes::settings::bypass_permissions_for_db((*ctx.db).clone()).await {
+        Some(cli::AutoApprove::Bypass)
+    } else {
+        None
+    }
+}
+
+/// The re-call result while the user still hasn't answered the prompt.
+pub(super) fn still_waiting(display: &str) -> Value {
+    serde_json::json!({
+        "status": "awaiting_approval",
+        "command": display,
+        "message": "Still waiting for the user to approve this command.",
+    })
+}
+
+/// Emit the Approve once / Approve always / Deny question and return the
+/// `awaiting_approval` result telling the agent to re-call `tool` with the
+/// same command once the user answers.
+pub(super) async fn prompt_for_approval(
+    ctx: &ToolCallContext,
+    question: &str,
+    tool: &str,
+    reason: Option<&str>,
+    display: &str,
+    options: &[String],
+    token: &str,
+) -> anyhow::Result<Value> {
+    emit_plugin_question(
+        &ctx.db,
+        &ctx.broadcaster,
+        &ctx.session_id,
+        &match reason {
+            Some(r) => format!("{question}\n\n    {display}\n\nWhy: {r}"),
+            None => format!("{question}\n\n    {display}"),
+        },
+        options,
+        token,
+        None,
+    )
+    .await?;
+    Ok(serde_json::json!({
+        "status": "awaiting_approval",
+        "command": display,
+        "message": format!(
+            "Asked the user to approve running `{display}`. Their answer will resume \
+             this session; then re-call {tool} with the same command to proceed."
+        ),
+    }))
 }
 
 #[cfg(test)]
@@ -242,6 +299,7 @@ mod tests {
             provider_registry: None,
             data_dir: None,
             device_registry: None,
+            background: None,
         };
         (ctx, dir)
     }

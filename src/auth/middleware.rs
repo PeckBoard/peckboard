@@ -181,7 +181,10 @@ pub(crate) mod tests {
 
     pub(crate) fn test_state(dir: &std::path::Path) -> Arc<AppState> {
         let provider_registry = Arc::new(crate::provider::registry::ProviderRegistry::new());
+        let db = Db::in_memory().unwrap();
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
         Arc::new(AppState {
+            background: Default::default(),
             plugin_ws_tickets: Default::default(),
             device_registry: Default::default(),
             config: Config {
@@ -193,7 +196,7 @@ pub(crate) mod tests {
                 keep_alive_hours: 0,
                 provider_send_timeout_secs: 300,
             },
-            db: Db::in_memory().unwrap(),
+            db,
             plugins: Arc::new(crate::plugin::manager::PluginManager::empty()),
             builtin_plugins: Arc::new(crate::plugin::builtin::BuiltinPluginRegistry::new()),
             jwt_secret: generate_jwt_secret(),
@@ -201,7 +204,7 @@ pub(crate) mod tests {
             mfa_vault_key: vec![0u8; 32],
             login_limiter: crate::auth::rate_limit::RateLimiter::new(100),
             password_change_limiter: crate::auth::rate_limit::RateLimiter::new(100),
-            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            broadcaster,
             provider_registry: provider_registry.clone(),
             session_manager: crate::provider::manager::SessionManager::new(provider_registry),
             repeating_task_manager: crate::repeating::RepeatingTaskManager::new(),

@@ -168,6 +168,7 @@ impl Fixture {
 
     fn ctx(&self, session_id: &str) -> ToolCallContext {
         ToolCallContext {
+            background: None,
             session_id: session_id.into(),
             project_id: None,
             card_id: None,

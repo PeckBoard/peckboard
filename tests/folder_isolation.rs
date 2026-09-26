@@ -152,6 +152,7 @@ fn ctx(
     project_id: Option<&str>,
 ) -> ToolCallContext {
     ToolCallContext {
+        background: None,
         session_id: session_id.into(),
         project_id: project_id.map(|s| s.to_string()),
         card_id: None,

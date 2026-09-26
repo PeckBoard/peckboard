@@ -85,6 +85,21 @@ impl AutoApprove {
     }
 }
 
+/// The outcome of the approval half of the flow, before anything runs.
+/// `Approved` carries the `approved_via` label for the result. Shared by
+/// `run_command` ([`decide`]) and `run_background`, which runs the approved
+/// command as a peckboard-managed background task instead.
+pub enum Approval {
+    Approved(&'static str),
+    Denied(String),
+    NeedsPrompt {
+        token: String,
+        display: String,
+        options: Vec<String>,
+    },
+    StillWaiting(String),
+}
+
 /// The synchronous core of `run_command`, safe to run inside `spawn_blocking`.
 /// Ports the plugin's two-step approval flow, minus the operator allowlist.
 /// `auto_approve` (worker sessions, or the host-wide bypass setting) skips the
@@ -99,37 +114,61 @@ pub fn decide(
     timeout: Option<u64>,
     auto_approve: Option<AutoApprove>,
 ) -> Result<Decision, String> {
-    // 0. Auto-approval — no prompt, straight to the folder-pinned exec.
+    let key = pending_key(session_id, command, argv);
+    Ok(
+        match decide_approval(db, inv, &key, command, argv, auto_approve)? {
+            Approval::Approved(via) => {
+                Decision::Ran(run_now(db, inv, command, argv, timeout, via)?)
+            }
+            Approval::Denied(m) => Decision::Denied(m),
+            Approval::StillWaiting(d) => Decision::StillWaiting(d),
+            Approval::NeedsPrompt {
+                token,
+                display,
+                options,
+            } => Decision::NeedsPrompt {
+                token,
+                display,
+                options,
+            },
+        },
+    )
+}
+
+/// The approval gate alone: decides whether `command argv` may run for the
+/// caller, without running it. `key` correlates the two-step prompt flow —
+/// [`pending_key`] for `run_command`; a distinct key for another tool so its
+/// pending prompts never consume each other's answers. Blocking (DB) — call
+/// inside `spawn_blocking`.
+pub fn decide_approval(
+    db: &Db,
+    inv: &InvocationContext,
+    key: &str,
+    command: &str,
+    argv: &[String],
+    auto_approve: Option<AutoApprove>,
+) -> Result<Approval, String> {
+    // 0. Auto-approval — no prompt.
     if let Some(via) = auto_approve {
-        return Ok(Decision::Ran(run_now(
-            db,
-            inv,
-            command,
-            argv,
-            timeout,
-            via.label(),
-        )?));
+        return Ok(Approval::Approved(via.label()));
     }
-    // 1. Persisted "always" approval → run now (unrestricted exec).
+    // 1. Persisted "always" approval.
     if always_approved(db, command)? {
-        return Ok(Decision::Ran(run_now(
-            db, inv, command, argv, timeout, "always",
-        )?));
+        return Ok(Approval::Approved("always"));
     }
 
     // 2. Interactive approval, correlated across the two-step flow.
-    let key = pending_key(session_id, command, argv);
-    match pending_token(db, &key)? {
+    match pending_token(db, key)? {
         None => {
             // First call: park a pending request and ask the handler to prompt.
             let token = HostCtx::gen_id();
             store_put(
                 db,
                 PENDING_COLLECTION,
-                &key,
+                key,
                 serde_json::json!({ "token": token, "command": command, "args": argv }),
             )?;
-            Ok(Decision::NeedsPrompt {
+            Ok(Approval::NeedsPrompt {
                 token,
                 display: display(command, argv),
                 options: vec![APPROVE_ONCE.into(), APPROVE_ALWAYS.into(), DENY.into()],
@@ -144,7 +183,7 @@ pub fn decide(
             let ans = get_answer(db, inv, &token)?;
             let status = ans.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if status != "answered" {
-                return Ok(Decision::StillWaiting(display(command, argv)));
+                return Ok(Approval::StillWaiting(display(command, argv)));
             }
 
             let rejected = ans
@@ -153,9 +192,9 @@ pub fn decide(
                 .unwrap_or(false);
             let answer = ans.get("answer").and_then(|v| v.as_str()).unwrap_or("");
             // Consume the one-shot pending record now that it is decided.
-            clear_pending(db, &key)?;
+            clear_pending(db, key)?;
             if rejected || answer == DENY {
-                return Ok(Decision::Denied(format!(
+                return Ok(Approval::Denied(format!(
                     "the user denied running `{}`",
                     display(command, argv)
                 )));
@@ -167,25 +206,11 @@ pub fn decide(
                     command,
                     serde_json::json!({ "approved": true }),
                 )?;
-                Ok(Decision::Ran(run_now(
-                    db,
-                    inv,
-                    command,
-                    argv,
-                    timeout,
-                    "approved_always",
-                )?))
+                Ok(Approval::Approved("approved_always"))
             } else if answer.starts_with(APPROVE_ONCE) {
-                Ok(Decision::Ran(run_now(
-                    db,
-                    inv,
-                    command,
-                    argv,
-                    timeout,
-                    "approved_once",
-                )?))
+                Ok(Approval::Approved("approved_once"))
             } else {
-                Ok(Decision::Denied(format!(
+                Ok(Approval::Denied(format!(
                     "the user did not approve running `{}` (answer: {answer})",
                     display(command, argv)
                 )))
@@ -301,6 +326,15 @@ pub fn pending_key(session_id: &str, command: &str, argv: &[String]) -> String {
     format!("{command}.{:016x}", h.finish())
 }
 
+/// [`pending_key`] for `run_background`: same shape, but salted so a pending
+/// `run_command` prompt for the identical command is never answered (and
+/// consumed) by a `run_background` re-call, or vice versa.
+pub fn background_pending_key(session_id: &str, command: &str, argv: &[String]) -> String {
+    format!(
+        "bg.{}",
+        pending_key(&format!("{session_id}\0background"), command, argv)
+    )
+}
 /// FNV-1a 64-bit — a tiny, dependency-free hash for the correlation key.
 struct Fnv(u64);
 impl Fnv {
