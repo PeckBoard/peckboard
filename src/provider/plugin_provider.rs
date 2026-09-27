@@ -108,12 +108,17 @@ pub fn validate_models(models: &[ModelInfo]) -> Result<(), String> {
 /// its own picker entries (`[Account] Model`). The deleted native providers
 /// served these variants directly; the plugin refresh path must accept them
 /// too or adding an account silently changes nothing in the catalog.
+///
+/// An EMPTY refresh catalog is valid: account-scoped providers list only
+/// `model@acct` entries, so with no accounts configured they offer nothing.
+/// Rejecting it would fall back to the bare registration seed and resurrect
+/// the unscoped ids those providers no longer serve.
 pub fn validate_refresh_models(models: &[ModelInfo]) -> Result<(), String> {
     validate_models_inner(models, true)
 }
 
 fn validate_models_inner(models: &[ModelInfo], allow_account_scoped: bool) -> Result<(), String> {
-    if models.is_empty() {
+    if models.is_empty() && !allow_account_scoped {
         return Err("a provider must register at least one model".into());
     }
     let mut seen = std::collections::HashSet::new();
@@ -2033,6 +2038,12 @@ mod tests {
         let mut r = reg("ok");
         r.models.clear();
         assert!(validate_registration(&r).is_err(), "empty models");
+        // ...but an empty refresh catalog is valid: an account-scoped
+        // provider with no accounts offers nothing, not its bare seed.
+        assert!(
+            validate_refresh_models(&[]).is_ok(),
+            "empty refresh catalog"
+        );
         let mut r = reg("ok");
         r.display_name = "  ".into();
         assert!(validate_registration(&r).is_err(), "blank display name");

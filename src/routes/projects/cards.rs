@@ -182,6 +182,7 @@ pub(super) async fn create_card(
         }
         _ => project.workflow.clone(),
     };
+    crate::routes::settings::check_model_or_400(body.model.as_deref())?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
@@ -425,6 +426,8 @@ pub(super) async fn update_card(
             Json(serde_json::json!({ "error": format!("blocked by plugin {plugin}: {reason}") })),
         ));
     }
+
+    crate::routes::settings::check_model_or_400(body.model.as_ref().and_then(|m| m.as_deref()))?;
 
     // Pull `depends_on` out before the atomic update closure so the
     // body fields it captures don't include the dep set. Replacing

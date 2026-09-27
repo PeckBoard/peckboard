@@ -1019,7 +1019,7 @@ mod tests {
                 serde_json::json!({
                     "card_id": b_id,
                     "workflow": "research",
-                    "model": "claude-opus-4-8",
+                    "model": "claude-opus-4-8@acc_a",
                     "effort": "high",
                     "depends_on": [a_id, b_id],
                 }),
@@ -1030,7 +1030,7 @@ mod tests {
         assert_eq!(edited["card"]["workflow"], serde_json::json!("research"));
         assert_eq!(
             edited["card"]["model"],
-            serde_json::json!("claude-opus-4-8")
+            serde_json::json!("claude-opus-4-8@acc_a")
         );
         assert_eq!(edited["card"]["effort"], serde_json::json!("high"));
         // The self-reference is silently dropped; only the real prereq remains.
@@ -1059,7 +1059,7 @@ mod tests {
         // The change persisted to the row, not just the response.
         let stored = db.get_card(&b_id).await.unwrap().unwrap();
         assert_eq!(stored.workflow, "research");
-        assert_eq!(stored.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(stored.model.as_deref(), Some("claude-opus-4-8@acc_a"));
 
         // An explicit null clears a nullable override; omitted fields are left
         // untouched (workflow stays "research").

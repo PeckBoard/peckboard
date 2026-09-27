@@ -415,6 +415,21 @@ async fn set_default_model(
     set_default_model_value(&state, &model).await
 }
 
+/// 400 when `model` is a bare id on an account provider (see
+/// `registry::check_model`). Every HTTP route that stores a model on a
+/// session, card, project, or repeating task, or overrides one per message,
+/// gates on this.
+pub(crate) fn check_model_or_400(
+    model: Option<&str>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    crate::provider::registry::check_model(model).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })
+}
+
 /// Shared by the route above and the account-delete guard (clearing a
 /// default pinned to the account being force-deleted).
 pub(crate) async fn set_default_model_value(

@@ -2,12 +2,14 @@ import { test, expect, type APIRequestContext } from '../harness'
 
 /**
  * UI e2e for installable bundled crate plugins: removing one from
- * Settings → Plugins deactivates it (its models leave the catalog), the
+ * Settings → Plugins deactivates it (its provider leaves the catalog), the
  * registry browser then offers Install (activation, no download), and
- * installing brings the models back.
+ * installing brings the provider back.
  *
- * Uses `kimi` — one seed model, and restored via API in afterEach so a
- * mid-test failure can't leave later specs in this shard without it.
+ * Uses `kimi` — restored via API in afterEach so a mid-test failure can't
+ * leave later specs in this shard without it. Kimi models are
+ * account-scoped only, so with no account the provider entry (not a model)
+ * is the catalog signal.
  */
 
 const E2E_USER = 'e2e-user'
@@ -22,13 +24,13 @@ async function authenticate(request: APIRequestContext): Promise<string> {
   return token
 }
 
-async function modelIds(request: APIRequestContext, token: string): Promise<string[]> {
+async function providerIds(request: APIRequestContext, token: string): Promise<string[]> {
   const res = await request.get('/api/models', {
     headers: { Authorization: `Bearer ${token}` },
   })
   expect(res.ok()).toBeTruthy()
-  const body = (await res.json()) as { models: { id: string }[] }
-  return body.models.map((m) => m.id)
+  const body = (await res.json()) as { providers: { id: string }[] }
+  return body.providers.map((p) => p.id)
 }
 
 test.afterEach(async ({ request }) => {
@@ -49,7 +51,7 @@ test('a bundled crate plugin removes and reinstalls from the registry', async ({
   expect(baseURL, 'baseURL configured').toBeTruthy()
   const token = await authenticate(request)
 
-  expect((await modelIds(request, token)).some((id) => id.startsWith('kimi:'))).toBe(true)
+  expect(await providerIds(request, token)).toContain('kimi')
 
   await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
   await page.goto('/plugins')
@@ -65,11 +67,9 @@ test('a bundled crate plugin removes and reinstalls from the registry', async ({
   await expect(confirm).toBeVisible()
   await confirm.getByRole('button', { name: 'Remove' }).click()
 
-  // The row leaves the installed list and the models leave the catalog.
+  // The row leaves the installed list and the provider leaves the catalog.
   await expect(page.getByTestId('plugin-card-kimi')).toHaveCount(0)
-  await expect
-    .poll(async () => (await modelIds(request, token)).some((id) => id.startsWith('kimi:')))
-    .toBe(false)
+  await expect.poll(() => providerIds(request, token)).not.toContain('kimi')
 
   // The registry browser offers Install (activation of the compiled-in
   // plugin — crate rows are injected even when remote repos are down).
@@ -79,10 +79,8 @@ test('a bundled crate plugin removes and reinstalls from the registry', async ({
   await expect(install).toHaveAttribute('data-action', 'install')
   await install.click()
 
-  // Models return without any download, and the row is back.
-  await expect
-    .poll(async () => (await modelIds(request, token)).some((id) => id.startsWith('kimi:')))
-    .toBe(true)
+  // The provider returns without any download, and the row is back.
+  await expect.poll(() => providerIds(request, token)).toContain('kimi')
   await expect(page.getByTestId('registry-install-kimi')).toHaveAttribute(
     'data-action',
     'bundled',

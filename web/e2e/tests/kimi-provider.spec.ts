@@ -4,11 +4,11 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
  * Kimi Code (Moonshot AI) provider registration surface.
  *
  * The kimi builtin registers at startup, so with no CLI configured the
- * catalog must still show the provider with its config-default
- * pseudo-model (`kimi:default`, discovery falls back to the seed), a
- * Settings → Providers visibility toggle, and its plugin entry with the
- * settings schema. Real turns need a signed-in `kimi` CLI and are not
- * exercised here.
+ * catalog must still show the provider, a Settings → Providers visibility
+ * toggle, and its plugin entry with the settings schema. Kimi models are
+ * account-scoped only (`kimi:<model>@<acct>`): with no account the
+ * catalog lists no kimi model at all, and never a bare `kimi:<model>`.
+ * Real turns need a signed-in `kimi` CLI and are not exercised here.
  */
 
 const E2E_USER = 'e2e-user'
@@ -36,7 +36,7 @@ test('kimi provider is registered with its config-default model and settings sur
 }) => {
   const { token, authHeader } = await authenticate(request)
 
-  // /api/models: provider present with the seed model.
+  // /api/models: provider present, no bare (non-account) kimi model.
   const modelsRes = await request.get('/api/models', { headers: authHeader })
   expect(modelsRes.ok()).toBeTruthy()
   const models = (await modelsRes.json()) as {
@@ -46,7 +46,8 @@ test('kimi provider is registered with its config-default model and settings sur
   const kimi = models.providers.find((p) => p.id === 'kimi')
   expect(kimi, 'kimi provider missing from /api/models').toBeTruthy()
   expect(kimi!.display_name).toBe('Kimi Code')
-  expect(models.models.some((m) => m.id === 'kimi:default')).toBe(true)
+  const bare = models.models.filter((m) => m.id.startsWith('kimi:') && !m.id.includes('@'))
+  expect(bare.map((m) => m.id)).toEqual([])
 
   // /api/plugins: builtin entry carries the settings schema keys.
   const pluginsRes = await request.get('/api/plugins', { headers: authHeader })

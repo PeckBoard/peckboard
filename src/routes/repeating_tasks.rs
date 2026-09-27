@@ -169,6 +169,7 @@ async fn create_repeating_task(
     let prompt = validate_prompt(&body.prompt)?;
     let schedule_value = validate_schedule(&body.schedule_kind, &body.schedule_value)?;
     let timezone = validate_timezone(body.timezone.as_deref())?;
+    crate::routes::settings::check_model_or_400(body.model.as_deref())?;
 
     // Verify folder exists; without this the task row would reference a
     // non-existent folder and every dispatch would error out at run time.
@@ -300,6 +301,7 @@ async fn update_repeating_task(
         Some(tz) => Some(validate_timezone(tz.as_deref())?),
         None => None,
     };
+    crate::routes::settings::check_model_or_400(body.model.as_ref().and_then(|m| m.as_deref()))?;
 
     // Schedule kind/value must be edited together so we can re-validate.
     // If only one is supplied, fall back to the existing other field.

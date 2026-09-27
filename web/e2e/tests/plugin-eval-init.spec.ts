@@ -70,6 +70,35 @@ async function setClaudeCliPath(
   expect(res.ok(), `update cli_path failed: ${await res.text()}`).toBeTruthy()
 }
 
+/**
+ * Claude models are account-scoped only (`claude:<model>@<acct>`); a bare
+ * `claude:<model>` is rejected at session create. Create a throwaway API-key
+ * account and wait for its scoped model to reach the catalog.
+ */
+async function claudeAccountModel(
+  request: APIRequestContext,
+  auth: Record<string, string>,
+): Promise<{ id: string; model: string }> {
+  const res = await request.post('/api/claude-accounts', {
+    headers: auth,
+    data: {
+      name: `e2e-plugineval-${Date.now()}`,
+      kind: 'api_key',
+      credential: `sk-e2e-plugineval-${Date.now()}`,
+    },
+  })
+  expect(res.ok(), `create account failed: ${await res.text()}`).toBeTruthy()
+  const id = ((await res.json()) as { id: string }).id
+  const model = `claude:claude-opus-5@${id}`
+  await expect
+    .poll(async () => {
+      const models = await request.get('/api/models', { headers: auth })
+      return ((await models.json()) as { models: { id: string }[] }).models.map((m) => m.id)
+    })
+    .toContain(model)
+  return { id, model }
+}
+
 test('hidden on non-claude sessions', async ({ request, page }) => {
   const { token, auth } = await authenticate(request)
   const sessionId = await seedSession(request, auth, 'mock:happy-path')
@@ -86,7 +115,8 @@ test('sends the eval-authoring prompt on a claude session', async ({ request, pa
   const { token, auth } = await authenticate(request)
   // Deterministic spawn failure: no real CLI run, no model usage.
   await setClaudeCliPath(request, auth, '/nonexistent/peckboard-e2e-claude')
-  const sessionId = await seedSession(request, auth, 'claude:claude-opus-5')
+  const account = await claudeAccountModel(request, auth)
+  const sessionId = await seedSession(request, auth, account.model)
 
   try {
     await loadAppAt(page, token, `/sessions/${sessionId}`)
@@ -133,5 +163,6 @@ test('sends the eval-authoring prompt on a claude session', async ({ request, pa
       .toContain('agent-end')
   } finally {
     await setClaudeCliPath(request, auth, null)
+    await request.delete(`/api/claude-accounts/${account.id}?force=true`, { headers: auth })
   }
 })

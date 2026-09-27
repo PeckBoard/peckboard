@@ -525,6 +525,9 @@ pub(crate) fn create_card_impl(db: &Db, input: &str) -> String {
         return error_json("title is required");
     }
 
+    if let Err(e) = crate::provider::registry::check_model(req.model.as_deref()) {
+        return error_json(e);
+    }
     let priority = req.priority.unwrap_or(2);
     if !crate::routes::misc::is_valid_priority(priority) {
         return error_json(format!(
@@ -635,6 +638,9 @@ pub(crate) fn update_card_impl(db: &Db, input: &str) -> String {
     };
 
     let card_id = req.card_id.trim();
+    if let Err(e) = crate::provider::registry::check_model(req.model.as_deref()) {
+        return error_json(e);
+    }
     if card_id.is_empty() {
         return error_json("card_id is required");
     }
@@ -1240,6 +1246,9 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, caller: &TrustedCaller) 
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
+    if let Err(e) = crate::provider::registry::check_model(req.model.as_deref()) {
+        return error_json(e);
+    }
     if req.name.trim().is_empty() {
         return error_json("name is required");
     }
@@ -1364,6 +1373,11 @@ pub(crate) fn update_session_impl(
     // model/account. This path has no handover machinery (every change is a
     // direct write), so recycle on any actual change; mirrors the plain-
     // switch handling in the `PATCH /api/sessions/:id` route.
+    if let Err(e) =
+        crate::provider::registry::check_model(req.model.as_ref().and_then(|m| m.as_deref()))
+    {
+        return error_json(e);
+    }
     let model_changed = matches!(&req.model, Some(m) if *m != prior.model);
     let effort_changed = matches!(&req.effort, Some(e) if *e != prior.effort);
     let update = crate::db::models::UpdateSession {
@@ -2333,6 +2347,9 @@ pub(crate) fn orchestrate_create_session_impl(db: &Db, input: &str) -> String {
         Ok(r) => r,
         Err(e) => return error_json(format!("invalid request: {e}")),
     };
+    if let Err(e) = crate::provider::registry::check_model(req.model.as_deref()) {
+        return error_json(e);
+    }
     if req.name.trim().is_empty() {
         return error_json("name is required");
     }
@@ -6352,11 +6369,11 @@ mod tests {
         let r = update_session_impl(
             &db,
             pid,
-            &format!(r#"{{"session_id":"{sid}","model":"claude:claude-fable-5"}}"#),
+            &format!(r#"{{"session_id":"{sid}","model":"claude:claude-fable-5@acc_a"}}"#),
             &caller,
             Some(rec.clone()),
         );
-        assert!(r.contains("claude-fable-5"), "update: {r}");
+        assert!(r.contains("claude-fable-5@acc_a"), "update: {r}");
         assert_eq!(
             rec.calls.lock().unwrap().as_slice(),
             [format!("recycle:{sid}")]
@@ -6366,7 +6383,7 @@ mod tests {
         let r = update_session_impl(
             &db,
             pid,
-            &format!(r#"{{"session_id":"{sid}","model":"claude:claude-fable-5"}}"#),
+            &format!(r#"{{"session_id":"{sid}","model":"claude:claude-fable-5@acc_a"}}"#),
             &caller,
             Some(rec.clone()),
         );

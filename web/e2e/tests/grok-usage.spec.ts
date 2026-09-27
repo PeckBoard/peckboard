@@ -81,13 +81,29 @@ test('usage gauge sizes a grok session against 500K and strips the grok: prefix'
   expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
 
+  // Grok models are account-scoped only (`grok:<model>@<acct>`); a bare
+  // `grok:grok-4.5` is rejected at create time.
+  const acctRes = await request.post('/api/grok-accounts', {
+    headers: authHeader,
+    data: { name: `e2e-grok-usage-${Date.now()}`, kind: 'api_key', credential: 'xai-e2e' },
+  })
+  expect(acctRes.ok(), `create grok account failed: ${await acctRes.text()}`).toBeTruthy()
+  const acctId = ((await acctRes.json()) as { id: string }).id
+  const model = `grok:grok-4.5@${acctId}`
+  await expect
+    .poll(async () => {
+      const res = await request.get('/api/models', { headers: authHeader })
+      return ((await res.json()) as { models: { id: string }[] }).models.map((m) => m.id)
+    })
+    .toContain(model)
+
   const sessionRes = await request.post('/api/sessions', {
     headers: authHeader,
-    data: { name: 'grok gauge', folder_id: folder.id, model: 'grok:grok-4.5' },
+    data: { name: 'grok gauge', folder_id: folder.id, model },
   })
   expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
   const session = (await sessionRes.json()) as { id: string; model: string | null }
-  expect(session.model).toBe('grok:grok-4.5')
+  expect(session.model).toBe(model)
 
   await loadAt(page, token, '/usage')
   await expect(page.getByTestId('usage-view')).toBeVisible()
@@ -105,4 +121,6 @@ test('usage gauge sizes a grok session against 500K and strips the grok: prefix'
   await expect(detail).toContainText('/ 500.0K')
   await expect(detail).toContainText('grok-4.5')
   await expect(detail).not.toContainText('grok:grok-4.5')
+
+  await request.delete(`/api/grok-accounts/${acctId}?force=true`, { headers: authHeader })
 })

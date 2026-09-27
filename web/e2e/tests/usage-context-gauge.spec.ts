@@ -24,8 +24,11 @@ import { WebSocketImpl, type WsMessageEvent } from './ws-compat'
 const E2E_USER = 'e2e-user'
 const E2E_PASS = 'e2e-password-1234'
 
-/** A model id the registry advertises with a 1M context window. */
-const LONG_CONTEXT_MODEL = 'claude:opus[1m]'
+/** A model name the registry advertises with a 1M context window. Claude
+ *  models are account-scoped only, so the test adds it to the catalog via
+ *  the plugin's `additional_models` setting and scopes it to a throwaway
+ *  API-key account (`claude:opus[1m]@<acct>`). */
+const LONG_CONTEXT_NAME = 'opus[1m]'
 
 type AuthBundle = { token: string; authHeader: { Authorization: string } }
 
@@ -201,81 +204,111 @@ test('session context gauges are sized per model and the header reconciles with 
 
   // Set the long-context model AFTER the run: dispatching a message pins the
   // session to the model it ran with, which would overwrite this.
-  const patchRes = await request.patch(`/api/sessions/${ids.wide}`, {
+  const settingsRes = await request.put('/api/plugins/claude/settings', {
     headers: authHeader,
-    data: { model: LONG_CONTEXT_MODEL },
+    data: { updates: { additional_models: [LONG_CONTEXT_NAME] } },
   })
-  expect(patchRes.ok(), `set model failed: ${await patchRes.text()}`).toBeTruthy()
+  expect(settingsRes.ok(), `set additional_models failed: ${await settingsRes.text()}`).toBeTruthy()
+  const acctRes = await request.post('/api/claude-accounts', {
+    headers: authHeader,
+    data: { name: `e2e-gauge-${Date.now()}`, kind: 'api_key', credential: 'sk-e2e-gauge' },
+  })
+  expect(acctRes.ok(), `create account failed: ${await acctRes.text()}`).toBeTruthy()
+  const acctId = ((await acctRes.json()) as { id: string }).id
+  const LONG_CONTEXT_MODEL = `claude:${LONG_CONTEXT_NAME}@${acctId}`
+  try {
+    await expect
+      .poll(async () => {
+        const res = await request.get('/api/models', { headers: authHeader })
+        return ((await res.json()) as { models: { id: string }[] }).models.map((m) => m.id)
+      })
+      .toContain(LONG_CONTEXT_MODEL)
+    // `force`: the account-scoped id crosses a continuity boundary, and a
+    // plain PATCH would park it behind a handover instead of writing it.
+    const patchRes = await request.patch(`/api/sessions/${ids.wide}`, {
+      headers: authHeader,
+      data: { model: LONG_CONTEXT_MODEL, force: true },
+    })
+    expect(patchRes.ok(), `set model failed: ${await patchRes.text()}`).toBeTruthy()
 
-  // The API is the source of truth for what the UI should render, so read it
-  // and derive every expected string from it.
-  const apiRes = await request.get('/api/usage/sessions', { headers: authHeader })
-  expect(apiRes.ok(), `usage sessions failed: ${await apiRes.text()}`).toBeTruthy()
-  const rows = (await apiRes.json()) as SessionUsageRow[]
-  const billed = (r: SessionUsageRow) =>
-    r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens
-  const wideRow = rows.find((r) => r.id === ids.wide)!
-  const plainRow = rows.find((r) => r.id === ids.plain)!
-  expect(wideRow.model, 'the 1M model reached the rollup').toBe(LONG_CONTEXT_MODEL)
-  expect(billed(wideRow), 'the mock scenario recorded billed tokens').toBeGreaterThan(0)
-  expect(wideRow.total_context_tokens, 'and a context snapshot').toBeGreaterThan(0)
+    // The API is the source of truth for what the UI should render, so read it
+    // and derive every expected string from it.
+    const apiRes = await request.get('/api/usage/sessions', { headers: authHeader })
+    expect(apiRes.ok(), `usage sessions failed: ${await apiRes.text()}`).toBeTruthy()
+    const rows = (await apiRes.json()) as SessionUsageRow[]
+    const billed = (r: SessionUsageRow) =>
+      r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens
+    const wideRow = rows.find((r) => r.id === ids.wide)!
+    const plainRow = rows.find((r) => r.id === ids.plain)!
+    expect(wideRow.model, 'the 1M model reached the rollup').toBe(LONG_CONTEXT_MODEL)
+    expect(billed(wideRow), 'the mock scenario recorded billed tokens').toBeGreaterThan(0)
+    expect(wideRow.total_context_tokens, 'and a context snapshot').toBeGreaterThan(0)
 
-  await loadAt(page, token, '/usage')
-  await expect(page.getByTestId('usage-view')).toBeVisible()
+    await loadAt(page, token, '/usage')
+    await expect(page.getByTestId('usage-view')).toBeVisible()
 
-  // ── Gauge denominator: known 1M-context model. ──
-  const wide = page.getByTestId('usage-session-row').filter({ hasText: names.wide })
-  await expect(wide).toBeVisible()
-  // Measured against 1M, named, and NOT flagged as a default.
-  await expect(wide).toContainText('/ 1.00M')
-  await expect(wide).toContainText('opus[1m]')
-  await expect(wide).not.toContainText('default')
-  // 1.5K of 1M is 0%, so the gauge is nowhere near the danger band the 200K
-  // default used to put it in.
-  await expect(wide).toContainText('(0%)')
-  await expect(wide.locator('.usage-gauge-fill.is-danger')).toHaveCount(0)
+    // ── Gauge denominator: known 1M-context model. ──
+    const wide = page.getByTestId('usage-session-row').filter({ hasText: names.wide })
+    await expect(wide).toBeVisible()
+    // Measured against 1M, named, and NOT flagged as a default.
+    await expect(wide).toContainText('/ 1.00M')
+    await expect(wide).toContainText('opus[1m]')
+    await expect(wide).not.toContainText('default')
+    // 1.5K of 1M is 0%, so the gauge is nowhere near the danger band the 200K
+    // default used to put it in.
+    await expect(wide).toContainText('(0%)')
+    await expect(wide.locator('.usage-gauge-fill.is-danger')).toHaveCount(0)
 
-  // ── Gauge denominator: model we can't resolve. ──
-  const plain = page.getByTestId('usage-session-row').filter({ hasText: names.plain })
-  await expect(plain).toBeVisible()
-  await expect(plain).toContainText(`/ ${fmtTokens(200_000)} default`)
+    // ── Gauge denominator: model we can't resolve. ──
+    const plain = page.getByTestId('usage-session-row').filter({ hasText: names.plain })
+    await expect(plain).toBeVisible()
+    await expect(plain).toContainText(`/ ${fmtTokens(200_000)} default`)
 
-  // ── Header card vs panel rows: one field per label. ──
-  // Every row shows its billed-token total…
-  await expect(wide).toContainText(fmtTokens(billed(wideRow)))
-  await expect(plain).toContainText(fmtTokens(billed(plainRow)))
-  // …and the header card is the sum of exactly that figure over every session,
-  // so the two reconcile.
-  const totalBilled = rows.reduce((s, r) => s + billed(r), 0)
-  await expect(page.getByTestId('usage-stat-billed-tokens-value')).toHaveText(
-    fmtTokens(totalBilled),
-  )
-  await expect(page.getByTestId('usage-stat-billed-tokens')).toContainText('Billed Tokens')
+    // ── Header card vs panel rows: one field per label. ──
+    // Every row shows its billed-token total…
+    await expect(wide).toContainText(fmtTokens(billed(wideRow)))
+    await expect(plain).toContainText(fmtTokens(billed(plainRow)))
+    // …and the header card is the sum of exactly that figure over every session,
+    // so the two reconcile.
+    const totalBilled = rows.reduce((s, r) => s + billed(r), 0)
+    await expect(page.getByTestId('usage-stat-billed-tokens-value')).toHaveText(
+      fmtTokens(totalBilled),
+    )
+    await expect(page.getByTestId('usage-stat-billed-tokens')).toContainText('Billed Tokens')
 
-  // ── Context card is the largest single session, not a meaningless sum. ──
-  const largest = Math.max(...rows.map((r) => r.total_context_tokens))
-  const summed = rows.reduce((s, r) => s + r.total_context_tokens, 0)
-  expect(summed, 'two sessions carry context, so the sum differs from the max').toBeGreaterThan(
-    largest,
-  )
-  await expect(page.getByTestId('usage-stat-largest-context')).toContainText('Largest Context')
-  await expect(page.getByTestId('usage-stat-largest-context-value')).toHaveText(fmtTokens(largest))
+    // ── Context card is the largest single session, not a meaningless sum. ──
+    const largest = Math.max(...rows.map((r) => r.total_context_tokens))
+    const summed = rows.reduce((s, r) => s + r.total_context_tokens, 0)
+    expect(summed, 'two sessions carry context, so the sum differs from the max').toBeGreaterThan(
+      largest,
+    )
+    await expect(page.getByTestId('usage-stat-largest-context')).toContainText('Largest Context')
+    await expect(page.getByTestId('usage-stat-largest-context-value')).toHaveText(
+      fmtTokens(largest),
+    )
 
-  // ── Detail page agrees with the row it was opened from. ──
-  // The turn ran on `mock:usage`, which resolves to no known window, so the
-  // gauge falls back to the session's configured model instead of showing a
-  // 200K denominator the list contradicts.
-  await wide.click()
-  const detailGauge = page.getByTestId('usage-detail-context')
-  await expect(detailGauge).toBeVisible()
-  await expect(detailGauge).toContainText('/ 1.00M')
-  await expect(detailGauge).toContainText('opus[1m]')
-  await expect(page.getByTestId('usage-detail-totals')).toContainText('Billed Tokens')
-  await page.getByRole('button', { name: '← Usage' }).click()
-  await expect(page.getByTestId('usage-totals')).toBeVisible()
+    // ── Detail page agrees with the row it was opened from. ──
+    // The turn ran on `mock:usage`, which resolves to no known window, so the
+    // gauge falls back to the session's configured model instead of showing a
+    // 200K denominator the list contradicts.
+    await wide.click()
+    const detailGauge = page.getByTestId('usage-detail-context')
+    await expect(detailGauge).toBeVisible()
+    await expect(detailGauge).toContainText('/ 1.00M')
+    await expect(detailGauge).toContainText('opus[1m]')
+    await expect(page.getByTestId('usage-detail-totals')).toContainText('Billed Tokens')
+    await page.getByRole('button', { name: '← Usage' }).click()
+    await expect(page.getByTestId('usage-totals')).toBeVisible()
 
-  // ── Costs read as estimates in USD, with the rate table named. ──
-  await expect(page.getByTestId('usage-stat-cost')).toContainText('Est. cost (USD)')
-  await expect(page.getByTestId('usage-cost-footnote')).toContainText('/api/usage/costs')
-  await expect(page.getByTestId('usage-cost-footnote')).toContainText('estimates')
+    // ── Costs read as estimates in USD, with the rate table named. ──
+    await expect(page.getByTestId('usage-stat-cost')).toContainText('Est. cost (USD)')
+    await expect(page.getByTestId('usage-cost-footnote')).toContainText('/api/usage/costs')
+    await expect(page.getByTestId('usage-cost-footnote')).toContainText('estimates')
+  } finally {
+    await request.put('/api/plugins/claude/settings', {
+      headers: authHeader,
+      data: { updates: { additional_models: null } },
+    })
+    await request.delete(`/api/claude-accounts/${acctId}?force=true`, { headers: authHeader })
+  }
 })

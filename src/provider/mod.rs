@@ -113,8 +113,13 @@ fn auto_effort_rank(effort: Option<&str>, is_worker: bool) -> i32 {
     }
 }
 
-/// Provider-aware auto-model resolution. Prefers Claude (unchanged
-/// `auto_model` alias behaviour) when it's usable; otherwise picks the
+/// Provider-aware auto-model resolution over the LIVE catalogs in
+/// `candidates`, so the result is always a real, selectable catalog id —
+/// account-scoped (`model@acct`) for account providers, never a bare alias
+/// that would run on the host's own CLI login. Prefers Claude when it's
+/// usable, picking the catalog entry for `auto_model`'s tier alias
+/// (`haiku`/`sonnet`/`opus`/`fable`, matched on the model part of the id —
+/// the first, i.e. newest, entry of that family wins). Otherwise picks the
 /// highest-tier model from the best usable non-Claude provider, ranking
 /// credentialed providers (`auth == Some(true)`) ahead of providers with no
 /// auth signal (local providers like ollama, `auth == None`) ahead of
@@ -129,11 +134,21 @@ pub fn resolve_auto_model(
 ) -> anyhow::Result<String> {
     let usable = |c: &AutoCandidate| c.auth != Some(false) && !c.models.is_empty();
 
-    if candidates
+    if let Some(claude) = candidates
         .iter()
-        .any(|c| c.provider_id == "claude" && usable(c))
+        .find(|c| c.provider_id == "claude" && usable(c))
     {
-        return Ok(auto_model(effort, is_worker).to_string());
+        let alias = auto_model(effort, is_worker);
+        let base = |m: &stream::ModelInfo| registry::split_model_account(&m.id).0 == alias;
+        let family = |m: &stream::ModelInfo| registry::split_model_account(&m.id).0.contains(alias);
+        let pick = claude
+            .models
+            .iter()
+            .find(|m| base(m))
+            .or_else(|| claude.models.iter().find(|m| family(m)));
+        if let Some(m) = pick {
+            return Ok(format!("claude:{}", m.id));
+        }
     }
 
     let mut ranked: Vec<&AutoCandidate> = candidates.iter().filter(|c| usable(c)).collect();
@@ -147,7 +162,7 @@ pub fn resolve_auto_model(
 
     let chosen = ranked.into_iter().next().ok_or_else(|| {
         anyhow::anyhow!(
-            "Auto mode has no usable AI provider: add credentials or a local provider in \
+            "Auto mode has no usable AI provider: add an account or a local provider in \
              Settings \u{2192} Providers & Accounts."
         )
     })?;
@@ -221,11 +236,16 @@ mod auto_tests {
 
     #[test]
     fn resolve_auto_model_prefers_claude_when_usable() {
-        let candidates = vec![
+        // Live account-scoped catalog: only `model@acct` ids exist.
+        let scoped = claude_models()
+            .into_iter()
+            .map(|m| model(&format!("{}@acc_a", m.id), m.tier))
+            .collect();
+        let mut candidates = vec![
             AutoCandidate {
                 provider_id: "claude".into(),
                 auth: Some(true),
-                models: claude_models(),
+                models: scoped,
             },
             AutoCandidate {
                 provider_id: "ollama".into(),
@@ -233,14 +253,25 @@ mod auto_tests {
                 models: vec![model("llama3", 0)],
             },
         ];
-        // Identical to plain `auto_model` — no regression when Claude works.
+        // Same tier routing as `auto_model`, but a real scoped catalog id —
+        // never the bare alias, which would run on the host's own login.
         assert_eq!(
             resolve_auto_model(&candidates, Some("high"), false).unwrap(),
-            auto_model(Some("high"), false)
+            "claude:claude-opus-4-8@acc_a"
         );
         assert_eq!(
             resolve_auto_model(&candidates, None, true).unwrap(),
-            auto_model(None, true)
+            "claude:claude-sonnet-4-6@acc_a"
+        );
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("max"), false).unwrap(),
+            "claude:claude-fable-5@acc_a"
+        );
+        // No Claude account → empty catalog → not usable; never a bare id.
+        candidates[0].models.clear();
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("high"), false).unwrap(),
+            "ollama:llama3"
         );
     }
 

@@ -109,6 +109,52 @@ test('add, list, expose-in-picker, and delete a Claude account', async ({ reques
     .not.toContain('[E2E Work] Claude Opus 4.8')
 })
 
+test('model picker lists only account-scoped Claude models, never bare ones', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const auth = { Authorization: `Bearer ${token}` }
+
+  const res = await request.post('/api/claude-accounts', {
+    headers: auth,
+    data: { name: 'E2E Scoped', kind: 'api_key', credential: `sk-ant-e2e-scoped-${Date.now()}` },
+  })
+  expect(res.ok(), `create account failed: ${await res.text()}`).toBeTruthy()
+  const acctId = ((await res.json()) as { id: string }).id
+
+  try {
+    await expect
+      .poll(() => accountModelLabels(request, token))
+      .toContain('[E2E Scoped] Claude Opus 4.8')
+
+    // API: every Claude catalog id carries this account's `@` suffix.
+    const models = (await (await request.get('/api/models', { headers: auth })).json()) as {
+      models: { id: string }[]
+    }
+    const claudeIds = models.models.map((m) => m.id).filter((id) => id.startsWith('claude:'))
+    expect(claudeIds.length).toBeGreaterThan(0)
+    expect(claudeIds.filter((id) => !id.endsWith(`@${acctId}`))).toEqual([])
+
+    // UI: the New Session picker offers the scoped entry and no bare one.
+    await loadApp(page, token)
+    await page.locator('.tab-new').click()
+    await page.getByTestId('new-session-model').click()
+    await page.getByTestId('new-session-model-search').fill('Opus 4.8')
+    await expect(
+      page.getByTestId(`new-session-model-option-claude:claude-opus-4-8@${acctId}`),
+    ).toBeVisible()
+    await expect(page.getByTestId('new-session-model-option-claude:claude-opus-4-8')).toHaveCount(0)
+    const optionIds = await page
+      .locator('[data-testid^="new-session-model-option-claude:"]')
+      .evaluateAll((els) => els.map((e) => e.getAttribute('data-testid') ?? ''))
+    expect(optionIds.length).toBeGreaterThan(0)
+    expect(optionIds.filter((id) => !id.endsWith(`@${acctId}`))).toEqual([])
+  } finally {
+    await request.delete(`/api/claude-accounts/${acctId}?force=true`, { headers: auth })
+  }
+})
+
 test('browser login flow: generate URL, paste code, forward the PKCE login', async ({
   request,
   page,

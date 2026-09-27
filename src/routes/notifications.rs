@@ -281,6 +281,7 @@ async fn enqueue_queued_message(
     Path(session_id): Path<String>,
     Json(body): Json<QueueMessageRequest>,
 ) -> impl IntoResponse {
+    crate::routes::settings::check_model_or_400(body.model.as_deref())?;
     let now = chrono::Utc::now().to_rfc3339();
     let broadcast_session_id = session_id.clone();
 

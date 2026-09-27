@@ -165,6 +165,7 @@ async fn create_session(
     tracing::info!(name = %body.name, folder_id = %body.folder_id, "Creating session");
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
+    crate::routes::settings::check_model_or_400(body.model.as_deref())?;
 
     // Resolve a selected library prompt into (name, body). Empty/None clears
     // both; an unknown name is a 400. Some => set both columns; None => leave
@@ -373,6 +374,7 @@ async fn update_session(
     Json(body): Json<UpdateSessionRequest>,
 ) -> impl IntoResponse {
     tracing::info!(session_id = %id, "Updating session");
+    crate::routes::settings::check_model_or_400(body.model.as_ref().and_then(|m| m.as_deref()))?;
 
     // Snapshot first: a force switch needs the current continuity key
     // without going through `maybe_handover_target` (which 409s workers).

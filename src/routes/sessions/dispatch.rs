@@ -108,6 +108,7 @@ pub(super) async fn send_message(
     Json(body): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
     tracing::info!(session_id = %id, "Sending message");
+    crate::routes::settings::check_model_or_400(body.model.as_deref())?;
     // Verify session exists
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
@@ -224,12 +225,14 @@ pub(super) async fn send_message(
             crate::provider::manager::DEFAULT_PROVIDER,
         );
         // The model the pre-hatcher researches on: the user's Settings
-        // override when set, otherwise the provider's cheapest priced model.
+        // override when set, otherwise the provider's cheapest priced model
+        // (on the effective model's account when the catalog is scoped).
+        let (_, account) = crate::provider::registry::split_model_account(&effective_model);
         let cheap_model = match crate::routes::settings::pre_hatcher_model(&state).await {
             Some(m) => Some(m),
             None => state
                 .provider_registry
-                .cheapest_model(&provider_id)
+                .cheapest_model(&provider_id, account)
                 .await
                 .map(|m| format!("{provider_id}:{m}")),
         };
@@ -1227,7 +1230,10 @@ mod resolve_effective_model_tests {
             crate::provider::manager::DEFAULT_PROVIDER,
         );
         assert_eq!(provider_id, "ollama");
-        let cheap = state.provider_registry.cheapest_model(&provider_id).await;
+        let cheap = state
+            .provider_registry
+            .cheapest_model(&provider_id, None)
+            .await;
         assert_eq!(cheap.as_deref(), Some("echo"));
     }
 

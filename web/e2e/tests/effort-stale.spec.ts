@@ -139,7 +139,9 @@ test.describe('PATCH effort:null clears server-side', () => {
       data: {
         name: 'effort-stale-session',
         folder_id: folder.id,
-        model: 'claude:claude-opus-5',
+        // Real catalog ids only: account providers (claude/cursor/…) list
+        // only `model@acct` ids, and create/PATCH reject anything else.
+        model: 'mock:happy-path',
         effort: 'high',
       },
     })
@@ -147,14 +149,15 @@ test.describe('PATCH effort:null clears server-side', () => {
     const session = (await createRes.json()) as { id: string; effort: string | null }
     expect(session.effort).toBe('high')
 
-    // The exact PATCH `sessionModelPatch` produces for claude(high) → cursor.
+    // The PATCH shape `sessionModelPatch` produces for a switch to a
+    // ladder-less model: model + explicit effort:null.
     const patchRes = await request.patch(`/api/sessions/${session.id}`, {
       headers: authHeader,
-      data: { model: 'cursor:gpt-5', effort: null },
+      data: { model: 'mock:echo', effort: null },
     })
     expect(patchRes.ok(), `patch failed: ${await patchRes.text()}`).toBeTruthy()
     const patched = (await patchRes.json()) as { model: string | null; effort: string | null }
-    expect(patched.model).toBe('cursor:gpt-5')
+    expect(patched.model).toBe('mock:echo')
     expect(patched.effort).toBeNull()
 
     // And an absent key still leaves the field alone.

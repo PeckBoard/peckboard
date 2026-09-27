@@ -553,6 +553,7 @@ impl McpToolRegistry {
             .get("model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        crate::provider::registry::check_model(model.as_deref()).map_err(anyhow::Error::msg)?;
         let effort = args
             .get("effort")
             .and_then(|v| v.as_str())
@@ -911,6 +912,8 @@ impl McpToolRegistry {
         // null (or empty string) clears it back to the default, and omitting
         // the key leaves it untouched.
         let model = parse_nullable_override(&args, "model");
+        crate::provider::registry::check_model(model.as_ref().and_then(|m| m.as_deref()))
+            .map_err(anyhow::Error::msg)?;
         let effort = parse_nullable_override(&args, "effort");
         if let Some(Some(e)) = &effort {
             validate_effort(Some(e))?;

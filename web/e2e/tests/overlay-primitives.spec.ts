@@ -57,6 +57,48 @@ async function loadApp(page: Page, token: string, route: string) {
   await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
 }
 
+/**
+ * Claude accounts created during a test, torn down after it. The catalog
+ * only lists account-scoped Claude models, so switching to Claude needs an
+ * account — and `claude-accounts.spec.ts` asserts the empty state.
+ */
+const createdAccounts: string[] = []
+
+test.afterEach(async ({ request }) => {
+  const { authHeader } = await authenticate(request)
+  while (createdAccounts.length > 0) {
+    const id = createdAccounts.pop() as string
+    await request.delete(`/api/claude-accounts/${id}?force=true`, { headers: authHeader })
+  }
+})
+
+/** Create an API-key Claude account; resolves to its scoped Opus 4.8 model id. */
+async function claudeAccountModel(
+  request: APIRequestContext,
+  authHeader: Record<string, string>,
+): Promise<string> {
+  const res = await request.post('/api/claude-accounts', {
+    headers: authHeader,
+    data: {
+      name: `e2e-overlay-${Date.now()}`,
+      kind: 'api_key',
+      credential: `sk-e2e-overlay-${Date.now()}`,
+    },
+  })
+  expect(res.ok(), `create account failed: ${await res.text()}`).toBeTruthy()
+  const id = ((await res.json()) as { id: string }).id
+  createdAccounts.push(id)
+  const model = `claude:claude-opus-4-8@${id}`
+  await expect
+    .poll(async () => {
+      const models = await request.get('/api/models', { headers: authHeader })
+      const body = (await models.json()) as { models: { id: string }[] }
+      return body.models.map((m) => m.id)
+    })
+    .toContain(model)
+  return model
+}
+
 test('model picker: arrows + Enter pick a model, Escape closes only the popup', async ({
   request,
   page,
@@ -128,6 +170,7 @@ test('cross-provider switch prompt is a real dialog: Escape cancels it', async (
 
   const { token, authHeader } = await authenticate(request)
   const { sessionId } = await seedSession(request, authHeader, 'mock:echo')
+  const claudeModel = await claudeAccountModel(request, authHeader)
 
   // The prompt only appears for a session that HAS a conversation to lose.
   const send = await request.post(`/api/sessions/${sessionId}/message`, {
@@ -155,7 +198,7 @@ test('cross-provider switch prompt is a real dialog: Escape cancels it', async (
   await trigger.click()
   // Switching to a Claude model leaves the mock provider — a continuity-key
   // change, so the switch has to be confirmed.
-  await page.getByTestId('chat-toolbar-model-option-claude:claude-opus-4-8').click()
+  await page.getByTestId(`chat-toolbar-model-option-${claudeModel}`).click()
 
   const dialog = page.getByTestId('model-switch-prompt')
   await expect(dialog).toBeVisible()
@@ -191,6 +234,7 @@ test('force switch keeps the transcript and does not park a handover', async ({
 
   const { token, authHeader } = await authenticate(request)
   const { sessionId } = await seedSession(request, authHeader, 'mock:echo')
+  const claudeModel = await claudeAccountModel(request, authHeader)
 
   const send = await request.post(`/api/sessions/${sessionId}/message`, {
     headers: authHeader,
@@ -215,7 +259,7 @@ test('force switch keeps the transcript and does not park a handover', async ({
   const trigger = page.getByTestId('chat-toolbar-model')
   await expect(trigger).toBeVisible({ timeout: 10_000 })
   await trigger.click()
-  await page.getByTestId('chat-toolbar-model-option-claude:claude-opus-4-8').click()
+  await page.getByTestId(`chat-toolbar-model-option-${claudeModel}`).click()
 
   const dialog = page.getByTestId('model-switch-prompt')
   await expect(dialog).toBeVisible()
@@ -229,7 +273,7 @@ test('force switch keeps the transcript and does not park a handover', async ({
     handover_to_model: string | null
     conversation_id: string | null
   }
-  expect(detail.model).toBe('claude:claude-opus-4-8')
+  expect(detail.model).toBe(claudeModel)
   expect(detail.handover_to_model).toBeNull()
   expect(detail.conversation_id).toBeNull()
 

@@ -124,36 +124,68 @@ pub fn merge_catalog(
     for id in discovered.into_iter().chain(extra) {
         add(id);
     }
-    if !accounts.is_empty() {
-        let base = models.clone();
-        for (acct_id, acct_name) in accounts {
-            for m in &base {
-                let Some(id) = m.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if id.contains('@') {
-                    continue;
-                }
-                let scoped = format!("{id}@{acct_id}");
-                if seen.iter().any(|s| s == &scoped) {
-                    continue;
-                }
-                seen.push(scoped.clone());
-                let mut copy = m.clone();
-                if let Some(obj) = copy.as_object_mut() {
-                    obj.insert("id".into(), json!(scoped));
-                    let name = obj
-                        .get("display_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(id);
-                    obj.insert(
-                        "display_name".into(),
-                        json!(format!("[{acct_name}] {name}")),
-                    );
-                }
-                models.push(copy);
+    account_scoped(&models, accounts)
+}
+
+/// Per-account copies of every bare `base` entry (`<id>@<acct>`, labelled
+/// `[<acct name>] <name>`). ONLY these are offered: a bare id runs on the
+/// host's own CLI login, which is often not signed in — so zero configured
+/// accounts yields an empty catalog.
+pub fn account_scoped(base: &[Value], accounts: &[(String, String)]) -> Value {
+    let mut out: Vec<Value> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (acct_id, acct_name) in accounts {
+        for m in base {
+            let Some(id) = m.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if id.contains('@') {
+                continue;
             }
+            let scoped = format!("{id}@{acct_id}");
+            if seen.iter().any(|s| s == &scoped) {
+                continue;
+            }
+            seen.push(scoped.clone());
+            let mut copy = m.clone();
+            if let Some(obj) = copy.as_object_mut() {
+                obj.insert("id".into(), json!(scoped));
+                let name = obj
+                    .get("display_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(id);
+                obj.insert(
+                    "display_name".into(),
+                    json!(format!("[{acct_name}] {name}")),
+                );
+            }
+            out.push(copy);
         }
     }
-    Value::Array(models)
+    Value::Array(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_offers_only_account_scoped_ids() {
+        let seed = json!([{ "id": "m1", "display_name": "M1" }]);
+        let accts = vec![("a1".to_string(), "Work".to_string())];
+        let make = |id: &str| json!({ "id": id, "display_name": id });
+        let out = merge_catalog(seed.clone(), vec!["m2".into()], Vec::new(), &accts, make);
+        let ids: Vec<&str> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["m1@a1", "m2@a1"]);
+        assert_eq!(out[0]["display_name"], "[Work] M1");
+        assert_eq!(
+            merge_catalog(seed, Vec::new(), Vec::new(), &[], make),
+            json!([])
+        );
+    }
 }

@@ -185,12 +185,19 @@ struct RegisteredProvider {
 /// the dispatcher uses to actually drive a run.
 pub struct ProviderRegistry {
     providers: Mutex<HashMap<String, RegisteredProvider>>,
+    /// Last catalog each provider's `dynamic_models()` refresh returned, by
+    /// provider id. Served when a later refresh fails (busy WASM instance,
+    /// plugin error) instead of the registration seed: account-scoped
+    /// providers list only `model@acct` ids, and their bare seed must never
+    /// come back just because one refresh failed.
+    last_good: std::sync::Mutex<HashMap<String, Vec<ModelInfo>>>,
 }
 
 impl ProviderRegistry {
     pub fn new() -> Self {
         ProviderRegistry {
             providers: Mutex::new(HashMap::new()),
+            last_good: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -204,6 +211,7 @@ impl ProviderRegistry {
             info.display_name,
             info.models.len()
         );
+        self.last_good.lock().unwrap().remove(&info.id);
         providers.insert(info.id.clone(), RegisteredProvider { info, provider });
     }
 
@@ -214,10 +222,40 @@ impl ProviderRegistry {
     pub async fn unregister(&self, id: &str) -> bool {
         let mut providers = self.providers.lock().await;
         let removed = providers.remove(id).is_some();
+        self.last_good.lock().unwrap().remove(id);
         if removed {
             tracing::info!("Unregistered provider '{id}'");
         }
         removed
+    }
+
+    /// A provider's effective catalog: a fresh `dynamic_models()` refresh
+    /// (remembered as last-good), else the last-good refresh, else the
+    /// registration seed `info.models`. The seed is only served until the
+    /// first refresh succeeds, so a failed refresh can't resurrect bare ids
+    /// an account-scoped catalog no longer offers. Call with the registry
+    /// lock released — `dynamic_models()` can be slow.
+    async fn effective_models(
+        &self,
+        info: &ProviderInfo,
+        provider: &Arc<dyn AgentProvider>,
+    ) -> Vec<ModelInfo> {
+        match provider.dynamic_models().await {
+            Some(models) => {
+                self.last_good
+                    .lock()
+                    .unwrap()
+                    .insert(info.id.clone(), models.clone());
+                models
+            }
+            None => self
+                .last_good
+                .lock()
+                .unwrap()
+                .get(&info.id)
+                .cloned()
+                .unwrap_or_else(|| info.models.clone()),
+        }
     }
     /// Get provider metadata by ID.
     pub async fn get_info(&self, id: &str) -> Option<ProviderInfo> {
@@ -277,10 +315,7 @@ impl ProviderRegistry {
         };
         let mut out = Vec::with_capacity(entries.len());
         for (info, provider) in entries {
-            let models = match provider.dynamic_models().await {
-                Some(models) => models,
-                None => info.models.clone(),
-            };
+            let models = self.effective_models(&info, &provider).await;
             out.push(ProviderInfo { models, ..info });
         }
         out
@@ -294,7 +329,9 @@ impl ProviderRegistry {
     /// hides a seed model an outdated external catalog doesn't advertise yet
     /// (the Claude CLI's initialize handshake omitting `claude-fable-5`, say).
     /// Plugin-facing listings use the union so every registry-known model
-    /// stays selectable.
+    /// stays selectable. An account-scoped catalog (every entry `model@acct`,
+    /// or empty because no account exists) is NOT unioned: its bare seed ids
+    /// are no longer selectable and must not leak back in.
     pub async fn list_providers_with_models_union_except(
         &self,
         exclude: &std::collections::HashSet<String>,
@@ -309,17 +346,17 @@ impl ProviderRegistry {
         };
         let mut out = Vec::with_capacity(entries.len());
         for (info, provider) in entries {
-            let models = match provider.dynamic_models().await {
-                Some(mut dynamic) => {
-                    for m in &info.models {
-                        if !dynamic.iter().any(|d| d.id == m.id) {
-                            dynamic.push(m.clone());
-                        }
+            let mut models = self.effective_models(&info, &provider).await;
+            let scoped_only = models
+                .iter()
+                .all(|d| split_model_account(&d.id).1.is_some());
+            if !scoped_only {
+                for m in &info.models {
+                    if !models.iter().any(|d| d.id == m.id) {
+                        models.push(m.clone());
                     }
-                    dynamic
                 }
-                None => info.models.clone(),
-            };
+            }
             out.push(ProviderInfo { models, ..info });
         }
         out
@@ -343,28 +380,37 @@ impl ProviderRegistry {
         }
         out
     }
+
     /// Provider candidates for auto-model resolution: id, best-effort auth
-    /// status, and the STATIC model catalog (not `dynamic_models` — that can
-    /// probe a CLI and is too slow for the dispatch hot path this feeds).
-    /// Excludes the `mock` provider: it is the scripted dev/test vehicle and
-    /// must never be auto-routed to for real work. Also excludes any id in
-    /// `exclude` — the hidden/disabled set from Settings → Providers &
-    /// Accounts — so auto-routing never lands on a provider the user hid.
+    /// status, and the LIVE effective catalog (see `effective_models`), so
+    /// Auto only ever picks a selectable id — account-scoped `model@acct`
+    /// for account providers, never a bare seed id that would run on the
+    /// host's own CLI login. The registry lock is released before the
+    /// provider calls. Excludes the `mock` provider: it is the scripted
+    /// dev/test vehicle and must never be auto-routed to for real work. Also
+    /// excludes any id in `exclude` — the hidden/disabled set from Settings
+    /// → Providers & Accounts — so auto-routing never lands on a provider
+    /// the user hid.
     pub async fn auto_model_candidates(
         &self,
         exclude: &std::collections::HashSet<String>,
     ) -> Vec<crate::provider::AutoCandidate> {
-        let providers = self.providers.lock().await;
-        let mut out = Vec::with_capacity(providers.len());
-        for r in providers.values() {
-            if r.info.id == "mock" || exclude.contains(&r.info.id) {
-                continue;
-            }
-            let auth = r.provider.auth_configured().await;
+        let entries: Vec<(ProviderInfo, Arc<dyn AgentProvider>)> = {
+            let providers = self.providers.lock().await;
+            providers
+                .values()
+                .filter(|r| r.info.id != "mock" && !exclude.contains(&r.info.id))
+                .map(|r| (r.info.clone(), r.provider.clone()))
+                .collect()
+        };
+        let mut out = Vec::with_capacity(entries.len());
+        for (info, provider) in entries {
+            let auth = provider.auth_configured().await;
+            let models = self.effective_models(&info, &provider).await;
             out.push(crate::provider::AutoCandidate {
-                provider_id: r.info.id.clone(),
+                provider_id: info.id,
                 auth,
-                models: r.info.models.clone(),
+                models,
             });
         }
         out
@@ -388,7 +434,9 @@ impl ProviderRegistry {
     /// Whether the given model id resolves to a thinking (reasoning) model.
     /// Gates planning. Unknown models return `false` (planning is refused
     /// rather than risked). Accepts `provider:model`, bare `model`, and an
-    /// optional `@account` suffix.
+    /// optional `@account` suffix. Account-scoped catalogs list only
+    /// `model@acct` entries, so the lookup matches on the base model: the
+    /// thinking capability is a property of the model, not the account.
     pub async fn is_thinking_model(&self, model_id: &str) -> bool {
         let (base, _account) = split_model_account(model_id);
         let (provider_id, model) = Self::parse_model_id(base, "claude");
@@ -404,33 +452,36 @@ impl ProviderRegistry {
         }) else {
             return false;
         };
-        let models = match provider.dynamic_models().await {
-            Some(models) => models,
-            None => info.models,
-        };
+        let models = self.effective_models(&info, &provider).await;
         models
             .iter()
-            .find(|m| m.id == model)
+            .find(|m| split_model_account(&m.id).0 == model)
             .is_some_and(|m| m.is_thinking())
     }
     /// The cheapest model `provider_id` offers, ranked by the provider's own
     /// published price (input + output USD per million tokens, via
-    /// `AgentProvider::model_price`). `None` when the provider is unknown or
-    /// prices none of its models — an unpriced model is unknown, never free.
-    /// Ties keep the earlier catalog entry.
-    pub async fn cheapest_model(&self, provider_id: &str) -> Option<String> {
+    /// `AgentProvider::model_price`, looked up by the base model so an
+    /// account-scoped `model@acct` entry prices like its model). Returns the
+    /// catalog id verbatim — account-scoped when the catalog is — so the
+    /// result is always selectable. When `account` is given, entries on that
+    /// account win over the rest, keeping a turn on the caller's account.
+    /// `None` when the provider is unknown or prices none of its models — an
+    /// unpriced model is unknown, never free. Ties keep the earlier entry.
+    pub async fn cheapest_model(&self, provider_id: &str, account: Option<&str>) -> Option<String> {
         let (info, provider) = {
             let providers = self.providers.lock().await;
             let r = providers.get(provider_id)?;
             (r.info.clone(), r.provider.clone())
         };
-        let models = match provider.dynamic_models().await {
-            Some(models) => models,
-            None => info.models,
-        };
+        let models = self.effective_models(&info, &provider).await;
+        let on_account = |id: &str| account.is_some() && split_model_account(id).1 == account;
+        let prefer_account = models.iter().any(|m| on_account(&m.id));
         let mut best: Option<(String, f64)> = None;
         for m in &models {
-            if let Some((input, output)) = provider.model_price(&m.id) {
+            if prefer_account && !on_account(&m.id) {
+                continue;
+            }
+            if let Some((input, output)) = provider.model_price(split_model_account(&m.id).0) {
                 let total = input + output;
                 if best.as_ref().map_or(true, |(_, b)| total < *b) {
                     best = Some((m.id.clone(), total));
@@ -448,6 +499,31 @@ impl ProviderRegistry {
             None => (default_provider.to_string(), model_id.to_string()),
         }
     }
+}
+/// Providers whose catalogs list only account-scoped `model@acct` ids.
+const ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok", "kimi", "codex"];
+
+/// Validate a user/agent-supplied model id before it is stored on a
+/// session, card, project, or repeating task, or used for a turn. Only a
+/// bare id (no `@account`) on an account provider is refused — it would run
+/// on the host's own CLI login. A bare string with no provider prefix counts
+/// as `claude:`. `None` / empty / `auto` / `default` and every other id pass
+/// (mock's hidden scenarios, cursor, ollama, …).
+pub fn check_model(model: Option<&str>) -> Result<(), String> {
+    let Some(model) = model.map(str::trim) else {
+        return Ok(());
+    };
+    if crate::provider::is_auto_model(model) {
+        return Ok(());
+    }
+    let (provider_id, rest) = ProviderRegistry::parse_model_id(model, "claude");
+    if ACCOUNT_PROVIDERS.contains(&provider_id.as_str()) && split_model_account(&rest).1.is_none() {
+        return Err(format!(
+            "model '{provider_id}:{rest}' needs an account: use a `model@account` id \
+             from list_models (Settings \u{2192} Providers & Accounts)"
+        ));
+    }
+    Ok(())
 }
 
 /// Split a (possibly account-scoped) model id into its base model and the
@@ -603,11 +679,99 @@ mod tests {
         // `echo` (0.1 + 0.5) undercuts `happy-path` (1.0 + 5.0); the
         // unpriced scenarios never win even though they'd sort "free".
         assert_eq!(
-            registry.cheapest_model("mock").await.as_deref(),
+            registry.cheapest_model("mock", None).await.as_deref(),
             Some("echo")
         );
         // Unknown provider → no answer.
-        assert_eq!(registry.cheapest_model("nope").await, None);
+        assert_eq!(registry.cheapest_model("nope", None).await, None);
+    }
+
+    /// Account-scoped catalogs list only `model@acct` ids (no bare entries):
+    /// the helpers must match on the base model and hand back a real,
+    /// selectable scoped catalog id.
+    #[tokio::test]
+    async fn helpers_resolve_account_scoped_catalog_ids() {
+        let registry = ProviderRegistry::new();
+        let scoped = |id: &str, acct: &str, caps: &[&str]| ModelInfo {
+            id: format!("{id}@{acct}"),
+            display_name: format!("[{acct}] {id}"),
+            capabilities: caps.iter().map(|c| c.to_string()).collect(),
+            tier: 1,
+        };
+        registry
+            .register(
+                Arc::new(NoopProvider::new()),
+                ProviderInfo {
+                    id: "mock".into(),
+                    display_name: "Mock".into(),
+                    models: vec![
+                        scoped("happy-path", "acc_a", &[]),
+                        scoped("echo", "acc_a", &[]),
+                        scoped("plan-review", "acc_a", &["reasoning"]),
+                        scoped("happy-path", "acc_b", &[]),
+                        scoped("echo", "acc_b", &[]),
+                    ],
+                    effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+
+        assert!(registry.is_thinking_model("mock:plan-review@acc_a").await);
+        assert!(!registry.is_thinking_model("mock:echo@acc_a").await);
+        assert!(!registry.is_thinking_model("mock:nope@acc_a").await);
+
+        // Scoped id returned, never the bare `echo`; the caller's account wins.
+        assert_eq!(
+            registry.cheapest_model("mock", None).await.as_deref(),
+            Some("echo@acc_a")
+        );
+        assert_eq!(
+            registry
+                .cheapest_model("mock", Some("acc_b"))
+                .await
+                .as_deref(),
+            Some("echo@acc_b")
+        );
+        // An account the catalog doesn't list falls back to the whole catalog.
+        assert_eq!(
+            registry
+                .cheapest_model("mock", Some("acc_gone"))
+                .await
+                .as_deref(),
+            Some("echo@acc_a")
+        );
+    }
+
+    /// Create/edit/send validation refuses only a bare id on an account
+    /// provider (bare strings count as claude); everything else passes.
+    #[test]
+    fn check_model_rejects_only_bare_account_provider_ids() {
+        for ok in [
+            None,
+            Some(""),
+            Some("auto"),
+            Some("default"),
+            Some("claude:claude-opus-4-8@acc_a"),
+            Some("claude-opus-4-8@acc_a"),
+            Some("grok:grok-4@acc_g"),
+            Some("mock:auth-error-once"),
+            Some("cursor:gpt-5"),
+            Some("ollama:llama3"),
+        ] {
+            assert!(check_model(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "claude:claude-opus-4-8",
+            "claude-opus-4-8",
+            "opus",
+            "grok:grok-4",
+            "kimi:kimi-k2",
+            "codex:gpt-5-codex",
+        ] {
+            let err = check_model(Some(bad)).unwrap_err();
+            assert!(err.contains("needs an account"), "{bad}: {err}");
+        }
     }
 
     #[tokio::test]

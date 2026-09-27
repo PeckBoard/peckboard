@@ -281,6 +281,7 @@ async fn create_project(
     if let Some(ref p) = body.budget_period {
         validate_budget_period(p)?;
     }
+    crate::routes::settings::check_model_or_400(body.model.as_deref())?;
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -403,6 +404,7 @@ async fn update_project(
     if body.worker_count.is_some_and(|n| n < 0) {
         return Err(bad_request("worker_count must be >= 0"));
     }
+    crate::routes::settings::check_model_or_400(body.model.as_ref().and_then(|m| m.as_deref()))?;
     if let Some(Some(p)) = &body.budget_period {
         validate_budget_period(p)?;
     }

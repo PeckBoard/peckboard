@@ -174,34 +174,54 @@ test('claude picker lists every still-available opus snapshot', async ({
   const { token, authHeader } = await authenticate(request)
   const { sessionId } = await seedSession(request, authHeader)
 
-  await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
-  await page.goto(`/sessions/${sessionId}`)
-  await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
+  // Claude models are account-scoped only (`claude:<model>@<acct>`): with no
+  // account the catalog lists none, so create a throwaway API-key account.
+  const acctRes = await request.post('/api/claude-accounts', {
+    headers: authHeader,
+    data: {
+      name: `e2e-picker-${Date.now()}`,
+      kind: 'api_key',
+      credential: `sk-e2e-picker-${Date.now()}`,
+    },
+  })
+  expect(acctRes.ok(), `create account failed: ${await acctRes.text()}`).toBeTruthy()
+  const acctId = ((await acctRes.json()) as { id: string }).id
 
-  await page.locator('.tab-new').click()
-  const trigger = page.getByTestId('new-session-model')
-  await expect(trigger).toBeVisible({ timeout: 10_000 })
-  await trigger.click()
-  const search = page.getByTestId('new-session-model-search')
-  await expect(search).toBeVisible()
+  try {
+    await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
+    await page.goto(`/sessions/${sessionId}`)
+    await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
 
-  // Type the bare id: the catalogue must keep Opus 4.6 / 4.7 / 4.8 / 5
-  // selectable after Opus 5.5 shipped, plus current Fable / Sonnet / Haiku
-  // ids. Discovery is off in e2e, so this is the static seed.
-  const pinned = [
-    'claude:claude-fable-5-1',
-    'claude:claude-opus-5-5',
-    'claude:claude-opus-5',
-    'claude:claude-opus-4-8',
-    'claude:claude-opus-4-7',
-    'claude:claude-opus-4-6',
-    'claude:claude-sonnet-5',
-    'claude:claude-sonnet-4-6',
-    'claude:claude-fable-5',
-    'claude:claude-haiku-4-5',
-  ]
-  for (const id of pinned) {
-    await search.fill(id.slice('claude:'.length))
-    await expect(page.getByTestId(`new-session-model-option-${id}`)).toBeVisible()
+    await page.locator('.tab-new').click()
+    const trigger = page.getByTestId('new-session-model')
+    await expect(trigger).toBeVisible({ timeout: 10_000 })
+    await trigger.click()
+    const search = page.getByTestId('new-session-model-search')
+    await expect(search).toBeVisible()
+
+    // Type the bare model name: the catalogue must keep Opus 4.6 / 4.7 / 4.8
+    // / 5 selectable after Opus 5.5 shipped, plus current Fable / Sonnet /
+    // Haiku ids. Discovery is off in e2e, so this is the static seed, scoped
+    // to the account.
+    const pinned = [
+      'claude-fable-5-1',
+      'claude-opus-5-5',
+      'claude-opus-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-opus-4-6',
+      'claude-sonnet-5',
+      'claude-sonnet-4-6',
+      'claude-fable-5',
+      'claude-haiku-4-5',
+    ]
+    for (const id of pinned) {
+      await search.fill(id)
+      await expect(
+        page.getByTestId(`new-session-model-option-claude:${id}@${acctId}`),
+      ).toBeVisible()
+    }
+  } finally {
+    await request.delete(`/api/claude-accounts/${acctId}?force=true`, { headers: authHeader })
   }
 })

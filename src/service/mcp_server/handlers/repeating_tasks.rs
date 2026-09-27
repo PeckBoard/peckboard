@@ -128,6 +128,7 @@ impl McpToolRegistry {
             .get("model")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        crate::provider::registry::check_model(model.as_deref()).map_err(anyhow::Error::msg)?;
         let effort = args
             .get("effort")
             .and_then(|v| v.as_str())
@@ -255,6 +256,8 @@ impl McpToolRegistry {
             Some(Value::String(s)) => Some(Some(s.clone())),
             Some(_) => anyhow::bail!("effort must be a string or null"),
         };
+        crate::provider::registry::check_model(model.as_ref().and_then(|m| m.as_deref()))
+            .map_err(anyhow::Error::msg)?;
         let enabled = args.get("enabled").and_then(|v| v.as_bool());
 
         let now = chrono::Utc::now().to_rfc3339();
