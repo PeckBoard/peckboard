@@ -2,12 +2,12 @@
 //! uninstalled provider, stale project model): `spawn_worker_for_card`
 //! used to mint a brand-new session row on every 5s tick forever, since
 //! a dispatch failure released the claim but left a session with neither
-//! `conversation_id` nor `pending_handover_doc` -- which fails the resume
-//! filter -- and never counted toward the crash-based auto-pause.
+//! filter -- and never counted toward the crash guard.
 //!
 //! This locks in the fix: dispatch failures reuse the dead session row
-//! (bounded row count) and count as crashes (auto-pause after two in a
-//! row, surfacing the failure to the user instead of stalling silently).
+//! (bounded row count) and count as crashes (the card is blocked after two
+//! in a row, surfacing the failure to the user instead of stalling
+//! silently; the project itself is never paused).
 
 use std::sync::Arc;
 
@@ -135,7 +135,7 @@ async fn seed_dead_model_card(state: &AppState) {
 }
 
 #[tokio::test]
-async fn dead_model_card_stays_bounded_and_pauses_the_project() {
+async fn dead_model_card_stays_bounded_and_blocks_the_card() {
     let state = build_state().await;
     seed_dead_model_card(&state).await;
 
@@ -157,20 +157,23 @@ async fn dead_model_card_stays_bounded_and_pauses_the_project() {
         sessions.len()
     );
 
-    let project = state.db.get_project("p1").await.unwrap().unwrap();
-    assert_eq!(
-        project.status, "paused",
-        "repeated dispatch failures must auto-pause the project instead \
-         of stalling silently forever"
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert!(
+        card.blocked,
+        "repeated dispatch failures must block the card instead of \
+         stalling silently forever"
     );
     assert!(
-        project.pause_reason.is_some(),
-        "the pause must carry a reason the user can see on the project banner"
+        card.block_reason.is_some(),
+        "the block must carry a reason the user can see on the card"
     );
-
-    let card = state.db.get_card("c1").await.unwrap().unwrap();
     assert!(
         card.worker_session_id.is_none(),
         "a card that never got a live agent run must not stay claimed"
     );
+
+    // Pausing is user-only: the crash guard never touches the project.
+    let project = state.db.get_project("p1").await.unwrap().unwrap();
+    assert_eq!(project.status, "active");
+    assert!(project.pause_reason.is_none());
 }

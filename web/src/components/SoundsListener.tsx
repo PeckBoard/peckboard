@@ -135,12 +135,18 @@ export default function SoundsListener() {
       window.addEventListener(name, fn)
       return [name, fn] as const
     })
+    // Chime once when a project's budget flips to exhausted — not on every
+    // later project-update that still carries the flag.
+    const budgetExhausted = new Map<string, boolean>()
     const onProject = (e: globalThis.Event) => {
       const project = (e as CustomEvent).detail?.data?.project as
-        | { pause_reason?: string | null }
+        | { id?: string; budget_exhausted?: boolean }
         | undefined
-      const reason = project?.pause_reason ?? ''
-      if (reason.startsWith('budget:')) playSound('accountLimit')
+      if (!project?.id) return
+      const now = project.budget_exhausted === true
+      const before = budgetExhausted.get(project.id) ?? false
+      budgetExhausted.set(project.id, now)
+      if (now && !before) playSound('accountLimit')
     }
     window.addEventListener('peckboard:project-update', onProject as EventListener)
     return () => {

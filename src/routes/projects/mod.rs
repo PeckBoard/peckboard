@@ -45,6 +45,9 @@ struct CreateProjectRequest {
     worktree_isolation: bool,
     budget_usd_cents: Option<i32>,
     budget_period: Option<String>,
+    review_enabled: Option<bool>,
+    review_model: Option<String>,
+    review_effort: Option<String>,
 }
 fn default_worker_count() -> i32 {
     1
@@ -74,6 +77,12 @@ struct UpdateProjectRequest {
     budget_usd_cents: Option<Option<i32>>,
     worktree_isolation: Option<bool>,
     budget_period: Option<Option<String>>,
+    review_enabled: Option<bool>,
+    /// Explicit `null` resets the reviewer to "same as project".
+    #[serde(default, deserialize_with = "explicit_null")]
+    review_model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "explicit_null")]
+    review_effort: Option<Option<String>>,
 }
 
 fn validate_budget_period(period: &str) -> Result<(), RouteError> {
@@ -82,6 +91,22 @@ fn validate_budget_period(period: &str) -> Result<(), RouteError> {
         _ => Err(bad_request(format!(
             "invalid budget_period '{period}'; must be daily, weekly, or monthly"
         ))),
+    }
+}
+
+/// The reviewer effort is stored verbatim and becomes the review worker's
+/// `--effort`, so only the canonical levels are accepted.
+fn validate_review_effort(effort: Option<&str>) -> Result<(), RouteError> {
+    let Some(e) = effort else { return Ok(()) };
+    if crate::provider::registry::standard_effort_levels()
+        .iter()
+        .any(|l| l.id == e)
+    {
+        Ok(())
+    } else {
+        Err(bad_request(format!(
+            "invalid review_effort '{e}'; use one of low|medium|high|xhigh|max"
+        )))
     }
 }
 // ── Shared error type + helpers ─────────────────────────────────────
@@ -282,6 +307,8 @@ async fn create_project(
         validate_budget_period(p)?;
     }
     crate::routes::settings::check_model_or_400(body.model.as_deref())?;
+    crate::routes::settings::check_model_or_400(body.review_model.as_deref())?;
+    validate_review_effort(body.review_effort.as_deref())?;
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -314,6 +341,35 @@ async fn create_project(
             )
         })?;
 
+    // Review settings aren't part of the insert (column defaults: review
+    // on, same model/effort as the project); apply explicit ones on top.
+    let project = if body.review_enabled.is_some()
+        || body.review_model.is_some()
+        || body.review_effort.is_some()
+    {
+        state
+            .db
+            .update_project(
+                &project.id,
+                UpdateProject {
+                    review_enabled: body.review_enabled,
+                    review_model: body.review_model.map(Some),
+                    review_effort: body.review_effort.map(Some),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?
+            .unwrap_or(project)
+    } else {
+        project
+    };
+
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,
         Json(serde_json::json!(project)),
@@ -339,7 +395,11 @@ async fn list_projects(
         )
     })?;
 
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(projects)))
+    let mut out = Vec::with_capacity(projects.len());
+    for project in &projects {
+        out.push(crate::worker::budget::project_json(&state.db, project).await);
+    }
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::Value::Array(out)))
 }
 
 /// GET /api/projects/:id
@@ -373,7 +433,7 @@ async fn get_project(
     })?;
 
     Ok(Json(serde_json::json!({
-        "project": project,
+        "project": crate::worker::budget::project_json(&state.db, &project).await,
         "cards": cards,
     })))
 }
@@ -405,6 +465,10 @@ async fn update_project(
         return Err(bad_request("worker_count must be >= 0"));
     }
     crate::routes::settings::check_model_or_400(body.model.as_ref().and_then(|m| m.as_deref()))?;
+    crate::routes::settings::check_model_or_400(
+        body.review_model.as_ref().and_then(|m| m.as_deref()),
+    )?;
+    validate_review_effort(body.review_effort.as_ref().and_then(|e| e.as_deref()))?;
     if let Some(Some(p)) = &body.budget_period {
         validate_budget_period(p)?;
     }
@@ -431,6 +495,9 @@ async fn update_project(
         pause_reason: if clear_pause_reason { Some(None) } else { None },
         budget_usd_cents: body.budget_usd_cents,
         budget_period: body.budget_period,
+        review_enabled: body.review_enabled,
+        review_model: body.review_model,
+        review_effort: body.review_effort,
     };
 
     let project = state.db.update_project(&id, update).await.map_err(|e| {
@@ -441,7 +508,9 @@ async fn update_project(
     })?;
 
     match project {
-        Some(p) => Ok(Json(serde_json::json!(p))),
+        Some(p) => Ok(Json(
+            crate::worker::budget::project_json(&state.db, &p).await,
+        )),
         None => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "project not found" })),
@@ -482,12 +551,37 @@ async fn delete_project(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
-/// Shared pause logic used by both the manual route and the budget evaluator.
-/// Sets status=paused, sets pause_reason, cancels in-flight workers, clears
-/// queued messages, broadcasts a project-update, and fires the project.paused hook.
+/// Shared pause logic used by the manual route and the MCP `pause_project`
+/// tool — pausing is user-only; nothing in the orchestrator pauses a
+/// project automatically. Sets status=paused, sets pause_reason, cancels
+/// in-flight workers, clears queued messages, broadcasts a project-update,
+/// and fires the project.paused hook.
 /// Returns `Ok(None)` when the project doesn't exist.
 pub(crate) async fn pause_project_inner(
     state: &Arc<AppState>,
+    id: &str,
+    pause_reason: Option<String>,
+    source: &str,
+) -> anyhow::Result<Option<crate::db::models::Project>> {
+    pause_project_with(
+        &state.db,
+        &state.broadcaster,
+        Some(&state.provider_registry),
+        id,
+        pause_reason,
+        source,
+    )
+    .await
+}
+
+/// [`pause_project_inner`] for callers that carry only the db, broadcaster
+/// and provider registry rather than the whole `AppState` — the MCP
+/// `pause_project` tool. `registry: None` (headless tool contexts) skips
+/// cancelling in-flight workers.
+pub(crate) async fn pause_project_with(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    registry: Option<&crate::provider::registry::ProviderRegistry>,
     id: &str,
     pause_reason: Option<String>,
     source: &str,
@@ -499,21 +593,30 @@ pub(crate) async fn pause_project_inner(
         ..Default::default()
     };
 
-    let project = state.db.update_project(id, update).await?;
+    let project = db.update_project(id, update).await?;
     let project = match project {
         Some(p) => p,
         None => return Ok(None),
     };
 
-    if let Err(e) = state.db.delete_queued_messages_for_project(id).await {
+    // Drop queued messages first so the cancel's completion listener
+    // can't drain a buffered message into a fresh agent run.
+    if let Err(e) = db.delete_queued_messages_for_project(id).await {
         tracing::warn!(project_id = %id, "Failed to clear queued messages on pause: {e}");
     }
-    if let Ok(workers) = state.db.list_worker_sessions_by_project(id).await {
+    if let Some(registry) = registry
+        && let Ok(workers) = db.list_worker_sessions_by_project(id).await
+    {
         let mut cancelled = 0u32;
         for ws in &workers {
-            if state.session_manager.is_running(&ws.id).await {
-                state.session_manager.cancel(&ws.id).await;
-                cancelled += 1;
+            for info in registry.list_providers().await {
+                if let Some(p) = registry.get_provider(&info.id).await
+                    && p.is_running(&ws.id).await
+                {
+                    p.cancel(&ws.id).await;
+                    cancelled += 1;
+                    break;
+                }
             }
         }
         if cancelled > 0 {
@@ -521,13 +624,11 @@ pub(crate) async fn pause_project_inner(
         }
     }
 
-    state
-        .broadcaster
-        .broadcast(crate::ws::broadcaster::WsEvent {
-            event_type: "project-update".into(),
-            session_id: id.to_string(),
-            data: serde_json::json!({ "project": &project }),
-        });
+    broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "project-update".into(),
+        session_id: id.to_string(),
+        data: serde_json::json!({ "project": crate::worker::budget::project_json(db, &project).await }),
+    });
     let paused_payload = crate::plugin::notify::project_paused_payload(
         &project.id,
         &project.name,
@@ -545,9 +646,9 @@ async fn pause_project(
 ) -> impl IntoResponse {
     tracing::info!(project_id = %id, "Pausing project");
     match pause_project_inner(&state, &id, None, "manual").await {
-        Ok(Some(project)) => {
-            Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(project)))
-        }
+        Ok(Some(project)) => Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+            crate::worker::budget::project_json(&state.db, &project).await,
+        )),
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "project not found" })),
@@ -596,7 +697,7 @@ pub(crate) async fn resume_project_inner(
         .broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "project-update".into(),
             session_id: id.to_string(),
-            data: serde_json::json!({ "project": &project }),
+            data: serde_json::json!({ "project": crate::worker::budget::project_json(&state.db, &project).await }),
         });
     Ok(Some(project))
 }
@@ -607,7 +708,9 @@ async fn resume_project(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match resume_project_inner(&state, &id).await {
-        Ok(Some(p)) => Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(p))),
+        Ok(Some(p)) => Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+            crate::worker::budget::project_json(&state.db, &p).await,
+        )),
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "project not found" })),

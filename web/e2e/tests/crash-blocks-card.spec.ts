@@ -4,11 +4,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * Auto-pause defense: when a card's worker crashes twice in a row, the
- * orchestrator pauses the owning project and surfaces a banner explaining
- * why. The mock provider's `crash` scenario crashes deterministically on
- * every spawn, so a project pointed at `mock:crash` with at least one
- * card hits the threshold in two orchestrator ticks (~5s each).
+ * Crash-loop defense: when a card's worker crashes twice in a row, the
+ * orchestrator blocks that CARD (reason on the card's Blocked chip) and
+ * never pauses the project — pausing is user-only. The mock provider's
+ * `crash` scenario crashes deterministically on every spawn, so a project
+ * pointed at `mock:crash` with one card hits the threshold in two
+ * orchestrator ticks (~5s each).
  */
 
 const E2E_USER = 'e2e-user'
@@ -32,7 +33,7 @@ async function loadAt(page: Page, token: string, route: string) {
   await page.goto(route)
 }
 
-test('crashing worker pauses project and surfaces a reason banner', async ({
+test('crashing worker blocks its card and the project keeps running', async ({
   request,
   page,
   baseURL,
@@ -40,10 +41,10 @@ test('crashing worker pauses project and surfaces a reason banner', async ({
   expect(baseURL, 'baseURL configured').toBeTruthy()
   const { token, auth } = await authenticate(request)
 
-  const folderPath = mkdtempSync(path.join(tmpdir(), `peckboard-e2e-auto-pause-`))
+  const folderPath = mkdtempSync(path.join(tmpdir(), `peckboard-e2e-crash-block-`))
   const folderRes = await request.post('/api/folders', {
     headers: auth,
-    data: { name: `e2e-auto-pause-${Date.now()}`, path: folderPath },
+    data: { name: `e2e-crash-block-${Date.now()}`, path: folderPath },
   })
   expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
   const folder = (await folderRes.json()) as { id: string }
@@ -53,7 +54,7 @@ test('crashing worker pauses project and surfaces a reason banner', async ({
   const projectRes = await request.post('/api/projects', {
     headers: auth,
     data: {
-      name: 'auto pause',
+      name: 'crash block',
       folder_id: folder.id,
       worker_count: 1,
       workflow: 'task',
@@ -66,7 +67,7 @@ test('crashing worker pauses project and surfaces a reason banner', async ({
   // One card in backlog: the orchestrator picks it up on its next tick
   // (~5s), spawns the mock crash worker, sees the Crashed event, clears
   // worker_session_id; on the following tick it respawns and crashes
-  // again, tripping the PAUSE_AFTER_CRASHES=2 threshold.
+  // again, tripping the BLOCK_AFTER_CRASHES=2 threshold.
   const cardRes = await request.post(`/api/projects/${project.id}/cards`, {
     headers: auth,
     data: {
@@ -77,24 +78,36 @@ test('crashing worker pauses project and surfaces a reason banner', async ({
     },
   })
   expect(cardRes.ok(), `create card failed: ${await cardRes.text()}`).toBeTruthy()
+  const cardId = ((await cardRes.json()) as { id: string }).id
 
   await loadAt(page, token, `/projects/${project.id}`)
 
   // Two orchestrator ticks + crash bookkeeping should land within 30s.
-  // The banner shows the card title, crash count, and a stderr snippet.
-  const banner = page.getByTestId('project-pause-banner')
-  await expect(banner).toBeVisible({ timeout: 30_000 })
-  await expect(banner).toContainText('Crashing task')
-  await expect(banner).toContainText('2 times')
-  await expect(banner).toContainText('simulated stderr')
+  // The card's Blocked chip carries the reason: title, crash count, and a
+  // stderr snippet.
+  const card = page.locator('.kanban-card').filter({ hasText: 'Crashing task' })
+  const chip = card.getByTestId('card-blocked-chip')
+  await expect(chip).toBeVisible({ timeout: 30_000 })
+  await expect(chip).toHaveAttribute('title', /Crashing task/)
+  await expect(chip).toHaveAttribute('title', /2 times/)
+  await expect(chip).toHaveAttribute('title', /simulated stderr/)
 
-  // The status badge in the toolbar flips to "paused" so the pause is
-  // discoverable from the project list too, not just the banner.
-  await expect(page.locator('.status-badge.status-paused')).toBeVisible()
+  // The project is untouched: no pause banner and no paused status badge
+  // (the board only shows a badge for a non-active project), and the
+  // server agrees.
+  await expect(page.getByTestId('project-pause-banner')).toHaveCount(0)
+  await expect(page.locator('.status-badge.status-paused')).toHaveCount(0)
 
-  // Resume via the API and verify the banner disappears via the
-  // project-update WS broadcast — no reload required.
-  const resumeRes = await request.post(`/api/projects/${project.id}/resume`, { headers: auth })
-  expect(resumeRes.ok(), `resume failed: ${await resumeRes.text()}`).toBeTruthy()
-  await expect(banner).toBeHidden({ timeout: 10_000 })
+  const projRes = await request.get(`/api/projects/${project.id}`, { headers: auth })
+  expect(projRes.ok(), `get project failed: ${await projRes.text()}`).toBeTruthy()
+  const body = (await projRes.json()) as {
+    project: { status: string; pause_reason: string | null }
+    cards: Array<{ id: string; blocked: boolean; worker_session_id: string | null }>
+  }
+  expect(body.project.status).toBe('active')
+  expect(body.project.pause_reason).toBeNull()
+  const blocked = body.cards.find((c) => c.id === cardId)
+  expect(blocked, 'card present').toBeTruthy()
+  expect(blocked!.blocked).toBe(true)
+  expect(blocked!.worker_session_id).toBeNull()
 })

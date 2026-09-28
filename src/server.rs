@@ -526,16 +526,17 @@ pub async fn run_server(
                                             .clear_card_worker_if_matches(card_id, &sid)
                                             .await;
 
-                                        // Auto-pause defense: if this card has
+                                        // Crash-loop defense: if this card has
                                         // been crashing in a tight loop (e.g.
                                         // rate-limit, bad credentials, broken
-                                        // sandbox), stop the project so we don't
-                                        // burn cycles. Stderr from this run goes
-                                        // into the pause reason so the user has
-                                        // a starting point.
+                                        // sandbox), block the card so we don't
+                                        // burn cycles. The project keeps
+                                        // running. Stderr from this run goes
+                                        // into the block reason so the user
+                                        // has a starting point.
                                         let last_stderr =
                                             last_crash_stderr(&orchestrator_state.db, &sid).await;
-                                        crate::worker::orchestrator::maybe_auto_pause_after_crash(
+                                        crate::worker::orchestrator::maybe_block_card_after_crash(
                                             &orchestrator_state,
                                             card_id,
                                             last_stderr.as_deref(),
@@ -948,7 +949,7 @@ async fn shutdown_signal(window_closed: Option<tokio::sync::oneshot::Receiver<()
 }
 
 /// Read the stderr text from the session's most recent crash `agent-end`
-/// event. The completion listener uses this to enrich the auto-pause
+/// event. The completion listener uses this to enrich the crash-block
 /// reason — knowing the worker crashed isn't useful on its own; the user
 /// needs the underlying CLI error to act on it.
 async fn last_crash_stderr(db: &crate::db::Db, session_id: &str) -> Option<String> {

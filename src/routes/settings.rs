@@ -9,7 +9,10 @@
 //!   [`SETTINGS_NS`]/[`SETTINGS_COLLECTION`] and read at dispatch time by
 //!   `SessionManager::send_message_locked`.
 //! - Pre-hatcher model: which model the pre-hatcher plugin researches on
-//!   (`{"model": ...}`; empty = auto, the provider's cheapest priced model),
+//!   read per turn by the `session.message.before` dispatch path.
+//! - Provider base prompts: per-provider replacement for the standing
+//!   system prompt (see `provider::base_prompt`). Admin-only — the text
+//!   steers every user's agents on this host.
 //!   read per turn by the `session.message.before` dispatch path.
 //!
 //! The surface is split in two: [`admin_router`] holds everything that reads
@@ -30,6 +33,7 @@ use std::sync::Arc;
 
 use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::Db;
+use crate::provider::base_prompt;
 use crate::service::mcp_server::user_servers;
 use crate::service::tls::{self, TlsSource};
 use crate::state::AppState;
@@ -140,6 +144,11 @@ fn admin_router() -> Router<Arc<AppState>> {
             post(upload_tls_cert).delete(delete_tls_cert),
         )
         .route("/api/settings/tls/regenerate", post(regenerate_tls_cert))
+        .route("/api/settings/provider-prompts", get(get_provider_prompts))
+        .route(
+            "/api/settings/provider-prompts/{provider}",
+            put(set_provider_prompt),
+        )
         .route("/api/settings/setup/complete", post(complete_setup))
         .route_layer(middleware::from_fn(require_admin))
 }
@@ -867,6 +876,69 @@ async fn set_provider_hidden(
             Json(serde_json::json!({ "error": e.to_string() })),
         )),
     }
+}
+/// One provider's base-prompt state for the settings UI.
+fn provider_prompt_json(
+    id: &str,
+    label: &str,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "provider": id,
+        "label": label,
+        "default": base_prompt::default_base_prompt(id),
+        "override": overrides.get(id).filter(|s| !s.trim().is_empty()),
+    })
+}
+
+/// GET /api/settings/provider-prompts → `[{provider, label, default,
+/// override}]` for every registered provider (`override` null = default in
+/// use), sorted like `/api/settings/providers`.
+async fn get_provider_prompts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let show_mock = dev_providers_visible();
+    let mut providers = state.provider_registry.list_providers().await;
+    providers.retain(|p| show_mock || p.id != "mock");
+    providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    let overrides = base_prompt::overrides(&state.db).await;
+    Json(
+        providers
+            .iter()
+            .map(|p| provider_prompt_json(&p.id, &p.display_name, &overrides))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderPromptBody {
+    text: Option<String>,
+}
+
+/// PUT /api/settings/provider-prompts/{provider} `{"text": string|null}` →
+/// the updated entry. `null` or blank text resets to the default. 404 for
+/// an unregistered provider. Takes effect on each session's next turn.
+async fn set_provider_prompt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ProviderPromptBody>,
+) -> impl IntoResponse {
+    let Some(info) = state.provider_registry.get_info(&id).await else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown provider" })),
+        ));
+    };
+    if let Err(e) = base_prompt::set_override(&state.db, &id, body.text).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ));
+    }
+    let overrides = base_prompt::overrides(&state.db).await;
+    Ok(Json(provider_prompt_json(
+        &id,
+        &info.display_name,
+        &overrides,
+    )))
 }
 
 /// GET /api/settings/mcp-servers → the user-defined MCP server list plus

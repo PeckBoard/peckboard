@@ -40,6 +40,11 @@ pub struct CrateHooks {
     /// {subtype:"interrupt"}`). `None` = no in-band stop; interrupt is a
     /// hard kill.
     pub interrupt_frame: Option<fn() -> String>,
+    /// Provider-specific default base-prompt text the crate prepends ahead
+    /// of the host's shared working-style rules (Claude's `ask_user` /
+    /// directory rules). `None` = the shared rules alone. Surfaced so the
+    /// host can show and replace the full default (`provider::base_prompt`).
+    pub base_prompt: Option<fn() -> &'static str>,
 }
 
 /// Settings schema declared in the crate's plugin manifest, or empty when
@@ -208,13 +213,19 @@ impl AgentProvider for CrateAgentProvider {
             )
             .map_err(|e| anyhow::anyhow!(e))?;
 
+        // A user override of this provider's base prompt replaces BOTH the
+        // shared working-style rules and the crate's own prompt text; the
+        // flag tells the crate (Claude) not to prepend its default too.
+        let base_override =
+            crate::provider::base_prompt::override_for(&ctx.db, &self.provider_id).await;
         let payload = serde_json::json!({
             "session_id": ctx.session_id,
             "provider_id": self.provider_id,
             "spawn_config": ctx.config,
             "message": message_payload(&ctx.message),
             "conversation_id": ctx.conversation_id.as_ref().map(|h| h.id()),
-            "system_prompt": compose_system_prompt(&ctx.config),
+            "system_prompt": compose_system_prompt(&ctx.config, base_override.as_deref()),
+            "base_prompt_overridden": base_override.is_some(),
         });
 
         let host = self.host_fn();

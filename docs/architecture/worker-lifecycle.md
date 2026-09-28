@@ -36,7 +36,7 @@ Output is newline-delimited JSON parsed into event kinds: agent-start, agent chu
 - The session is viewable by clicking the card's 3-dot menu → "Session" on the kanban board
 - The full transcript (all steps) is visible in the same chat view used for interactive sessions
 - Card sessions are `is_worker = true` and do not appear in the main session list
-- Changing the session's model/effort from the chat UI (`PATCH /api/sessions/:id`) takes effect immediately: the live CLI is hard-cancelled (an `interrupted` crash, excluded from auto-pause counting), the card's claim is released, and the orchestrator resumes the same session with `--resume` under the new settings. Cross-provider/account switches are refused with 409 — workers can't run the handover doc turn; set the card/project model to move future workers instead.
+- Changing the session's model/effort from the chat UI (`PATCH /api/sessions/:id`) takes effect immediately: the live CLI is hard-cancelled (an `interrupted` crash, excluded from crash-block counting), the card's claim is released, and the orchestrator resumes the same session with `--resume` under the new settings. Cross-provider/account switches are refused with 409 — workers can't run the handover doc turn; set the card/project model to move future workers instead.
 
 ### Done
 
@@ -143,7 +143,7 @@ count_consecutive_no_progress, no_progress_backoff_secs}` and
   time has passed since its last no-progress completion.
 - At `BLOCK_AFTER_NO_PROGRESS` (4) consecutive no-progress completions, the
   CARD is blocked (`blocked = true`, `block_reason` naming the count) —
-  this does not pause the whole project, unlike the crash defense.
+  like the crash defense, this never pauses the project (pausing is user-only).
 - Operator unblock (`restart_card_worker`, or an explicit `blocked: false`
   PATCH) calls `mark_card_unblocked`, which appends the same
   `auto-pause-cleared` sentinel the crash defense uses, resetting both

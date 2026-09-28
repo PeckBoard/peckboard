@@ -55,6 +55,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_system_prompt_name_columns(conn)?;
     ensure_system_prompts_table(conn)?;
     ensure_plans_tables(conn)?;
+    ensure_projects_review_columns(conn)?;
     ensure_projects_worktree_isolation_column(conn)?;
     ensure_cards_worktree_unmerged_columns(conn)?;
     ensure_projects_budget_columns(conn)?;
@@ -1287,6 +1288,27 @@ fn ensure_projects_worktree_isolation_column(conn: &mut SqliteConnection) -> any
         tracing::info!("Repairing schema: adding projects.worktree_isolation");
         sql_query("ALTER TABLE projects ADD COLUMN worktree_isolation BOOLEAN NOT NULL DEFAULT 0")
             .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs where `1790400000_projects_review_settings` was skipped or
+/// half-applied. `review_enabled` backfills to on (the column default);
+/// the model/effort overrides are nullable.
+fn ensure_projects_review_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let existing = project_columns(conn)?;
+    if !existing.iter().any(|c| c == "review_enabled") {
+        tracing::info!("Repairing schema: adding projects.review_enabled");
+        sql_query("ALTER TABLE projects ADD COLUMN review_enabled INTEGER NOT NULL DEFAULT 1")
+            .execute(conn)?;
+    }
+    if !existing.iter().any(|c| c == "review_model") {
+        tracing::info!("Repairing schema: adding projects.review_model");
+        sql_query("ALTER TABLE projects ADD COLUMN review_model TEXT NULL").execute(conn)?;
+    }
+    if !existing.iter().any(|c| c == "review_effort") {
+        tracing::info!("Repairing schema: adding projects.review_effort");
+        sql_query("ALTER TABLE projects ADD COLUMN review_effort TEXT NULL").execute(conn)?;
     }
     Ok(())
 }

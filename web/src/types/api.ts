@@ -119,12 +119,22 @@ export interface Project {
   worktree_isolation: boolean
   created_at: string
   last_accessed_at: string
-  /** Human-readable reason the project is paused, set automatically when
-   *  a card's worker keeps crashing. Null when the project was paused
-   *  manually or is active. Cleared on resume. */
+  /** Optional note on why the project is paused. Pausing is user-only;
+   *  projects paused by older releases may still carry an automatic
+   *  reason. Cleared on resume. */
   pause_reason: string | null
   budget_usd_cents: number | null
   budget_period: 'daily' | 'weekly' | 'monthly' | null
+  /** Derived server-side: the spend cap is reached for the current
+   *  window, so no new workers start (running ones finish). The project
+   *  itself stays active. */
+  budget_exhausted?: boolean
+  /** Cards pass through a `review` step — a fresh session verifies the
+   *  work — before landing in Done. */
+  review_enabled: boolean
+  /** Reviewer model / effort; null = same as the project's. */
+  review_model: string | null
+  review_effort: string | null
 }
 
 export interface Plan {

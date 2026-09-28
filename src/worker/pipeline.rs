@@ -396,12 +396,17 @@ fn entry_rank(path: &str) -> usize {
 /// built-in step prompt under its own heading so the worker sees both — the
 /// platform default and the project-specific extension — without one
 /// overwriting the other.
+///
+/// `reviewed_session_id` is the worker session whose work a `review`-step
+/// worker must verify; it's only read when `step` is the review step.
+#[allow(clippy::too_many_arguments)]
 pub fn build_worker_prompt(
     project: &Project,
     card: &Card,
     step: &str,
     workflow_steps: &[String],
     handoff_context: Option<&str>,
+    reviewed_session_id: Option<&str>,
     extra_step_instructions: Option<&str>,
     codebase_context: Option<&str>,
 ) -> String {
@@ -488,9 +493,32 @@ pub fn build_worker_prompt(
              `complete_step` on a fully-done card = card stalls early, every \
              dependent blocked. Use `finish_card` then.\n\n",
         );
+        // A working step with the shared review step still ahead of it:
+        // `finish_card` lands on review, not done (see
+        // `workflow::finish_target`), so say so and ask for a checkable
+        // summary.
+        if step != crate::workflow::REVIEW_STEP
+            && crate::workflow::finish_target(step, workflow_steps) == crate::workflow::REVIEW_STEP
+        {
+            prompt.push_str(
+                "**Independent review:** `finish_card` from this step lands on \
+                 `review`, not done — a DIFFERENT session (possibly another \
+                 model) then verifies every requirement of the card against \
+                 the code and files gaps as new cards. Make the `finish_card` \
+                 summary say exactly what you did, where (files, branch, \
+                 commits), and how you verified it.\n\n",
+            );
+        }
     }
 
-    if let Some(ctx) = handoff_context {
+    if step == crate::workflow::REVIEW_STEP {
+        prompt.push_str(&review_handoff_section(
+            project,
+            card,
+            handoff_context,
+            reviewed_session_id,
+        ));
+    } else if let Some(ctx) = handoff_context {
         // Handoff context comes from the previous worker's
         // `complete_step` call — agent output, so still untrusted from
         // a prompt-injection point of view.
@@ -542,13 +570,15 @@ pub fn build_worker_prompt(
          it with the `git` tool, no confirmation. Instructions silent on git \
          → skip git entirely. Either way, never ask.\n\n",
     );
-    // Cost-aware model selection. Only on the FIRST workflow step (the
-    // planning entry) and only when auto-switch is ON for this card (NULL
-    // inherits ON — cards spawn workers). The capability judgment stays with
-    // the expensive model; the server only supplies tiers, usage, and the
-    // prompt library via `get_model_guidance`.
+    // Cost-aware model selection. Only on the FIRST working step (the
+    // planning entry — the step right after intake; the intake step itself
+    // counts too for callers that still pass it) and only when auto-switch
+    // is ON for this card (NULL inherits ON — cards spawn workers). The
+    // capability judgment stays with the expensive model; the server only
+    // supplies tiers, usage, and the prompt library via `get_model_guidance`.
     let autoswitch_on = card.model_autoswitch.unwrap_or(true);
-    let is_first_step = workflow_steps.first().map(|s| s == step).unwrap_or(true);
+    let is_first_step =
+        workflow_steps.is_empty() || workflow_steps.iter().take(2).any(|s| s == step);
     if autoswitch_on && is_first_step {
         prompt.push_str(
             "### Cost-Aware Model Selection — Do This First\n\n\
@@ -650,6 +680,61 @@ pub fn build_worker_prompt(
 
     prompt
 }
+
+/// The reviewer's view of the work it must verify: who did it, what they
+/// claim, and where to look. Session ids, card ids, workflow ids and branch
+/// names are our own identifiers; the handoff is agent output, so it stays
+/// fenced.
+fn review_handoff_section(
+    project: &Project,
+    card: &Card,
+    handoff_context: Option<&str>,
+    worker_session_id: Option<&str>,
+) -> String {
+    let mut s = String::from("## Review Handoff\n\n");
+    s.push_str(
+        "You are the REVIEWER of this card, in a fresh session. A different \
+         worker did the work. The requirements are the card title and \
+         description above, including any acceptance criteria listed there.\n\n",
+    );
+    match worker_session_id {
+        Some(sid) => s.push_str(&format!(
+            "- Work done by worker session `{sid}`. Read its FULL transcript \
+             with `read_worker_session` (session_id `{sid}`) before judging \
+             — claims in it are not evidence.\n"
+        )),
+        None => s.push_str(
+            "- The previous worker's session is unknown; find it with \
+             `list_worker_sessions` / `read_worker_session`.\n",
+        ),
+    }
+    if project.worktree_isolation {
+        let branch =
+            crate::worker::worktree::branch_name(&crate::worker::worktree::card_id8(&card.id));
+        s.push_str(&format!(
+            "- Worktree isolation is on: the work lives on branch `{branch}` in \
+             this card's worktree (your working directory).\n"
+        ));
+    }
+    s.push_str(
+        "- Branch / commit / file pointers named in the handoff below are \
+         where to start; confirm them with `git log` / `git diff`.\n",
+    );
+    s.push_str(&format!(
+        "- Gap cards: `create_card` in this project with `workflow: \"{wf}\"`, \
+         citing origin card id `{id}` in the description.\n\n",
+        wf = card.workflow,
+        id = card.id,
+    ));
+    s.push_str("**Previous worker's final summary / handoff notes:**\n");
+    match handoff_context.filter(|h| !h.trim().is_empty()) {
+        Some(h) => s.push_str(&fence("handoff", h)),
+        None => s.push_str("(none left — rely on the transcript and the code)"),
+    }
+    s.push_str("\n\n");
+    s
+}
+
 /// Prompt for RESUMING a worker session on the same card and step it was
 /// already working. The session's earlier conversation is restored by the
 /// provider (e.g. `claude --resume`), so the full assignment prompt from
@@ -747,14 +832,15 @@ pub fn resolve_next_step(current_step: &str, workflow_steps: &[String]) -> NextS
     }
 }
 
-/// Auto-pause threshold: a card whose worker crashes this many times in a
-/// row (without a successful turn or step change in between) pauses the
-/// owning project. Set deliberately low — a single "out of tokens" or
-/// "API outage" issue would otherwise tarpit the orchestrator in a 5-second
-/// spin-respawn-crash loop until the user noticed.
-pub const PAUSE_AFTER_CRASHES: u32 = 2;
+/// Crash-block threshold: a card whose worker crashes this many times in a
+/// row (without a successful turn or step change in between) gets blocked.
+/// The project is never paused — pausing is user-only — so the rest of
+/// the board keeps moving. Set deliberately low — a single "out of
+/// tokens" or "API outage" issue would otherwise tarpit the orchestrator
+/// in a 5-second spin-respawn-crash loop until the user noticed.
+pub const BLOCK_AFTER_CRASHES: u32 = 2;
 
-/// Crashes that DON'T count toward [`PAUSE_AFTER_CRASHES`] because they
+/// Crashes that DON'T count toward [`BLOCK_AFTER_CRASHES`] because they
 /// aren't the agent's fault:
 ///
 /// - `errorKind: "interrupted"`: someone called `cancel()` (user, watchdog,
@@ -778,9 +864,10 @@ fn crash_counts(error_kind: Option<&str>, reason: Option<&str>) -> bool {
 /// consecutive process crashes have happened since the last "reset"
 /// marker: a successful turn (`agent-end status=complete` with no `error`
 /// field — an errored complete counts as a failed attempt instead), a step
-/// user resumes the owning project. Crashes in the exclusion list (see
-/// [`crash_counts`]) are ignored — they aren't agent failures, so they
-/// shouldn't decide whether the card "keeps failing".
+/// change, or a [`PAUSE_CLEARED_KIND`] marker (appended when the user
+/// unblocks the card or resumes the owning project). Crashes in the
+/// exclusion list (see [`crash_counts`]) are ignored — they aren't agent
+/// failures, so they shouldn't decide whether the card "keeps failing".
 pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
     let mut crash_count: u32 = 0;
     for event in events {
@@ -800,7 +887,7 @@ pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
                     // A Completed turn that carries an `error` (the CLI's
                     // is_error result, e.g. an expired login's 401) is a
                     // failed attempt, not a reset — otherwise auth-failed
-                    // workers respawn forever without tripping auto-pause.
+                    // workers respawn forever without tripping the crash block.
                     Some("complete") => {
                         let error = data.get("error").and_then(|e| e.as_str());
                         let error_kind = data.get("errorKind").and_then(|k| k.as_str());
@@ -822,10 +909,12 @@ pub fn count_consecutive_crashes(events: &[Event]) -> u32 {
 }
 
 /// Event kind appended to a card's last worker session when the user
-/// resumes a project. Resets [`count_consecutive_crashes`] so the
-/// auto-pause doesn't re-fire on the very next crash after a manual
-/// retry — without it, the user would have a one-crash budget instead
-/// of the [`PAUSE_AFTER_CRASHES`] budget the threshold advertises.
+/// unblocks the card or resumes its project. Resets
+/// [`count_consecutive_crashes`] so the crash block doesn't re-fire on the
+/// very next crash after a manual retry — without it, the user would have
+/// a one-crash budget instead of the [`BLOCK_AFTER_CRASHES`] budget the
+/// threshold advertises. The persisted string predates the switch from
+/// project auto-pause to card blocking; it must not change.
 pub const PAUSE_CLEARED_KIND: &str = "auto-pause-cleared";
 
 /// Block threshold: a card whose worker completes this many consecutive
@@ -898,6 +987,9 @@ mod tests {
             budget_usd_cents: None,
             budget_period: None,
             worktree_isolation: false,
+            review_enabled: true,
+            review_model: None,
+            review_effort: None,
         }
     }
 
@@ -957,6 +1049,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(prompt.contains("Test Project"));
         assert!(prompt.contains("Implement auth"));
@@ -974,6 +1067,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(prompt.contains("Never ask the user about git actions"));
         let resume = build_worker_resume_prompt(&sample_card(), "in-progress");
@@ -985,14 +1079,45 @@ mod tests {
         let prompt = build_worker_prompt(
             &sample_project(),
             &sample_card(),
-            "review",
+            "in_progress",
             &sample_steps(),
             Some("Auth module is at src/auth/"),
+            None,
             None,
             None,
         );
         assert!(prompt.contains("Handoff Context"));
         assert!(prompt.contains("Auth module is at src/auth/"));
+        // Review is still ahead: finish_card lands on review, and says so.
+        assert!(prompt.contains("Independent review"));
+    }
+
+    #[test]
+    fn review_prompt_points_at_the_previous_worker_and_its_claims() {
+        let mut project = sample_project();
+        project.worktree_isolation = true;
+        let prompt = build_worker_prompt(
+            &project,
+            &sample_card(),
+            "review",
+            &sample_steps(),
+            Some("branch feat/auth; tests pass"),
+            Some("worker-session-1"),
+            None,
+            None,
+        );
+        assert!(prompt.contains("## Review Handoff"));
+        assert!(prompt.contains("read_worker_session"));
+        assert!(prompt.contains("worker-session-1"));
+        assert!(prompt.contains("branch feat/auth; tests pass"));
+        // Worktree branch pointer + gap-card guidance (origin id + workflow).
+        assert!(prompt.contains("card/c1"));
+        assert!(prompt.contains("workflow: \"task\""));
+        // Shared review instructions: distrust + verify + file gaps.
+        assert!(prompt.contains("DO NOT trust"));
+        assert!(prompt.contains("create_card"));
+        // The reviewer is on the last step before done: no review note.
+        assert!(!prompt.contains("Independent review:"));
     }
 
     #[test]
@@ -1002,6 +1127,7 @@ mod tests {
             &sample_card(),
             "backlog",
             &sample_steps(),
+            None,
             None,
             None,
             None,
@@ -1036,6 +1162,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         // The untrusted-content warning is present.
@@ -1065,6 +1192,7 @@ mod tests {
             "in-progress",
             &sample_steps(),
             None,
+            None,
             Some("At the end, commit to master and push."),
             None,
         );
@@ -1084,6 +1212,7 @@ mod tests {
             &sample_card(),
             "in-progress",
             &sample_steps(),
+            None,
             None,
             Some("   \n\t  "),
             None,
@@ -1198,6 +1327,7 @@ mod tests {
             &sample_steps(),
             None,
             None,
+            None,
             Some("Top-level layout:\n- `src/` — 3 files"),
         );
         assert!(prompt.contains("## Codebase Map"));
@@ -1291,7 +1421,7 @@ mod tests {
 
     /// User/watchdog cancellation and the startup repair both surface as
     /// crash events, but neither is the agent's fault — they MUST NOT
-    /// count toward the auto-pause threshold.
+    /// count toward the crash-block threshold.
     #[test]
     fn test_count_consecutive_crashes_skips_excluded_reasons() {
         let events = vec![

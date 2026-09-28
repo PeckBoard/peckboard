@@ -183,6 +183,13 @@ pub fn send_turn(payload: &serde_json::Value) -> Result<(), String> {
     send::run(payload)
 }
 
+/// Claude's provider-specific default base-prompt text (`ask_user` usage,
+/// directory rules). The host prepends it to the shared working-style rules
+/// to show the full default, and omits both when the user overrides the
+/// base prompt (`base_prompt_overridden` in the send payload).
+pub fn base_prompt() -> &'static str {
+    argv::PECKBOARD_SYSTEM_PROMPT
+}
 /// The CLI's in-band stop frame: it settles the CURRENT turn with a real
 /// `result` (usage included) instead of dying mid-stream. The native host
 /// writes this to the child's stdin on interrupt and only hard-kills if

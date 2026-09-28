@@ -23,14 +23,14 @@
 //!   failure is a stored token that was already fine and a live child
 //!   that was stale, and that heals with no user action at all;
 //! * when the account's credential changes (re-login, pasted secret,
-//!   silent refresh), which also resumes any project that auto-paused on
-//!   the same failure — see [`release_for_account`];
+//!   silent refresh), which also unblocks any card the crash guard
+//!   blocked on the same failure — see [`release_for_account`];
 //! * on demand, from the "Retry now" button in the chat's auth banner —
 //!   see [`retry_now`].
 //!
 //! Workers park nothing: the orchestrator owns their prompt and
-//! re-dispatches the card by itself. What a worker needs is its project
-//! un-paused, which [`release_for_account`] does.
+//! re-dispatches the card by itself. What a worker needs is its card
+//! unblocked, which [`release_for_account`] does.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -111,8 +111,8 @@ async fn handle_auth_failure(state: &Arc<AppState>, session_id: &str) {
         // The orchestrator owns a worker's prompt: it re-dispatches the
         // card on its next tick (that IS the automatic restart, and it now
         // spawns under a current credential), and the crash counter
-        // auto-pauses the project once the failure repeats. Nothing to
-        // park; `release_for_account` un-pauses when a login lands.
+        // blocks the card once the failure repeats. Nothing to park;
+        // `release_for_account` unblocks it when a login lands.
         tracing::warn!(
             session_id = %session_id,
             card_id = session.card_id.as_deref().unwrap_or("-"),
@@ -271,12 +271,12 @@ pub async fn retry_now(state: &Arc<AppState>, session_id: &str) -> bool {
 }
 
 /// A credential for `account_id` on `provider_id` just changed: replay
-/// every turn parked against it, and un-pause every project that stopped
-/// for the same reason.
+/// every turn parked against it, and unblock every card whose worker
+/// crash-blocked for the same reason.
 ///
 /// Called from the account create/update routes and from the silent OAuth
 /// refresh. Safe to call when nothing is parked — it does a bounded scan
-/// of the queue table and the paused projects, and no work beyond that.
+/// of the queue table and the blocked cards, and no work beyond that.
 pub async fn release_for_account(state: &Arc<AppState>, provider_id: &str, account_id: &str) {
     let parked: Vec<String> = state
         .db
@@ -306,12 +306,57 @@ pub async fn release_for_account(state: &Arc<AppState>, provider_id: &str, accou
             tracing::warn!(session_id = %session_id, "Auth release: drain failed: {e}");
         }
     }
+    unblock_auth_blocked_cards(state, provider_id, account_id).await;
     resume_auth_paused_projects(state, provider_id, account_id).await;
 }
 
-/// Un-pause projects whose auto-pause traces back to an auth failure on
-/// this account. The orchestrator picks their cards back up on its next
-/// tick.
+/// Lift crash blocks that trace back to an auth failure on this account.
+/// The crash guard blocks a card (never its project) once its worker keeps
+/// failing; a fresh login is exactly what fixes an auth failure, so the
+/// orchestrator picks the card back up on its next tick. A block with any
+/// other last failure — or one a human set — is left alone.
+async fn unblock_auth_blocked_cards(state: &Arc<AppState>, provider_id: &str, account_id: &str) {
+    let Ok(projects) = state.db.list_projects().await else {
+        return;
+    };
+    for project in projects {
+        let Ok(cards) = state.db.list_cards_by_project(&project.id).await else {
+            continue;
+        };
+        for card in cards.iter().filter(|c| c.blocked) {
+            let Some(session_id) = card.last_worker_session_id.as_deref() else {
+                continue;
+            };
+            let Ok(Some(session)) = state.db.get_session(session_id).await else {
+                continue;
+            };
+            if !session_uses(session.model.as_deref(), provider_id, account_id) {
+                continue;
+            }
+            let Ok(events) = state
+                .db
+                .list_events_by_session_before(session_id, None, 40)
+                .await
+            else {
+                continue;
+            };
+            if last_turn_failed_auth(&events)
+                && crate::worker::orchestrator::clear_crash_block(state, card).await
+            {
+                tracing::info!(
+                    card_id = %card.id,
+                    account = %account_id,
+                    "Unblocked a card that had crash-blocked on expired credentials"
+                );
+            }
+        }
+    }
+}
+
+/// Un-pause projects whose pause traces back to an auth failure on this
+/// account. Nothing pauses a project automatically any more — this heals
+/// projects an older release auto-paused. The orchestrator picks their
+/// cards back up on its next tick.
 async fn resume_auth_paused_projects(state: &Arc<AppState>, provider_id: &str, account_id: &str) {
     let Ok(projects) = state.db.list_projects().await else {
         return;
@@ -497,7 +542,7 @@ mod tests {
     fn last_turn_failed_auth_ignores_other_failures() {
         // A rate limit or a plain crash is not something a new login
         // fixes — resuming those would re-enter the crash loop the
-        // auto-pause exists to stop.
+        // crash block exists to stop.
         let events = vec![event(
             "agent-end",
             r#"{"status":"crashed","errorKind":"rate_limit"}"#,

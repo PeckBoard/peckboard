@@ -614,6 +614,29 @@
   color: var(--text3);
 }
 
+/* ── Provider base-prompt editor (Providers & Accounts) ───────────── */
+.provider-base-prompt {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+}
+.provider-base-prompt-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.provider-base-prompt-header h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.provider-base-prompt-input {
+  width: 100%;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+  resize: vertical;
+}
+
 /* ── Plugin hook-approval status badges ───────────────────────────── */
 .plugin-badge--approved {
   background: rgba(0, 160, 80, 0.12);

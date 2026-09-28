@@ -855,14 +855,17 @@ pub async fn notify_attachments_dropped(
 }
 
 /// The system prompt for a provider with no Claude-style
-/// `--append-system-prompt`: the shared working-style rules, then any
-/// per-spawn suffix (repeating-task context), then any per-session custom
-/// prompt. Mirrors how the Claude provider layers the same three sources
-/// (`claude/mod.rs`) so a session behaves the same whichever CLI runs it —
-/// before this, only Claude honoured `system_prompt_suffix` at all, and
-/// cursor honoured neither.
-pub fn compose_system_prompt(config: &SpawnConfig) -> String {
-    let mut prompt = crate::provider::WORKING_STYLE.to_string();
+/// `--append-system-prompt`: the provider's base prompt (the shared
+/// working-style rules, or the user's per-provider override from
+/// `provider::base_prompt` — which REPLACES them), then any per-spawn suffix
+/// (repeating-task context), then any per-session custom prompt. Mirrors how
+/// the Claude provider layers the same three sources so a session behaves
+/// the same whichever CLI runs it — before this, only Claude honoured
+/// `system_prompt_suffix` at all, and cursor honoured neither.
+pub fn compose_system_prompt(config: &SpawnConfig, base_override: Option<&str>) -> String {
+    let mut prompt = base_override
+        .unwrap_or(crate::provider::WORKING_STYLE)
+        .to_string();
     for extra in [
         config.system_prompt_suffix.as_deref(),
         config.system_prompt_override.as_deref(),
@@ -1691,13 +1694,13 @@ mod tests {
     fn compose_system_prompt_layers_suffix_then_override() {
         let mut config = SpawnConfig::default();
         assert_eq!(
-            compose_system_prompt(&config),
+            compose_system_prompt(&config, None),
             crate::provider::WORKING_STYLE
         );
 
         config.system_prompt_suffix = Some("# Repeating Task Context".into());
         config.system_prompt_override = Some("Always answer in haiku.".into());
-        let prompt = compose_system_prompt(&config);
+        let prompt = compose_system_prompt(&config, None);
         assert!(prompt.starts_with(crate::provider::WORKING_STYLE));
         let suffix_at = prompt.find("# Repeating Task Context").unwrap();
         let override_at = prompt.find("Always answer in haiku.").unwrap();
@@ -1707,11 +1710,50 @@ mod tests {
         config.system_prompt_suffix = Some("   ".into());
         config.system_prompt_override = Some(String::new());
         assert_eq!(
-            compose_system_prompt(&config),
+            compose_system_prompt(&config, None),
             crate::provider::WORKING_STYLE
         );
     }
 
+    #[tokio::test]
+    async fn provider_base_prompt_override_replaces_default_and_reset_restores() {
+        use crate::provider::base_prompt;
+        let db = crate::db::Db::in_memory().unwrap();
+        let config = SpawnConfig {
+            system_prompt_override: Some("Session rule.".into()),
+            ..Default::default()
+        };
+
+        // Claude's default carries its crate-specific text plus the shared rules.
+        let claude_default = base_prompt::default_base_prompt("claude");
+        assert!(claude_default.contains("mcp__peckboard__ask_user"));
+        assert!(claude_default.ends_with(crate::provider::WORKING_STYLE));
+        assert_eq!(
+            base_prompt::default_base_prompt("some-wasm-plugin"),
+            crate::provider::WORKING_STYLE
+        );
+
+        base_prompt::set_override(&db, "mock", Some("Custom base.".into()))
+            .await
+            .unwrap();
+        let base = base_prompt::override_for(&db, "mock").await;
+        let prompt = compose_system_prompt(&config, base.as_deref());
+        assert_eq!(prompt, "Custom base.\nSession rule.");
+        assert!(!prompt.contains("# Working style"));
+        // Other providers are untouched.
+        assert_eq!(base_prompt::override_for(&db, "claude").await, None);
+
+        // Blank = reset to default.
+        base_prompt::set_override(&db, "mock", Some("  ".into()))
+            .await
+            .unwrap();
+        let base = base_prompt::override_for(&db, "mock").await;
+        assert_eq!(base, None);
+        assert!(
+            compose_system_prompt(&config, base.as_deref())
+                .starts_with(crate::provider::WORKING_STYLE)
+        );
+    }
     #[test]
     fn resolve_cli_path_prefers_path_then_fallback_dirs() {
         let dir = tempfile::tempdir().unwrap();

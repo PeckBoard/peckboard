@@ -291,8 +291,19 @@ pub struct Project {
     pub pause_reason: Option<String>,
     pub budget_usd_cents: Option<i32>,
     pub budget_period: Option<String>,
+    /// Whether cards pass through the shared `review` step (a fresh
+    /// session verifies the work) before `done`.
+    pub review_enabled: bool,
+    /// Reviewer model; NULL = same as the project's `model`.
+    pub review_model: Option<String>,
+    /// Reviewer effort; NULL = same as the project's `effort`.
+    pub review_effort: Option<String>,
 }
 
+/// Insert shape for `projects`. The review settings are deliberately absent:
+/// the column defaults (review on, same model/effort as the project) apply,
+/// and callers that take explicit review settings follow the insert with an
+/// `UpdateProject`.
 #[derive(Insertable, Deserialize, Debug)]
 #[diesel(table_name = projects)]
 pub struct NewProject {
@@ -333,6 +344,9 @@ pub struct UpdateProject {
     pub budget_usd_cents: Option<Option<i32>>,
     pub worktree_isolation: Option<bool>,
     pub budget_period: Option<Option<String>>,
+    pub review_enabled: Option<bool>,
+    pub review_model: Option<Option<String>>,
+    pub review_effort: Option<Option<String>>,
 }
 
 // ── Cards ────────────────────────────────────────────────────────────

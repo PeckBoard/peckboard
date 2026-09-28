@@ -192,53 +192,83 @@ code first, then make the change.
 When the implementation is complete and ready for review, call \
 `complete_step` to hand off to the review step.";
 
-const DEEP_DEVELOP_REVIEW_INSTRUCTIONS: &str =
-    "Review the code change produced by the previous worker. Treat the \
-previous worker's output as a pull request.
+/// Name of the shared review step every workflow runs right before `done`:
+/// a fresh worker session — optionally on the project's `review_model` —
+/// independently verifies the card. Projects can turn it off
+/// (`projects.review_enabled`), see [`steps_for_card`].
+pub const REVIEW_STEP: &str = "review";
 
-If the working directory is NOT a git repo, do the review against the \
-files in place.
+/// Instructions for the shared [`REVIEW_STEP`]. The worker prompt adds the
+/// previous worker's session id and handoff above these (see
+/// `pipeline::build_worker_prompt`).
+pub const REVIEW_INSTRUCTIONS: &str =
+    "Independently review the work a PREVIOUS worker (a different session) \
+did on this card. You are a second pair of eyes; the author's own account \
+of its work is not evidence.
 
-**If the working directory is a git repo**, the previous worker's \
-handoff_context should include the branch name (look for `branch \
-<name>` in the handoff context near the top of this prompt). If the \
-handoff context is missing or the branch doesn't exist, call \
-`finish_card` with a short reason rather than reviewing a stale copy \
-of main.
+### Ground Rules
+
+- DO NOT trust claims that the work is complete — not in the handoff, \
+  not in the previous worker's transcript, not in commit messages. Every \
+  claim is a hypothesis until you have checked it yourself.
+- Independently verify EVERY requirement in the card (title, description, \
+  acceptance criteria) against the actual code, files, reports, and \
+  tests. Run the tests / build / linter yourself; don't rely on reported \
+  results.
+
+### Find the Work
+
+- Read the previous worker's handoff and its full transcript via \
+  `read_worker_session` (session id in the Review Handoff section) to \
+  learn what it claims to have done and where.
+- **If the working directory is a git repo** and the handoff names a \
+  branch, check out that branch and review its commits / diff against \
+  the base branch. Otherwise review the working tree and recent commits \
+  (`git log`, `git diff`). Do NOT push unless instructed to.
+- If the working directory is NOT a git repo, review the files in place.
 
 ### Review
 
-- `cd` to the working directory and check out the branch named in the \
-  handoff. Do the review against that branch's commits.
-- **Correctness** — does the code actually solve the card? Trace the \
+- **Completeness** — tick off each requirement in the card one by one.
+- **Correctness** — does it actually do what the card asks? Trace the \
   logic; don't just read the tests. Look for off-by-one, wrong branch, \
   missed edge cases.
 - **Security** — input validation at boundaries, no secrets in code, no \
   obvious injection/XSS/SSRF.
-- **Tests** — did the author add tests for the new behavior and edge \
-  cases? If tests are missing, either add them or file a follow-up.
+- **Tests** — are the new behaviours and edge cases covered, and do the \
+  checks pass?
 - **Style & scope** — no unrelated refactors, no dead code, names make \
-  sense, comments only where the \"why\" is non-obvious.
+  sense.
 
-If you find issues, fix them directly in this session (you have the \
-same tools as the previous worker). Don't punt to \"future work\" \
-unless it's genuinely out of scope — in that case file a new card with \
-`create_card`. If you make fixes, commit them on the same branch. Do \
-NOT push unless instructed to.
+### Act on What You Find
 
-When done, call `finish_card`. The handoff_context should be short \
-and final, e.g. `\"review complete; branch feat/queue ready\"`.";
+- Small defects in the delivered work (a bug, a missing test, a failing \
+  check) → fix them directly in this session and re-run the checks. On a \
+  branch, commit the fixes on that same branch.
+- EVERY requirement that is missing or only partly done → call \
+  `create_card` in this same project describing the gap: what is missing, \
+  where, and how to verify it. Reference the origin card (title + id) in \
+  the description and pass the origin card's workflow as `workflow`. Do \
+  NOT silently finish the missing work yourself and do NOT drop it.
+- Don't call `complete_step` — this is the last step before done.
 
-/// All built-in workflows. Every `steps` list starts with `backlog` and ends
-/// with `done`; the orchestrator's dispatch auto-advance and `find_next_step`
-/// both rely on that shape.
+### Finish
+
+Call `finish_card` with a summary listing each requirement and how you \
+verified it, what you fixed, and the gap cards you created (title + id) \
+or \"no gaps\". If the work is fundamentally wrong or the card should \
+not be done, call `wont_do_card` with the reason instead.";
+
+/// All built-in workflows. Every `steps` list starts with `backlog`, ends
+/// with `done`, and runs the shared [`REVIEW_STEP`] right before `done`;
+/// the orchestrator's dispatch auto-advance and `find_next_step` both rely
+/// on that shape.
 pub const WORKFLOWS: &[Workflow] = &[
     Workflow {
         id: "task",
         name: "Task",
-        description: "Runs a single in-progress step with no review. Best for everyday \
-                      one-shot jobs you would hand a worker without needing a separate \
-                      review step.",
+        description: "Runs a single in-progress step, then a fresh session reviews the \
+                      result. Best for everyday one-shot jobs you would hand a worker.",
         priority: 100,
         steps: &[
             WorkflowStep {
@@ -248,6 +278,10 @@ pub const WORKFLOWS: &[Workflow] = &[
             WorkflowStep {
                 step: "in_progress",
                 instructions: TASK_INSTRUCTIONS,
+            },
+            WorkflowStep {
+                step: REVIEW_STEP,
+                instructions: REVIEW_INSTRUCTIONS,
             },
             WorkflowStep {
                 step: "done",
@@ -272,6 +306,10 @@ pub const WORKFLOWS: &[Workflow] = &[
                 instructions: RESEARCH_INSTRUCTIONS,
             },
             WorkflowStep {
+                step: REVIEW_STEP,
+                instructions: REVIEW_INSTRUCTIONS,
+            },
+            WorkflowStep {
                 step: "done",
                 instructions: "",
             },
@@ -293,6 +331,10 @@ pub const WORKFLOWS: &[Workflow] = &[
                 instructions: BREAKDOWN_INSTRUCTIONS,
             },
             WorkflowStep {
+                step: REVIEW_STEP,
+                instructions: REVIEW_INSTRUCTIONS,
+            },
+            WorkflowStep {
                 step: "done",
                 instructions: "",
             },
@@ -301,8 +343,8 @@ pub const WORKFLOWS: &[Workflow] = &[
     Workflow {
         id: "fast-develop-software",
         name: "Fast Develop Software",
-        description: "Normal software development. Lower cost than Deep Develop Software, \
-                      which adds a separate reviewer pass.",
+        description: "Normal software development: implement, run the checks, then an \
+                      independent review. Lower cost than Deep Develop Software.",
         priority: 400,
         steps: &[
             WorkflowStep {
@@ -314,6 +356,10 @@ pub const WORKFLOWS: &[Workflow] = &[
                 instructions: FAST_DEVELOP_INSTRUCTIONS,
             },
             WorkflowStep {
+                step: REVIEW_STEP,
+                instructions: REVIEW_INSTRUCTIONS,
+            },
+            WorkflowStep {
                 step: "done",
                 instructions: "",
             },
@@ -322,8 +368,9 @@ pub const WORKFLOWS: &[Workflow] = &[
     Workflow {
         id: "deep-develop-software",
         name: "Deep Develop Software",
-        description: "For big or riskier tasks where you want a second worker to review \
-                      the changes after the first one implements them. Higher cost.",
+        description: "For big or riskier tasks: the work lands on its own git branch with \
+                      an explicit hand-off, then an independent reviewer checks that \
+                      branch. Higher cost.",
         priority: 500,
         steps: &[
             WorkflowStep {
@@ -335,8 +382,8 @@ pub const WORKFLOWS: &[Workflow] = &[
                 instructions: DEEP_DEVELOP_EXECUTION_INSTRUCTIONS,
             },
             WorkflowStep {
-                step: "review",
-                instructions: DEEP_DEVELOP_REVIEW_INSTRUCTIONS,
+                step: REVIEW_STEP,
+                instructions: REVIEW_INSTRUCTIONS,
             },
             WorkflowStep {
                 step: "done",
@@ -407,12 +454,41 @@ static CUSTOM_WORKFLOWS: std::sync::RwLock<Vec<WorkflowDef>> = std::sync::RwLock
 /// Replace the full set of custom workflows held in memory. Called at
 /// startup (after loading from the DB) and after any CRUD mutation so
 /// every reader — the orchestrator, the worker prompt builder, the HTTP
-/// listing — sees the change immediately without a DB round-trip.
+/// listing — sees the change immediately without a DB round-trip. Each
+/// definition gets the shared review step (see [`with_review_step`]).
 pub fn set_custom_workflows(defs: Vec<WorkflowDef>) {
+    let defs = defs.into_iter().map(with_review_step).collect();
     let mut guard = CUSTOM_WORKFLOWS
         .write()
         .expect("workflow registry poisoned");
     *guard = defs;
+}
+
+/// Give a custom workflow the shared [`REVIEW_STEP`] right before `done`,
+/// unless it already declares its own `review` step. The injected step is
+/// never persisted: [`is_injected_review_step`] lets the save path drop it
+/// again when the editor round-trips it unchanged, so stored workflows keep
+/// tracking the current shared instructions.
+pub fn with_review_step(mut def: WorkflowDef) -> WorkflowDef {
+    let has_review = def.steps.iter().any(|s| s.step == REVIEW_STEP);
+    let ends_at_done = def.steps.last().is_some_and(|s| s.step == "done");
+    if !has_review && ends_at_done {
+        let at = def.steps.len() - 1;
+        def.steps.insert(
+            at,
+            WorkflowStepDef {
+                step: REVIEW_STEP.to_string(),
+                instructions: REVIEW_INSTRUCTIONS.to_string(),
+            },
+        );
+    }
+    def
+}
+
+/// True for a `review` step that is exactly the injected shared step (see
+/// [`with_review_step`]) — i.e. the user didn't customise it.
+pub fn is_injected_review_step(step: &WorkflowStepDef) -> bool {
+    step.step == REVIEW_STEP && step.instructions.trim() == REVIEW_INSTRUCTIONS.trim()
 }
 
 /// Every workflow — built-ins first (in their fixed order), then custom
@@ -465,6 +541,33 @@ pub fn default_workflow() -> WorkflowDef {
 pub fn steps_for(id: Option<&str>) -> Vec<String> {
     let wf = id.and_then(workflow_by_id).unwrap_or_else(default_workflow);
     wf.steps.into_iter().map(|s| s.step).collect()
+}
+
+/// Step order for one card: its workflow's steps, minus the shared
+/// [`REVIEW_STEP`] when the owning project turned review off. A card already
+/// sitting on `review` keeps the step so it stays resolvable and can finish.
+/// Everything that advances a card (`complete_step`, `finish_card`, the
+/// orchestrator's completion handler) must use this rather than
+/// [`steps_for`], or a review-disabled project would still stop on review.
+pub fn steps_for_card(workflow_id: &str, current_step: &str, review_enabled: bool) -> Vec<String> {
+    let mut steps = steps_for(Some(workflow_id));
+    if !review_enabled && current_step != REVIEW_STEP {
+        steps.retain(|s| s != REVIEW_STEP);
+    }
+    steps
+}
+
+/// Where `finish_card` lands from `current_step`: the [`REVIEW_STEP`] while
+/// the card still has an unrun review ahead of it in `steps` (as returned by
+/// [`steps_for_card`]), otherwise `done`. An unknown current step never
+/// invents a review detour.
+pub fn finish_target(current_step: &str, steps: &[String]) -> String {
+    let current = steps.iter().position(|s| s == current_step);
+    let review = steps.iter().position(|s| s == REVIEW_STEP);
+    match (current, review) {
+        (Some(c), Some(r)) if c < r => REVIEW_STEP.to_string(),
+        _ => "done".to_string(),
+    }
 }
 
 /// Look up the per-step instructions for a workflow/step combination. Returns
@@ -614,8 +717,17 @@ mod tests {
         );
         assert_eq!(
             steps_for(Some("task")),
-            vec!["backlog", "in_progress", "done"]
+            vec!["backlog", "in_progress", "review", "done"]
         );
+    }
+
+    #[test]
+    fn every_workflow_reviews_right_before_done() {
+        for wf in all_workflows() {
+            let n = wf.steps.len();
+            assert_eq!(wf.steps[n - 2].step, REVIEW_STEP, "{} review", wf.id);
+            assert_eq!(wf.steps[n - 1].step, "done", "{} end", wf.id);
+        }
     }
 
     #[test]
@@ -623,10 +735,13 @@ mod tests {
         // Task's in_progress step has instructions.
         let inst = step_instructions(Some("task"), "in_progress").unwrap();
         assert!(inst.contains("Do the task"));
-        // Deep-develop's review step has its own instructions distinct from
-        // the execution step's instructions.
+        // Every workflow shares one review step, distinct from execution.
         let review = step_instructions(Some("deep-develop-software"), "review").unwrap();
-        assert!(review.contains("Review the code change"));
+        assert!(review.contains("DO NOT trust"));
+        assert_eq!(
+            step_instructions(Some("task"), "review").as_deref(),
+            Some(review.as_str())
+        );
         let exec = step_instructions(Some("deep-develop-software"), "in_progress").unwrap();
         assert!(exec.contains("Implement the work"));
         assert_ne!(review, exec);
@@ -637,9 +752,9 @@ mod tests {
         // Terminal step has no instructions.
         assert!(step_instructions(Some("task"), "done").is_none());
         // Unknown step on a known workflow.
-        assert!(step_instructions(Some("task"), "review").is_none());
-        // Unknown workflow falls back to default, which has no review step.
-        assert!(step_instructions(Some("does-not-exist"), "review").is_none());
+        assert!(step_instructions(Some("task"), "summarize").is_none());
+        // Unknown workflow falls back to default.
+        assert!(step_instructions(Some("does-not-exist"), "summarize").is_none());
     }
 
     fn valid_custom_steps() -> Vec<WorkflowStepDef> {
@@ -750,17 +865,77 @@ mod tests {
 
         let resolved = workflow_by_id("my-custom-id").expect("custom workflow must resolve");
         assert_eq!(resolved.name, "My Custom Flow");
+        // The shared review step is injected before `done`.
         assert_eq!(
             steps_for(Some("my-custom-id")),
-            vec!["backlog", "in_progress", "done"]
+            vec!["backlog", "in_progress", "review", "done"]
         );
         assert_eq!(
             step_instructions(Some("my-custom-id"), "in_progress").as_deref(),
             Some("Do the thing.")
         );
+        assert_eq!(
+            step_instructions(Some("my-custom-id"), "review").as_deref(),
+            Some(REVIEW_INSTRUCTIONS)
+        );
+
+        // A custom workflow that declares its own `review` keeps it (no
+        // second review step, its own instructions).
+        let mut own_review = valid_custom_steps();
+        own_review.insert(
+            2,
+            WorkflowStepDef {
+                step: "review".to_string(),
+                instructions: "Custom review.".to_string(),
+            },
+        );
+        set_custom_workflows(vec![WorkflowDef {
+            id: "my-custom-review".to_string(),
+            name: "My Custom Review".to_string(),
+            description: String::new(),
+            priority: 1000,
+            source: "custom",
+            steps: own_review,
+        }]);
+        assert_eq!(
+            steps_for(Some("my-custom-review")),
+            vec!["backlog", "in_progress", "review", "done"]
+        );
+        assert_eq!(
+            step_instructions(Some("my-custom-review"), "review").as_deref(),
+            Some("Custom review.")
+        );
 
         // Clean up so this test doesn't leak into any test added later in
         // this module.
         set_custom_workflows(Vec::new());
+    }
+
+    #[test]
+    fn review_can_be_skipped_per_project_but_not_mid_review() {
+        assert_eq!(
+            steps_for_card("task", "in_progress", false),
+            vec!["backlog", "in_progress", "done"]
+        );
+        // A card already on `review` keeps it resolvable so it can finish.
+        assert_eq!(
+            steps_for_card("task", "review", false),
+            vec!["backlog", "in_progress", "review", "done"]
+        );
+        assert_eq!(
+            steps_for_card("task", "in_progress", true),
+            vec!["backlog", "in_progress", "review", "done"]
+        );
+    }
+
+    #[test]
+    fn finish_lands_on_review_until_the_card_was_reviewed() {
+        let with_review = steps_for_card("task", "in_progress", true);
+        assert_eq!(finish_target("in_progress", &with_review), "review");
+        assert_eq!(finish_target("review", &with_review), "done");
+        let without = steps_for_card("task", "in_progress", false);
+        assert_eq!(finish_target("in_progress", &without), "done");
+        // Unknown step: never invent a review detour.
+        assert_eq!(finish_target("mystery", &with_review), "done");
     }
 }

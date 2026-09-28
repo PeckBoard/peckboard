@@ -107,7 +107,8 @@ test('create custom workflow, assign to a card, orchestrator resolves its custom
   const created = workflows.find((w) => w.name === workflowName)
   expect(created, 'created workflow present in /api/workflows').toBeTruthy()
   expect(created!.source).toBe('custom')
-  expect(created!.steps.map((s) => s.step)).toEqual(['backlog', customStepName, 'done'])
+  // Every workflow gets the shared `review` step injected right before `done`.
+  expect(created!.steps.map((s) => s.step)).toEqual(['backlog', customStepName, 'review', 'done'])
   const workflowId = created!.id
 
   // ── 2. Assign it to a new card via the card form's WorkflowSelect ──

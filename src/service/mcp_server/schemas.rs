@@ -251,13 +251,13 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "finish_card".into(),
-            description: "Mark the ENTIRE card done. Jumps straight to the terminal `done` step from ANY current step (even `backlog`/`in_progress`), unblocking cards that depend on it. Use whenever all the card's work is complete. Do NOT use `complete_step` to finish a card.".into(),
+            description: "Mark the ENTIRE card's work complete. From a working step (even `backlog`/`in_progress`) the card moves to the shared `review` step, where a DIFFERENT session independently verifies it before `done` (projects with review turned off, and the reviewer itself, land straight on `done`, unblocking dependent cards). Use whenever all the card's work is complete. Do NOT use `complete_step` to finish a card.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "Final summary of what was done"
+                        "description": "Final summary: what was done, where (files, branch, commits), and how it was verified — the reviewer starts from this"
                     }
                 },
                 "additionalProperties": false

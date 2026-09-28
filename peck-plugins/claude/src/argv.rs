@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-const PECKBOARD_SYSTEM_PROMPT: &str = r#"
+pub(crate) const PECKBOARD_SYSTEM_PROMPT: &str = r#"
 # Asking the user questions
 
 You run inside Peckboard, a remote web UI — no terminal. To ask the user anything, call `mcp__peckboard__ask_user` (the built-in AskUserQuestion does NOT work headless). Never ask in plain text — the UI cannot render it.
@@ -72,11 +72,20 @@ pub struct CliSpec {
     pub core_tools: Vec<String>,
     pub pre_hatcher_tools: Vec<String>,
     pub subagent_context_path: Option<String>,
+    /// The user replaced this provider's base prompt; `system_prompt` already
+    /// starts with it, so `PECKBOARD_SYSTEM_PROMPT` must not be prepended.
+    pub base_prompt_overridden: bool,
 }
 
 pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
     let combined_system_prompt = {
-        let mut prompt = PECKBOARD_SYSTEM_PROMPT.to_string();
+        // A user override of the base prompt already arrived in
+        // `spec.system_prompt` and replaces this default outright.
+        let mut prompt = if spec.base_prompt_overridden {
+            String::new()
+        } else {
+            PECKBOARD_SYSTEM_PROMPT.to_string()
+        };
         if !spec.system_prompt.is_empty() {
             prompt.push_str(&spec.system_prompt);
         }
@@ -232,4 +241,44 @@ pub fn build_user_message_frame(message: &serde_json::Value) -> String {
         "message": { "role": "user", "content": blocks },
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn append_prompt(overridden: bool) -> String {
+        let spec = CliSpec {
+            model: "default".into(),
+            effort: None,
+            conversation_id: None,
+            mcp_config_path: None,
+            permission_mode: None,
+            is_worker: false,
+            is_pre_hatcher: false,
+            extra_allowed_tools: Vec::new(),
+            extra_disallowed_tools: Vec::new(),
+            system_prompt: "BASE".into(),
+            core_tools: Vec::new(),
+            pre_hatcher_tools: Vec::new(),
+            subagent_context_path: None,
+            base_prompt_overridden: overridden,
+        };
+        build_cli_args(&spec)
+            .into_iter()
+            .find_map(|a| {
+                a.strip_prefix("--append-system-prompt=")
+                    .map(str::to_string)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn base_prompt_override_drops_the_default_peckboard_prompt() {
+        assert_eq!(
+            append_prompt(false),
+            format!("{PECKBOARD_SYSTEM_PROMPT}BASE")
+        );
+        assert_eq!(append_prompt(true), "BASE");
+    }
 }

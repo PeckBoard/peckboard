@@ -114,6 +114,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
         system_prompt,
         core_tools,
         pre_hatcher_tools,
+        base_prompt_overridden: payload
+            .get("base_prompt_overridden")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         subagent_context_path: Some(subagent_path),
     };
     let args = argv::build_cli_args(&spec);

@@ -99,6 +99,9 @@ diesel::table! {
         pause_reason -> Nullable<Text>,
         budget_usd_cents -> Nullable<Integer>,
         budget_period -> Nullable<Text>,
+        review_enabled -> Bool,
+        review_model -> Nullable<Text>,
+        review_effort -> Nullable<Text>,
     }
 }
 

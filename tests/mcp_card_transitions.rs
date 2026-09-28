@@ -212,11 +212,13 @@ async fn finish_card_transitions_synchronously() {
     // `handle_worker_done` round trip required. This is the regression
     // bug the user hit: the agent calls `finish_card`, the call returns
     // ok, but the kanban shows the card still in `in_progress` because
-    // the worker process was waiting on idle.
+    // the worker process was waiting on idle. The card starts on the
+    // shared `review` step: `finish_card` from a working step lands on
+    // review instead (see the test below).
     let state = build_state().await;
     let (card_id, session_id) = seed_card_with_worker(
         &state,
-        "in_progress",
+        "review",
         "deep-develop-software",
         "deep-develop-software",
     )
@@ -234,7 +236,7 @@ async fn finish_card_transitions_synchronously() {
         .unwrap();
     assert_eq!(result["status"], "ok");
     assert_eq!(result["to"], "done");
-    assert_eq!(result["from"], "in_progress");
+    assert_eq!(result["from"], "review");
 
     let card = state.db.get_card(&card_id).await.unwrap().unwrap();
     assert_eq!(card.step, "done");
@@ -254,11 +256,16 @@ async fn finish_card_transitions_synchronously() {
 }
 
 #[tokio::test]
-async fn finish_card_lands_on_done_from_any_intermediate_step() {
+async fn finish_card_lands_on_review_then_done_from_any_intermediate_step() {
     // `finish_card` is the "whole card is done, even though the workflow
-    // has more steps" escape hatch. From any non-terminal step it must
-    // reach `done` so dependent cards unblock.
-    for start in ["backlog", "in_progress", "review"] {
+    // has more steps" escape hatch. From a working step it lands on the
+    // shared `review` step (a fresh session verifies the work); from
+    // `review` itself it must reach `done` so dependent cards unblock.
+    for (start, expected) in [
+        ("backlog", "review"),
+        ("in_progress", "review"),
+        ("review", "done"),
+    ] {
         let state = build_state().await;
         let (card_id, session_id) = seed_card_with_worker(
             &state,
@@ -270,13 +277,14 @@ async fn finish_card_lands_on_done_from_any_intermediate_step() {
         let registry = McpToolRegistry::new();
         let ctx = ctx_for_card(&state, &session_id, &card_id);
 
-        registry
+        let result = registry
             .handle_tool_call("finish_card", serde_json::json!({}), &ctx)
             .await
             .unwrap();
+        assert_eq!(result["to"], expected, "from {start}");
 
         let card = state.db.get_card(&card_id).await.unwrap().unwrap();
-        assert_eq!(card.step, "done", "from {start} must reach done");
+        assert_eq!(card.step, expected, "from {start} must reach {expected}");
     }
 }
 

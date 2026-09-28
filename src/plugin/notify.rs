@@ -200,10 +200,10 @@ mod tests {
 
     #[test]
     fn project_paused_payload_shape() {
-        let v = project_paused_payload("p1", "Proj", Some("crash"), "crash");
+        let v = project_paused_payload("p1", "Proj", Some("taking a break"), "manual");
         assert_eq!(v["project_id"], "p1");
-        assert_eq!(v["source"], "crash");
-        assert_eq!(v["reason"], "crash");
+        assert_eq!(v["source"], "manual");
+        assert_eq!(v["reason"], "taking a break");
     }
 
     #[test]

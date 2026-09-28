@@ -56,6 +56,7 @@ import EnvVarsSection from './EnvVarsSection'
 import SshKeysSection from './SshKeysSection'
 import AgentVarsSection from './AgentVarsSection'
 import ConfirmDialog from './ConfirmDialog'
+import ProviderBasePrompt, { type ProviderPrompt } from './ProviderBasePrompt'
 
 interface KeepAliveRun {
   provider: string
@@ -747,6 +748,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
   const setDefaultModelLocal = useResourcesStore((s) => s.setDefaultModelLocal)
   const [providerVisibility, setProviderVisibility] = useState<ProviderInfo[]>([])
+  const [providerPrompts, setProviderPrompts] = useState<Record<string, ProviderPrompt>>({})
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
   // One inline save error at a time, tagged with the section that owns the
   // control. A failed PUT reverts the control and parks the reason here.
@@ -808,6 +810,18 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    // Admin-only route: a provider's base prompt steers every user's agents.
+    if (!isAdmin) return
+    authedFetch('/api/settings/provider-prompts')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ProviderPrompt[] | null) => {
+        if (Array.isArray(data))
+          setProviderPrompts(Object.fromEntries(data.map((e) => [e.provider, e])))
+      })
+      .catch(() => {})
+  }, [isAdmin])
 
   useEffect(() => {
     if (user?.role !== 'admin') return
@@ -1420,6 +1434,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                       )}
                       <PluginSettingsForm pluginId={p.id} />
                       {p.id === 'ollama' && <OllamaPullModel />}
+                      {isAdmin && providerPrompts[p.id] && (
+                        <ProviderBasePrompt
+                          key={providerPrompts[p.id].override ?? ''}
+                          entry={providerPrompts[p.id]}
+                          onChange={(entry) =>
+                            setProviderPrompts((prev) => ({ ...prev, [entry.provider]: entry }))
+                          }
+                        />
+                      )}
                     </section>
                   )}
                 </div>

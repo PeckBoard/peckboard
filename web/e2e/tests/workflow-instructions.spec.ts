@@ -213,7 +213,10 @@ test('WorkflowInstructionsModal persists text via Edit Project and round-trips o
     // have loaded (the modal shows a "Loading current instructions…"
     // placeholder until then).
     await expect(
-      page.locator('.workflow-instructions-modal').getByLabel('Your additional instructions'),
+      page
+        .locator('.workflow-instructions-modal')
+        .getByLabel('Your additional instructions')
+        .first(),
     ).toBeVisible()
   }
 
@@ -229,12 +232,12 @@ test('WorkflowInstructionsModal persists text via Edit Project and round-trips o
   // assertion isn't tied to picker ordering.
   await wfModal.getByLabel('Workflow').selectOption('fast-develop-software')
 
-  // `fast-develop-software` has exactly one worker-running step
-  // (`in_progress`), so there's only one "Your additional instructions"
-  // textarea inside the modal at this point.
+  // `fast-develop-software` runs two worker steps (`in_progress`, then the
+  // shared `review`); `in_progress` renders first, so target the first
+  // "Your additional instructions" textarea (and its Save) inside the modal.
   const message = 'At the end, commit to master and push.'
-  await wfModal.getByLabel('Your additional instructions').fill(message)
-  await wfModal.getByRole('button', { name: 'Save' }).click()
+  await wfModal.getByLabel('Your additional instructions').first().fill(message)
+  await wfModal.getByRole('button', { name: 'Save' }).first().click()
   await expect(wfModal.getByText('Saved.')).toBeVisible()
 
   // Close the modal stack so we can re-open from scratch and prove the
@@ -244,7 +247,7 @@ test('WorkflowInstructionsModal persists text via Edit Project and round-trips o
 
   await openInstructionsModal()
   await wfModal.getByLabel('Workflow').selectOption('fast-develop-software')
-  await expect(wfModal.getByLabel('Your additional instructions')).toHaveValue(message)
+  await expect(wfModal.getByLabel('Your additional instructions').first()).toHaveValue(message)
 
   // And the server agrees — list endpoint returns the same row.
   const listRes = await request.get(`/api/projects/${project.id}/workflow-instructions`, {

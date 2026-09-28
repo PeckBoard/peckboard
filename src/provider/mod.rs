@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod auth_recovery;
+pub mod base_prompt;
 pub mod login_stash {
     pub use crate::accounts::login_stash::*;
 }

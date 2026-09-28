@@ -190,11 +190,16 @@ async fn seed_card_with_worker(
 }
 
 #[tokio::test]
-async fn finish_drives_card_to_done_from_any_step() {
-    // A worker that calls `finish_card` must land the card on `done`
-    // regardless of which step it started on — that's what unblocks
-    // dependents.
-    for start_step in ["backlog", "in_progress", "review"] {
+async fn finish_lands_on_review_then_done() {
+    // A worker that calls `finish_card` from a working step lands the card
+    // on the shared `review` step (a fresh session verifies the work); the
+    // reviewer's own `finish_card` lands it on `done` — that's what
+    // unblocks dependents.
+    for (start_step, expected) in [
+        ("backlog", "review"),
+        ("in_progress", "review"),
+        ("review", "done"),
+    ] {
         let state = build_state().await;
         let (card_id, session_id) = seed_card_with_worker(
             &state,
@@ -218,8 +223,8 @@ async fn finish_drives_card_to_done_from_any_step() {
 
         let card = state.db.get_card(&card_id).await.unwrap().unwrap();
         assert_eq!(
-            card.step, "done",
-            "finish_card from {start_step} should reach done"
+            card.step, expected,
+            "finish_card from {start_step} should reach {expected}"
         );
     }
 }

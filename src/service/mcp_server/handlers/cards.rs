@@ -182,6 +182,18 @@ async fn validate_dependency_set(
     Ok(deps)
 }
 
+/// Whether the project owning `card_id` runs the shared review step.
+/// Defaults to on when the card or project can't be read — skipping a
+/// review by accident is worse than running one.
+async fn card_review_enabled(ctx: &ToolCallContext, card_id: &str) -> bool {
+    let Ok(Some(card)) = ctx.db.get_card(card_id).await else {
+        return true;
+    };
+    match ctx.db.get_project(&card.project_id).await {
+        Ok(Some(project)) => project.review_enabled,
+        _ => true,
+    }
+}
 impl McpToolRegistry {
     pub(crate) async fn handle_complete_step(
         &self,
@@ -218,6 +230,7 @@ impl McpToolRegistry {
         // calls on the same card can't both see the same pre-state and
         // both advance. The pre-step is captured for the step-change
         // event we append after the write.
+        let review_enabled = card_review_enabled(ctx, card_id).await;
         let session_id = ctx.session_id.clone();
         let handoff_for_update = handoff_context.clone();
         let prev_step_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
@@ -235,7 +248,8 @@ impl McpToolRegistry {
                         card.step
                     );
                 }
-                let workflow_steps = crate::workflow::steps_for(Some(&card.workflow));
+                let workflow_steps =
+                    crate::workflow::steps_for_card(&card.workflow, &card.step, review_enabled);
                 // Belt-and-braces for the workflow-edit guard in
                 // `routes::workflows::update_workflow`: if the card's step
                 // isn't in its workflow at all, refuse rather than fall back
@@ -344,10 +358,17 @@ impl McpToolRegistry {
             )
             .await?;
 
+        // `finish_card` from a working step lands on the shared review step
+        // (a fresh session verifies the work) unless the project turned
+        // review off or the card is already being reviewed — see
+        // `workflow::finish_target`.
+        let review_enabled = card_review_enabled(ctx, card_id).await;
         let session_id = ctx.session_id.clone();
         let summary_for_update = summary.clone();
         let prev_step_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let prev_step_writer = prev_step_cell.clone();
+        let target_cell = std::sync::Arc::new(std::sync::Mutex::new("done".to_string()));
+        let target_writer = target_cell.clone();
         let updated = ctx
             .db
             .update_card_atomic(card_id, move |card| {
@@ -359,8 +380,12 @@ impl McpToolRegistry {
                 if card.step == "wont_do" {
                     anyhow::bail!("finish-card-policy: card is wont_do, cannot finish");
                 }
+                let steps =
+                    crate::workflow::steps_for_card(&card.workflow, &card.step, review_enabled);
+                let target = crate::workflow::finish_target(&card.step, &steps);
+                *target_writer.lock().unwrap() = target.clone();
                 Ok(UpdateCard {
-                    step: Some("done".into()),
+                    step: Some(target),
                     handoff_context: Some(if summary_for_update.is_empty() {
                         None
                     } else {
@@ -376,15 +401,16 @@ impl McpToolRegistry {
 
         let card = updated.ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
         let prev_step = prev_step_cell.lock().unwrap().clone().unwrap_or_default();
+        let target = target_cell.lock().unwrap().clone();
 
-        append_step_change(ctx, card_id, &prev_step, "done").await?;
+        append_step_change(ctx, card_id, &prev_step, &target).await?;
         crate::plugin::notify::fire_card_step_after(
             &ctx.db,
             card_id,
             &card.title,
             &card.project_id,
             &prev_step,
-            "done",
+            &target,
         )
         .await;
         broadcast_card_update(ctx, &card);
@@ -394,19 +420,27 @@ impl McpToolRegistry {
             &ctx.session_id,
         )
         .await;
-        if let Some(ref cid) = ctx.card_id {
-            if let Ok(Some(folder)) = ctx.db.get_folder(&ctx.folder_id).await {
-                crate::worker::worktree::finalize_worktree(
-                    &folder.path,
-                    cid,
-                    &ctx.session_id,
-                    &ctx.db,
-                )
+        // Only a terminal card merges its worktree; on the way to review the
+        // reviewer reuses the card's worktree (`ensure_worktree` is keyed by
+        // card) to inspect the delivered branch.
+        if target == "done"
+            && let Some(ref cid) = ctx.card_id
+            && let Ok(Some(folder)) = ctx.db.get_folder(&ctx.folder_id).await
+        {
+            crate::worker::worktree::finalize_worktree(&folder.path, cid, &ctx.session_id, &ctx.db)
                 .await;
-            }
         }
         shutdown_worker_after_turn(ctx).await;
 
+        if target == crate::workflow::REVIEW_STEP {
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "message": "Card moved to review: a different session will independently \
+                            verify the work before it is done. Stop here.",
+                "from": prev_step,
+                "to": target,
+            }));
+        }
         Ok(serde_json::json!({
             "status": "ok",
             "message": "Card finished",

@@ -256,9 +256,9 @@ export default function KanbanBoard({
     return () => window.removeEventListener('peckboard:card-update', handler)
   }, [projectId])
 
-  // Listen for project-update broadcasts — currently the auto-pause path
-  // is the only emitter, so this is how the "project paused, here's why"
-  // banner appears without the user having to refresh.
+  // Listen for project-update broadcasts (pause/resume, and the
+  // orchestrator flipping `budget_exhausted`) so the pause-reason and
+  // budget-reached banners track the server without a refresh.
   useEffect(() => {
     const handler = (e: globalThis.Event) => {
       const detail = (e as CustomEvent).detail
@@ -904,6 +904,12 @@ export default function KanbanBoard({
         {project?.pause_reason && (
           <div className="project-pause-banner" role="status" data-testid="project-pause-banner">
             <strong>Project paused.</strong> {project.pause_reason}
+          </div>
+        )}
+        {project?.budget_exhausted && (
+          <div className="project-pause-banner" role="status" data-testid="project-budget-banner">
+            <strong>Budget reached.</strong> No new workers start until the budget window resets or
+            the budget is raised.
           </div>
         )}
 

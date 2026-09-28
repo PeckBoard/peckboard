@@ -406,18 +406,18 @@ pub const CARD_STEP_AFTER_HOOK: &str = "card.step.after";
 /// crashes.
 pub const SESSION_AGENT_ENDED_HOOK: &str = "session.agent.ended";
 
-/// Fired when a worker is blocked from further automatic dispatch: either
-/// the owning project auto-pauses after repeated crashes (pairs with
-/// `project.paused`, source `"crash"`) or a single card is blocked after
-/// too many consecutive turns that completed without advancing it (no
-/// project-level effect in that case). Payload:
+/// Fired when a single card is blocked from further automatic dispatch:
+/// after repeated consecutive worker crashes, or after too many
+/// consecutive turns that completed without advancing it. The owning
+/// project is never paused by either — pausing is user-only. Payload:
 /// `{ card_id, card_title, project_id, project_name, reason }`.
 pub const WORKER_BLOCKED_HOOK: &str = "worker.blocked";
 
-/// Fired after a project is paused: manually (source `"manual"`), by the
-/// auto-pause crash guard (source `"crash"`), or by the spend-budget gate
-/// (source `"budget"`). Payload:
-/// `{ project_id, project_name, reason, source }`.
+/// Fired after a project is paused. Pausing is user-only (the HTTP route
+/// or a chat session's `pause_project` tool), so `source` is always
+/// `"manual"`; the orchestrator never pauses a project on its own (crash
+/// loops block the card, an exhausted budget just stops new workers).
+/// Payload: `{ project_id, project_name, reason, source }`.
 pub const PROJECT_PAUSED_HOOK: &str = "project.paused";
 
 /// Fired when a worker or chat session surfaces a pending question that needs

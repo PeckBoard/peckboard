@@ -301,6 +301,7 @@ const CLAUDE: CrateHooks = CrateHooks {
     registration: peckboard_claude_plugin::registration,
     manifest_json: peckboard_claude_plugin::manifest_json,
     interrupt_frame: Some(peckboard_claude_plugin::interrupt_frame),
+    base_prompt: Some(peckboard_claude_plugin::base_prompt),
 };
 const GROK: CrateHooks = CrateHooks {
     send: peckboard_grok_plugin::send_turn,
@@ -308,6 +309,7 @@ const GROK: CrateHooks = CrateHooks {
     registration: peckboard_grok_plugin::registration,
     manifest_json: peckboard_grok_plugin::manifest_json,
     interrupt_frame: None,
+    base_prompt: None,
 };
 const CURSOR: CrateHooks = CrateHooks {
     send: peckboard_cursor_plugin::send_turn,
@@ -315,6 +317,7 @@ const CURSOR: CrateHooks = CrateHooks {
     registration: peckboard_cursor_plugin::registration,
     manifest_json: peckboard_cursor_plugin::manifest_json,
     interrupt_frame: None,
+    base_prompt: None,
 };
 const KIMI: CrateHooks = CrateHooks {
     send: peckboard_kimi_plugin::send_turn,
@@ -322,6 +325,7 @@ const KIMI: CrateHooks = CrateHooks {
     registration: peckboard_kimi_plugin::registration,
     manifest_json: peckboard_kimi_plugin::manifest_json,
     interrupt_frame: None,
+    base_prompt: None,
 };
 const CODEX: CrateHooks = CrateHooks {
     send: peckboard_codex_plugin::send_turn,
@@ -329,6 +333,7 @@ const CODEX: CrateHooks = CrateHooks {
     registration: peckboard_codex_plugin::registration,
     manifest_json: peckboard_codex_plugin::manifest_json,
     interrupt_frame: None,
+    base_prompt: None,
 };
 const OLLAMA: CrateHooks = CrateHooks {
     send: peckboard_ollama_plugin::send_turn,
@@ -336,6 +341,7 @@ const OLLAMA: CrateHooks = CrateHooks {
     registration: peckboard_ollama_plugin::registration,
     manifest_json: peckboard_ollama_plugin::manifest_json,
     interrupt_frame: None,
+    base_prompt: None,
 };
 const MOCK: CrateHooks = CrateHooks {
     send: peckboard_mock_plugin::send_turn,
@@ -343,6 +349,7 @@ const MOCK: CrateHooks = CrateHooks {
     registration: peckboard_mock_plugin::registration,
     manifest_json: peckboard_mock_plugin::manifest_json,
     interrupt_frame: None,
+    base_prompt: None,
 };
 
 const SPECS: &[Spec] = &[

@@ -321,7 +321,7 @@ export default function NewProjectModal({ onClose }: Props) {
                   </select>
                 </div>
                 <p className="form-hint">
-                  Auto-pauses the project when spend in the current window exceeds this amount.
+                  No new workers start once spend in the current window reaches this amount.
                 </p>
               </div>
               <div className="form-field">

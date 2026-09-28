@@ -71,7 +71,7 @@ pub async fn reload_registry(db: &crate::db::Db) -> anyhow::Result<()> {
 }
 
 fn to_workflow_def(w: crate::db::crud::CustomWorkflowWithSteps) -> workflow::WorkflowDef {
-    workflow::WorkflowDef {
+    workflow::with_review_step(workflow::WorkflowDef {
         id: w.row.id,
         name: w.row.name,
         description: w.row.description,
@@ -85,7 +85,7 @@ fn to_workflow_def(w: crate::db::crud::CustomWorkflowWithSteps) -> workflow::Wor
                 instructions: s.instructions,
             })
             .collect(),
-    }
+    })
 }
 
 /// GET /api/workflows — built-ins + custom, each carrying a `source` field.
@@ -107,6 +107,10 @@ struct CreateWorkflowBody {
     steps: Vec<StepBody>,
 }
 
+/// Normalise submitted steps. The shared review step that the listing
+/// injects (see `workflow::with_review_step`) comes back from the editor
+/// unchanged; drop it so it isn't persisted as a frozen copy — the registry
+/// re-injects the current shared step on load. An edited review step is kept.
 fn to_step_defs(steps: Vec<StepBody>) -> Vec<WorkflowStepDef> {
     steps
         .into_iter()
@@ -114,6 +118,7 @@ fn to_step_defs(steps: Vec<StepBody>) -> Vec<WorkflowStepDef> {
             step: s.step.trim().to_string(),
             instructions: s.instructions,
         })
+        .filter(|s| !workflow::is_injected_review_step(s))
         .collect()
 }
 

@@ -1799,13 +1799,16 @@ impl AgentProvider for PluginProviderAdapter {
             )
             .map_err(|e| anyhow::anyhow!(e))?;
 
+        let base_override =
+            crate::provider::base_prompt::override_for(&ctx.db, &self.provider_id).await;
         let payload = serde_json::json!({
             "session_id": ctx.session_id,
             "provider_id": self.provider_id,
             "spawn_config": ctx.config,
             "message": message_payload(&ctx.message),
             "conversation_id": ctx.conversation_id.as_ref().map(|h| h.id()),
-            "system_prompt": compose_system_prompt(&ctx.config),
+            "system_prompt": compose_system_prompt(&ctx.config, base_override.as_deref()),
+            "base_prompt_overridden": base_override.is_some(),
         });
 
         let manager = self.manager.clone();

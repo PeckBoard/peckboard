@@ -57,6 +57,49 @@ pub fn budget_window_reset(now: chrono::DateTime<Utc>, period: &str) -> chrono::
     }
 }
 
+/// Whether `project` has a spend cap and its spend in the current window
+/// has reached it. While this holds the orchestrator starts no new
+/// workers (running ones finish their turn); the project itself is never
+/// paused — pausing is user-only. A project without a cap is never
+/// exhausted.
+pub async fn budget_exhausted(
+    db: &crate::db::Db,
+    project: &crate::db::models::Project,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<bool> {
+    let (Some(budget_cents), Some(period)) = (project.budget_usd_cents, &project.budget_period)
+    else {
+        return Ok(false);
+    };
+    let start_millis = budget_window_start(now, period).timestamp_millis();
+    let spend_usd = db.project_cost_in_window(&project.id, start_millis).await?;
+    Ok(spend_usd * 100.0 >= budget_cents as f64)
+}
+
+/// Project JSON as the UI receives it: the stored row plus the derived
+/// `budget_exhausted` flag (computed at read time, never stored). Used by
+/// the project routes and every `project-update` broadcast so the board's
+/// "budget reached" banner survives reloads and unrelated updates.
+pub async fn project_json(
+    db: &crate::db::Db,
+    project: &crate::db::models::Project,
+) -> serde_json::Value {
+    let exhausted = budget_exhausted(db, project, Utc::now())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(project_id = %project.id, "Failed to compute budget state: {e}");
+            false
+        });
+    let mut value = serde_json::json!(project);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "budget_exhausted".into(),
+            serde_json::Value::Bool(exhausted),
+        );
+    }
+    value
+}
+
 // Suppress unused-import lint when Weekday is only needed for the trait.
 #[allow(unused_imports)]
 use chrono::Weekday as _;

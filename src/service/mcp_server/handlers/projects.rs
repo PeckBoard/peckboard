@@ -203,40 +203,21 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: pause_project");
 
-        let update = UpdateProject {
-            status: Some("paused".to_string()),
-            last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
-            ..Default::default()
-        };
-
-        let project = ctx
-            .db
-            .update_project(project_id, update)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
-
-        // Cancel any in-flight workers so pause means stop, not "stop
-        // spawning new ones but let the current turn finish and advance
-        // the card." Mirrors the HTTP /pause route, including the
-        // queued-message drop so the cancel's completion listener can't
-        // drain a buffered message into a fresh agent run.
-        if let Err(e) = ctx.db.delete_queued_messages_for_project(project_id).await {
-            tracing::warn!(project_id = %project_id, "Failed to clear queued messages on pause: {e}");
-        }
-        if let Some(registry) = ctx.provider_registry.as_ref() {
-            if let Ok(workers) = ctx.db.list_worker_sessions_by_project(project_id).await {
-                for ws in &workers {
-                    for info in registry.list_providers().await {
-                        if let Some(p) = registry.get_provider(&info.id).await {
-                            if p.is_running(&ws.id).await {
-                                p.cancel(&ws.id).await;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Same path as the HTTP /pause route: sets status + reason, drops
+        // queued messages, cancels in-flight workers (pause means stop,
+        // not "let the current turn finish and advance the card"),
+        // broadcasts the project-update, and fires `project.paused` with
+        // source "manual" — a chat session pausing is the user's call.
+        let project = crate::routes::projects::pause_project_with(
+            &ctx.db,
+            &ctx.broadcaster,
+            ctx.provider_registry.as_deref(),
+            project_id,
+            None,
+            "manual",
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
 
         Ok(serde_json::json!({
             "status": "ok",

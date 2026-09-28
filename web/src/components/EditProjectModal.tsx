@@ -27,6 +27,9 @@ export default function EditProjectModal({ project, onClose }: Props) {
   const [workerCommunication, setWorkerCommunication] = useState(project.worker_communication)
   const [autoNotifyChanges, setAutoNotifyChanges] = useState(project.auto_notify_changes)
   const [worktreeIsolation, setWorktreeIsolation] = useState(project.worktree_isolation)
+  const [reviewEnabled, setReviewEnabled] = useState(project.review_enabled ?? true)
+  const [reviewModel, setReviewModel] = useState(project.review_model ?? '')
+  const [reviewEffort, setReviewEffort] = useState(project.review_effort ?? '')
   const [budgetDollars, setBudgetDollars] = useState(
     project.budget_usd_cents != null ? String(project.budget_usd_cents / 100) : '',
   )
@@ -57,6 +60,24 @@ export default function EditProjectModal({ project, onClose }: Props) {
     setModel(id)
     const opts = effortOptionsForModel(id, providers)
     if (providers.length > 0 && effort && !opts.some((o) => o.value === effort)) setEffort('')
+  }
+  // The reviewer runs on its own model (or the project's), so its effort
+  // options follow that model's provider; '' means "same as project".
+  const reviewEffortOptions = useMemo(
+    () =>
+      effortSelectOptions(
+        effortOptionsForModel(reviewModel || model, providers).map((o) =>
+          o.value === '' ? { ...o, label: 'Same as project' } : o,
+        ),
+        reviewEffort,
+      ),
+    [reviewModel, model, providers, reviewEffort],
+  )
+  const handleReviewModelChange = (id: string) => {
+    setReviewModel(id)
+    const opts = effortOptionsForModel(id || model, providers)
+    if (providers.length > 0 && reviewEffort && !opts.some((o) => o.value === reviewEffort))
+      setReviewEffort('')
   }
 
   // Why Save is disabled, shown next to the button — a disabled control
@@ -102,6 +123,9 @@ export default function EditProjectModal({ project, onClose }: Props) {
           budgetDollars && budgetPeriod ? Math.round(parseFloat(budgetDollars) * 100) : null,
         budget_period: budgetPeriod || null,
         worktree_isolation: worktreeIsolation,
+        review_enabled: reviewEnabled,
+        review_model: reviewModel || null,
+        review_effort: reviewEffort || null,
       } as Partial<Project>)
       onClose()
     } catch (err) {
@@ -219,6 +243,58 @@ export default function EditProjectModal({ project, onClose }: Props) {
             <label className="form-checkbox-label">
               <input
                 type="checkbox"
+                checked={reviewEnabled}
+                onChange={(e) => setReviewEnabled(e.target.checked)}
+                data-testid="edit-project-review-enabled"
+              />
+              <span>Review completed cards</span>
+            </label>
+            <p className="form-hint">
+              Before a card lands in Done, a fresh session independently verifies the work against
+              the card, fixes small defects, and files new cards for anything missing. Pick another
+              model for a second perspective.
+            </p>
+          </div>
+          {reviewEnabled && (
+            <>
+              <div className="form-field">
+                <label className="form-label" htmlFor="edit-project-review-model">
+                  Reviewer model
+                </label>
+                <ModelPicker
+                  id="edit-project-review-model"
+                  value={reviewModel}
+                  defaultLabel="Same as project"
+                  onChange={handleReviewModelChange}
+                  models={models}
+                  ariaLabel="Select reviewer model"
+                  testId="edit-project-review-model"
+                />
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="edit-project-review-effort">
+                  Reviewer effort
+                </label>
+                <select
+                  id="edit-project-review-effort"
+                  className="form-input"
+                  value={reviewEffort}
+                  onChange={(e) => setReviewEffort(e.target.value)}
+                  data-testid="edit-project-review-effort"
+                >
+                  {reviewEffortOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </>
+          )}
+          <div className="form-field">
+            <label className="form-checkbox-label">
+              <input
+                type="checkbox"
                 checked={parallelInstructions}
                 onChange={(e) => setParallelInstructions(e.target.checked)}
               />
@@ -264,7 +340,7 @@ export default function EditProjectModal({ project, onClose }: Props) {
                 </select>
               </div>
               <p className="form-hint">
-                Auto-pauses the project when spend in the current window exceeds this amount.
+                No new workers start once spend in the current window reaches this amount.
               </p>
             </div>
             <p className="form-hint">

@@ -154,46 +154,46 @@ Every hookable operation follows the same pattern:
 
 ### Worker Hooks
 
-| Hook                   | When                                                                                           | Payload                                               | Can cancel | Can modify          |
-| ---------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ---------- | ------------------- |
-| worker.spawn.before    | Before spawning a worker                                                                       | card ID, session ID, model, effort                    | Yes        | Yes (model, effort) |
-| worker.spawn.after     | After worker spawned                                                                           | session ID, PID                                       | No         | No                  |
-| worker.spawn.failed    | After spawn failure                                                                            | card ID, reason                                       | No         | No                  |
-| worker.prompt.before   | Before sending prompt to Claude                                                                | session ID, card ID, prompt text                      | Yes        | Yes (prompt text)   |
-| worker.prompt.after    | After prompt sent                                                                              | session ID, card ID                                   | No         | No                  |
-| worker.done            | Worker finished normally                                                                       | session ID, card ID, intent                           | No         | No                  |
-| worker.error           | Worker crashed                                                                                 | session ID, card ID, error reason                     | No         | No                  |
-| worker.recovery.before | Before recovery spawn                                                                          | session ID, crash count                               | Yes        | No                  |
-| worker.recovery.after  | After recovery spawn                                                                           | session ID                                            | No         | No                  |
-| worker.recovery.failed | After recovery denied (loop detected)                                                          | session ID, crash count                               | No         | No                  |
-| worker.stop.before     | Before stopping a worker                                                                       | session ID, card ID                                   | Yes        | No                  |
-| worker.stop.after      | After worker stopped                                                                           | session ID, card ID                                   | No         | No                  |
-| worker.restart.before  | Before restarting a worker                                                                     | card ID                                               | Yes        | No                  |
-| worker.restart.after   | After worker restarted                                                                         | session ID, card ID                                   | No         | No                  |
-| worker.blocked         | After a project is auto-paused due to repeated crashes (identifies the card that triggered it) | card_id, card_title, project_id, project_name, reason | No         | No                  |
+| Hook                   | When                                                                                       | Payload                                               | Can cancel | Can modify          |
+| ---------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ---------- | ------------------- |
+| worker.spawn.before    | Before spawning a worker                                                                   | card ID, session ID, model, effort                    | Yes        | Yes (model, effort) |
+| worker.spawn.after     | After worker spawned                                                                       | session ID, PID                                       | No         | No                  |
+| worker.spawn.failed    | After spawn failure                                                                        | card ID, reason                                       | No         | No                  |
+| worker.prompt.before   | Before sending prompt to Claude                                                            | session ID, card ID, prompt text                      | Yes        | Yes (prompt text)   |
+| worker.prompt.after    | After prompt sent                                                                          | session ID, card ID                                   | No         | No                  |
+| worker.done            | Worker finished normally                                                                   | session ID, card ID, intent                           | No         | No                  |
+| worker.error           | Worker crashed                                                                             | session ID, card ID, error reason                     | No         | No                  |
+| worker.recovery.before | Before recovery spawn                                                                      | session ID, crash count                               | Yes        | No                  |
+| worker.recovery.after  | After recovery spawn                                                                       | session ID                                            | No         | No                  |
+| worker.recovery.failed | After recovery denied (loop detected)                                                      | session ID, crash count                               | No         | No                  |
+| worker.stop.before     | Before stopping a worker                                                                   | session ID, card ID                                   | Yes        | No                  |
+| worker.stop.after      | After worker stopped                                                                       | session ID, card ID                                   | No         | No                  |
+| worker.restart.before  | Before restarting a worker                                                                 | card ID                                               | Yes        | No                  |
+| worker.restart.after   | After worker restarted                                                                     | session ID, card ID                                   | No         | No                  |
+| worker.blocked         | After a card is blocked (repeated crashes or no-progress turns); the project keeps running | card_id, card_title, project_id, project_name, reason | No         | No                  |
 
-> `worker.blocked` is a **notification** dispatched via `PluginManager::dispatch_notify`. It fires together with `project.paused` (source `"crash"`) from `src/worker/orchestrator.rs::maybe_auto_pause_after_crash` on every crash-triggered pause transition.
+> `worker.blocked` is a **notification** dispatched via `PluginManager::dispatch_notify`. It fires from `src/worker/orchestrator.rs` — `maybe_block_card_after_crash` after `BLOCK_AFTER_CRASHES` consecutive crashes, and `handle_worker_done` after `BLOCK_AFTER_NO_PROGRESS` turns that didn't advance the card. Neither pauses the project.
 
 ### Project Hooks
 
-| Hook                  | When                                                      | Payload                                  | Can cancel | Can modify                        |
-| --------------------- | --------------------------------------------------------- | ---------------------------------------- | ---------- | --------------------------------- |
-| project.create.before | Before creating a project                                 | project fields                           | Yes        | Yes (name, context, worker_count) |
-| project.create.after  | After project created                                     | project record                           | No         | No                                |
-| project.create.failed | After project creation failure                            | fields, reason                           | No         | No                                |
-| project.update.before | Before updating a project                                 | project ID, changed fields               | Yes        | Yes (fields)                      |
-| project.update.after  | After project updated                                     | project record                           | No         | No                                |
-| project.update.failed | After project update failure                              | project ID, reason                       | No         | No                                |
-| project.delete.before | Before deleting a project                                 | project ID                               | Yes        | No                                |
-| project.delete.after  | After project deleted                                     | project ID                               | No         | No                                |
-| project.delete.failed | After project deletion failure                            | project ID, reason                       | No         | No                                |
-| project.pause.before  | Before pausing a project                                  | project ID                               | Yes        | No                                |
-| project.pause.after   | After project paused                                      | project ID                               | No         | No                                |
-| project.resume.before | Before resuming a project                                 | project ID                               | Yes        | No                                |
-| project.resume.after  | After project resumed                                     | project ID                               | No         | No                                |
-| project.paused        | After a project is paused (manual, auto-crash, or budget) | project_id, project_name, reason, source | No         | No                                |
+| Hook                  | When                                  | Payload                                  | Can cancel | Can modify                        |
+| --------------------- | ------------------------------------- | ---------------------------------------- | ---------- | --------------------------------- |
+| project.create.before | Before creating a project             | project fields                           | Yes        | Yes (name, context, worker_count) |
+| project.create.after  | After project created                 | project record                           | No         | No                                |
+| project.create.failed | After project creation failure        | fields, reason                           | No         | No                                |
+| project.update.before | Before updating a project             | project ID, changed fields               | Yes        | Yes (fields)                      |
+| project.update.after  | After project updated                 | project record                           | No         | No                                |
+| project.update.failed | After project update failure          | project ID, reason                       | No         | No                                |
+| project.delete.before | Before deleting a project             | project ID                               | Yes        | No                                |
+| project.delete.after  | After project deleted                 | project ID                               | No         | No                                |
+| project.delete.failed | After project deletion failure        | project ID, reason                       | No         | No                                |
+| project.pause.before  | Before pausing a project              | project ID                               | Yes        | No                                |
+| project.pause.after   | After project paused                  | project ID                               | No         | No                                |
+| project.resume.before | Before resuming a project             | project ID                               | Yes        | No                                |
+| project.resume.after  | After project resumed                 | project ID                               | No         | No                                |
+| project.paused        | After a project is paused by the user | project_id, project_name, reason, source | No         | No                                |
 
-> `project.paused` is a **notification** dispatched via `PluginManager::dispatch_notify`. The `source` field is `"manual"` (user called pause), `"crash"` (auto-pause from repeated worker crashes), or `"budget"` (spend cap reached — see `budget_usd_cents`/`budget_period` on the project). Fire sites: `src/routes/projects/mod.rs::pause_project` (manual) and `src/worker/orchestrator.rs` (`maybe_auto_pause_after_crash` for crash, the budget gate in `check_and_spawn_workers` for budget) — all through the shared `pause_project_inner`.
+> `project.paused` is a **notification** dispatched via `PluginManager::dispatch_notify`. Pausing is user-only, so `source` is always `"manual"` — the HTTP `pause_project` route or a chat session's MCP `pause_project` tool, both through the shared `pause_project_inner` / `pause_project_with` in `src/routes/projects/mod.rs`. The orchestrator never pauses a project: repeated worker crashes block the card (see `worker.blocked`), and a reached spend budget (`budget_usd_cents`/`budget_period`) only stops new workers from starting, surfaced as `budget_exhausted` on the project JSON.
 
 ### MCP Hooks
 
