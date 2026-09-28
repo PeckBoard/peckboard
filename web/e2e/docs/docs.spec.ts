@@ -91,7 +91,13 @@ test.describe('Landing', () => {
 
   test('hero, CTAs, and section anatomy render', async ({ page }) => {
     await expect(page).toHaveTitle(/PeckBoard/)
-    await expect(page.locator('.hero h1')).toContainText('The kanban board that works itself')
+    await expect(page.locator('.hero h1')).toContainText('Mission control for AI agents')
+    // The three pillars float beside the hero on desktop.
+    await expect(page.locator('.float-card .tag')).toHaveText([
+      'Board',
+      'Orchestrators',
+      'Subagents',
+    ])
     // Both hero CTAs: docs entry + repository.
     const getStarted = page.locator('.cta-row a', { hasText: 'Get started' })
     await expect(getStarted).toBeVisible()
@@ -100,13 +106,23 @@ test.describe('Landing', () => {
       'href',
       'https://github.com/PeckBoard/peckboard',
     )
-    // The three how-it-works steps and all five feature rows.
-    // The three how-it-works steps, all six feature rows, and the
-    // also-in-the-box grid.
-    await expect(page.locator('.step')).toHaveCount(3)
-    await expect(page.locator('.feature')).toHaveCount(6)
-    await expect(page.locator('.extra')).toHaveCount(6)
-    await expect(page.locator('.site-nav')).toHaveCount(0)
+    // How it works: one column per pillar, each linking to its docs.
+    const steps = page.locator('.step')
+    await expect(steps).toHaveCount(3)
+    await expect(steps.nth(0).locator('a.more')).toHaveAttribute('href', /core-concepts\.html$/)
+    await expect(steps.nth(1).locator('a.more')).toHaveAttribute(
+      'href',
+      /plugins\/session-control\.html$/,
+    )
+    await expect(steps.nth(1)).toContainText('Session Control plugin')
+    await expect(steps.nth(2).locator('a.more')).toHaveAttribute('href', /#subagent-panes$/)
+    // All eight feature rows, subagents and orchestrators first, and the
+    // what's-new + also-in-the-box grids.
+    const features = page.locator('.feature')
+    await expect(features).toHaveCount(8)
+    await expect(features.nth(0).locator('.kicker')).toHaveText('Subagents')
+    await expect(features.nth(1).locator('.kicker')).toHaveText('Orchestrators')
+    await expect(page.locator('.extra')).toHaveCount(12)
   })
 
   test('no unrendered Liquid', async ({ page }) => {

@@ -1,5 +1,5 @@
 title: PeckBoard
-description: A remote control panel that spawns Claude Code agents and orchestrates multi-agent workflows on a kanban board.
+description: Self-hosted mission control for AI agents — a board the dispatcher works for you, orchestrators that drive sessions toward a goal, and subagents streaming live in split panes.
 baseurl: ""
 url: "https://peckboard.com"
 

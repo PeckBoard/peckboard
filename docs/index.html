@@ -9,10 +9,10 @@ layout: null
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PeckBoard — the kanban board that works itself</title>
+    <title>PeckBoard — mission control for AI agents</title>
     <meta
       name="description"
-      content="PeckBoard is a self-hosted control panel that spawns Claude Code agents to work your project board: add a card, a worker picks it up, edits real files, and moves it to Done. One binary on your own machine."
+      content="PeckBoard is self-hosted mission control for AI coding agents: run a board the dispatcher works card by card, put orchestrators in charge of a standing goal, or let agents spawn subagents you watch live in split panes. One binary on your own machine."
     />
     <link rel="icon" href="{{ '/assets/icon.png' | relative_url }}" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -27,15 +27,15 @@ layout: null
     />
     <meta
       property="og:title"
-      content="PeckBoard — the kanban board that works itself"
+      content="PeckBoard — mission control for AI agents"
     />
     <meta
       property="og:description"
-      content="Self-hosted AI project board: agents pick up your cards, edit real files, and ship them. One binary, your machine, your code."
+      content="Self-hosted mission control for AI agents: a board the dispatcher works for you, orchestrators that drive sessions toward a goal, and subagents streaming live in panes. One binary, your machine, your code."
     />
     <meta
       property="og:image"
-      content="{{ '/assets/screenshots/board.png' | absolute_url }}"
+      content="{{ '/assets/screenshots/subagent-panes.png' | absolute_url }}"
     />
     <meta property="og:url" content="{{ '/' | absolute_url }}" />
   </head>
@@ -61,30 +61,25 @@ layout: null
       <section class="hero">
         <div aria-hidden="true">
           <div class="float-card fc-1">
-            <span class="tag">Backlog</span>
-            <b>Rate-limit public API endpoints</b>
+            <span class="tag">Board</span>
+            <b>Dispatcher picks the next card</b>
           </div>
           <div class="float-card fc-2">
-            <span class="tag">In progress</span>
-            <b>Fix flaky WebSocket reconnect</b>
+            <span class="tag">Orchestrators</span>
+            <b>Brain directs three hatted sessions</b>
           </div>
           <div class="float-card fc-3">
-            <span class="tag">Review</span>
-            <b>Refactor session storage layer</b>
-          </div>
-          <div class="float-card fc-4">
-            <span class="tag">Done ✓</span>
-            <b>OAuth login with GitHub</b>
+            <span class="tag">Subagents</span>
+            <b>Four panes streaming live</b>
           </div>
         </div>
         <div class="wrap">
           <span class="kicker">Self-hosted multi-agent orchestration</span>
-          <h1>The kanban board that <span class="mark">works itself</span></h1>
+          <h1>Mission control for <span class="mark">AI agents</span></h1>
           <p class="pitch">
-            PeckBoard spawns Claude Code agents to work your project board. Add
-            a card describing a task; a worker session — one of your flock —
-            picks it up, edits real files in your repository, and moves the card
-            across the board until it reaches Done.
+            Run a board the dispatcher works card by card, put orchestrators in
+            charge of a goal, or let any agent spawn subagents you watch live in
+            split panes — your whole flock, from one screen.
           </p>
           <div class="cta-row">
             <a
@@ -204,34 +199,66 @@ layout: null
       <section class="steps">
         <div class="wrap">
           <span class="kicker">How it works</span>
-          <h2>You write the cards. The flock ships them.</h2>
+          <h2>Three ways to put the flock to work.</h2>
           <div class="step-grid">
             <div class="step">
-              <span class="num">01</span>
-              <h3>Lay out the cards</h3>
+              <img
+                class="step-shot"
+                src="{{ '/assets/screenshots/board.png' | relative_url }}"
+                alt="A project board with cards spread across Backlog, In Progress, Review, and Done columns"
+                loading="lazy"
+              />
+              <span class="num">01 · Board</span>
+              <h3>Add cards; the dispatcher ships them</h3>
               <p>
-                Write cards the way you'd brief a colleague. Set priorities and
-                dependencies; blocked cards wait until the cards they depend on
-                are done.
+                Write cards the way you'd brief a colleague. The built-in
+                dispatcher picks them up by priority, spawns a worker session
+                per card, and moves each card to Done after review.
               </p>
+              <a class="more" href="{{ '/core-concepts.html' | relative_url }}"
+                >Core concepts →</a
+              >
             </div>
             <div class="step">
-              <span class="num">02</span>
-              <h3>A worker swoops in</h3>
+              <img
+                class="step-shot"
+                src="{{ '/assets/screenshots/plugins/orchestrators.png' | relative_url }}"
+                alt="The Orchestrators page with a configured orchestrator, its goal, triggers, and activity feed"
+                loading="lazy"
+              />
+              <span class="num">02 · Orchestrators</span>
+              <h3>Put a brain in charge of a goal</h3>
               <p>
-                The orchestrator spawns a worker session — a Claude Code agent —
-                in the project's folder. It reads the code, edits files, and
-                runs your tests.
+                Give an orchestrator a standing goal and triggers. Each fire
+                runs a brain session that creates sessions, hands them hats,
+                watches them, and reports back. Comes with the Session Control
+                plugin.
               </p>
+              <a
+                class="more"
+                href="{{ '/plugins/session-control.html' | relative_url }}"
+                >Session Control →</a
+              >
             </div>
             <div class="step">
-              <span class="num">03</span>
-              <h3>Review, then Done</h3>
+              <img
+                class="step-shot"
+                src="{{ '/assets/screenshots/subagent-panes.png' | relative_url }}"
+                alt="A session with three running subagents, each streaming in its own split pane beside the parent chat"
+                loading="lazy"
+              />
+              <span class="num">03 · Subagents</span>
+              <h3>Fan out, watch every pane</h3>
               <p>
-                Watch every step live, chat with the worker mid-run, inspect a
-                side-by-side diff of what changed, and let the card land in
-                Done.
+                Any agent can spawn child sessions. They run in parallel in live
+                split panes, and each child's result is posted back to the
+                parent automatically.
               </p>
+              <a
+                class="more"
+                href="{{ '/features.html#subagent-panes' | relative_url }}"
+                >Subagent panes →</a
+              >
             </div>
           </div>
         </div>
@@ -241,6 +268,60 @@ layout: null
         <span class="kicker">The toolkit</span>
         <h2>Everything your flock needs</h2>
         <div class="wrap">
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Subagents</span>
+              <h3>Watch every subagent at once</h3>
+              <p>
+                When an agent fans work out with <code>spawn_subagent</code>,
+                each child slides into its own live pane beside the parent chat,
+                tiled into a grid, and its result is posted back to the parent
+                when it finishes. A pane lasts exactly as long as its subagent —
+                even one that outlives the parent's turn — then closes itself.
+                Switch panes Off, and finished subagents reopen from their tool
+                card.
+              </p>
+              <a
+                class="more"
+                href="{{ '/features.html#subagent-panes' | relative_url }}"
+                >Subagent panes →</a
+              >
+            </div>
+            <div class="feature-shot f-subagents">
+              <img
+                src="{{ '/assets/screenshots/subagent-panes.png' | relative_url }}"
+                alt="A session with three running subagents, each streaming in its own split pane beside the parent chat"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Orchestrators</span>
+              <h3>Goals that drive their own sessions</h3>
+              <p>
+                An orchestrator holds a standing goal and fires on a schedule,
+                when a watched session goes idle, or from a watchdog while the
+                goal isn't done. Each fire wakes a brain session that creates
+                sessions, gives each a hat — a named scope of responsibility —
+                watches them, and reports progress. Its own Orchestrators page
+                shows goal progress with an ETA, a dry run of the next prompt,
+                and Run now. Comes with the Session Control plugin.
+              </p>
+              <a
+                class="more"
+                href="{{ '/plugins/session-control.html' | relative_url }}"
+                >The Session Control plugin →</a
+              >
+            </div>
+            <div class="feature-shot f-orchestrators">
+              <img
+                src="{{ '/assets/screenshots/plugins/orchestrators.png' | relative_url }}"
+                alt="The Orchestrators page with a configured orchestrator, its goal, triggers, and activity feed"
+              />
+            </div>
+          </div>
+
           <div class="feature">
             <div class="feature-copy">
               <span class="kicker">Sessions</span>
@@ -259,31 +340,6 @@ layout: null
               <img
                 src="{{ '/assets/screenshots/chat.png' | relative_url }}"
                 alt="Chat view of a session showing user messages, agent replies, and a collapsed tool call"
-              />
-            </div>
-          </div>
-
-          <div class="feature">
-            <div class="feature-copy">
-              <span class="kicker">Subagents</span>
-              <h3>Watch every subagent at once</h3>
-              <p>
-                When an agent fans work out to subagents, each running one
-                slides into its own live pane beside the parent chat, tiled into
-                a grid. A pane lasts exactly as long as its subagent — even one
-                that outlives the parent's turn — then closes itself. Switch
-                panes Off, and finished subagents reopen from their tool card.
-              </p>
-              <a
-                class="more"
-                href="{{ '/features.html#subagent-panes' | relative_url }}"
-                >Subagent panes →</a
-              >
-            </div>
-            <div class="feature-shot f-subagents">
-              <img
-                src="{{ '/assets/screenshots/subagent-panes.png' | relative_url }}"
-                alt="A session with three running subagents, each streaming in its own split pane beside the parent chat"
               />
             </div>
           </div>
@@ -450,12 +506,11 @@ layout: null
               </p>
             </div>
             <div class="extra">
-              <h3>Subagents side by side</h3>
+              <h3>Split views on demand</h3>
               <p>
-                Every running subagent gets its own split pane next to the
-                parent chat — streaming live, closable, and gone when the
-                subagent finishes. Group any sessions into a saved split view
-                from the tab bar's + ▾ menu.
+                Group any sessions — chats, workers, a brain and its crew — into
+                a saved split view from the tab bar's + ▾ menu, and watch them
+                side by side.
               </p>
             </div>
             <div class="extra">

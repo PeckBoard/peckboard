@@ -270,7 +270,8 @@ img {
   font-weight: 600;
 }
 
-/* floating mini kanban cards — quiet, glassy, desktop only */
+/* floating pillar cards (Board · Orchestrators · Subagents) — quiet,
+   glassy, desktop only */
 
 .float-card {
   position: absolute;
@@ -324,28 +325,17 @@ img {
 }
 
 .fc-2 .tag {
-  background: var(--col-amber);
+  background: var(--col-violet);
 }
 
 .fc-3 {
-  top: 150px;
-  right: max(24px, calc(50% - 620px));
+  top: 230px;
+  right: max(24px, calc(50% - 630px));
   transform: rotate(3deg);
   animation-delay: 0.7s;
 }
 
 .fc-3 .tag {
-  background: var(--col-violet);
-}
-
-.fc-4 {
-  top: 340px;
-  right: max(12px, calc(50% - 650px));
-  transform: rotate(-2deg);
-  animation-delay: 2s;
-}
-
-.fc-4 .tag {
   background: var(--col-green);
 }
 
@@ -546,6 +536,25 @@ img {
   margin-top: 8px;
   font-size: 14.5px;
   color: var(--muted);
+}
+
+/* Each how-it-works pillar leads with its screen. */
+.step-shot {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  object-position: top left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  margin-bottom: 20px;
+}
+
+.step .more {
+  display: inline-block;
+  margin-top: 12px;
+  font-size: 14.5px;
+  font-weight: 600;
 }
 
 /* ── feature rows ── */

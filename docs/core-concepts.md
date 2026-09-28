@@ -27,7 +27,7 @@ The Projects view lists every board; opening one shows its cards.
 A _card_ is one task: a title, a description of what should be done, and a priority from Critical down to Low. The board shows the columns Backlog, In Progress, Review, and Done, plus a Won't Do column for cards that were dropped rather than finished. A new card starts in Backlog, and agents move it across the board as the work progresses — you never have to drag it yourself, though you can.
 
 ![A project board with cards spread across Backlog, In Progress, Review, and Done columns]({{ "/assets/screenshots/board.png" | relative_url }})
-
+Cards in Backlog are picked up automatically by the _dispatcher_: as long as the project is active and has a free worker slot, the highest-priority card that is ready to run gets a worker within a few seconds.
 Cards in Backlog are picked up automatically: as long as the project is active and has a free worker slot, the highest-priority card that is ready to run gets a worker within a few seconds.
 
 <details markdown="1">
@@ -58,6 +58,14 @@ A card can depend on other cards in the same project. It then waits in Backlog, 
 Only Done satisfies a dependency. A prerequisite moved to Won't Do keeps its dependents waiting forever — drop the dead edge from the dependent's Depends On list to release them. Dependency cycles are rejected when you try to create them, so the graph always has an order in which cards can run.
 
 </details>
+
+## Subagents
+
+Any session can hand part of its work to _subagents_ — child sessions it spawns with the `spawn_subagent` tool. They run in parallel, each in its own live split pane beside the parent chat, and when a child finishes its final message is posted back to the parent automatically, so the parent picks up the results without polling. Long builds and test runs follow the same report-back shape as [background processes]({{ "/features.html#background-processes" | relative_url }}). See [Subagent Panes]({{ "/features.html#subagent-panes" | relative_url }}) for how the panes behave.
+
+## Orchestrators
+
+An _orchestrator_ is a standing goal with triggers — a schedule, a watched session going idle, or a watchdog that re-engages while the goal is not done. Each fire runs a _brain_ session that creates and directs other sessions, gives each a _hat_ (a named scope of responsibility), watches them, and reports progress back. Orchestrators have their own page with a dry run and Run now; they come with the [Session Control]({{ "/plugins/session-control.html" | relative_url }}) plugin. Where the board's dispatcher works a list of cards, an orchestrator works toward a goal.
 
 ## Repeating Tasks
 

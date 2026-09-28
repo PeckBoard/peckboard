@@ -1,15 +1,19 @@
 # Screens that scroll through the landing-page hero marquee, in order.
 # Files live in assets/screenshots/ and are captured by
 # web/e2e/screenshots/screenshots.spec.ts (`cd web && npm run screenshots`).
+# Opens on the three pillars: subagents, orchestrators, then the board.
+- file: subagent-panes.png
+  caption: Subagent panes
+  alt: A session with three running subagents, each streaming in its own split pane beside the parent chat
+- file: plugins/orchestrators.png
+  caption: Orchestrators
+  alt: The Orchestrators page with a configured orchestrator, its goal, triggers, and activity feed
 - file: board.png
   caption: Project board
   alt: A project board with cards spread across Backlog, In Progress, Review, and Done columns
 - file: chat.png
   caption: Live sessions
   alt: Chat view of a session showing user messages, agent replies, and a collapsed tool call
-- file: subagent-panes.png
-  caption: Subagent panes
-  alt: A session with three running subagents, each streaming in its own split pane beside the parent chat
 - file: background-tasks.png
   caption: Background processes
   alt: The Background tasks panel listing a running dev server, a passed test run, and a failed lint, with the dev server's output
