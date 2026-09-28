@@ -5,7 +5,7 @@ nav_order: 3
 
 # Core Concepts
 
-PeckBoard turns a folder of code into a board of tasks that AI agents work through. You create a project, add cards describing what you want done, and PeckBoard launches worker sessions that pick the cards up, make the changes — usually code changes in the project's folder — and move them to Done.
+PeckBoard is mission control for AI agents working in your code. There are three ways to put them to work: a _project_ board, where you add cards and the dispatcher launches worker sessions that pick them up, make the changes, and move them to Done; _orchestrators_, which put a brain session in charge of a standing goal; and _subagents_, child sessions any agent can spawn and you watch live in split panes. The board flow looks like this:
 
 ```mermaid
 graph LR
@@ -27,8 +27,8 @@ The Projects view lists every board; opening one shows its cards.
 A _card_ is one task: a title, a description of what should be done, and a priority from Critical down to Low. The board shows the columns Backlog, In Progress, Review, and Done, plus a Won't Do column for cards that were dropped rather than finished. A new card starts in Backlog, and agents move it across the board as the work progresses — you never have to drag it yourself, though you can.
 
 ![A project board with cards spread across Backlog, In Progress, Review, and Done columns]({{ "/assets/screenshots/board.png" | relative_url }})
+
 Cards in Backlog are picked up automatically by the _dispatcher_: as long as the project is active and has a free worker slot, the highest-priority card that is ready to run gets a worker within a few seconds.
-Cards in Backlog are picked up automatically: as long as the project is active and has a free worker slot, the highest-priority card that is ready to run gets a worker within a few seconds.
 
 <details markdown="1">
 <summary>How pickup decides which card runs next</summary>
