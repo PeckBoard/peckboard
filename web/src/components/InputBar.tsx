@@ -67,8 +67,15 @@ export default function InputBar({
     text: string
     attachments: PendingAttachment[]
   } | null>(null)
-  const [suggestions, setSuggestions] = useState<MentionItem[]>([])
-  const [showAutocomplete, setShowAutocomplete] = useState(false)
+  // The `@foo` token under the caret, or null when the caret is not in
+  // one (or the user pressed Escape). The list itself is DERIVED from this
+  // and the mention catalogue rather than stored: the catalogue loads over
+  // several requests (reports, sessions, every project's cards), and a user
+  // who types `@foo` before it lands must see the list appear when it does,
+  // not on their next keystroke.
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null)
+  const suggestions = mentionQuery === null ? [] : filterMentions(allMentions, mentionQuery)
+  const showAutocomplete = suggestions.length > 0
   // Keyboard cursor over the @-mention list. The list is a listbox the
   // textarea points at via `aria-activedescendant`, so focus never leaves
   // the composer while the user picks.
@@ -142,14 +149,8 @@ export default function InputBar({
     const cursor = e.target.selectionStart ?? val.length
     const before = val.slice(0, cursor)
     const atMatch = before.match(/@(\S*)$/)
-    if (atMatch) {
-      const filtered = filterMentions(allMentions, atMatch[1])
-      setSuggestions(filtered)
-      setShowAutocomplete(filtered.length > 0)
-      setMentionIndex(0)
-    } else {
-      setShowAutocomplete(false)
-    }
+    setMentionQuery(atMatch ? atMatch[1] : null)
+    setMentionIndex(0)
   }
 
   const insertSuggestion = (item: MentionItem) => {
@@ -160,7 +161,7 @@ export default function InputBar({
     const newText = before.slice(0, atIdx) + item.ref + after
     setText(newText)
     setDraft(sessionId, newText)
-    setShowAutocomplete(false)
+    setMentionQuery(null)
     setMentionIndex(0)
     textareaRef.current?.focus()
   }
@@ -418,7 +419,7 @@ export default function InputBar({
       }
       if (e.key === 'Escape') {
         e.preventDefault()
-        setShowAutocomplete(false)
+        setMentionQuery(null)
         return
       }
     }

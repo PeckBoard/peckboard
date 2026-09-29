@@ -80,6 +80,14 @@ test('clicking Interrupt shows a subtle notice, not a crash banner', async ({
     page.locator('.chat-agent-start-label').filter({ hasText: 'Agent started' }),
   ).toBeVisible({ timeout: 10_000 })
 
+  // The question mock:ask raises opens as a centered modal over the chat.
+  // Escape only hides it (the question stays open), clearing the way to
+  // the inline Interrupt chip.
+  const modal = page.getByTestId('question-modal')
+  await expect(modal).toBeVisible({ timeout: 10_000 })
+  await page.keyboard.press('Escape')
+  await expect(modal).toBeHidden()
+
   // Click the Interrupt button (inline next to the Thinking... indicator).
   await page.locator('.chat-thinking-interrupt').click()
 

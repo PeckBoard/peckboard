@@ -7,7 +7,7 @@ import path from 'node:path'
  * ControlRequest question card, parallel file-diff attach, usage chip,
  * user-bubble markdown, and feed a11y attributes:
  *
- *  - `mock:ask` renders the "Input needed" card; submitting the answer
+ *  - `mock:ask` opens the "Input needed" modal; submitting the answer
  *    resolves it by requestId and the provider receives the answer over
  *    stdin (its follow-up text lands in the feed).
  *  - Two edit_file tool cards open in parallel each attach the
@@ -88,7 +88,8 @@ test('mock:ask question card answers by requestId and the provider sees the answ
   })
   expect(send.ok()).toBeTruthy()
 
-  const card = page.locator('.question-card.question-active')
+  // The open question is a centered modal, not a card in the feed.
+  const card = page.getByTestId('question-modal')
   await expect(card).toBeVisible({ timeout: 10_000 })
   await expect(card).toContainText('Input needed')
   await expect(card).toContainText('Continue?')

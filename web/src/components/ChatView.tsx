@@ -1,4 +1,13 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { highlightPlugins } from './markdownHighlight'
 import SafeMarkdown from './SafeMarkdown'
@@ -38,7 +47,13 @@ import {
 import { useBackgroundPanel } from '../hooks/useBackgroundPanel'
 import PreHatchActivity from './chat/PreHatchActivity'
 import { chatMarkdownComponents } from './chat/markdown'
-import { type AnswerValue, answerText, selectedOptions, toggleOption } from '../lib/questionAnswers'
+import {
+  PendingQuestionRow,
+  QuestionCard,
+  QuestionModal,
+  ResolvedQuestionCard,
+} from './chat/QuestionCard'
+import { useQuestionModalSlot } from '../hooks/useQuestionModalSlot'
 import { fetchPlanId, openPlan } from '../lib/plan'
 import { PLUGIN_EVAL_INIT_PROMPT } from '../lib/pluginEvals'
 import { openReport } from '../lib/reports'
@@ -55,7 +70,6 @@ import {
   type AgentStatus,
   type DisplayItem,
   type MessageAttachment,
-  type QuestionItem,
 } from './chat/events'
 
 // Coarse announcement key: `working` and `tool` collapse into one "busy"
@@ -287,174 +301,6 @@ function MessageAttachments({
   )
 }
 
-function ResolvedQuestionCard({
-  questions,
-  answers,
-}: {
-  questions: QuestionItem[]
-  answers: Record<string, unknown>
-}) {
-  return (
-    <div className="question-card question-resolved">
-      <div className="question-card-title-bar">
-        <span className="question-card-icon">&#x2611;&#xFE0F;</span>
-        <span className="question-card-title-text">Question answered</span>
-      </div>
-      {questions.map((q, idx) => {
-        const answer = String(
-          answers[idx] ?? answers[String(idx)] ?? answers[q.question] ?? '(no answer)',
-        )
-        return (
-          <div key={idx} className="question-item">
-            {q.header && <div className="question-header">{q.header}</div>}
-            <div className="question-card-text">{q.question}</div>
-            <div className="question-answer-display">{answer}</div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function QuestionCard({
-  sessionId,
-  questionId,
-  requestId,
-  questions,
-}: {
-  sessionId: string
-  questionId: string
-  requestId?: string
-  questions: QuestionItem[]
-}) {
-  const [answers, setAnswers] = useState<Record<number, AnswerValue>>({})
-  const [submitting, setSubmitting] = useState(false)
-
-  const setAnswer = (idx: number, value: string) => {
-    setAnswers((prev) => ({ ...prev, [idx]: value }))
-  }
-
-  const toggleMulti = (idx: number, option: string) =>
-    setAnswers((prev) => ({ ...prev, [idx]: toggleOption(prev[idx], option) }))
-
-  const hasAnswers = questions.some((_, idx) => answerText(answers[idx]).length > 0)
-
-  const handleSubmit = async () => {
-    if (!hasAnswers || submitting) return
-    setSubmitting(true)
-    try {
-      const answerMap: Record<string, string> = {}
-      questions.forEach((_, idx) => {
-        const val = answerText(answers[idx])
-        if (val) answerMap[String(idx)] = val
-      })
-      await authedFetch(`/api/sessions/${sessionId}/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'question-resolved',
-          data: {
-            question_id: questionId,
-            ...(requestId ? { request_id: requestId } : {}),
-            answers: answerMap,
-          },
-        }),
-      })
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  const handleDismiss = async () => {
-    if (submitting) return
-    setSubmitting(true)
-    try {
-      await authedFetch(`/api/sessions/${sessionId}/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'question-resolved',
-          data: {
-            question_id: questionId,
-            ...(requestId ? { request_id: requestId } : {}),
-            rejected: true,
-          },
-        }),
-      })
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <div className="question-card question-active">
-      <div className="question-card-title-bar">
-        <span className="question-card-icon">&#x2753;</span>
-        <span className="question-card-title-text">Input needed</span>
-      </div>
-      {questions.map((q, idx) => (
-        <div key={idx} className="question-item">
-          {q.header && <div className="question-header">{q.header}</div>}
-          <div className="question-card-text">{q.question}</div>
-          {q.options && q.options.length > 0 ? (
-            <div className="question-options">
-              {q.options.map((opt, optIdx) => {
-                const optObj = q.optionObjects?.[optIdx]
-                return (
-                  <label key={opt} className="question-option-label">
-                    {q.multiSelect ? (
-                      <input
-                        type="checkbox"
-                        checked={selectedOptions(answers[idx]).includes(opt)}
-                        onChange={() => toggleMulti(idx, opt)}
-                        disabled={submitting}
-                      />
-                    ) : (
-                      <input
-                        type="radio"
-                        name={`question-${questionId}-${idx}`}
-                        checked={answers[idx] === opt}
-                        onChange={() => setAnswer(idx, opt)}
-                        disabled={submitting}
-                      />
-                    )}
-                    <span className="question-option-text">
-                      <span className="question-option-label-text">{opt}</span>
-                      {optObj?.description && (
-                        <span className="question-option-desc">{optObj.description}</span>
-                      )}
-                    </span>
-                  </label>
-                )
-              })}
-            </div>
-          ) : (
-            <input
-              className="question-input"
-              type="text"
-              placeholder="Type your answer..."
-              value={typeof answers[idx] === 'string' ? answers[idx] : ''}
-              onChange={(e) => setAnswer(idx, e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && questions.length === 1) handleSubmit()
-              }}
-              disabled={submitting}
-            />
-          )}
-        </div>
-      ))}
-      <div className="question-actions">
-        <button className="btn-primary" onClick={handleSubmit} disabled={!hasAnswers || submitting}>
-          Submit
-        </button>
-        <button className="btn-secondary" onClick={handleDismiss} disabled={submitting}>
-          Dismiss
-        </button>
-      </div>
-    </div>
-  )
-}
-
 interface ModelInfo {
   id: string
   display_name: string
@@ -518,10 +364,15 @@ export const ChatRow = memo(function ChatRow({
   item,
   sessionId,
   costTable,
+  onAnswerQuestion,
 }: {
   item: DisplayItem
   sessionId: string
   costTable: CostTable
+  /** When set, an open question renders as the compact "Input needed"
+   *  row that opens the session's question modal; when absent (read-only
+   *  echoes such as the subagent pane) it renders the full inline card. */
+  onAnswerQuestion?: () => void
 }) {
   switch (item.type) {
     case 'user':
@@ -888,12 +739,16 @@ export const ChatRow = memo(function ChatRow({
     case 'question':
       return (
         <div className="chat-row chat-row-system">
-          <QuestionCard
-            sessionId={sessionId}
-            questionId={item.questionId}
-            requestId={item.requestId}
-            questions={item.questions}
-          />
+          {onAnswerQuestion ? (
+            <PendingQuestionRow questions={item.questions} onAnswer={onAnswerQuestion} />
+          ) : (
+            <QuestionCard
+              sessionId={sessionId}
+              questionId={item.questionId}
+              requestId={item.requestId}
+              questions={item.questions}
+            />
+          )}
         </div>
       )
     case 'question-resolved':
@@ -1371,6 +1226,40 @@ export default function ChatView({
   if (foldRef.current === null) foldRef.current = createDisplayItemsFolder()
   const fold = foldRef.current
   const displayItems = useMemo(() => fold(events), [fold, events])
+
+  // The newest question still awaiting an answer. The fold swaps a question
+  // item for its resolution in place, so the last `question` item IS the
+  // open one; the scan is one type check per item from the end.
+  const openQuestion = useMemo(() => {
+    for (let i = displayItems.length - 1; i >= 0; i--) {
+      const it = displayItems[i]
+      if (it.type === 'question') return it
+    }
+    return null
+  }, [displayItems])
+  // Escape / backdrop put the modal away for THIS question only — the next
+  // one opens again. "Answer" on the feed's row brings it back, and is how
+  // an unfocused split pane (no auto-open) gets to the question at all.
+  const [hiddenQuestionId, setHiddenQuestionId] = useState<string | null>(null)
+  const [forcedQuestionId, setForcedQuestionId] = useState<string | null>(null)
+  const wantQuestionModal =
+    openQuestion !== null &&
+    (forcedQuestionId === openQuestion.questionId ||
+      (shortcutsEnabled && hiddenQuestionId !== openQuestion.questionId))
+  const questionSlotId = useId()
+  const showQuestionModal = useQuestionModalSlot(questionSlotId, wantQuestionModal)
+  const hideQuestionModal = useCallback(() => {
+    if (!openQuestion) return
+    setHiddenQuestionId(openQuestion.questionId)
+    setForcedQuestionId(null)
+  }, [openQuestion])
+  // Whichever row was clicked, the modal shows the OPEN question (the
+  // newest); an older one still unanswered has no modal of its own.
+  const answerQuestion = useCallback(() => {
+    if (!openQuestion) return
+    setHiddenQuestionId(null)
+    setForcedQuestionId(openQuestion.questionId)
+  }, [openQuestion])
 
   // Windowed rendering: only rows near the viewport mount. Rows are
   // measured (heights vary: markdown, tool blocks, diagrams) and keyed by
@@ -2633,7 +2522,12 @@ export default function ChatView({
                   transform: `translateY(${vi.start - rowVirtualizer.options.scrollMargin}px)`,
                 }}
               >
-                <ChatRow item={item} sessionId={sessionId} costTable={costTable} />
+                <ChatRow
+                  item={item}
+                  sessionId={sessionId}
+                  costTable={costTable}
+                  onAnswerQuestion={answerQuestion}
+                />
               </div>
             )
           })}
@@ -2784,6 +2678,15 @@ export default function ChatView({
         handoverActive={!!sessionDetail?.handover_to_model}
         attachDisabledReason={attachDisabledReason}
       />
+      {showQuestionModal && openQuestion && (
+        <QuestionModal
+          sessionId={sessionId}
+          questionId={openQuestion.questionId}
+          requestId={openQuestion.requestId}
+          questions={openQuestion.questions}
+          onHide={hideQuestionModal}
+        />
+      )}
       {pendingModelSwitch !== null && (
         <ModelSwitchDialog
           targetLabel={modelDisplayName(pendingModelSwitch)}

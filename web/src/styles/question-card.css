@@ -101,6 +101,80 @@
   font-size: var(--text-sm);
 }
 
+/* ─── Question modal ───
+   The same card, centered: the modal panel gives up its padding and the
+   card gives up its border so the title bar becomes the dialog's header. */
+
+.modal.question-modal {
+  padding: 0;
+  overflow: hidden;
+}
+
+.question-modal .question-card {
+  max-width: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.question-modal .question-card-title-bar {
+  padding: 12px 20px;
+  font-size: var(--text-base);
+}
+
+.question-modal .question-card .question-item,
+.question-modal .question-card .question-actions {
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+.question-modal .question-card .question-item:first-of-type {
+  padding-top: 16px;
+}
+
+.question-modal .question-card .question-actions {
+  padding-bottom: 18px;
+}
+
+/* ─── Pending row ───
+   The feed's stand-in while the modal is hidden (Escape / backdrop) or
+   while another pane holds it. */
+
+.question-pending-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 500px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--accent-muted);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 0 1px var(--accent-subtle);
+  font-size: var(--text-sm);
+}
+
+.question-pending-title {
+  font-weight: 600;
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+.question-pending-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text3);
+}
+
+.question-pending-row .question-pending-answer {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
 /* ─── Panel Item Meta (time + folder) ─── */
 
 .panel-item-meta {

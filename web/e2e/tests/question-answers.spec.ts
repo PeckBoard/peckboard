@@ -117,7 +117,8 @@ test('chat multi-select with a comma-bearing option toggles and submits the exac
 
   await loadAs(page, token, `/sessions/${session.id}`)
 
-  const card = page.locator('.question-card.question-active')
+  // The open question is a centered modal, not a card in the feed.
+  const card = page.getByTestId('question-modal')
   await expect(card).toBeVisible({ timeout: 10_000 })
 
   const commaBox = card

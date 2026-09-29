@@ -215,6 +215,14 @@ test('a refused Interrupt surfaces a banner and locks the button while in flight
     600,
   )
 
+  // The question mock:ask raises opens as a centered modal over the chat.
+  // Escape only hides it (the question stays open), clearing the way to
+  // the inline Interrupt chip.
+  const modal = page.getByTestId('question-modal')
+  await expect(modal).toBeVisible({ timeout: 10_000 })
+  await page.keyboard.press('Escape')
+  await expect(modal).toBeHidden()
+
   const interrupt = page.locator('.chat-thinking-interrupt')
   await expect(interrupt).toBeVisible({ timeout: 10_000 })
   await interrupt.click()
