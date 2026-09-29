@@ -401,6 +401,29 @@ async fn mcp_handler(
                             }
                         });
                     }
+                    // `_resolve_question` (answer_question): the handler has
+                    // validated the caller and the pending question; resolve
+                    // it here, where the AppState lives. Awaited — it returns
+                    // once the resolution is durable (the resume is spawned)
+                    // — so a failure reaches the model as a tool error.
+                    if let Some((target, user_id, data)) = result.as_object_mut().and_then(|o| {
+                        let r = o.remove("_resolve_question")?;
+                        let target = r.get("session_id").and_then(|v| v.as_str())?.to_string();
+                        let user_id = r.get("user_id").and_then(|v| v.as_str())?.to_string();
+                        Some((target, user_id, r.get("data")?.clone()))
+                    }) && let Err(e) = crate::service::questions::resolve_question(
+                        state.clone(),
+                        user_id,
+                        target,
+                        data,
+                    )
+                    .await
+                    {
+                        return (
+                            StatusCode::OK,
+                            rpc_json(JsonRpcResponse::error(id.clone(), -32000, e)),
+                        );
+                    }
                     let text_block = serde_json::json!({
                         "type": "text",
                         "text": serde_json::to_string(&result).unwrap_or_default(),

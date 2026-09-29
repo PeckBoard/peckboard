@@ -57,6 +57,7 @@ import SshKeysSection from './SshKeysSection'
 import AgentVarsSection from './AgentVarsSection'
 import ConfirmDialog from './ConfirmDialog'
 import ProviderBasePrompt, { type ProviderPrompt } from './ProviderBasePrompt'
+import VoiceSettingsSection from './VoiceSettingsSection'
 
 interface KeepAliveRun {
   provider: string
@@ -100,6 +101,7 @@ type SubPage =
   | 'account'
   | 'appearance'
   | 'sounds'
+  | 'voice'
   | 'chat'
   | 'prompts'
   | 'workflows'
@@ -150,6 +152,11 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
         id: 'sounds',
         title: 'Sounds',
         blurb: 'Clicks, errors, and chimes for questions, finished runs, limits',
+      },
+      {
+        id: 'voice',
+        title: 'Voice',
+        blurb: 'Voice assistant: spoken voice, rate, language, and model',
       },
       {
         id: 'chat',
@@ -302,6 +309,18 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'Events',
     anchor: 'sounds-events',
     keywords: 'question complete tool limit queue send start',
+  },
+  {
+    page: 'voice',
+    section: 'Speech',
+    anchor: 'voice-speech',
+    keywords: 'voice assistant speak listen microphone rate pitch language tts stt',
+  },
+  {
+    page: 'voice',
+    section: 'Assistant Model',
+    anchor: 'voice-model',
+    keywords: 'voice assistant model fast cheap',
   },
   {
     page: 'chat',
@@ -483,6 +502,12 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
     <>
       <path d="M2.5 6.5h2L7.5 4v8L4.5 9.5h-2z" />
       <path d="M10 6.2a2.4 2.4 0 0 1 0 3.6M11.8 4.6a4.4 4.4 0 0 1 0 6.8" />
+    </>
+  ),
+  voice: (
+    <>
+      <rect x="5.75" y="1.75" width="4.5" height="7.5" rx="2.25" />
+      <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.25M5.75 14.25h4.5" />
     </>
   ),
   chat: (
@@ -1361,6 +1386,8 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
             </section>
           </>
         )}
+
+        {activeSubPage === 'voice' && <VoiceSettingsSection />}
 
         {activeSubPage === 'providers' && (
           <>

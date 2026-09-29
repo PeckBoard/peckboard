@@ -53,6 +53,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import AskpassDialog from './components/AskpassDialog'
 import EnvUnlockDialog from './components/EnvUnlockDialog'
 import SoundsListener from './components/SoundsListener'
+import VoiceDock, { VoiceListenButton } from './components/VoiceDock'
 import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import './App.css'
@@ -1567,6 +1568,7 @@ function App() {
           </button>
         </div>
         <div className="rail-bottom">
+          {authenticated && <VoiceListenButton />}
           <div
             className={`rail-status ${connected ? 'online' : ''}`}
             title={connected ? 'Connected' : 'Disconnected'}
@@ -2041,6 +2043,7 @@ function App() {
       </main>
 
       {authenticated && <SoundsListener />}
+      {authenticated && <VoiceDock />}
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showNewView && (
         <NewViewModal

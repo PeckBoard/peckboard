@@ -18,6 +18,7 @@ mod repeating_tasks;
 mod reports;
 mod subagents;
 mod variables;
+mod voice;
 mod workers;
 
 pub use model_control::autoswitch_enabled;

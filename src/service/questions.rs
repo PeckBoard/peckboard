@@ -447,12 +447,13 @@ pub async fn resolve_question(
 pub const ASK_USER_BLOCK_REASON: &str = "Waiting for your answer to the worker's question";
 
 /// True when `session_id` has at least one `question` event with no
+/// True when `session_id` has at least one `question` event with no
 /// matching `question-resolved`. Mirrors the resolution bookkeeping used
 /// by `dismiss_pending_questions` and `/api/projects/:id/pending-questions`
 /// (both `question_id` and `questionId` spellings).
 pub async fn session_has_pending_question(db: &crate::db::Db, session_id: &str) -> bool {
-    let events = match db.list_events_by_session(session_id, None).await {
-        Ok(events) => events,
+    match pending_question_events(db, session_id).await {
+        Ok(pending) => !pending.is_empty(),
         Err(e) => {
             // Fail closed: an unreadable event log must not license a
             // respawn of a worker that may be waiting on the user.
@@ -460,33 +461,39 @@ pub async fn session_has_pending_question(db: &crate::db::Db, session_id: &str) 
                 session_id = %session_id,
                 "Failed to scan events for pending questions: {e}"
             );
-            return true;
+            true
         }
-    };
+    }
+}
 
-    let mut resolved: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut questions: Vec<&str> = Vec::new();
-    let parsed: Vec<Option<serde_json::Value>> = events
-        .iter()
-        .map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
-        .collect();
-    for (ev, data) in events.iter().zip(parsed.iter()) {
-        match ev.kind.as_str() {
-            "question" => questions.push(ev.id.as_str()),
-            "question-resolved" => {
-                if let Some(qid) = data.as_ref().and_then(|d| {
-                    d.get("question_id")
-                        .or_else(|| d.get("questionId"))
-                        .and_then(|v| v.as_str())
-                }) {
-                    resolved.insert(qid);
-                }
-            }
-            _ => {}
+/// Every `question` event on `session_id` with no matching
+/// `question-resolved`, oldest first. Same bookkeeping as
+/// [`session_has_pending_question`].
+pub async fn pending_question_events(
+    db: &crate::db::Db,
+    session_id: &str,
+) -> anyhow::Result<Vec<crate::db::models::Event>> {
+    let events = db.list_events_by_session(session_id, None).await?;
+
+    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ev in events.iter().filter(|e| e.kind == "question-resolved") {
+        if let Some(qid) = serde_json::from_str::<serde_json::Value>(&ev.data)
+            .ok()
+            .and_then(|d| {
+                d.get("question_id")
+                    .or_else(|| d.get("questionId"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+        {
+            resolved.insert(qid);
         }
     }
 
-    questions.iter().any(|qid| !resolved.contains(qid))
+    Ok(events
+        .into_iter()
+        .filter(|e| e.kind == "question" && !resolved.contains(&e.id))
+        .collect())
 }
 
 /// Park `card_id` on the user's answer: set `blocked` with

@@ -140,6 +140,10 @@ impl McpToolRegistry {
             }),
         });
 
+        // A session doing work for the voice assistant: relay the question
+        // to it now rather than waiting for this turn to end.
+        crate::service::voice_relay::note_question(&ctx.session_id, &event.id);
+
         // Broadcast as global worker-question event so the project page updates live
         if is_worker {
             if let Some(ref pid) = project_id_val {

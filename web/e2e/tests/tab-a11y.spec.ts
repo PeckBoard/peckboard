@@ -68,13 +68,18 @@ async function loadAt(page: Page, token: string, route: string) {
   await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
 }
 
-/** Clear the server-side tab list so a test starts from a clean slate. */
+/** Clear the server-side tab list so a test starts from a clean slate.
+ *  Report ids embed a `/` (`<folder>/<file>`); unencoded, the DELETE path
+ *  never matches and the tab survives into this spec — the same encoding
+ *  the app's own close-tab path uses (see store/tabs.ts). */
 async function clearTabs(request: APIRequestContext, auth: Record<string, string>) {
   const res = await request.get('/api/me/tabs', { headers: auth })
   if (!res.ok()) return
   const tabs = (await res.json()) as Array<{ item_type: string; item_id: string }>
   for (const t of tabs) {
-    await request.delete(`/api/me/tabs/${t.item_type}/${t.item_id}`, { headers: auth })
+    await request.delete(`/api/me/tabs/${t.item_type}/${encodeURIComponent(t.item_id)}`, {
+      headers: auth,
+    })
   }
 }
 

@@ -22,6 +22,9 @@ pub struct ToolGate {
     is_worker: bool,
     pre_hatcher: bool,
     doc_review: bool,
+    /// Voice assistant session (`expert_kind == "voice"`): the only role
+    /// that may call `answer_question`.
+    voice: bool,
     autoswitch_on: bool,
     /// Names of plugin-owned tools this session's role must never dispatch
     /// — populated via [`Self::with_plugin_tools`] from each active plugin's
@@ -38,11 +41,14 @@ impl ToolGate {
         let pre_hatcher = session.expert_kind.as_deref() == Some(PRE_HATCHER_EXPERT_KIND);
         let doc_review =
             session.expert_kind.as_deref() == Some(crate::service::doc_reviews::EXPERT_KIND);
+        let voice =
+            session.expert_kind.as_deref() == Some(crate::service::voice_relay::VOICE_EXPERT_KIND);
         let autoswitch_on = autoswitch_enabled(session.model_autoswitch, session.is_worker);
         Self {
             is_worker: session.is_worker,
             pre_hatcher,
             doc_review,
+            voice,
             autoswitch_on,
             worker_denied_plugin_tools: std::collections::HashSet::new(),
         }
@@ -57,6 +63,7 @@ impl ToolGate {
             is_worker: false,
             pre_hatcher: false,
             doc_review: false,
+            voice: false,
             autoswitch_on: false,
             worker_denied_plugin_tools: std::collections::HashSet::new(),
         }
@@ -92,6 +99,9 @@ impl ToolGate {
         if matches!(name, "get_review_doc" | "submit_review_revision") {
             return self.doc_review;
         }
+        if name == "answer_question" {
+            return self.voice;
+        }
         if self.is_worker && self.worker_denied_plugin_tools.contains(name) {
             return false;
         }
@@ -118,6 +128,13 @@ impl ToolGate {
             ));
         }
 
+        if name == "answer_question" && !self.voice {
+            return Some(
+                "tool 'answer_question' is blocked: only the voice assistant session \
+                 answers other sessions' questions."
+                    .to_string(),
+            );
+        }
         if matches!(name, "get_model_guidance" | "switch_session_model") && !self.autoswitch_on {
             return Some(format!(
                 "tool '{name}' is unavailable: model auto-switch is off for this session."
@@ -263,5 +280,22 @@ mod tests {
         let gate = ToolGate::from_session(&session(false, None, None)).with_plugin_tools(&tools);
         assert!(gate.blocked("clear_session").is_none());
         assert!(gate.advertised("clear_session"));
+    }
+
+    #[test]
+    fn answer_question_is_voice_only() {
+        let voice = ToolGate::from_session(&session(false, Some("voice"), None));
+        assert!(voice.blocked("answer_question").is_none());
+        assert!(voice.advertised("answer_question"));
+        // Voice keeps the ordinary chat tool surface.
+        assert!(voice.advertised("list_sessions"));
+        for gate in [
+            ToolGate::from_session(&session(false, None, None)),
+            ToolGate::from_session(&session(true, None, None)),
+            ToolGate::none(),
+        ] {
+            assert!(gate.blocked("answer_question").is_some());
+            assert!(!gate.advertised("answer_question"));
+        }
     }
 }

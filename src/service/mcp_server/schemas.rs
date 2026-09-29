@@ -27,7 +27,8 @@ pub fn tool_names() -> Vec<String> {
 /// review bound to the session, so only sessions with
 /// `expert_kind == "doc-review"` see them — `routes/mcp.rs` re-admits them
 /// there (in both `tools/list` and the dispatch gate), and their handlers
-/// reject any other session.
+/// reject any other session. `answer_question` works the same way for
+/// `expert_kind == "voice"` sessions (see `ToolGate`).
 pub fn worker_hidden_tool_names() -> &'static [&'static str] {
     &[
         "list_projects",
@@ -50,6 +51,7 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "list_sessions",
         "get_review_doc",
         "submit_review_revision",
+        "answer_question",
     ]
 }
 
@@ -77,6 +79,7 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "get_finding_details",
         "get_review_doc",
         "submit_review_revision",
+        "answer_question",
     ]
 }
 
@@ -1944,6 +1947,25 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "keys": { "type": "string", "description": "combo: '+'-joined chord, e.g. 'ctrl+c'." }
                 },
                 "required": ["device_id", "action"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "answer_question".into(),
+            description: "Voice assistant only: answer (or dismiss) a pending question another session asked the user, on the user's behalf. Use the session_id and question_id from the `[relay] question` message, and key answers by question index, e.g. {\"0\": \"Use Postgres\"}. The target session resumes with the answer.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "The session that asked the question." },
+                    "question_id": { "type": "string", "description": "The question id from the relay message." },
+                    "answers": {
+                        "type": "object",
+                        "description": "Answers keyed by question index (\"0\", \"1\", …); each value is the chosen option label or free text.",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "rejected": { "type": "boolean", "description": "true = dismiss the question without answering (answers ignored)." }
+                },
+                "required": ["session_id", "question_id"],
                 "additionalProperties": false
             }),
         },

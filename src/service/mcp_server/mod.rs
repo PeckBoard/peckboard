@@ -71,6 +71,7 @@ impl McpToolRegistry {
         match tool_name {
             "complete_step" => self.handle_complete_step(args, ctx).await,
             "finish_card" => self.handle_finish_card(args, ctx).await,
+            "answer_question" => self.handle_answer_question(args, ctx).await,
             "wont_do_card" => self.handle_wont_do_card(args, ctx).await,
             "ask_user" => self.handle_ask_user(args, ctx).await,
             "get_review_doc" => self.handle_get_review_doc(args, ctx).await,
@@ -335,6 +336,12 @@ pub async fn dispatch_tool_call(
         }
     }
 
+    // Read before dispatch consumes the args: the voice-relay link below
+    // needs the target of a session tool.
+    let target_session_arg = final_args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     // A CORE tool name always dispatches to core — the same rule
     // `tools/list` applies to name collisions — so a plugin manifest that
     // declares e.g. `remote_agent_run` cannot silently divert those calls
@@ -378,6 +385,16 @@ pub async fn dispatch_tool_call(
                     }),
                 )
                 .await;
+            // A voice session handing another session work: relay that
+            // session's questions and turn ends back to it.
+            crate::service::voice_relay::link_from_tool_call(
+                &ctx.db,
+                &ctx.session_id,
+                tool_name,
+                target_session_arg.as_deref(),
+                result,
+            )
+            .await;
         }
         Err(e) => {
             plugins
@@ -527,7 +544,9 @@ mod tests {
         assert!(names.contains(&"background_status"));
         assert!(names.contains(&"list_background"));
         assert!(names.contains(&"stop_background"));
-        assert_eq!(names.len(), 88);
+        // Voice assistant (only advertised on a voice session).
+        assert!(names.contains(&"answer_question"));
+        assert_eq!(names.len(), 89);
     }
 
     #[test]

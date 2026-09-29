@@ -279,6 +279,22 @@ pub async fn claim_and_compose(
 /// added only where a non-text event (tool call, thinking) split the reply
 /// into separate segments. Empty when the child never produced text.
 async fn final_reply(db: &crate::db::Db, session_id: &str) -> String {
+    let reply = last_reply_text(db, session_id).await;
+    let result_char_cap = load_limits(db).await.result_char_cap;
+    if reply.chars().count() > result_char_cap {
+        let tail: String = reply
+            .chars()
+            .skip(reply.chars().count() - result_char_cap)
+            .collect();
+        format!("(truncated…)\n{tail}")
+    } else {
+        reply
+    }
+}
+
+/// Uncapped fold behind [`final_reply`]: the session's agent text since its
+/// last `user` event. Also used by the voice relay's update messages.
+pub(crate) async fn last_reply_text(db: &crate::db::Db, session_id: &str) -> String {
     let events = match db.events_tail(session_id, 200).await {
         Ok(events) => events,
         Err(e) => {
@@ -309,16 +325,7 @@ async fn final_reply(db: &crate::db::Db, session_id: &str) -> String {
         reply.push_str(&text);
         prev_was_text = true;
     }
-    let result_char_cap = load_limits(db).await.result_char_cap;
-    if reply.chars().count() > result_char_cap {
-        let tail: String = reply
-            .chars()
-            .skip(reply.chars().count() - result_char_cap)
-            .collect();
-        format!("(truncated…)\n{tail}")
-    } else {
-        reply
-    }
+    reply
 }
 
 /// Startup reconcile pass: find subagent sessions still marked

@@ -37,9 +37,18 @@
     flex: 1;
     justify-content: flex-start;
   }
+  /* The rail scrolls horizontally once plugins add buttons; keep the
+     right-hand cluster (voice "Listen", user avatar) pinned to the
+     visible edge so it stays reachable without scrolling the strip. */
   .rail-bottom {
     flex-direction: row;
     gap: 4px;
+    position: sticky;
+    right: 0;
+    flex-shrink: 0;
+    padding-left: 6px;
+    background: var(--surface);
+    z-index: 1;
   }
   .rail-brand {
     margin-bottom: 0;

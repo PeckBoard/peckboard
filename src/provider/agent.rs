@@ -468,6 +468,7 @@ pub async fn emit_event(
                         None,
                     )
                     .await;
+                    crate::service::voice_relay::note_turn_end(session_id, "completed", None);
                 }
                 ProviderEvent::Crashed { reason, .. } => {
                     crate::plugin::notify::fire_session_agent_ended(
@@ -477,6 +478,11 @@ pub async fn emit_event(
                         Some(reason.as_str()),
                     )
                     .await;
+                    crate::service::voice_relay::note_turn_end(
+                        session_id,
+                        "crashed",
+                        Some(reason.as_str()),
+                    );
                 }
                 ProviderEvent::ControlRequest {
                     request_type,

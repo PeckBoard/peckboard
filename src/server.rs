@@ -443,6 +443,9 @@ pub async fn run_server(
         tracing::info!("Worker watchdog started");
     }
 
+    // Voice assistant relay: forwards linked sessions' questions and turn
+    // ends into the voice session (see `service::voice_relay`).
+    crate::service::voice_relay::spawn_listener(state.clone());
     // Start worker completion listener -- receives notifications when a
     // streaming process finishes and runs the worker-done handler +
     // orchestration outside the tokio::spawn boundary (avoiding Send issues
