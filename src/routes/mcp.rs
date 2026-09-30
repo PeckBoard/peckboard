@@ -424,6 +424,43 @@ async fn mcp_handler(
                             rpc_json(JsonRpcResponse::error(id.clone(), -32000, e)),
                         );
                     }
+                    // `_reattach_worker` (reattach_worker): the handler has
+                    // scope-checked the card; re-scope it for the proof token
+                    // and reattach here, under the session manager's lock.
+                    if let Some(r) = result
+                        .as_object_mut()
+                        .and_then(|o| o.remove("_reattach_worker"))
+                    {
+                        let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+                        let unblock = r.get("unblock").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let outcome = match ctx.scope_card(s("card_id")).await {
+                            Ok(project) => {
+                                crate::worker::reattach::reattach_worker(
+                                    &state,
+                                    &project,
+                                    s("card_id"),
+                                    s("session_id"),
+                                    unblock,
+                                    s("reason"),
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        };
+                        match outcome {
+                            Ok(v) => result = v,
+                            Err(e) => {
+                                return (
+                                    StatusCode::OK,
+                                    rpc_json(JsonRpcResponse::error(
+                                        id.clone(),
+                                        -32000,
+                                        e.to_string(),
+                                    )),
+                                );
+                            }
+                        }
+                    }
                     let text_block = serde_json::json!({
                         "type": "text",
                         "text": serde_json::to_string(&result).unwrap_or_default(),

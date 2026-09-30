@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useVoiceStore } from '../store/voice'
 import { useResourcesStore } from '../store/resources'
 import { getSpeechEngine, type VoiceOption } from '../voice/engine'
+import { isKokoroVoice } from '../voice/kokoro'
 import ModelPicker from './ModelPicker'
 
 /** Recognition languages offered in the picker. The browser default (`''`)
@@ -126,12 +127,27 @@ export default function VoiceSettingsSection() {
               onChange={(e) => setPrefs({ voiceURI: e.target.value })}
               disabled={!synthesisSupported}
             >
-              <option value="">Browser default</option>
-              {voices.map((v) => (
-                <option key={v.voiceURI} value={v.voiceURI}>
-                  {v.name} ({v.lang}){v.default ? ' — default' : ''}
-                </option>
-              ))}
+              {voices.some((v) => isKokoroVoice(v.voiceURI)) && (
+                <optgroup label="Natural (server)">
+                  {voices
+                    .filter((v) => isKokoroVoice(v.voiceURI))
+                    .map((v) => (
+                      <option key={v.voiceURI} value={v.voiceURI}>
+                        {v.name}
+                      </option>
+                    ))}
+                </optgroup>
+              )}
+              <optgroup label="Browser">
+                <option value="">Browser default</option>
+                {voices
+                  .filter((v) => !isKokoroVoice(v.voiceURI))
+                  .map((v) => (
+                    <option key={v.voiceURI} value={v.voiceURI}>
+                      {v.name} ({v.lang}){v.default ? ' — default' : ''}
+                    </option>
+                  ))}
+              </optgroup>
             </select>
           </label>
           <label className="settings-row voice-settings-row">

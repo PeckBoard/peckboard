@@ -1238,7 +1238,11 @@ async fn move_card_to_terminal_step(
         .or_else(|| card.last_worker_session_id.clone());
     if let Some(ref sid) = cleanup_sid {
         crate::worker::orchestrator::clear_session_todos(&ctx.db, &ctx.broadcaster, sid).await;
-        if let Ok(Some(folder)) = ctx.db.get_folder(&ctx.folder_id).await {
+        // Resolve the card's own project folder, not the caller's: the
+        // voice assistant moves cards in folders other than its own.
+        if let Ok(Some(project)) = ctx.db.get_project(&card.project_id).await
+            && let Ok(Some(folder)) = ctx.db.get_folder(&project.folder_id).await
+        {
             crate::worker::worktree::finalize_worktree(&folder.path, card_id, sid, &ctx.db).await;
         }
     }

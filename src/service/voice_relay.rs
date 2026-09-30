@@ -71,6 +71,13 @@ You are the user's fast, spoken assistant. These voice rules override the genera
 Messages starting with "[relay] " come from the system, not from the user speaking.
 - "[relay] question from ...": a session you sent work to needs a decision. Do NOT read the question out verbatim. The user only knows what was said in this voice conversation, so frame it with that context: explain in plain words what is being decided and why it matters, suggest a sensible default, and talk it through until you have a clear answer. Then call answer_question with the session_id, the question_id, and the answers keyed by question index (for example {"0": "Use Postgres"}). If the user wants to skip it, call answer_question with rejected set to true.
 - "[relay] update from ...": a session finished a turn. Summarize briefly what changed and whether the work is done or still needs something.
+- One relay turn may carry several relays from the same topic; cover each.
+
+## One Topic at a Time
+- Stay on the topic the user is on. Updates and questions from other sessions wait in a queue instead of interrupting; the system delivers them when the user is quiet.
+- When the user wraps up the current topic ("okay", "sounds good", "thanks") or asks what else is going on ("what else", "anything new"), or switches topics, call voice_queue with action next and handle what it returns like relay messages, one topic at a time.
+- When the user asks what is queued or waiting, call voice_queue with action list and give a one-sentence overview by session name.
+- If nothing is queued, say so briefly.
 
 ## Destructive Actions
 You run without permission prompts, so you are the safety check. Destructive tools are any delete tool, terminate_agent, clear_session, stop_background, and any remove or uninstall tool. Before calling one, say exactly what it will do (which session, card, or project, by name) and ask the user to confirm out loud. Only after an explicit yes, call it with confirmed set to true. Anything other than a clear yes means do not do it. Never set confirmed to true on your own initiative; the system refuses destructive calls without it.
@@ -143,8 +150,10 @@ fn signal(sig: Signal) {
 }
 
 /// A session's agent turn ended (`outcome` is `"completed"` or `"crashed"`).
-/// Cheap no-op unless the session is linked to a voice session.
+/// Cheap no-op unless the session is linked to a voice session (or is a
+/// voice session the relay gate is tracking).
 pub fn note_turn_end(session_id: &str, outcome: &str, reason: Option<&str>) {
+    crate::service::voice_gate::note_turn_end(session_id);
     if linked_voice(session_id).is_none() {
         return;
     }
@@ -166,14 +175,15 @@ pub fn note_question(session_id: &str, question_event_id: &str) {
     });
 }
 
-/// Start the relay listener. Called once at boot; later calls are no-ops.
+/// Start the relay listener (and the relay gate's ticker, which does the
+/// actual delivery). Called once at boot; later calls are no-ops.
 pub fn spawn_listener(state: Arc<AppState>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     if SIGNALS.set(tx).is_err() {
         return;
     }
+    crate::service::voice_gate::spawn_ticker(state.clone());
     tokio::spawn(async move {
-        let dispatcher = crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
         while let Some(sig) = rx.recv().await {
             match sig {
                 Signal::TurnEnded {
@@ -181,42 +191,22 @@ pub fn spawn_listener(state: Arc<AppState>) {
                     outcome,
                     reason,
                 } => {
-                    relay_turn_end(
-                        &state.db,
-                        &state.broadcaster,
-                        Some(&dispatcher),
-                        &session_id,
-                        &outcome,
-                        reason.as_deref(),
-                    )
-                    .await;
+                    relay_turn_end(&state.db, &session_id, &outcome, reason.as_deref()).await;
                 }
                 Signal::Question {
                     session_id,
                     question_event_id,
                 } => {
-                    relay_question(
-                        &state.db,
-                        &state.broadcaster,
-                        Some(&dispatcher),
-                        &session_id,
-                        &question_event_id,
-                    )
-                    .await;
+                    relay_question(&state.db, &session_id, &question_event_id).await;
                 }
             }
         }
     });
 }
 
-/// Relay one freshly asked question from `target_session_id`.
-pub async fn relay_question(
-    db: &Db,
-    broadcaster: &Broadcaster,
-    dispatcher: Option<&dyn ExpertDispatcher>,
-    target_session_id: &str,
-    question_event_id: &str,
-) {
+/// Queue one freshly asked question from `target_session_id` for the voice
+/// session (the relay gate decides when it is spoken).
+pub async fn relay_question(db: &Db, target_session_id: &str, question_event_id: &str) {
     let Some(voice_id) = linked_voice(target_session_id) else {
         return;
     };
@@ -229,19 +219,13 @@ pub async fn relay_question(
     if event.kind != "question" || event.session_id != target_session_id {
         return;
     }
-    relay_question_event(db, broadcaster, dispatcher, &voice_id, &target, &event).await;
+    relay_question_event(db, &voice_id, &target, &event).await;
 }
 
-/// A linked target's turn ended: relay any not-yet-relayed pending
+/// A linked target's turn ended: queue any not-yet-relayed pending
 /// questions, or — when nothing is pending — an update carrying its reply.
-pub async fn relay_turn_end(
-    db: &Db,
-    broadcaster: &Broadcaster,
-    dispatcher: Option<&dyn ExpertDispatcher>,
-    target_session_id: &str,
-    outcome: &str,
-    reason: Option<&str>,
-) {
+pub async fn relay_turn_end(db: &Db, target_session_id: &str, outcome: &str, reason: Option<&str>) {
+    use crate::service::voice_gate::{RelayKind, enqueue};
     let Some(voice_id) = linked_voice(target_session_id) else {
         return;
     };
@@ -260,36 +244,75 @@ pub async fn relay_turn_end(
     if !pending.is_empty() {
         // Waiting on the user: the question is the news, not the turn end.
         for q in &pending {
-            relay_question_event(db, broadcaster, dispatcher, &voice_id, &target, q).await;
+            relay_question_event(db, &voice_id, &target, q).await;
         }
         return;
     }
-    let text = if outcome == "completed" {
+    if outcome == "completed" {
         let reply = crate::subagent::last_reply_text(db, target_session_id).await;
-        format_update(&target.name, &target.id, &reply)
+        let text = format_update(&target.name, &target.id, &reply);
+        let summary = if reply.trim().is_empty() {
+            "finished its turn"
+        } else {
+            reply.as_str()
+        };
+        enqueue(
+            db,
+            &voice_id,
+            &target,
+            RelayKind::Update,
+            None,
+            &text,
+            summary,
+        )
+        .await;
     } else {
-        format_stopped(&target.name, &target.id, reason)
-    };
-    deliver(db, broadcaster, dispatcher, &voice_id, &text).await;
+        let text = format_stopped(&target.name, &target.id, reason);
+        let summary = format!(
+            "the agent stopped before finishing{}",
+            reason.map(|r| format!(" ({r})")).unwrap_or_default()
+        );
+        enqueue(
+            db,
+            &voice_id,
+            &target,
+            RelayKind::Update,
+            None,
+            &text,
+            &summary,
+        )
+        .await;
+    }
 }
 
-async fn relay_question_event(
-    db: &Db,
-    broadcaster: &Broadcaster,
-    dispatcher: Option<&dyn ExpertDispatcher>,
-    voice_id: &str,
-    target: &Session,
-    event: &Event,
-) {
+async fn relay_question_event(db: &Db, voice_id: &str, target: &Session, event: &Event) {
     if !claim_question(&event.id) {
         return;
     }
     let data = serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default();
     let text = format_question(&target.name, &target.id, &event.id, &data);
-    deliver(db, broadcaster, dispatcher, voice_id, &text).await;
+    let summary = data
+        .get("questions")
+        .and_then(|q| q.get(0))
+        .and_then(|q| q.get("question"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("a question")
+        .to_string();
+    crate::service::voice_gate::enqueue(
+        db,
+        voice_id,
+        target,
+        crate::service::voice_gate::RelayKind::Question,
+        Some(&event.id),
+        &text,
+        &summary,
+    )
+    .await;
 }
 
-async fn deliver(
+/// Inject a (possibly batched) relay turn into the voice session. Called by
+/// the relay gate once the relay is due.
+pub(crate) async fn deliver(
     db: &Db,
     broadcaster: &Broadcaster,
     dispatcher: Option<&dyn ExpertDispatcher>,
@@ -414,11 +437,12 @@ pub async fn link_from_tool_call(
             .get("session_id")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        _ => return,
+        _ => None,
     };
-    let Some(target) = target else {
+    let focus = focus_from_tool_call(tool_name, target.as_deref(), target_from_args, result);
+    if target.is_none() && focus.is_none() {
         return;
-    };
+    }
     // A cross-folder send parked on approval did not reach the target yet;
     // the re-call after the user approves links it.
     if result.get("status").and_then(|v| v.as_str()) == Some("awaiting_approval") {
@@ -427,16 +451,68 @@ pub async fn link_from_tool_call(
     let is_voice = |s: &Session| s.expert_kind.as_deref() == Some(VOICE_EXPERT_KIND);
     let caller_is_voice =
         matches!(db.get_session(caller_session_id).await, Ok(Some(s)) if is_voice(&s));
+    if !caller_is_voice {
+        return;
+    }
+    // What the voice conversation is about now: relays from it are on-topic.
+    match focus {
+        Some(FocusTarget::Session(id)) => {
+            crate::service::voice_gate::focus_session(db, caller_session_id, &id).await
+        }
+        Some(FocusTarget::Project(id)) => {
+            crate::service::voice_gate::focus_project(caller_session_id, &id)
+        }
+        None => {}
+    }
+    let Some(target) = target else {
+        return;
+    };
     // Never link one voice session to another: each one's turn end would
     // relay into the other forever.
     let target_is_voice = matches!(db.get_session(&target).await, Ok(Some(s)) if is_voice(&s));
-    if caller_is_voice && !target_is_voice {
+    if !target_is_voice {
         link(&target, caller_session_id);
     }
 }
 
+enum FocusTarget {
+    Session(String),
+    Project(String),
+}
+
+/// The session or project a voice tool call turns the conversation to.
+fn focus_from_tool_call(
+    tool_name: &str,
+    link_target: Option<&str>,
+    session_arg: Option<&str>,
+    result: &serde_json::Value,
+) -> Option<FocusTarget> {
+    match tool_name {
+        "send_message" | "send_image" | "create_session" => {
+            link_target.map(|s| FocusTarget::Session(s.to_string()))
+        }
+        "read_session"
+        | "interrupt_session"
+        | "watch_session"
+        | "answer_question"
+        | "read_worker_session" => session_arg.map(|s| FocusTarget::Session(s.to_string())),
+        "show_view" => {
+            let opened = result.get("opened")?;
+            let s = |k: &str| opened.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            match opened.get("target").and_then(|v| v.as_str())? {
+                "session" => s("id").map(FocusTarget::Session),
+                "project" => s("id").map(FocusTarget::Project),
+                "card" => s("project_id").map(FocusTarget::Project),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Tools that destroy or discard work: deletes, removals, uninstalls,
-/// killing an agent, wiping a session's context, stopping a background task.
+/// killing an agent, wiping a session's context, stopping a background task,
+/// abandoning a card, pausing a project's workers.
 /// The voice session runs with permissions skipped, so these are the calls
 /// it must confirm out loud first (see [`require_voice_confirmation`]).
 pub fn is_destructive_tool(name: &str) -> bool {
@@ -446,7 +522,11 @@ pub fn is_destructive_tool(name: &str) -> bool {
         || name.starts_with("uninstall")
         || matches!(
             name,
-            "terminate_agent" | "clear_session" | "stop_background"
+            "terminate_agent"
+                | "clear_session"
+                | "stop_background"
+                | "move_card_to_wont_do"
+                | "pause_project"
         )
 }
 
@@ -577,8 +657,15 @@ mod tests {
             )
             .await
             .unwrap();
-        relay_question(&db, &bc, None, &target, &q.id).await;
-        relay_turn_end(&db, &bc, None, &target, "completed", None).await;
+        relay_question(&db, &target, &q.id).await;
+        relay_turn_end(&db, &target, "completed", None).await;
+        // Queued, not injected: the relay gate delivers it once the
+        // conversation is quiet (it is on-topic: the voice session just
+        // messaged this target).
+        assert!(relay_texts(&db, &voice).await.is_empty());
+        let t0 = std::time::Instant::now();
+        crate::service::voice_gate::tick_at(&db, &bc, None, t0 + std::time::Duration::from_secs(3))
+            .await;
         let texts = relay_texts(&db, &voice).await;
         assert_eq!(texts.len(), 1, "{texts:?}");
         assert_eq!(
@@ -607,7 +694,14 @@ mod tests {
         )
         .await
         .unwrap();
-        relay_turn_end(&db, &bc, None, &target, "completed", None).await;
+        relay_turn_end(&db, &target, "completed", None).await;
+        // Held behind the relay turn until it ends, then due after the gap.
+        use crate::service::voice_gate::{note_turn_end_at, tick_at};
+        let t1 = std::time::Instant::now();
+        tick_at(&db, &bc, None, t1 + std::time::Duration::from_secs(5)).await;
+        assert_eq!(relay_texts(&db, &voice).await.len(), 1);
+        note_turn_end_at(&voice, t1);
+        tick_at(&db, &bc, None, t1 + std::time::Duration::from_secs(5)).await;
         let texts = relay_texts(&db, &voice).await;
         assert_eq!(texts.len(), 2, "{texts:?}");
         assert_eq!(

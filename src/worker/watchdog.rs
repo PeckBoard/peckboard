@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::background::BackgroundRegistry;
 use crate::db::Db;
 use crate::provider::manager::SessionManager;
 use crate::ws::broadcaster::Broadcaster;
@@ -24,6 +25,7 @@ pub async fn start_watchdog(
     db: Db,
     session_manager: SessionManager,
     broadcaster: Arc<Broadcaster>,
+    background: Arc<BackgroundRegistry>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     // The broadcaster is kept for future use (e.g., notifying on cleanup).
@@ -31,7 +33,7 @@ pub async fn start_watchdog(
     loop {
         interval.tick().await;
         sweep_orphans(&db, &session_manager).await;
-        sweep_stale_card_refs(&db, &session_manager).await;
+        sweep_stale_card_refs(&db, &session_manager, &background).await;
         sweep_worktrees(&db).await;
     }
 }
@@ -61,7 +63,11 @@ pub async fn start_watchdog(
 ///
 /// `pub` so integration tests can run one sweep deterministically instead
 /// of waiting on the 60s loop.
-pub async fn sweep_stale_card_refs(db: &Db, session_manager: &SessionManager) {
+pub async fn sweep_stale_card_refs(
+    db: &Db,
+    session_manager: &SessionManager,
+    background: &BackgroundRegistry,
+) {
     let projects = match db.list_projects().await {
         Ok(projects) => projects,
         Err(e) => {
@@ -102,6 +108,18 @@ pub async fn sweep_stale_card_refs(db: &Db, session_manager: &SessionManager) {
                     card_id = %card.id,
                     session_id = %session_id,
                     "Watchdog: stale-ref sweep skipping card awaiting a user answer"
+                );
+                continue;
+            }
+
+            // Same for a worker that ended its turn to wait on its own
+            // background task (a long test run): the task's exit report
+            // resumes it, so it isn't dead — just idle.
+            if background.has_running_for_session(session_id) {
+                tracing::debug!(
+                    card_id = %card.id,
+                    session_id = %session_id,
+                    "Watchdog: stale-ref sweep skipping card waiting on a background task"
                 );
                 continue;
             }
@@ -702,7 +720,7 @@ mod tests {
         seed_session(&db, "ws-fresh", &fresh_ts).await;
         seed_card_with_worker(&db, "c1", Some("ws-fresh")).await;
 
-        sweep_stale_card_refs(&db, &sm).await;
+        sweep_stale_card_refs(&db, &sm, &BackgroundRegistry::default()).await;
 
         let card = db.get_card("c1").await.unwrap().unwrap();
         assert_eq!(
@@ -724,7 +742,7 @@ mod tests {
         seed_session(&db, "ws-old", &stale_ts).await;
         seed_card_with_worker(&db, "c1", Some("ws-old")).await;
 
-        sweep_stale_card_refs(&db, &sm).await;
+        sweep_stale_card_refs(&db, &sm, &BackgroundRegistry::default()).await;
 
         let card = db.get_card("c1").await.unwrap().unwrap();
         assert!(
@@ -756,7 +774,7 @@ mod tests {
         .await
         .unwrap();
 
-        sweep_stale_card_refs(&db, &sm).await;
+        sweep_stale_card_refs(&db, &sm, &BackgroundRegistry::default()).await;
 
         // Even though the session is stale, the card is terminal so
         // the sweep leaves it alone.
@@ -779,7 +797,7 @@ mod tests {
 
         let lock_held = sm.lock_session("ws-locked").await;
 
-        sweep_stale_card_refs(&db, &sm).await;
+        sweep_stale_card_refs(&db, &sm, &BackgroundRegistry::default()).await;
 
         let card = db.get_card("c1").await.unwrap().unwrap();
         // Lock blocks the sweep; the ref must still be in place.
@@ -787,7 +805,7 @@ mod tests {
 
         drop(lock_held);
         // After releasing the lock the next sweep clears it.
-        sweep_stale_card_refs(&db, &sm).await;
+        sweep_stale_card_refs(&db, &sm, &BackgroundRegistry::default()).await;
         let card = db.get_card("c1").await.unwrap().unwrap();
         assert!(card.worker_session_id.is_none());
     }
@@ -815,7 +833,7 @@ mod tests {
         .await
         .unwrap();
 
-        sweep_stale_card_refs(&db, &sm).await;
+        sweep_stale_card_refs(&db, &sm, &BackgroundRegistry::default()).await;
 
         let card = db.get_card("c1").await.unwrap().unwrap();
         assert_eq!(
@@ -851,12 +869,32 @@ mod tests {
         .await
         .unwrap();
 
-        sweep_stale_card_refs(&db, &sm).await;
+        sweep_stale_card_refs(&db, &sm, &BackgroundRegistry::default()).await;
 
         let card = db.get_card("c1").await.unwrap().unwrap();
         assert!(
             card.worker_session_id.is_none(),
             "an answered question must not pin the card forever"
         );
+    }
+
+    /// A worker idle past the grace window because it's waiting on its own
+    /// background task (a long test run) keeps its card: the task's exit
+    /// report resumes it.
+    #[tokio::test]
+    async fn stale_card_ref_with_running_background_task_is_preserved() {
+        let db = setup().await;
+        let sm = SessionManager::new(std::sync::Arc::new(
+            crate::provider::registry::ProviderRegistry::new(),
+        ));
+        seed_session(&db, "ws-bg", &old_ts()).await;
+        seed_card_with_worker(&db, "c1", Some("ws-bg")).await;
+        let background = BackgroundRegistry::default();
+        background.insert_running_for_test("ws-bg");
+
+        sweep_stale_card_refs(&db, &sm, &background).await;
+
+        let card = db.get_card("c1").await.unwrap().unwrap();
+        assert_eq!(card.worker_session_id.as_deref(), Some("ws-bg"));
     }
 }

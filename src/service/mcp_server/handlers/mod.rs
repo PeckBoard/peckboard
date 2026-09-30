@@ -13,6 +13,7 @@ mod misc;
 mod model_control;
 mod plans;
 mod projects;
+mod reattach;
 mod remote_agent;
 mod repeating_tasks;
 mod reports;
@@ -20,6 +21,7 @@ mod subagents;
 mod variables;
 mod voice;
 mod voice_nav;
+mod voice_queue;
 mod workers;
 
 pub use model_control::autoswitch_enabled;

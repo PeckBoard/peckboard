@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Notify;
 
@@ -207,6 +207,8 @@ pub struct BackgroundRegistry {
     /// process. Lock order: `tasks` before `deleted_sessions`.
     deleted_sessions: Mutex<HashSet<String>>,
     reporter: OnceLock<Reporter>,
+    /// Set by [`Self::shutdown_all`]: silent exits then keep their sidecar.
+    shutting_down: AtomicBool,
 }
 
 impl Default for BackgroundRegistry {
@@ -227,14 +229,43 @@ pub fn global() -> Option<Arc<BackgroundRegistry>> {
     GLOBAL.get().cloned()
 }
 
+/// Sidecar suffix: `<log_dir>/<id>.task.json` holds a visible task's
+/// [`LostTask`] metadata while it runs, so a restart can tell its session.
+const META_SUFFIX: &str = ".task.json";
+
+/// Minimal durable record of a running task, written next to its log. Only
+/// read back when a previous server process died with the task still
+/// running (the registry that owned it is gone).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LostTask {
+    pub id: String,
+    pub session_id: String,
+    pub label: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub started_at: String,
+}
+
 /// Remove logs left by a previous server process (unreachable: the
-/// registry that knew them is gone).
-pub fn clear_stale_logs(log_dir: &Path) {
+/// registry that knew them is gone). Returns the tasks that were still
+/// running when that process died (their sidecars), oldest first, so the
+/// caller can report them via [`BackgroundRegistry::report_lost`].
+pub fn clear_stale_logs(log_dir: &Path) -> Vec<LostTask> {
+    let mut lost: Vec<LostTask> = std::fs::read_dir(log_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(META_SUFFIX))
+        .filter_map(|e| std::fs::read(e.path()).ok())
+        .filter_map(|b| serde_json::from_slice(&b).ok())
+        .collect();
+    lost.sort_by(|a: &LostTask, b| a.started_at.cmp(&b.started_at));
     if log_dir.exists()
         && let Err(e) = std::fs::remove_dir_all(log_dir)
     {
         tracing::warn!(dir = %log_dir.display(), "failed to clear stale background logs: {e}");
     }
+    lost
 }
 
 impl BackgroundRegistry {
@@ -245,6 +276,7 @@ impl BackgroundRegistry {
             tasks: Mutex::new(HashMap::new()),
             deleted_sessions: Mutex::new(HashSet::new()),
             reporter: OnceLock::new(),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -267,6 +299,76 @@ impl BackgroundRegistry {
             broadcaster,
             dispatcher,
         });
+    }
+
+    fn meta_path(&self, id: &str) -> PathBuf {
+        self.log_dir.join(format!("{id}{META_SUFFIX}"))
+    }
+
+    /// Record a now-visible running task durably (see [`LostTask`]).
+    fn persist_meta(&self, info: &TaskInfo) {
+        let meta = LostTask {
+            id: info.id.clone(),
+            session_id: info.session_id.clone(),
+            label: info.label.clone(),
+            program: info.program.clone(),
+            args: info.args.clone(),
+            started_at: info.started_at.clone(),
+        };
+        let written = serde_json::to_vec(&meta)
+            .map_err(std::io::Error::other)
+            .and_then(|b| std::fs::write(self.meta_path(&info.id), b));
+        if let Err(e) = written {
+            tracing::warn!(task_id = %info.id, "failed to persist background task metadata: {e}");
+        }
+    }
+
+    fn forget_meta(&self, id: &str) {
+        let _ = std::fs::remove_file(self.meta_path(id));
+    }
+
+    /// Tell each owning session that its task died with the previous server
+    /// process, instead of leaving it to discover a silent "not found".
+    /// Delivered like a normal exit report (persisted + session woken).
+    pub async fn report_lost(&self, lost: Vec<LostTask>) {
+        let Some(reporter) = self.reporter.get() else {
+            return;
+        };
+        for t in lost {
+            if !matches!(reporter.db.get_session(&t.session_id).await, Ok(Some(_))) {
+                continue;
+            }
+            let text = format!(
+                "Background task \"{}\" (id {}, `{}`, started {}) was lost: the Peckboard \
+                 server restarted before it finished, so its process and output are gone. \
+                 Re-run it if you still need the result.",
+                t.label,
+                t.id,
+                report::display_command(&t.program, &t.args),
+                t.started_at,
+            );
+            tracing::info!(session_id = %t.session_id, task_id = %t.id, "reporting background task lost to restart");
+            if let Err(e) = crate::service::session_notify::notify_session(
+                &reporter.db,
+                &reporter.broadcaster,
+                reporter.dispatcher.as_deref(),
+                &t.session_id,
+                &text,
+                serde_json::json!({
+                    "source": EVENT_SOURCE,
+                    "background_task": {
+                        "id": t.id,
+                        "label": t.label,
+                        "status": "lost",
+                        "exit_code": null,
+                    },
+                }),
+            )
+            .await
+            {
+                tracing::warn!(session_id = %t.session_id, task_id = %t.id, "lost-task report append failed: {e}");
+            }
+        }
     }
 
     fn task(&self, id: &str) -> Option<Arc<Task>> {
@@ -304,6 +406,45 @@ impl BackgroundRegistry {
             let i = lock(&t.info);
             i.session_id == session_id && i.status == TaskStatus::Running
         })
+    }
+
+    /// Test seam: register a process-less task that reads as running for
+    /// `session_id`, so callers of [`Self::has_running_for_session`] can be
+    /// exercised without forking.
+    #[cfg(test)]
+    pub(crate) fn insert_running_for_test(&self, session_id: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let info = TaskInfo {
+            id: id.clone(),
+            session_id: session_id.to_string(),
+            label: "test".into(),
+            program: "true".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: None,
+            status: TaskStatus::Running,
+            exit_code: None,
+            signal: None,
+            pid: None,
+            log_path: String::new(),
+            log_truncated: false,
+            timeout_secs: MAX_TIMEOUT_SECS,
+            stopping: false,
+        };
+        let task = Arc::new(Task {
+            info: Mutex::new(info),
+            tail: Mutex::new(VecDeque::new()),
+            started: Instant::now(),
+            stop: Notify::new(),
+            stop_requested: AtomicBool::new(false),
+            silent: AtomicBool::new(false),
+            attached: Mutex::new(None),
+            hidden: AtomicBool::new(false),
+            keep_group_on_exit: false,
+        });
+        lock(&self.tasks).insert(id.clone(), task);
+        id
     }
 
     /// Stop every running task of `session_id` with no completion report,
@@ -397,6 +538,7 @@ impl BackgroundRegistry {
                 // can't land after `supervise`'s "finished".
                 task.hidden.store(false, Ordering::SeqCst);
                 let info = task.info();
+                self.persist_meta(&info);
                 self.broadcast("started", &info);
                 drop(slot);
                 return Ok(Attached::Detached(info, task.last_lines(REPORT_LINES)));
@@ -515,6 +657,7 @@ impl BackgroundRegistry {
             tasks.insert(id, task.clone());
         }
         if !hidden {
+            self.persist_meta(&info);
             self.broadcast("started", &info);
         }
         tracing::info!(
@@ -606,6 +749,7 @@ impl BackgroundRegistry {
     /// moment, SIGKILL whatever is left. No reports (the server is going
     /// down; the sessions' agents are being stopped too).
     pub async fn shutdown_all(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         let running: Vec<Arc<Task>> = lock(&self.tasks)
             .values()
             .filter(|t| t.is_running())
@@ -792,6 +936,11 @@ impl BackgroundRegistry {
         }
 
         if task.silent.load(Ordering::SeqCst) {
+            // Shutdown keeps the sidecar so the next boot can tell the
+            // session its task was lost (see `clear_stale_logs`).
+            if !self.shutting_down.load(Ordering::SeqCst) {
+                self.forget_meta(&info.id);
+            }
             if self.task(&info.id).is_none() {
                 // Session deleted: the task was already dropped from the map.
                 let _ = std::fs::remove_file(&info.log_path);
@@ -802,6 +951,7 @@ impl BackgroundRegistry {
             return;
         }
         self.broadcast("finished", &info);
+        self.forget_meta(&info.id);
 
         let Some(reporter) = self.reporter.get() else {
             return;

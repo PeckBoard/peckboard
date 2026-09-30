@@ -21,6 +21,8 @@ pub mod session_notify;
 pub mod ssh_keys;
 pub mod tls;
 pub mod tool_images;
+pub mod tts;
 pub mod update;
+pub mod voice_gate;
 pub mod voice_relay;
 pub mod wake;

@@ -261,8 +261,7 @@ impl McpToolRegistry {
         // so we filter against names. Sibling-folder reports become
         // invisible.
         let in_folder_project_names: std::collections::HashSet<String> = ctx
-            .db
-            .list_projects_by_folder(&ctx.folder_id)
+            .visible_projects()
             .await
             .unwrap_or_default()
             .into_iter()
@@ -423,8 +422,7 @@ impl McpToolRegistry {
             (Some(_), None) => false,
             (None, Some(rp)) => {
                 let in_folder: std::collections::HashSet<String> = ctx
-                    .db
-                    .list_projects_by_folder(&ctx.folder_id)
+                    .visible_projects()
                     .await
                     .unwrap_or_default()
                     .into_iter()

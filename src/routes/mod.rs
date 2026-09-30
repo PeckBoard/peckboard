@@ -36,6 +36,7 @@ pub mod update;
 pub mod usage;
 pub mod views;
 pub mod voice;
+pub mod voice_tts;
 pub mod workflows;
 
 use crate::frontend::static_handler;
@@ -87,6 +88,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(me::router(state.clone()))
         .merge(views::router(state.clone()))
         .merge(voice::router(state.clone()))
+        .merge(voice_tts::router(state.clone()))
         .merge(agent_vars::router(state.clone()))
         .merge(ssh_keys::router(state.clone()))
         .merge(env_vars::router(state.clone()))

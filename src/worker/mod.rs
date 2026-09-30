@@ -1,6 +1,7 @@
 pub mod budget;
 pub mod orchestrator;
 pub mod pipeline;
+pub mod reattach;
 pub mod scheduler;
 pub mod watchdog;
 pub mod worktree;

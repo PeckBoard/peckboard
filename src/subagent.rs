@@ -22,7 +22,9 @@
 //!    its turn with `run_background` tasks still running is not done: the
 //!    claim waits for the turn the last task's exit report resumes.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use crate::state::AppState;
 use crate::ws::broadcaster::WsEvent;
@@ -127,6 +129,16 @@ pub fn build_subagent_prompt(name: &str, parent_session_id: &str, task: &str) ->
          further subagents.\n\n# Task\n\n{task}"
     )
 }
+/// How long a subagent whose turn failed to authenticate gets to resume
+/// (auth recovery's auto-retry, a re-login) before the parent is told it
+/// crashed. Auto-retry replays within a second or two.
+pub const AUTH_CRASH_GRACE: Duration = Duration::from_secs(60);
+
+/// Children reported CRASHED for an auth failure, so a later release of
+/// their park knows to un-claim them and announce the resume. In-memory:
+/// after a restart the reconcile pass reports every incomplete child anyway.
+static AUTH_CRASH_REPORTED: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
 /// Report a completed (or crashed) subagent back to its parent session.
 /// Idempotent via `claim_subagent_completion`; called from the completion
@@ -137,12 +149,22 @@ pub fn build_subagent_prompt(name: &str, parent_session_id: &str, task: &str) ->
 /// completion of that turn re-runs this check. A crash reports at once and
 /// silently stops the child's tasks, so a later exit can't wake a child
 /// whose result has already been delivered.
+///
+/// `auth_failed` (the turn died on an expired/revoked credential) defers
+/// the crash report: auth recovery parks the turn and usually replays it
+/// straight away, so the child is not dead. The report goes out only if
+/// the child has not started another turn within [`AUTH_CRASH_GRACE`].
 pub async fn handle_subagent_done(
     state: &Arc<AppState>,
     session: &crate::db::models::Session,
     completed: bool,
+    auth_failed: bool,
     error: Option<&str>,
 ) {
+    if !completed && auth_failed {
+        defer_auth_crash(state, session, error).await;
+        return;
+    }
     let background = crate::background::global();
     if !completed && let Some(bg) = &background {
         bg.stop_session_silently(&session.id);
@@ -159,25 +181,58 @@ pub async fn handle_subagent_done(
     else {
         return;
     };
+    deliver_to_parent(state, &session.id, &parent_id, &text).await;
+}
 
-    // The claim stamped `subagent_completed_at`; tell the UI.
-    if let Ok(Some(child)) = state.db.get_session(&session.id).await {
+/// Spawn the grace-window check behind an auth-failed subagent turn. The
+/// baseline is read here, before the listener's auth recovery step parks
+/// and replays the turn, so the replay's `agent-start` counts as a resume.
+async fn defer_auth_crash(
+    state: &Arc<AppState>,
+    session: &crate::db::models::Session,
+    error: Option<&str>,
+) {
+    let baseline = auth_failure_baseline(&state.db, &session.id).await;
+    let state = state.clone();
+    let session_id = session.id.clone();
+    let error = error.map(str::to_string);
+    tokio::spawn(async move {
+        tokio::time::sleep(AUTH_CRASH_GRACE).await;
+        let Ok(Some(session)) = state.db.get_session(&session_id).await else {
+            return;
+        };
+        let Some((parent_id, text)) =
+            claim_after_auth_grace(&state.db, &session, baseline, error.as_deref()).await
+        else {
+            return;
+        };
+        if let Some(bg) = crate::background::global() {
+            bg.stop_session_silently(&session_id);
+        }
+        if let Ok(mut set) = AUTH_CRASH_REPORTED.lock() {
+            set.insert(session_id.clone());
+        }
+        deliver_to_parent(&state, &session_id, &parent_id, &text).await;
+    });
+}
+
+/// Broadcast the child's updated row (its `subagent_completed_at` changed),
+/// then persist `text` on the parent and resume it like a user message.
+async fn deliver_to_parent(state: &Arc<AppState>, child_id: &str, parent_id: &str, text: &str) {
+    if let Ok(Some(child)) = state.db.get_session(child_id).await {
         state.broadcaster.broadcast(WsEvent {
             event_type: "session-updated".into(),
             session_id: child.id.clone(),
             data: serde_json::to_value(&child).unwrap_or(serde_json::Value::Null),
         });
     }
-
-    // Persist + broadcast on the parent first, then resume it exactly like
-    // an incoming user message.
     let dispatcher = crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
     if let Err(e) = crate::service::session_notify::notify_session(
         &state.db,
         &state.broadcaster,
         Some(&dispatcher),
-        &parent_id,
-        &text,
+        parent_id,
+        text,
         serde_json::json!({ "source": "subagent-result" }),
     )
     .await
@@ -206,7 +261,7 @@ pub async fn fail_subagent_dispatch(state: &Arc<AppState>, child_id: &str, error
             return;
         }
     };
-    handle_subagent_done(state, &session, false, Some(error)).await;
+    handle_subagent_done(state, &session, false, false, Some(error)).await;
 }
 
 /// The DB half of [`handle_subagent_done`], separated so it is testable
@@ -273,6 +328,75 @@ pub async fn claim_and_compose(
 }
 
 /// The child's final reply: every `agent-text` event after the last `user`
+/// Seq of the child's newest `agent-start` at the moment an auth failure
+/// ended its turn. [`claim_after_auth_grace`] treats any later start as
+/// proof the child resumed.
+pub async fn auth_failure_baseline(db: &crate::db::Db, session_id: &str) -> Option<i32> {
+    db.latest_event_of_kinds(session_id, &["agent-start"])
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.seq)
+}
+
+/// The DB half of the deferred auth-crash report, run once
+/// [`AUTH_CRASH_GRACE`] has lapsed: `None` when the child started another
+/// turn since `baseline_start_seq` (auto-retry resumed it — its own
+/// completion reports), otherwise the usual crash claim + CRASHED text.
+pub async fn claim_after_auth_grace(
+    db: &crate::db::Db,
+    session: &crate::db::models::Session,
+    baseline_start_seq: Option<i32>,
+    error: Option<&str>,
+) -> Option<(String, String)> {
+    if auth_failure_baseline(db, &session.id).await > baseline_start_seq {
+        return None;
+    }
+    claim_and_compose(db, session, false, error, false).await
+}
+
+/// Auth recovery just lifted `session_id`'s park. If that child was
+/// already reported CRASHED for the auth failure, un-claim it (so its
+/// eventual result reports as `finished`) and tell the parent it is alive
+/// again — otherwise the parent may re-spawn a child that is still
+/// working.
+pub async fn on_auth_released(state: &Arc<AppState>, session_id: &str) {
+    let reported = AUTH_CRASH_REPORTED
+        .lock()
+        .map(|mut set| set.remove(session_id))
+        .unwrap_or(false);
+    if !reported {
+        return;
+    }
+    let Ok(Some(session)) = state.db.get_session(session_id).await else {
+        return;
+    };
+    let Some(parent_id) = session.parent_session_id.clone() else {
+        return;
+    };
+    if !matches!(
+        state.db.unclaim_subagent_completion(session_id).await,
+        Ok(true)
+    ) {
+        return;
+    }
+    if !matches!(state.db.get_session(&parent_id).await, Ok(Some(_))) {
+        return;
+    }
+    let name = session
+        .name
+        .strip_prefix(SUBAGENT_NAME_PREFIX)
+        .unwrap_or(&session.name);
+    let text = format!(
+        "[subagent \"{name}\" ({id}) resumed]\n\nIts CRASHED report above was an \
+         authentication failure; the turn has been retried and the subagent is \
+         running again. Do not re-spawn it — its result is posted here when it \
+         finishes.",
+        id = session.id
+    );
+    deliver_to_parent(state, session_id, &parent_id, &text).await;
+}
+
 /// event, folded the way the chat UI folds them: consecutive rows are
 /// chunks of ONE streamed message (the Claude parser flushes coalesced
 /// deltas as separate rows) and concatenate verbatim; a paragraph break is
@@ -400,5 +524,113 @@ mod tests {
         assert!(p.contains("do not spawn further subagents"));
         assert!(p.contains("`run_command`"));
         assert!(p.contains("`search_files`"));
+    }
+
+    async fn child_of(db: &crate::db::Db, parent: &str, id: &str) -> crate::db::models::Session {
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_session(crate::db::models::NewSession {
+            id: id.to_string(),
+            name: format!("{SUBAGENT_NAME_PREFIX}{id}"),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now,
+            parent_session_id: Some(parent.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    /// An auth failure that auto-retry parks and releases is not a crash:
+    /// no CRASHED report, and the resumed turn's result still reports as
+    /// `finished`. One that stays parked through the grace window is.
+    #[tokio::test]
+    async fn auth_failure_reports_crash_only_when_the_child_never_resumes() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "parent".into(),
+            name: "parent".into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let ev = |kind: &'static str| serde_json::json!({ "kind": kind });
+
+        // Parked, auto-retried, and running again: no crash report.
+        let resumed = child_of(&db, "parent", "resumed").await;
+        db.append_event("resumed", "agent-start", ev("s"))
+            .await
+            .unwrap();
+        db.append_event("resumed", "agent-end", ev("e"))
+            .await
+            .unwrap();
+        let baseline = auth_failure_baseline(&db, "resumed").await;
+        db.append_event("resumed", "auth-parked", ev("p"))
+            .await
+            .unwrap();
+        db.append_event("resumed", "auth-resumed", ev("r"))
+            .await
+            .unwrap();
+        db.append_event("resumed", "agent-start", ev("s"))
+            .await
+            .unwrap();
+        let err = Some("Failed to authenticate. API Error: 401");
+        assert!(
+            claim_after_auth_grace(&db, &resumed, baseline, err)
+                .await
+                .is_none()
+        );
+        db.append_event(
+            "resumed",
+            "agent-text",
+            serde_json::json!({ "text": "done" }),
+        )
+        .await
+        .unwrap();
+        let (_, text) = claim_and_compose(&db, &resumed, true, None, false)
+            .await
+            .expect("resumed child still reports its result");
+        assert!(
+            text.contains("finished]") && text.ends_with("done"),
+            "{text}"
+        );
+
+        // Parked and never resumed: CRASHED once the grace window lapses.
+        let stuck = child_of(&db, "parent", "stuck").await;
+        db.append_event("stuck", "agent-start", ev("s"))
+            .await
+            .unwrap();
+        db.append_event("stuck", "agent-end", ev("e"))
+            .await
+            .unwrap();
+        let baseline = auth_failure_baseline(&db, "stuck").await;
+        db.append_event("stuck", "auth-parked", ev("p"))
+            .await
+            .unwrap();
+        let (parent, text) = claim_after_auth_grace(&db, &stuck, baseline, err)
+            .await
+            .expect("a child that never resumed is reported");
+        assert_eq!(parent, "parent");
+        assert!(text.contains("CRASHED]") && text.contains("401"), "{text}");
+
+        // A later release un-claims so the eventual result reports again.
+        assert!(db.unclaim_subagent_completion("stuck").await.unwrap());
+        assert!(
+            claim_and_compose(&db, &stuck, true, None, false)
+                .await
+                .is_some()
+        );
     }
 }

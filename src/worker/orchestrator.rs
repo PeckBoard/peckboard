@@ -48,7 +48,7 @@ fn note_budget_state(project_id: &str, exhausted: bool) -> bool {
 }
 
 /// Broadcast a card update via WebSocket so the project page gets live updates.
-fn broadcast_card_update(state: &AppState, card_id: &str, project_id: &str) {
+pub(crate) fn broadcast_card_update(state: &AppState, card_id: &str, project_id: &str) {
     let db = state.db.clone();
     let broadcaster = state.broadcaster.clone();
     let card_id = card_id.to_string();
@@ -1360,6 +1360,19 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
             let _ = question; // already recorded via MCP tool
         }
 
+        Some(WorkerIntent::Continue) | None
+            if state.background.has_running_for_session(session_id) =>
+        {
+            // The worker ended its turn to wait on its own background task
+            // (e.g. a long test run). It hasn't stalled — the task's exit
+            // report resumes it — so keep the assignment and don't count
+            // this turn toward the no-progress block.
+            tracing::info!(
+                card_id = %card_id,
+                session_id = %session_id,
+                "Worker waiting on a running background task; keeping assignment"
+            );
+        }
         Some(WorkerIntent::Continue) | None => {
             // No special intent detected. Clear worker_session_id so the
             // orchestrator can re-spawn if needed, but stamp
@@ -2456,5 +2469,61 @@ mod crash_block_tests {
         let json = crate::worker::budget::project_json(&state.db, &project).await;
         assert_eq!(json["budget_exhausted"], true);
         assert_eq!(json["status"], "active");
+    }
+
+    /// A reviewer that ends its turn to wait on its own background task (a
+    /// multi-minute test run) is not "no progress": it keeps the card through
+    /// both the turn end and a later watchdog sweep, and the turn doesn't
+    /// count toward the no-progress block.
+    #[tokio::test]
+    async fn worker_waiting_on_background_task_keeps_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        seed_project(&state.db, None).await;
+        let long_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        state
+            .db
+            .create_session(NewSession {
+                id: "ws1".into(),
+                name: "worker".into(),
+                folder_id: "f1".into(),
+                is_worker: true,
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                created_at: long_ago.clone(),
+                last_activity: long_ago,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .update_card(
+                "c1",
+                UpdateCard {
+                    worker_session_id: Some(Some("ws1".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state.background.insert_running_for_test("ws1");
+
+        handle_worker_done(&state, "ws1").await;
+        crate::worker::watchdog::sweep_stale_card_refs(
+            &state.db,
+            &state.session_manager,
+            &state.background,
+        )
+        .await;
+
+        let card = state.db.get_card("c1").await.unwrap().unwrap();
+        assert_eq!(card.worker_session_id.as_deref(), Some("ws1"));
+        assert!(!card.blocked);
+        let events = state.db.list_events_by_session("ws1", None).await.unwrap();
+        assert!(
+            !events.iter().any(|e| e.kind == pipeline::NO_PROGRESS_KIND),
+            "waiting on a background task is not a no-progress turn"
+        );
     }
 }

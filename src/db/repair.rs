@@ -70,6 +70,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_mfa_tables(conn)?;
     ensure_devices_table(conn)?;
     ensure_device_activity_table(conn)?;
+    ensure_voice_relay_queue_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -243,6 +244,32 @@ fn ensure_device_activity_table(conn: &mut SqliteConnection) -> anyhow::Result<(
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_device_activity_device \
          ON device_activity(device_id, created_at)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1790733768_voice_relay_queue`. `CREATE TABLE IF
+/// NOT EXISTS` is idempotent so this is safe on a fully-migrated DB and
+/// only does work on one that lacks the table. DDL mirrors the migration.
+fn ensure_voice_relay_queue_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "voice_relay_queue")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS voice_relay_queue (
+            id                 TEXT PRIMARY KEY NOT NULL,
+            voice_session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            source_session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            kind               TEXT NOT NULL CHECK (kind IN ('question', 'update')),
+            question_event_id  TEXT,
+            text               TEXT NOT NULL,
+            summary            TEXT NOT NULL,
+            created_at         TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_voice_relay_queue_voice \
+         ON voice_relay_queue (voice_session_id, created_at)",
     )
     .execute(conn)?;
     Ok(())

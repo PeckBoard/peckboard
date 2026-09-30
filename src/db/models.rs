@@ -1225,6 +1225,23 @@ pub struct NewDeviceActivity {
     pub created_at: String,
 }
 
+/// A relay held for the voice assistant session (`service::voice_gate`):
+/// another session's question or turn-end update, waiting until the user
+/// is quiet and the topic fits. `kind` is `question` or `update`;
+/// `question_event_id` is set for questions. Deleted on delivery.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone)]
+#[diesel(table_name = voice_relay_queue)]
+pub struct VoiceRelayItem {
+    pub id: String,
+    pub voice_session_id: String,
+    pub source_session_id: String,
+    pub kind: String,
+    pub question_event_id: Option<String>,
+    pub text: String,
+    pub summary: String,
+    pub created_at: String,
+}
+
 // ── Agent Vars ───────────────────────────────────
 
 /// A user-defined agent variable: plain name/value state agents read AND

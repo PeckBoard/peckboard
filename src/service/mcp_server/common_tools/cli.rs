@@ -148,6 +148,8 @@ pub fn decide_approval(
     argv: &[String],
     auto_approve: Option<AutoApprove>,
 ) -> Result<Approval, String> {
+    // Never a path to Peckboard's own DB, whoever approved it.
+    refuse_own_db(db, command, argv)?;
     // 0. Auto-approval — no prompt.
     if let Some(via) = auto_approve {
         return Ok(Approval::Approved(via.label()));
@@ -301,6 +303,76 @@ fn parse_envelope(out: &str) -> Result<Value, String> {
     Ok(v)
 }
 
+/// Refuse a command that reaches for Peckboard's own SQLite DB (the data
+/// dir's `peckboard.db` / `-wal` / `-shm`). Agents have "repaired" state by
+/// writing rows directly (e.g. inserting `question-resolved`), which skips the
+/// side effects the real tools run and leaves cards stuck. This is a string
+/// match over the command line — a guard against the obvious path, not a
+/// sandbox: an obfuscated reference (env-var indirection, globs) gets through.
+pub fn refuse_own_db(db: &Db, command: &str, argv: &[String]) -> Result<(), String> {
+    let home = std::env::var("HOME").ok();
+    if references_own_db(db.data_dir(), home.as_deref(), command, argv) {
+        return Err(
+            "refused: this command references Peckboard's own database (peckboard.db). \
+             Never read or write it directly — use the tools: reattach_worker (put a \
+             detached worker back on its card), answer_question (resolve a pending \
+             question and lift its card block), update_card (block/unblock, edit a card), \
+             list_worker_sessions / read_worker_session (inspect state)."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Pure core of [`refuse_own_db`]. A token counts when its file name is
+/// `peckboard.db[-wal|-shm]` and its path (after `~` / `$HOME` expansion)
+/// lies in `data_dir`, or looks like a default install
+/// (`.peckboard/peckboard.db`). With no known data dir, any path to such a
+/// file counts. A bare `peckboard.db` word is allowed: exec runs in the
+/// project folder, and searching source for the name must keep working.
+fn references_own_db(
+    data_dir: Option<&std::path::Path>,
+    home: Option<&str>,
+    command: &str,
+    argv: &[String],
+) -> bool {
+    let data_dir = data_dir.map(|d| d.to_string_lossy().trim_end_matches('/').to_string());
+    std::iter::once(command)
+        .chain(argv.iter().map(String::as_str))
+        .flat_map(|s| {
+            s.split(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '\'' | '"' | '`' | '(' | ')' | ';' | ',' | '=' | '<' | '>' | '|' | '&'
+                    )
+            })
+        })
+        .any(|token| {
+            let name = token.rsplit('/').next().unwrap_or(token);
+            if !matches!(
+                name,
+                "peckboard.db" | "peckboard.db-wal" | "peckboard.db-shm"
+            ) || !token.contains('/')
+            {
+                return false;
+            }
+            let expanded = match home {
+                Some(h) if token.starts_with("~/") => format!("{h}{}", &token[1..]),
+                Some(h) if token.starts_with("$HOME/") => format!("{h}{}", &token[5..]),
+                Some(h) if token.starts_with("${HOME}/") => format!("{h}{}", &token[7..]),
+                _ => token.to_string(),
+            };
+            match &data_dir {
+                Some(dir) => {
+                    expanded.starts_with(&format!("{dir}/"))
+                        || expanded.contains(".peckboard/peckboard.db")
+                }
+                None => true,
+            }
+        })
+}
+
 /// A human-readable rendering of the command for prompts and output.
 pub fn display(command: &str, argv: &[String]) -> String {
     if argv.is_empty() {
@@ -372,5 +444,40 @@ mod tests {
     fn display_joins_argv() {
         assert_eq!(display("ls", &[]), "ls");
         assert_eq!(display("rg", &["-n".into(), "foo".into()]), "rg -n foo");
+    }
+    #[test]
+    fn commands_touching_peckboards_own_db_are_refused() {
+        let dir = std::path::Path::new("/home/u/.peckboard");
+        let refused = |cmd: &str, args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            references_own_db(Some(dir), Some("/home/u"), cmd, &argv)
+        };
+        assert!(refused(
+            "sqlite3",
+            &["/home/u/.peckboard/peckboard.db", "select 1"]
+        ));
+        assert!(refused("sqlite3", &["~/.peckboard/peckboard.db-wal"]));
+        assert!(refused(
+            "python3",
+            &[
+                "-c",
+                "import sqlite3; sqlite3.connect('$HOME/.peckboard/peckboard.db')"
+            ]
+        ));
+        assert!(refused(
+            "sh",
+            &["-c", "cd x && sqlite3 /home/u/.peckboard/peckboard.db-shm"]
+        ));
+        // Searching the source for the name, or a scratch instance's DB, is fine.
+        assert!(!refused("rg", &["peckboard.db", "src"]));
+        assert!(!refused("sqlite3", &["/tmp/tmp.x/peckboard.db"]));
+        assert!(!refused("cargo", &["test"]));
+        // Unknown data dir (in-memory DB): any path to a peckboard.db counts.
+        assert!(references_own_db(
+            None,
+            None,
+            "sqlite3",
+            &["/srv/pb/peckboard.db".to_string()]
+        ));
     }
 }

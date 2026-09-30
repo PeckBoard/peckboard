@@ -251,6 +251,8 @@ pub async fn release_session(state: &Arc<AppState>, session_id: &str, trigger: &
         serde_json::json!({ "trigger": trigger }),
     )
     .await;
+    // A subagent already reported CRASHED for this failure is alive again.
+    crate::subagent::on_auth_released(state, session_id).await;
 }
 
 /// Release one session on the user's say-so and deliver its parked turn.

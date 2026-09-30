@@ -464,6 +464,18 @@ diesel::table! {
     }
 }
 diesel::table! {
+    voice_relay_queue (id) {
+        id -> Text,
+        voice_session_id -> Text,
+        source_session_id -> Text,
+        kind -> Text,
+        question_event_id -> Nullable<Text>,
+        text -> Text,
+        summary -> Text,
+        created_at -> Text,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -691,5 +703,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     devices,
     device_activity,
     session_views,
+    voice_relay_queue,
     session_view_nodes,
 );

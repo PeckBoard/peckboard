@@ -68,6 +68,7 @@ cd "$ROOT"
 run_step "cargo fmt --check" cargo fmt --check
 run_step "cargo clippy" cargo clippy --all-targets --no-deps
 run_step "cargo test" cargo test
+run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
 
 cd "$ROOT/web"
 run_step "web lint" npm run lint

@@ -169,9 +169,10 @@ pub async fn run_server(
 
     // In-memory background-process registry. Logs from a previous run are
     // unreachable (the registry that knew them died with that process), so
-    // clear them before any new task writes there.
+    // clear them before any new task writes there — keeping the metadata of
+    // tasks that were still running, reported to their sessions below.
     let background_log_dir = config.data_dir.join(crate::background::LOG_DIR);
-    crate::background::clear_stale_logs(&background_log_dir);
+    let lost_background_tasks = crate::background::clear_stale_logs(&background_log_dir);
     let background = Arc::new(crate::background::BackgroundRegistry::new(
         background_log_dir,
     ));
@@ -250,6 +251,15 @@ pub async fn run_server(
         let review_state = state.clone();
         tokio::spawn(async move {
             crate::routes::doc_reviews::resume_running_reviews(&review_state).await;
+        });
+    }
+    // Background tasks that were still running when the previous process
+    // died: tell each owning session instead of leaving it to hit "not
+    // found" later. Detached for the same reason as review recovery.
+    if !lost_background_tasks.is_empty() {
+        let bg_state = state.clone();
+        tokio::spawn(async move {
+            bg_state.background.report_lost(lost_background_tasks).await;
         });
     }
 
@@ -439,6 +449,7 @@ pub async fn run_server(
             watchdog_db,
             watchdog_sm,
             watchdog_bc,
+            state.background.clone(),
         ));
         tracing::info!("Worker watchdog started");
     }
@@ -550,12 +561,16 @@ pub async fn run_server(
                             }
                             // Subagent finished: report its final message
                             // back to the parent session. Idempotent (claim
-                            // inside); a crash reports the error instead.
+                            // inside); a crash reports the error instead —
+                            // deferred for an auth failure, which step 1.7
+                            // parks and usually replays at once.
                             Ok(Some(session)) if session.parent_session_id.is_some() => {
                                 crate::subagent::handle_subagent_done(
                                     &orchestrator_state,
                                     &session,
                                     completion.completed,
+                                    completion.error_kind
+                                        == Some(crate::provider::stream::CrashKind::AuthExpired),
                                     completion.error.as_deref(),
                                 )
                                 .await;

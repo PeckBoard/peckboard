@@ -11,3 +11,18 @@ docs/.jekyll-cache/
 docs/.jekyll-metadata
 docs/.bundle/
 docs/vendor/
+# Plugin build output. The shipped blobs live in peck-plugins-wasm/.
+peck-plugins/*/target/
+peck-plugins/*/dist/
+peck-plugins/*/.demo/
+peck-plugins/*/.tooling/
+peck-plugins/*/src/generated/
+peck-plugins/*/*.wasm
+# Plugins that live in their own repos (PeckBoard/<name>); their shipped
+# blobs are rebuilt into peck-plugins-wasm/ — see scripts/check-plugin-blobs.sh.
+peck-plugins/_registry/
+peck-plugins/graphify/
+peck-plugins/project-planner/
+peck-plugins/session-control/
+peck-plugins/ssh-fleet/
+peck-plugins/ui-gauge/

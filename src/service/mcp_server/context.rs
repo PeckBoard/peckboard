@@ -192,7 +192,11 @@ impl ToolCallContext {
             .get_project(&project_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
-        if project.folder_id != self.folder_id {
+        // The global voice assistant (unscoped token only) reaches every
+        // folder; project-scoped worker tokens stay strict.
+        if project.folder_id != self.folder_id
+            && !(self.project_id.is_none() && self.is_voice().await)
+        {
             anyhow::bail!("project not found: {project_id}");
         }
 
@@ -262,11 +266,39 @@ impl ToolCallContext {
     /// creating cross-folder rows. Same "not found" framing as the
     /// project / session scope checks: a caller can't use this to probe
     /// for the existence of sibling folders.
-    pub fn scope_folder_target(&self, target: &str) -> anyhow::Result<ScopedFolderTarget> {
+    pub async fn scope_folder_target(&self, target: &str) -> anyhow::Result<ScopedFolderTarget> {
+        // The global voice assistant (admin-only, unscoped token) may act
+        // in any existing folder.
         if target != self.folder_id {
-            anyhow::bail!("folder not found: {target}");
+            let voice_ok = self.project_id.is_none()
+                && self.is_voice().await
+                && matches!(self.db.get_folder(target).await, Ok(Some(_)));
+            if !voice_ok {
+                anyhow::bail!("folder not found: {target}");
+            }
         }
         Ok(ScopedFolderTarget(target.to_string()))
+    }
+
+    /// Whether the caller is the global voice assistant session, which is
+    /// exempt from the folder boundary (it is admin-only; ownership and
+    /// project-token boundaries still apply).
+    pub async fn is_voice(&self) -> bool {
+        matches!(
+            self.db.get_session(&self.session_id).await,
+            Ok(Some(s)) if s.expert_kind.as_deref()
+                == Some(crate::service::voice_relay::VOICE_EXPERT_KIND)
+        )
+    }
+
+    /// Projects the caller may list: its own folder's, or every folder's
+    /// for the global voice assistant (unscoped token only).
+    pub async fn visible_projects(&self) -> anyhow::Result<Vec<crate::db::models::Project>> {
+        if self.project_id.is_none() && self.is_voice().await {
+            self.db.list_projects().await
+        } else {
+            self.db.list_projects_by_folder(&self.folder_id).await
+        }
     }
 
     /// The caller's own folder, wrapped in the proof token. Convenience
@@ -442,14 +474,14 @@ mod tests {
     #[tokio::test]
     async fn scope_folder_target_accepts_caller_folder() {
         let ctx = ctx_for_scope(None).await;
-        let scope = ctx.scope_folder_target("f-1").unwrap();
+        let scope = ctx.scope_folder_target("f-1").await.unwrap();
         assert_eq!(scope.as_str(), "f-1");
     }
 
     #[tokio::test]
     async fn scope_folder_target_rejects_foreign_folder() {
         let ctx = ctx_for_scope(None).await;
-        let err = ctx.scope_folder_target("f-2").unwrap_err();
+        let err = ctx.scope_folder_target("f-2").await.unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
     }
 

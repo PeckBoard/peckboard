@@ -27,7 +27,7 @@ pub fn tool_names() -> Vec<String> {
 /// review bound to the session, so only sessions with
 /// `expert_kind == "doc-review"` see them — `routes/mcp.rs` re-admits them
 /// there (in both `tools/list` and the dispatch gate), and their handlers
-/// reject any other session. `answer_question` works the same way for
+/// reject any other session. `show_view` works the same way for
 /// `expert_kind == "voice"` sessions (see `ToolGate`).
 pub fn worker_hidden_tool_names() -> &'static [&'static str] {
     &[
@@ -52,7 +52,9 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "get_review_doc",
         "submit_review_revision",
         "answer_question",
+        "reattach_worker",
         "show_view",
+        "voice_queue",
     ]
 }
 
@@ -80,8 +82,8 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "get_finding_details",
         "get_review_doc",
         "submit_review_revision",
-        "answer_question",
         "show_view",
+        "voice_queue",
     ]
 }
 
@@ -1953,8 +1955,23 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             }),
         },
         McpToolDef {
+            name: "reattach_worker".into(),
+            description: "Orchestrator repair: put a worker session back on a card it was detached from (e.g. it ended its turn waiting on a long background task, or the card was blocked after repeated no-progress turns). The session must be a worker of the card's project and not bound to another card; the card must be unassigned (or already assigned to that session) and not done/won't-do. unblock (default true) lifts the card's block and resets its crash/no-progress budget; a block from an unanswered worker question only lifts once the question is answered (see answer_question). Use this instead of editing the database.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "card_id": { "type": "string", "description": "The card to reattach." },
+                    "session_id": { "type": "string", "description": "The worker session to put back on the card." },
+                    "unblock": { "type": "boolean", "description": "Lift the card's block (default true)." },
+                    "reason": { "type": "string", "description": "Why the worker is being reattached (logged)." }
+                },
+                "required": ["card_id", "session_id", "reason"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
             name: "answer_question".into(),
-            description: "Voice assistant only: answer (or dismiss) a pending question another session asked the user, on the user's behalf. Use the session_id and question_id from the `[relay] question` message, and key answers by question index, e.g. {\"0\": \"Use Postgres\"}. The target session resumes with the answer.".into(),
+            description: "Answer (or dismiss) a pending question another session asked the user, on the user's behalf. Voice assistant: any session (use the ids from the `[relay] question` message). Orchestrator sessions: worker sessions of projects in your own folder/scope. Key answers by question index, e.g. {\"0\": \"Use Postgres\"}. The target session resumes with the answer and its card's question block is lifted. Never insert question-resolved events into the database by hand.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1984,6 +2001,17 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     },
                     "id": { "type": "string", "description": "Exact id, when known (e.g. from a candidates list)." },
                     "name": { "type": "string", "description": "Name as the user said it, e.g. \"stashify\". For target page: sessions, projects, folders, settings, reports, repeating_tasks, usage, or agents." }
+                },
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "voice_queue".into(),
+            description: "Voice assistant only: relays (other sessions' updates and questions) held back so you stay on one topic. action list = short summary of what is waiting (session, kind, one line each). action next = hand over the next topic's relays now, to handle like [relay] messages. Call next when the user wraps up the current topic or asks what else is new.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "next"], "description": "list (default) or next." }
                 },
                 "additionalProperties": false
             }),

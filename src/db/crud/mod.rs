@@ -37,6 +37,7 @@ mod tabs;
 mod todos;
 mod usage;
 mod users;
+mod voice_relay_queue;
 mod workflow_instructions;
 
 pub use account_refs::AccountModelRefs;

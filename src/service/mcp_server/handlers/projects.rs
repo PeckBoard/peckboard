@@ -12,8 +12,9 @@ impl McpToolRegistry {
         tracing::info!(session_id = %ctx.session_id, folder_id = %ctx.folder_id, "MCP tool: list_projects");
 
         // Folder-scoped: a caller in folder F sees only F's projects.
-        // Sibling folders never appear, even by id.
-        let projects = ctx.db.list_projects_by_folder(&ctx.folder_id).await?;
+        // Sibling folders never appear, even by id. The global voice
+        // assistant sees every folder.
+        let projects = ctx.visible_projects().await?;
 
         let items: Vec<Value> = projects
             .iter()
@@ -60,16 +61,29 @@ impl McpToolRegistry {
             .await?
             .ok_or_else(|| anyhow::anyhow!("caller folder vanished"))?;
         let folder_id = if let Some(fid) = args.get("folder_id").and_then(|v| v.as_str()) {
-            ctx.scope_folder_target(fid)?.as_str().to_string()
+            ctx.scope_folder_target(fid).await?.as_str().to_string()
         } else if let Some(fp) = args.get("folder_path").and_then(|v| v.as_str()) {
-            if fp != caller.path {
-                anyhow::bail!(
-                    "create_project is restricted to the caller's own folder \
-                     (path: {})",
-                    caller.path
-                );
+            if fp == caller.path {
+                caller.id.clone()
+            } else {
+                // Only the global voice assistant may name another
+                // (existing) folder; `scope_folder_target` enforces that.
+                let other = ctx
+                    .db
+                    .list_folders()
+                    .await?
+                    .into_iter()
+                    .find(|f| f.path == fp)
+                    .map(|f| f.id);
+                match other {
+                    Some(id) if ctx.scope_folder_target(&id).await.is_ok() => id,
+                    _ => anyhow::bail!(
+                        "create_project is restricted to the caller's own folder \
+                         (path: {})",
+                        caller.path
+                    ),
+                }
             }
-            caller.id.clone()
         } else {
             // Default to the caller's own folder rather than failing —
             // omitting both args is the common, safe case.

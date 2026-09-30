@@ -224,6 +224,18 @@
   text-decoration: underline;
 }
 
+.voice-tts-status {
+  margin: 0 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: var(--text-xs);
+}
+.voice-tts-status-hint {
+  color: var(--text-secondary, inherit);
+}
+
 .voice-controls {
   display: flex;
   align-items: center;

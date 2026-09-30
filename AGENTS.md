@@ -158,6 +158,20 @@ map is recorded evidence, not proof, so the merge gate stays the whole
 suite. Regenerate the map (`scripts/e2e-impact-map.sh`) after adding or
 substantially reworking specs, and commit `web/e2e/impact-map.json`.
 
+### Subagents Run Targeted Tests Only
+
+**Subagents (spawned child sessions working in parallel) never run the
+full suite** — no `scripts/verify.sh`, no full e2e run, no
+workspace-wide `cargo test`. Parallel full runs are slow and fight over
+the machine's CPU and memory. A subagent runs only the fast, targeted
+checks for what it changed — the specific Rust test(s) or module
+(`cargo test --lib <name>`), the specific e2e spec, and type-check /
+lint / format on the files it touched — then reports back.
+
+The main (parent) session runs the full `scripts/verify.sh` **once per
+release**, on the combined changes. When spawning a subagent, state this
+rule in its prompt.
+
 ## Ship It: Commit, Push, and Release When Done
 
 **When you finish a change and it passes verification, commit, push,

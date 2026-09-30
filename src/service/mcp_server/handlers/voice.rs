@@ -5,14 +5,15 @@ use crate::service::mcp_server::context::ToolCallContext;
 use crate::service::voice_relay::VOICE_EXPERT_KIND;
 
 impl McpToolRegistry {
-    /// `answer_question` — the voice assistant answers (or dismisses) a
-    /// pending question another session asked, on the user's behalf.
+    /// `answer_question` — the voice assistant (any session) or an
+    /// orchestrator (sessions of a project in its scope) answers or dismisses
+    /// a pending question another session asked, on the user's behalf.
     /// Validation happens here; the resolution itself needs the `AppState`,
     /// so the `mcp` route runs `service::questions::resolve_question` off
-    /// the `_resolve_question` marker.
+    /// the `_resolve_question` marker — which also lifts the card's question
+    /// block (unlike a hand-inserted `question-resolved` row).
     ///
-    /// Hard-enforced to voice sessions here as well as in `ToolGate`. Any
-    /// target session is fair game — the voice session is global.
+    /// Workers are refused here as well as in `ToolGate`.
     pub(crate) async fn handle_answer_question(
         &self,
         args: Value,
@@ -47,7 +48,24 @@ impl McpToolRegistry {
             .await?
             .ok_or_else(|| anyhow::anyhow!("caller session not found"))?;
         if caller.expert_kind.as_deref() != Some(VOICE_EXPERT_KIND) {
-            anyhow::bail!("answer_question is only available to the voice assistant session");
+            // Orchestrator path: only sessions of a project in the caller's
+            // scope (same folder; a project-bound caller only its own).
+            if caller.is_worker {
+                anyhow::bail!("answer_question is not available to worker sessions");
+            }
+            let in_scope = match ctx.scope_session(session_id).await {
+                Ok(project) => caller
+                    .project_id
+                    .as_deref()
+                    .is_none_or(|own| own == project.as_str()),
+                Err(_) => false,
+            };
+            if !in_scope {
+                anyhow::bail!(
+                    "answer_question: session {session_id} is not in a project you orchestrate \
+                     (only the voice assistant may answer any session)"
+                );
+            }
         }
 
         // The voice assistant is global and admin-only (see `routes::voice`):
@@ -273,5 +291,201 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not pending"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn voice_reaches_projects_in_any_folder() {
+        let db = Db::in_memory().unwrap();
+        for (id, path) in [("f1", "/tmp/f1"), ("f2", "/tmp/f2")] {
+            db.create_folder(NewFolder {
+                id: id.into(),
+                name: id.into(),
+                path: path.into(),
+                created_at: "now".into(),
+            })
+            .await
+            .unwrap();
+        }
+        seed(&db, "voice", Some("voice"), "u1").await;
+        seed(&db, "chat", None, "u1").await;
+        let reg = McpToolRegistry::new();
+        let call = |name: &'static str, args: serde_json::Value, sid: &'static str| {
+            let reg = &reg;
+            let c = ctx(&db, sid);
+            async move { reg.handle_tool_call(name, args, &c).await }
+        };
+
+        // Voice may create a project in a folder other than its own.
+        let p = call(
+            "create_project",
+            serde_json::json!({"name": "far", "folder_id": "f2"}),
+            "voice",
+        )
+        .await
+        .unwrap();
+        let pid = p["id"]
+            .as_str()
+            .or_else(|| p["project"]["id"].as_str())
+            .expect("project id")
+            .to_string();
+        assert_eq!(db.get_project(&pid).await.unwrap().unwrap().folder_id, "f2");
+        // A plain chat session may not.
+        let err = call(
+            "create_project",
+            serde_json::json!({"name": "nope", "folder_id": "f2"}),
+            "chat",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+
+        call(
+            "create_card",
+            serde_json::json!({"project_id": pid, "title": "t", "description": "d"}),
+            "voice",
+        )
+        .await
+        .unwrap();
+
+        let listed = call("list_projects", serde_json::json!({}), "voice")
+            .await
+            .unwrap();
+        assert!(
+            listed["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == pid.as_str()),
+            "{listed}"
+        );
+        let cards = call(
+            "list_cards",
+            serde_json::json!({"project_id": pid}),
+            "voice",
+        )
+        .await
+        .unwrap();
+        assert!(cards.to_string().contains("\"t\""), "{cards}");
+        let card_id = db.list_cards_by_project(&pid).await.unwrap()[0].id.clone();
+        call(
+            "get_card_dependency_tree",
+            serde_json::json!({"card_id": card_id}),
+            "voice",
+        )
+        .await
+        .unwrap();
+
+        // Non-voice session in f1 still can't see f2's board.
+        let chat_listed = call("list_projects", serde_json::json!({}), "chat")
+            .await
+            .unwrap();
+        assert_eq!(chat_listed["count"], 0, "{chat_listed}");
+        let err = call("list_cards", serde_json::json!({"project_id": pid}), "chat")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("project not found"), "{err}");
+
+        // A project-scoped token on the voice session stays strict.
+        // A project-scoped token stays folder-strict even on the voice
+        // session: the bypass is for the unscoped voice token only.
+        let mut scoped = ctx(&db, "voice");
+        scoped.project_id = Some(pid.clone());
+        assert!(scoped.scope_project(Some(&pid)).await.is_err());
+
+        assert!(crate::service::voice_relay::is_destructive_tool(
+            "move_card_to_wont_do"
+        ));
+        assert!(crate::service::voice_relay::is_destructive_tool(
+            "pause_project"
+        ));
+    }
+
+    /// An orchestrating chat may answer a worker question in a project of
+    /// its own folder, but not one in another folder.
+    #[tokio::test]
+    async fn answer_question_for_orchestrator_is_project_scoped() {
+        let db = Db::in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for (fid, pid) in [("f1", "p1"), ("f2", "p2")] {
+            db.create_folder(NewFolder {
+                id: fid.into(),
+                name: fid.into(),
+                path: format!("/tmp/{fid}"),
+                created_at: now.clone(),
+            })
+            .await
+            .unwrap();
+            db.create_project(crate::db::models::NewProject {
+                id: pid.into(),
+                name: pid.into(),
+                context: "".into(),
+                folder_id: fid.into(),
+                worker_count: 1,
+                status: "active".into(),
+                workflow: "task".into(),
+                model: None,
+                effort: None,
+                parallel_instructions: false,
+                auto_notify_changes: true,
+                worker_communication: false,
+                created_at: now.clone(),
+                last_accessed_at: now.clone(),
+                budget_usd_cents: None,
+                budget_period: None,
+                worktree_isolation: false,
+            })
+            .await
+            .unwrap();
+            db.create_session(NewSession {
+                id: format!("w-{pid}"),
+                name: "worker".into(),
+                folder_id: fid.into(),
+                is_worker: true,
+                project_id: Some(pid.into()),
+                user_id: Some("u1".into()),
+                created_at: now.clone(),
+                last_activity: now.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        seed(&db, "chat", None, "u1").await;
+        let mut qids = Vec::new();
+        for sid in ["w-p1", "w-p2"] {
+            let q = db
+                .append_event(
+                    sid,
+                    "question",
+                    serde_json::json!({"questions": [{"question": "Which?"}]}),
+                )
+                .await
+                .unwrap();
+            qids.push(q.id);
+        }
+        let reg = McpToolRegistry::new();
+
+        let ok = reg
+            .handle_tool_call(
+                "answer_question",
+                serde_json::json!({"session_id": "w-p1", "question_id": qids[0], "answers": {"0": "this"}}),
+                &ctx(&db, "chat"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok["_resolve_question"]["session_id"], "w-p1");
+
+        let err = reg
+            .handle_tool_call(
+                "answer_question",
+                serde_json::json!({"session_id": "w-p2", "question_id": qids[1], "answers": {"0": "x"}}),
+                &ctx(&db, "chat"),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not in a project you orchestrate"),
+            "{err}"
+        );
     }
 }

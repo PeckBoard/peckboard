@@ -300,6 +300,26 @@ impl Db {
         .await
     }
 
+    /// Undo a claim: clear `subagent_completed_at` so the child's next
+    /// completion reports again. Used when a subagent reported as crashed
+    /// on an auth failure resumes after all (see
+    /// `crate::subagent::on_auth_released`). Returns true iff a stamp was
+    /// cleared.
+    pub async fn unclaim_subagent_completion(&self, session_id: &str) -> anyhow::Result<bool> {
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            let n = diesel::update(
+                sessions::table
+                    .filter(sessions::id.eq(&session_id))
+                    .filter(sessions::subagent_completed_at.is_not_null()),
+            )
+            .set(sessions::subagent_completed_at.eq(None::<String>))
+            .execute(conn)?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     /// Plain (non-worker, non-expert) sessions — the ordinary chat list.
     /// Experts are deliberately excluded: they must never surface in the
     /// normal chat session list.

@@ -28,11 +28,52 @@ struct VoiceSessionRequest {
     #[serde(default)]
     model: Option<String>,
 }
+#[derive(Deserialize)]
+struct VoiceActivityRequest {
+    session_id: String,
+    /// `speaking` | `idle` | `sent` | `tts_start` | `tts_end`.
+    state: String,
+}
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/voice/session", post(voice_session))
+        .route("/api/voice/activity", post(voice_activity))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+/// POST /api/voice/activity — `{"session_id", "state"}`. The browser
+/// reports the user speaking / going quiet / sending an utterance, and the
+/// assistant's reply being read aloud, so the relay gate
+/// (`service::voice_gate`) never injects a relay turn over the user.
+async fn voice_activity(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<VoiceActivityRequest>,
+) -> Result<StatusCode, ApiError> {
+    use crate::service::voice_gate::{Activity, note_activity};
+    if !user.is_admin() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "the voice assistant is admin-only",
+        ));
+    }
+    let activity = Activity::parse(&body.state).ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("unknown state '{}'", body.state),
+        )
+    })?;
+    let is_voice = matches!(
+        state.db.get_session(&body.session_id).await.map_err(internal)?,
+        Some(s) if s.expert_kind.as_deref() == Some(VOICE_EXPERT_KIND)
+    );
+    if !is_voice {
+        return Err(err(StatusCode::NOT_FOUND, "not a voice session"));
+    }
+    tracing::debug!(session_id = %body.session_id, state = %body.state, "voice activity");
+    note_activity(&body.session_id, activity);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Serialises get-or-create so two concurrent first calls can't both

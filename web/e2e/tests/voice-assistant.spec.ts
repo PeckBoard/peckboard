@@ -385,6 +385,80 @@ test('speech streams while the turn runs; talking over it ignores echo, then bar
   })
 })
 
+test('a relay arriving mid-utterance is not spoken over the user and does not split the utterance', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
+    .toBe(true)
+
+  // The user starts talking…
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('please tell the'))
+  await expect(page.getByTestId('voice-interim')).toContainText('please tell the')
+
+  // …and a relay lands on the voice session. `mock:echo` answers it by
+  // echoing it back, so its token would be spoken if the client talked
+  // over the user.
+  const relay = '[relay] update from "stashify dev": QUOKKA build finished.'
+  const res = await request.post(`/api/sessions/${voice.session_id}/message`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: relay },
+  })
+  expect(res.ok(), `relay send failed: ${await res.text()}`).toBeTruthy()
+  await expect
+    .poll(
+      async () =>
+        (await sessionEvents(request, token, voice.session_id)).some(
+          (e) => e.kind === 'agent-text' && String(e.data.text ?? '').includes('QUOKKA'),
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe(true)
+  // The reply to the relay is in, but the user is still mid-sentence.
+  await page.waitForTimeout(500)
+  expect((await spoken(page)).some((s) => s.includes('QUOKKA'))).toBe(false)
+
+  // The user finishes the sentence in two phrases with a short pause: one
+  // utterance, not two.
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceSay('please tell the stashify session'),
+  )
+  await page.waitForTimeout(300)
+  expect((await spoken(page)).some((s) => s.includes('QUOKKA'))).toBe(false)
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('to add'))
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('to add tests'))
+
+  const full = 'please tell the stashify session to add tests'
+  await expect(page.getByTestId('voice-line-user').last()).toContainText(full, {
+    timeout: 10_000,
+  })
+  const userTexts = (await sessionEvents(request, token, voice.session_id))
+    .filter((e) => e.kind === 'user')
+    .map((e) => String(e.data.text ?? ''))
+  expect(userTexts).toContain(full)
+  expect(userTexts).not.toContain('please tell the stashify session')
+
+  // Once the user's turn is sent, the held reply is spoken, then the answer.
+  await expect.poll(async () => (await spoken(page)).some((s) => s.includes('QUOKKA'))).toBe(true)
+  await expect
+    .poll(async () => (await spoken(page)).some((s) => s.includes('to add tests')), {
+      timeout: 15_000,
+    })
+    .toBe(true)
+  const all = await spoken(page)
+  expect(all.findIndex((s) => s.includes('QUOKKA'))).toBeLessThan(
+    all.findIndex((s) => s.includes('to add tests')),
+  )
+})
+
 test('Settings → Voice persists the chosen voice across reloads', async ({ request, page }) => {
   const token = await authenticate(request)
   await primePage(page, token)

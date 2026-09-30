@@ -51,6 +51,9 @@ export interface SpeechEngine {
   startListening(opts: RecognitionOptions, cb: RecognitionCallbacks): void
   stopListening(): void
   speak(text: string, opts: SpeakOptions): void
+  /** Optional hint: `text` will be spoken next, so engines that fetch
+   *  audio (Kokoro) can start early. */
+  prefetch?(text: string, opts: SpeakOptions): void
   /** Cancel the current utterance and anything the engine has queued.
    *  `reason` is logged. */
   cancelSpeech(reason?: string): void

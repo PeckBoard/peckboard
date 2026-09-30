@@ -16,6 +16,10 @@ use crate::service::mcp_server::context::ToolCallContext;
 
 /// Default `lines` for `background_status`.
 const DEFAULT_STATUS_LINES: usize = 40;
+/// Appended to "not found": tasks don't survive a server restart, and the
+/// owning session is sent a "lost" report for any that were running.
+const NOT_FOUND_HINT: &str = " (unknown id, finished over 24h ago, or lost to a server restart \
+     — a task lost that way was reported to its session; re-run it if needed)";
 
 fn registry(ctx: &ToolCallContext) -> anyhow::Result<Arc<BackgroundRegistry>> {
     ctx.background
@@ -131,7 +135,7 @@ impl McpToolRegistry {
             .unwrap_or(DEFAULT_STATUS_LINES);
         let info = registry
             .get_for_session(&id, &ctx.session_id)
-            .ok_or_else(|| anyhow::anyhow!("background task not found: {id}"))?;
+            .ok_or_else(|| anyhow::anyhow!("background task not found: {id}{NOT_FOUND_HINT}"))?;
         let output = registry.tail(&id, lines).unwrap_or_default();
         Ok(serde_json::json!({ "task": info, "output": output }))
     }
@@ -155,7 +159,7 @@ impl McpToolRegistry {
         let registry = registry(ctx)?;
         let id = task_id_arg(&args)?;
         if registry.get_for_session(&id, &ctx.session_id).is_none() {
-            anyhow::bail!("background task not found: {id}");
+            anyhow::bail!("background task not found: {id}{NOT_FOUND_HINT}");
         }
         let info = registry.stop(&id).map_err(|e| anyhow::anyhow!(e))?;
         Ok(serde_json::json!({

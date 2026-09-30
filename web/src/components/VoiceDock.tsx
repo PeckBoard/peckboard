@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVoiceStore, type VoiceStatus } from '../store/voice'
 import { foldVoiceTranscript, type VoiceTranscriptItem } from '../voice/text'
+import KokoroStatusNotice from './KokoroStatusNotice'
 
 const STATUS_LABEL: Record<VoiceStatus, string> = {
   idle: 'Idle',
@@ -211,6 +212,7 @@ export default function VoiceDock() {
           </button>
         </div>
       )}
+      <KokoroStatusNotice />
 
       <div className="voice-controls">
         <button

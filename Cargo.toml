@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.45"
+version = "0.1.46"
 edition = "2024"
 
 [dependencies]
@@ -94,6 +94,15 @@ flate2 = "1"
 # SSH client for the native ssh_* host functions (pure Rust, no system libs)
 russh = "0.62"
 russh-sftp = "2"
+
+# Server-side Kokoro TTS. ONNX Runtime is loaded at runtime from a shared
+# library downloaded into <data-dir>/tts/ (`load-dynamic`), so nothing is
+# linked at build time and every release target still builds. G2P is pure
+# Rust (MIT); `espeak` is off because espeak-ng is GPL.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-20"] }
+ndarray = "0.17"
+misaki-rs = { version = "0.6", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Desktop window (OS WebView). Optional so `--no-default-features` still
 # produces a CLI-only binary that runs on headless Linux without WebKitGTK.

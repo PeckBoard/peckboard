@@ -28,7 +28,7 @@ pub struct ToolGate {
     pre_hatcher: bool,
     doc_review: bool,
     /// Voice assistant session (`expert_kind == "voice"`): the only role
-    /// that may call `answer_question`, and the one role with no browser.
+    /// that may call `show_view`, and the one role with no browser.
     voice: bool,
     autoswitch_on: bool,
     /// Names of plugin-owned tools this session's role must never dispatch
@@ -104,7 +104,7 @@ impl ToolGate {
         if matches!(name, "get_review_doc" | "submit_review_revision") {
             return self.doc_review;
         }
-        if matches!(name, "answer_question" | "show_view") {
+        if matches!(name, "show_view" | "voice_queue") {
             return self.voice;
         }
         if self.voice && is_browser_tool(name) {
@@ -175,12 +175,8 @@ impl ToolGate {
         if name == "show_view" && !self.voice {
             return Some("tool 'show_view' is blocked: only the voice assistant session drives the user's screen.".to_string());
         }
-        if name == "answer_question" && !self.voice {
-            return Some(
-                "tool 'answer_question' is blocked: only the voice assistant session \
-                 answers other sessions' questions."
-                    .to_string(),
-            );
+        if name == "voice_queue" && !self.voice {
+            return Some("tool 'voice_queue' is blocked: only the voice assistant session has a relay queue.".to_string());
         }
         if self.voice && is_browser_tool(name) {
             return Some(format!(
@@ -336,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn answer_question_is_voice_only() {
+    fn answer_question_is_for_voice_and_orchestrators_not_workers() {
         let voice = ToolGate::from_session(&session(false, Some("voice"), None));
         assert!(voice.blocked("answer_question").is_none());
         assert!(voice.advertised("answer_question"));
@@ -346,13 +342,29 @@ mod tests {
         assert!(!voice.advertised("browser_act"));
         let chat = ToolGate::from_session(&session(false, None, None));
         assert!(chat.blocked("browser_open").is_none());
+        // An orchestrating chat may answer (the handler scopes the target).
+        assert!(chat.blocked("answer_question").is_none());
+        assert!(chat.advertised("answer_question"));
+        assert!(chat.advertised("reattach_worker"));
+        let worker = ToolGate::from_session(&session(true, None, None));
+        for tool in ["answer_question", "reattach_worker"] {
+            assert!(worker.blocked(tool).is_some());
+            assert!(!worker.advertised(tool));
+        }
+    }
+
+    #[test]
+    fn voice_queue_is_voice_only() {
+        let voice = ToolGate::from_session(&session(false, Some("voice"), None));
+        assert!(voice.blocked("voice_queue").is_none());
+        assert!(voice.advertised("voice_queue"));
         for gate in [
             ToolGate::from_session(&session(false, None, None)),
             ToolGate::from_session(&session(true, None, None)),
             ToolGate::none(),
         ] {
-            assert!(gate.blocked("answer_question").is_some());
-            assert!(!gate.advertised("answer_question"));
+            assert!(gate.blocked("voice_queue").is_some());
+            assert!(!gate.advertised("voice_queue"));
         }
     }
 }

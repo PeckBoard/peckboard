@@ -378,3 +378,42 @@ fn headline_formats() {
     assert_eq!(report::fmt_duration(3601), "1h0m1s");
     assert_eq!(report::fmt_duration(7), "7s");
 }
+
+/// A task still running when the server goes down leaves a sidecar; the next
+/// boot reads it back and tells the owning session the task was lost, so
+/// the agent isn't left to hit a silent "not found".
+#[tokio::test]
+async fn task_lost_to_restart_is_reported_to_its_session() {
+    let f = fixture().await;
+    let info = start(&f, "sh", &["-c", "sleep 30"]).await;
+    let log_dir = f._dir.path().join(LOG_DIR);
+    assert!(log_dir.join(format!("{}{META_SUFFIX}", info.id)).exists());
+
+    f.registry.shutdown_all().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        f.dispatcher.resumed.lock().unwrap().is_empty(),
+        "shutdown itself reports nothing"
+    );
+
+    // Next boot: collect + clear, then a fresh registry reports.
+    let lost = clear_stale_logs(&log_dir);
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].id, info.id);
+    assert_eq!(lost[0].session_id, "s-1");
+    assert!(!log_dir.exists());
+    let next = BackgroundRegistry::new(log_dir);
+    next.bind(
+        f.db.clone(),
+        crate::ws::broadcaster::Broadcaster::new(),
+        Some(f.dispatcher.clone()),
+    );
+    next.report_lost(lost).await;
+
+    let data = wait_for_report(&f).await;
+    assert!(
+        data["text"].as_str().unwrap().contains("was lost"),
+        "{data}"
+    );
+    assert_eq!(data["background_task"]["status"], "lost");
+}
