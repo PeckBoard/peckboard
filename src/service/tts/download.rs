@@ -18,9 +18,9 @@ pub struct Asset {
 pub const ORT_VERSION: &str = "1.28.2";
 
 pub const MODEL: Asset = Asset {
-    url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.fp16.onnx",
-    size: 177_464_787,
-    sha256: Some("c1610a859f3bdea01107e73e50100685af38fff88f5cd8e5c56df109ec880204"),
+    url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+    size: 325_532_387,
+    sha256: Some("7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5"),
 };
 pub const VOICES: Asset = Asset {
     url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",

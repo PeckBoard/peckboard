@@ -173,7 +173,9 @@ impl TtsService {
             .join(format!("onnxruntime-{}", download::ORT_VERSION));
         tokio::fs::create_dir_all(&ort_dir).await?;
         let lib = ort_dir.join(ort.lib_name);
-        let model = self.dir.join("kokoro-v1.0.fp16.onnx");
+        // The full-size fp32 model: clearer than fp16 at about the same speed
+        // on CPU. Installs that only have fp16 download it on next prepare.
+        let model = self.dir.join("kokoro-v1.0.onnx");
         let voices = self.dir.join("voices-v1.0.bin");
 
         let need_lib = !lib.exists();
@@ -226,6 +228,15 @@ impl TtsService {
             "kokoro tts loaded"
         );
         let _ = self.engine.set(Arc::new(engine));
+        // Installs from before the fp32 switch still hold the ~177 MB fp16
+        // model; it is unused now that the full-size one loaded.
+        let old = self.dir.join("kokoro-v1.0.fp16.onnx");
+        if old.exists() {
+            match tokio::fs::remove_file(&old).await {
+                Ok(()) => tracing::info!("removed the old fp16 kokoro model"),
+                Err(e) => tracing::warn!(error = %e, "could not remove the old fp16 kokoro model"),
+            }
+        }
         Ok(())
     }
 
