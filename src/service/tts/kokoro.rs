@@ -118,7 +118,30 @@ pub fn phonemize_with(
             out.push(c);
         }
     }
-    Ok(out)
+    Ok(release_final_flaps(&out))
+}
+
+/// Turn a word-final flap `ɾ` back into `t`. misaki-rs's dictionary spells
+/// "it" as `ɪɾ` in every context, so "Got it." ended on an unreleased flap
+/// and sounded like "goit". Word-internal flaps ("water") stay.
+pub fn release_final_flaps(ph: &str) -> String {
+    let mut out = String::with_capacity(ph.len());
+    let mut chars = ph.chars().peekable();
+    while let Some(c) = chars.next() {
+        let final_ = chars.peek().is_none_or(|n| !n.is_alphabetic());
+        out.push(if c == 'ɾ' && final_ { 't' } else { c });
+    }
+    out
+}
+
+/// Kokoro expects every token run wrapped in the pad token (0) at both
+/// ends; without it the first and last phonemes are clipped.
+pub fn pad_tokens(toks: &[i64]) -> Vec<i64> {
+    let mut padded = Vec::with_capacity(toks.len() + 2);
+    padded.push(0);
+    padded.extend_from_slice(toks);
+    padded.push(0);
+    padded
 }
 
 /// Split a normalised phoneme string into chunks of at most `MAX_TOKENS`
@@ -330,10 +353,7 @@ impl Kokoro {
                 continue;
             }
             let n = toks.len();
-            let mut padded = Vec::with_capacity(n + 2);
-            padded.push(0);
-            padded.extend(toks);
-            padded.push(0);
+            let padded = pad_tokens(&toks);
             let style = pack[n * STYLE_DIM..(n + 1) * STYLE_DIM].to_vec();
             let tokens = ort::value::Tensor::from_array(([1usize, n + 2], padded))?;
             let style = ort::value::Tensor::from_array(([1usize, STYLE_DIM], style))?;
@@ -353,7 +373,29 @@ impl Kokoro {
             let (_, data) = outputs[0].try_extract_tensor::<f32>()?;
             audio.extend_from_slice(data);
         }
+        limit_peak(&mut audio);
         Ok(audio)
+    }
+}
+
+/// Highest sample magnitude a clip may reach after [`limit_peak`].
+pub const PEAK_LIMIT: f32 = 0.95;
+
+/// Keep a clip inside ±[`PEAK_LIMIT`]: non-finite samples become 0, and a
+/// clip that overshoots is scaled down as a whole. The int16 encoder would
+/// otherwise hard-clip the peaks — audible as crackle/distortion on loud
+/// syllables — and one gain for the whole clip can't pump mid-sentence.
+pub fn limit_peak(audio: &mut [f32]) {
+    let mut peak = 0f32;
+    for s in audio.iter_mut() {
+        if !s.is_finite() {
+            *s = 0.0;
+        }
+        peak = peak.max(s.abs());
+    }
+    if peak > PEAK_LIMIT {
+        let g = PEAK_LIMIT / peak;
+        audio.iter_mut().for_each(|s| *s *= g);
     }
 }
 
@@ -494,5 +536,80 @@ mod tests {
         assert_eq!(v.len(), VOICE_ROWS * STYLE_DIM);
         assert_eq!(v[STYLE_DIM + 3], (STYLE_DIM + 3) as f32);
         assert!(parse_voices_npz(b"nope").is_err());
+    }
+
+    #[test]
+    fn word_final_flaps_are_released() {
+        // misaki-rs's dictionary spells "it" as `ɪɾ` everywhere, so "Got
+        // it." ended on an unreleased flap and read as "goit".
+        let g2p = LexG2p::new(false);
+        let ph = phonemize_with(&g2p, None, "Got it.", false).unwrap();
+        assert!(ph.contains("ɪt"), "{ph:?}");
+        assert!(!ph.contains('ɾ'), "{ph:?}");
+        let ph = phonemize_with(&g2p, None, "Let it go, better now.", false).unwrap();
+        assert!(ph.contains("ɪt "), "{ph:?}");
+        // A word-internal flap ("better") is natural American and stays.
+        assert!(ph.contains("bˈɛɾɚ"), "{ph:?}");
+        assert_eq!(release_final_flaps("ɪɾ"), "ɪt");
+        assert_eq!(release_final_flaps("wˈɔːɾɚ ɪɾ."), "wˈɔːɾɚ ɪt.");
+    }
+
+    #[test]
+    fn every_chunk_is_wrapped_in_pad_tokens() {
+        let toks = tokenize("ɡˈɑt");
+        let padded = pad_tokens(&toks);
+        assert_eq!(padded.len(), toks.len() + 2);
+        assert_eq!((padded[0], padded[padded.len() - 1]), (0, 0));
+        assert_eq!(&padded[1..padded.len() - 1], &toks[..]);
+    }
+
+    #[test]
+    fn peak_limiter_keeps_samples_in_range() {
+        let mut hot = vec![0.2, -1.6, 0.8, f32::NAN, f32::INFINITY];
+        limit_peak(&mut hot);
+        assert!(hot.iter().all(|s| s.is_finite() && s.abs() <= PEAK_LIMIT));
+        // One gain for the whole clip: relative levels are preserved.
+        assert!((hot[1] / hot[0] + 8.0).abs() < 1e-5, "{hot:?}");
+        let mut quiet = vec![0.5, -0.3];
+        limit_peak(&mut quiet);
+        assert_eq!(quiet, vec![0.5, -0.3]);
+    }
+
+    /// Real-model check (skipped unless `KOKORO_TEST_DIR` points at a data
+    /// dir's `tts/` holding the ONNX Runtime lib, model and voices): a short
+    /// phrase opens with near-silence and its first consonant is intact —
+    /// nothing trims the onset.
+    #[test]
+    fn short_phrase_onset_is_not_trimmed() {
+        let Ok(dir) = std::env::var("KOKORO_TEST_DIR") else {
+            return;
+        };
+        let dir = Path::new(&dir);
+        let ort = crate::service::tts::download::ort_asset().unwrap();
+        let lib = dir
+            .join(format!(
+                "onnxruntime-{}",
+                crate::service::tts::download::ORT_VERSION
+            ))
+            .join(ort.lib_name);
+        let engine = Kokoro::load(
+            &lib,
+            &dir.join(std::env::var("KOKORO_TEST_MODEL").unwrap_or("kokoro-v1.0.onnx".into())),
+            &dir.join("voices-v1.0.bin"),
+        )
+        .unwrap();
+        let a = engine
+            .synthesize("Got it.", crate::service::tts::DEFAULT_VOICE, 0.95, None)
+            .unwrap();
+        let ms = |i: usize| i * 1000 / SAMPLE_RATE as usize;
+        let onset = a.iter().position(|s| s.abs() > 0.02).unwrap();
+        // The model's own lead-in: >= 150 ms of near-silence (< -40 dBFS).
+        assert!(ms(onset) >= 150, "onset at {} ms", ms(onset));
+        // The /ɡ/ burst is present right at the onset (not a vowel that
+        // started mid-word): energy rises within 30 ms and stays speech-loud.
+        let win = &a[onset..onset + SAMPLE_RATE as usize * 30 / 1000];
+        let peak = win.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.05, "onset peak {peak}");
+        assert!(a.len() - onset > SAMPLE_RATE as usize * 300 / 1000);
     }
 }

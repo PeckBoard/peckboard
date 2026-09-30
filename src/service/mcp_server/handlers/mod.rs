@@ -21,6 +21,7 @@ mod subagents;
 mod variables;
 mod voice;
 mod voice_nav;
+mod voice_prompt;
 mod voice_pronunciation;
 mod voice_queue;
 mod workers;

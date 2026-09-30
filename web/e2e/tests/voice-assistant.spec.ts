@@ -74,6 +74,8 @@ type StubWindow = {
   __recStarts: number
   __voiceSay: (t: string) => void
   __voiceInterim: (t: string) => void
+  __voiceResult: (t: string, isFinal: boolean, confidence: number) => void
+  __voiceStale: (t: string) => void
   __spoken: string[]
   __cancels: number
   __ttsHold: boolean
@@ -95,9 +97,14 @@ async function primePage(page: Page, token: string) {
       onend: Handler<void> = null
       onerror: Handler<{ error: string }> = null
       start() {
-        const w = window as unknown as { __voiceRec: FakeRecognition | null; __recStarts: number }
+        const w = window as unknown as {
+          __voiceRec: FakeRecognition | null
+          __recStarts: number
+          __voiceRecs: FakeRecognition[]
+        }
         w.__voiceRec = this
         w.__recStarts = (w.__recStarts ?? 0) + 1
+        w.__voiceRecs = [...(w.__voiceRecs ?? []), this]
       }
       stop() {
         this.finish()
@@ -110,8 +117,8 @@ async function primePage(page: Page, token: string) {
         if (w.__voiceRec === this) w.__voiceRec = null
         this.onend?.()
       }
-      deliver(text: string, isFinal: boolean) {
-        const result = Object.assign([{ transcript: text }], { isFinal, length: 1 })
+      deliver(text: string, isFinal: boolean, confidence?: number) {
+        const result = Object.assign([{ transcript: text, confidence }], { isFinal, length: 1 })
         this.onresult?.({ resultIndex: 0, results: [result] })
       }
     }
@@ -133,6 +140,16 @@ async function primePage(page: Page, token: string) {
       if (!rec.continuous) rec.finish()
     }
     w.__voiceInterim = (text: string) => live().deliver(text, false)
+    // A result with an engine confidence (Chrome reports one on finals).
+    w.__voiceResult = (text: string, isFinal: boolean, confidence: number) =>
+      live().deliver(text, isFinal, confidence)
+    // A late result from the recognition session before the live one.
+    w.__voiceStale = (text: string) => {
+      const recs = w.__voiceRecs as FakeRecognition[]
+      const prev = recs[recs.length - 2]
+      if (!prev) throw new Error('no earlier recognition')
+      prev.deliver(text, true)
+    }
 
     w.__spoken = [] as string[]
     w.__cancels = 0
@@ -505,6 +522,59 @@ test('an interrupted reply is never spoken again, and the model is told it was c
   for (const unheard of reply.slice(1)) {
     expect(all.some((s) => s.includes(unheard.split(' ')[0]))).toBe(false)
   }
+})
+
+test('a sentence heard before a barge-in is never read again', async ({ request, page }) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
+    .toBe(true)
+  await page.evaluate(() => {
+    ;(window as unknown as StubWindow).__ttsHold = true
+  })
+  await page.evaluate(
+    (t) => (window as unknown as StubWindow).__voiceSay(t),
+    'Fair enough. Golf is the second point. Hotel is the third point.',
+  )
+  await expect.poll(async () => spoken(page), { timeout: 15_000 }).toContain('Fair enough.')
+  // "Fair enough." is read to the end; the user talks over the next one.
+  await page.evaluate(() => (window as unknown as StubWindow).__ttsFinish())
+  await expect.poll(async () => spoken(page)).toContain('Golf is the second point.')
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceInterim('stop right there please'),
+  )
+  await expect(page.getByTestId('voice-status')).not.toHaveText('Speaking')
+
+  await page.evaluate(() => {
+    const w = window as unknown as StubWindow
+    w.__ttsHold = false
+    w.__voiceSay('stop right there please and count zebras')
+  })
+  await expect
+    .poll(async () => (await spoken(page)).some((s) => s.includes('zebras')), {
+      timeout: 15_000,
+    })
+    .toBe(true)
+  const res = await request.post(`/api/sessions/${voice.session_id}/message`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: '[relay] update from "zoo": PANGOLIN count finished.' },
+  })
+  expect(res.ok(), `relay send failed: ${await res.text()}`).toBeTruthy()
+  await expect
+    .poll(async () => (await spoken(page)).some((s) => s.includes('PANGOLIN')), {
+      timeout: 15_000,
+    })
+    .toBe(true)
+  await page.waitForTimeout(500)
+  const all = await spoken(page)
+  expect(all.filter((s) => s.includes('Fair enough')).length).toBe(1)
+  expect(all.some((s) => s.includes('Hotel'))).toBe(false)
 })
 
 test('Kokoro audio fetched before a barge-in never plays after it', async ({ request, page }) => {
@@ -894,7 +964,51 @@ test('pronunciation hints show as plain words but reach Kokoro intact, even spli
   })
   await expect(line).not.toContainText('](/')
   // Each sentence is sent whole, hint markup included, for the server to read.
-  await expect.poll(() => [...new Set(requested)], { timeout: 15_000 }).toEqual(sentences)
+  // (The thinking fillers, synthesized ahead when the panel opens, aside.)
+  const replies = () => [...new Set(requested)].filter((t) => !/^\[(One|Let|Give)\]/.test(t))
+  await expect.poll(replies, { timeout: 15_000 }).toEqual(sentences)
+})
+
+test('a fully hinted reply streamed in small chunks shows plain words and is spoken whole', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  // Every word hinted, as the voice prompt asks; `mock:echo-stream` splits
+  // it into 5-char chunks.
+  await setVoiceModel(request, token, 'mock:echo-stream')
+  await primePage(page, token)
+  const ready = { state: 'ready', progress: 1, error: null }
+  await page.route('**/api/voice/tts/prepare', (r) => r.fulfill({ json: ready }))
+  await page.route('**/api/voice/tts/status', (r) => r.fulfill({ json: ready }))
+  const requested: string[] = []
+  await page.route('**/api/voice/tts', async (r) => {
+    requested.push(String((r.request().postDataJSON() as { text?: string }).text ?? ''))
+    await r
+      .fulfill({ status: 200, contentType: 'audio/wav', body: wav(0.1) })
+      .catch(() => undefined)
+  })
+  await page.goto('/')
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+
+  const sentences = [
+    "[Got](/ɡˈɑt/) [it](/ɪt/), [I'll](/ˈIl/) [check](/ʧˈɛk/) [Stashify](/stˈæʃɪfˌI/) [now](/nˈW/).",
+    '[Should](/ʃˈʊd/) [I](/ˈI/) [send](/sˈɛnd/) [it](/ɪt/)?',
+  ]
+  await page.getByTestId('voice-type-input').fill(sentences.join(' '))
+  await page.getByTestId('voice-type-send').click()
+
+  const line = page.getByTestId('voice-line-assistant').last()
+  await expect(line).toContainText("Got it, I'll check Stashify now. Should I send it?", {
+    timeout: 15_000,
+  })
+  await expect(line).not.toContainText('](/')
+  // Whole sentences, every hint intact — the markup's length never forces
+  // an early clause split. (Filler lines spoken while waiting are skipped.)
+  const ours = /\[(Got|I'll|Stashify|Should|send)\]/
+  const reply = () => [...new Set(requested.filter((t) => ours.test(t)))]
+  await expect.poll(reply, { timeout: 15_000 }).toEqual(sentences)
 })
 
 test('the browser voice reads a hinted word without the markup', async ({ request, page }) => {
@@ -909,4 +1023,138 @@ test('the browser voice reads a hinted word without the markup', async ({ reques
     timeout: 15_000,
   })
   await expect.poll(() => spoken(page), { timeout: 15_000 }).toContain('Ask Grok about it.')
+})
+
+test('phantom finals are dropped: low confidence after a restart, and stale sessions', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  const dropped: string[] = []
+  page.on('console', (m) => {
+    if (m.text().includes('dropped utterance')) dropped.push(m.text())
+  })
+  await page.goto('/')
+  await openListening(page)
+  const recStarts = () => page.evaluate(() => (window as unknown as StubWindow).__recStarts)
+
+  // Chrome ends a session on silence and it restarts; right away, with no
+  // interim buildup, a low-confidence final lands out of nowhere.
+  const startsBefore = await recStarts()
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceRec?.finish())
+  await expect.poll(recStarts).toBeGreaterThan(startsBefore)
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceResult('have a good morning', true, 0.3),
+  )
+  // …and the session that already ended delivers a late result.
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceStale('see you tomorrow then'))
+  await page.waitForTimeout(2_500)
+  const texts = await userTexts(request, token, voice.session_id)
+  expect(texts.some((t) => t.includes('have a good morning'))).toBe(false)
+  expect(texts.some((t) => t.includes('see you tomorrow then'))).toBe(false)
+  await expect(page.getByTestId('voice-line-user').filter({ hasText: 'good morning' })).toHaveCount(
+    0,
+  )
+  expect(dropped.some((l) => l.includes('low confidence'))).toBe(true)
+  expect(dropped.some((l) => l.includes('stale recognition session'))).toBe(true)
+
+  // Real speech — interims building to a confident final — still goes, and
+  // the stored event says it came from the mic.
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('what is the'))
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceResult('what is the deploy status', true, 0.92),
+  )
+  await expect
+    .poll(
+      async () =>
+        (await sessionEvents(request, token, voice.session_id)).find(
+          (e) => e.kind === 'user' && e.data.text === 'what is the deploy status',
+        )?.data.source,
+      { timeout: 10_000 },
+    )
+    .toBe('voice-mic')
+})
+
+test('over the assistant, a final with no interim buildup never barges in; real speech does', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:block')
+  await primePage(page, token)
+  await page.goto('/')
+  const cancels = () => page.evaluate(() => (window as unknown as StubWindow).__cancels)
+  await openListening(page)
+  await page.evaluate(() => {
+    ;(window as unknown as StubWindow).__ttsHold = true
+  })
+  await say(page, 'start the long job')
+  await expect.poll(async () => spoken(page), { timeout: 15_000 }).toContain('working…')
+  await expect(page.getByTestId('voice-status')).toHaveText('Speaking')
+  const cancelsBefore = await cancels()
+
+  // A hallucinated phrase with no interim before it: not the user.
+  await say(page, 'have a good morning everyone')
+  await page.waitForTimeout(300)
+  await expect(page.getByTestId('voice-status')).toHaveText('Speaking')
+  expect(await cancels()).toBe(cancelsBefore)
+
+  // The user actually talks: interims build up, then the final — barge-in.
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('no wait actually'))
+  await expect.poll(cancels).toBeGreaterThan(cancelsBefore)
+  await say(page, 'no wait actually stop')
+  await expect
+    .poll(() => userTexts(request, token, voice.session_id), { timeout: 10_000 })
+    .toContain(INTERRUPT_MARKER + 'no wait actually stop')
+  const texts = await userTexts(request, token, voice.session_id)
+  expect(texts.some((t) => t.includes('have a good morning everyone'))).toBe(false)
+
+  await request.post(`/api/sessions/${voice.session_id}/interrupt`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+})
+
+test('speech started as the last sentence ends is kept whole: one message, nothing dropped', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+  await openListening(page)
+  await page.evaluate(() => {
+    ;(window as unknown as StubWindow).__ttsHold = true
+  })
+
+  // `mock:echo` reads back two sentences; the second is the last.
+  const reply = ['Alpha is the first point.', 'Bravo is the second point.']
+  await say(page, reply.join(' '))
+  await expect.poll(async () => spoken(page), { timeout: 15_000 }).toContain(reply[0])
+  await page.evaluate(() => (window as unknown as StubWindow).__ttsFinish())
+  await expect.poll(async () => spoken(page), { timeout: 5_000 }).toContain(reply[1])
+  await expect(page.getByTestId('voice-status')).toHaveText('Speaking')
+
+  // The user starts while the last sentence is still playing…
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('wait'))
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('wait'))
+  // …it ends, and within 300ms they go on.
+  await page.evaluate(() => (window as unknown as StubWindow).__ttsFinish())
+  await page.waitForTimeout(150)
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('I also want'))
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('I also want'))
+  // A mid-sentence pause: the first fragment is not sent on its own.
+  await page.waitForTimeout(2_500)
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('to check'))
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('to check Stashify'))
+
+  const full = 'wait I also want to check Stashify'
+  await expect
+    .poll(() => userTexts(request, token, voice.session_id), { timeout: 10_000 })
+    .toContain(full)
+  const texts = await userTexts(request, token, voice.session_id)
+  expect(texts.filter((t) => t.includes('I also want'))).toEqual([full])
+  expect(texts).not.toContain('wait')
 })

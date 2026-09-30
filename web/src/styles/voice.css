@@ -362,6 +362,21 @@
   margin-top: 8px;
 }
 
+/* Settings → Voice → Assistant Prompt */
+.voice-prompt-textarea {
+  display: block;
+  width: 100%;
+  min-height: 320px;
+  margin-top: 8px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.voice-prompt-diff {
+  max-height: 60vh;
+  overflow: auto;
+}
+
 /* Phone: the rail is a top toolbar (the button rides along in its right
    cluster) and the panel takes over the whole screen — above the rail,
    tab strip, and composer, below modals (z-index 100). Height follows

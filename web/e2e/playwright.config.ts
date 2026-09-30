@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -64,6 +65,26 @@ process.env.PECKBOARD_E2E_DATA_DIR = DATA_DIR
 // sibling checkout next to the repo — same two candidates the Rust plugin
 // tests probe. First one with a built wasm wins.
 const e2eDir = path.dirname(fileURLToPath(import.meta.url))
+
+// The binary scripts/build-local-release.sh produces (`--profile verify`).
+// PECKBOARD_E2E_BIN points the suite at another, already-built binary, e.g.
+// ../../target/release/peckboard to test exactly what CI compiles.
+const SERVER_BIN = process.env.PECKBOARD_E2E_BIN ?? '../../target/verify/peckboard'
+
+// Build the frontend + that binary NOW, for the same reason as the plugin
+// copy below: this is the last hook before the webServer boots (globalSetup
+// runs after, so a build there only ever refreshed the NEXT run). The
+// helper skips the web build when web/dist is current and builds
+// incrementally. Setting the skip flag afterwards stops worker processes,
+// which re-eval this file, from building again. scripts/e2e-shards.sh and
+// verify.sh build once up front and pass PECKBOARD_E2E_SKIP_BUILD=1.
+if (process.env.PECKBOARD_E2E_SKIP_BUILD !== '1' && !process.env.PECKBOARD_E2E_BIN) {
+  execFileSync(path.resolve(e2eDir, '..', '..', 'scripts', 'build-local-release.sh'), {
+    stdio: 'inherit',
+  })
+  process.env.PECKBOARD_E2E_SKIP_BUILD = '1'
+}
+
 const pluginsSrcRoots = [
   path.resolve(e2eDir, '..', '..', 'peck-plugins'),
   path.resolve(e2eDir, '..', '..', '..', 'peck-plugins'),
@@ -128,7 +149,7 @@ export default defineConfig({
     // installed — fresh installs default to none, but specs assume mock
     // and friends are active; the install/uninstall flow is covered by
     // crate-plugin-install.spec.ts which round-trips from this state.
-    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ../../target/release/peckboard --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
+    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ${SERVER_BIN} --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     stdout: 'pipe',

@@ -56,6 +56,7 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "show_view",
         "voice_queue",
         "voice_pronunciation",
+        "voice_prompt",
     ]
 }
 
@@ -86,6 +87,7 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "show_view",
         "voice_queue",
         "voice_pronunciation",
+        "voice_prompt",
     ]
 }
 
@@ -2028,6 +2030,21 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "word": { "type": "string", "description": "The word as written, e.g. \"Peckboard\". Required for add and remove." },
                     "respelling": { "type": "string", "description": "add: how it sounds, e.g. \"PECK-board\". Give this or phonemes." },
                     "phonemes": { "type": "string", "description": "add: raw Kokoro/misaki phonemes, e.g. \"pˈɛkbˌɔːɹd\". Give this or respelling." }
+                },
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "voice_prompt".into(),
+            description: "Voice assistant only: read or change your own system prompt (how you behave), live from your next turn. action get = the current prompt and whether it is the built-in default. action update = replace the whole prompt with content. action append = add text to the end. update and append change your behaviour for good: first say out loud exactly what will change, get the user's explicit yes, then call with confirmed: true. Returns a short diff summary.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["get", "update", "append"], "description": "get (default), update, or append." },
+                    "content": { "type": "string", "description": "update: the complete new prompt." },
+                    "text": { "type": "string", "description": "append: text added on a new line at the end of the prompt." },
+                    "note": { "type": "string", "description": "update/append: one line on why, shown in the prompt history, e.g. \"user asked for shorter answers\"." },
+                    "confirmed": { "type": "boolean", "description": "update/append: true only after the user explicitly said yes out loud to this exact change." }
                 },
                 "additionalProperties": false
             }),

@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::models::{NewSession, Session, UpdateSession};
-use crate::service::voice_relay::{VOICE_EXPERT_KIND, VOICE_SESSION_TITLE, VOICE_SYSTEM_PROMPT};
+use crate::service::voice_relay::{VOICE_EXPERT_KIND, VOICE_SESSION_TITLE};
 use crate::state::AppState;
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -123,18 +123,20 @@ async fn voice_session(
 
     let session = match existing {
         Some(session) => {
-            // Keep the persona current across upgrades.
-            if session.system_prompt.as_deref() != Some(VOICE_SYSTEM_PROMPT) {
-                state
-                    .db
-                    .set_session_system_prompt(
-                        &session.id,
-                        Some(VOICE_SYSTEM_PROMPT.to_string()),
-                        None,
-                    )
-                    .await
-                    .map_err(internal)?;
-            }
+            // Keep the persona current: the active prompt (the built-in
+            // default across upgrades, or the user's edited one).
+            crate::service::voice_prompt::apply_to_voice_session(
+                &state.db,
+                Some(&state.provider_registry),
+            )
+            .await
+            .map_err(internal)?;
+            let session = state
+                .db
+                .get_session(&session.id)
+                .await
+                .map_err(internal)?
+                .unwrap_or(session);
             match requested {
                 Some(model) if session.model.as_deref() != Some(model.as_str()) => {
                     switch_model(&state, &session, &model).await?
@@ -144,6 +146,9 @@ async fn voice_session(
         }
         None => {
             let folder_id = pick_folder(&state, &user.user_id).await?;
+            let prompt = crate::service::voice_prompt::active_content(&state.db)
+                .await
+                .map_err(internal)?;
             let model = match requested {
                 Some(m) => Some(m),
                 None => default_voice_model(&state).await,
@@ -161,7 +166,7 @@ async fn voice_session(
                     is_expert: true,
                     expert_kind: Some(VOICE_EXPERT_KIND.to_string()),
                     is_permanent: true,
-                    system_prompt: Some(VOICE_SYSTEM_PROMPT.to_string()),
+                    system_prompt: Some(prompt),
                     user_id: Some(user.user_id.clone()),
                     ..Default::default()
                 })
@@ -333,6 +338,7 @@ mod tests {
         seed_authenticated_user, seed_authenticated_user_with_suffix, test_state,
     };
     use crate::db::models::NewFolder;
+    use crate::service::voice_relay::VOICE_SYSTEM_PROMPT;
     use axum::body::Body;
     use axum::http::{Request, header};
     use tower::ServiceExt;

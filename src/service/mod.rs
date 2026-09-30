@@ -25,5 +25,6 @@ pub mod tool_images;
 pub mod tts;
 pub mod update;
 pub mod voice_gate;
+pub mod voice_prompt;
 pub mod voice_relay;
 pub mod wake;

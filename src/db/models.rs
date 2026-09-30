@@ -1266,6 +1266,22 @@ pub struct TtsUnknownWord {
     pub first_seen: String,
     pub last_seen: String,
 }
+// ── Voice Prompt Versions ────────────────────────
+
+/// One saved version of the voice assistant's system prompt
+/// (`service::voice_prompt`). The newest row is active; `source` is
+/// `default` (reset — the live built-in is active, `content` is a
+/// snapshot), `user` or `assistant`.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = voice_prompt_versions)]
+pub struct VoicePromptVersion {
+    pub id: String,
+    pub content: String,
+    pub source: String,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
 
 // ── Agent Vars ───────────────────────────────────
 

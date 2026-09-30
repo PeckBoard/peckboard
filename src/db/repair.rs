@@ -72,6 +72,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_device_activity_table(conn)?;
     ensure_voice_relay_queue_table(conn)?;
     ensure_tts_lexicon_tables(conn)?;
+    ensure_voice_prompt_versions_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -307,6 +308,30 @@ fn ensure_tts_lexicon_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> 
             first_seen  TEXT NOT NULL,
             last_seen   TEXT NOT NULL
         )",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1790749825_voice_prompt_versions`. `CREATE TABLE
+/// IF NOT EXISTS` is idempotent so this is safe on a fully-migrated DB and
+/// only does work on one that lacks the table. DDL mirrors the migration.
+fn ensure_voice_prompt_versions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "voice_prompt_versions")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS voice_prompt_versions (
+            id          TEXT PRIMARY KEY NOT NULL,
+            content     TEXT NOT NULL,
+            source      TEXT NOT NULL CHECK (source IN ('default', 'user', 'assistant')),
+            note        TEXT,
+            created_at  TEXT NOT NULL,
+            created_by  TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_voice_prompt_versions_created \
+         ON voice_prompt_versions (created_at)",
     )
     .execute(conn)?;
     Ok(())

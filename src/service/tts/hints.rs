@@ -1,8 +1,10 @@
 //! Inline pronunciation hints in the voice assistant's replies, in misaki's
 //! native markup: `[Peckboard](/pˈɛkbɔɹd/)`. The chat shows the plain word;
-//! TTS speaks the hinted phonemes. A hint whose phonemes fall outside
-//! Kokoro's vocab is dropped (the word is phonemized normally), and broken
-//! markup is read literally minus the brackets.
+//! TTS speaks the hinted phonemes. The assistant hints every word, so
+//! parsing is one linear pass. A hint whose phonemes fall outside Kokoro's
+//! vocab is dropped (that word alone is phonemized normally); a hint
+//! missing its `/)` keeps its word and loses only its stray phonemes;
+//! other broken markup is read literally minus the brackets.
 
 use super::kokoro::{fold_joined, unknown_symbols};
 
@@ -12,16 +14,29 @@ pub enum Segment {
     Hinted { text: String, phonemes: String },
 }
 
-/// Hint phonemes → Kokoro alphabet, or `None` when empty, holding a symbol
-/// Kokoro doesn't know, or plain printable ASCII — real phonemes carry a
-/// stress mark, IPA symbol or space, so `[docs](/docs/)` is a link, not a
-/// hint (same rule as the web's `stripPronunciationHints`).
+/// Chars that end a hint's phoneme run: markup, newlines, and what paths
+/// and URLs are made of, so `[api](/api/v1/)` stays a link. Plain-ASCII
+/// phonemes (`[be](/bi/)`) are fine. The same rule as the web's
+/// `HINT_SRC` (`[^/()[\]\n.:#?=&%0-9]+`).
+fn ends_phonemes(c: char) -> bool {
+    matches!(
+        c,
+        '/' | '(' | ')' | '[' | ']' | '\n' | '.' | ':' | '#' | '?' | '=' | '&' | '%'
+    ) || c.is_ascii_digit()
+}
+
+/// Hint phonemes → Kokoro alphabet, or `None` when empty or holding a
+/// symbol Kokoro doesn't know.
 fn valid_phonemes(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    if raw.chars().all(|c| c.is_ascii_graphic()) {
-        return None;
+    let mut ph = if raw.contains('\u{200d}') {
+        fold_joined(raw)
+    } else {
+        raw.to_string()
+    };
+    if ph.contains('g') {
+        ph = ph.replace('g', "ɡ");
     }
-    let ph = fold_joined(raw).replace('g', "ɡ");
     (!ph.is_empty() && unknown_symbols(&ph).is_empty()).then_some(ph)
 }
 
@@ -33,24 +48,28 @@ pub fn parse(sentence: &str) -> Vec<Segment> {
     while let Some(open) = rest.find('[') {
         plain.push_str(&rest[..open]);
         let after = &rest[open + 1..];
-        // `text` runs to the first `]`; a nested `[` or a newline first
-        // means this `[` is not markup.
-        let close = after
-            .find(']')
-            .filter(|&c| !after[..c].contains(['[', '\n']));
-        let Some(close) = close else {
+        // `text` runs to the first `]`; a `[` or a newline first means this
+        // `[` is not markup.
+        let Some((close, ']')) = after
+            .char_indices()
+            .find(|&(_, c)| matches!(c, '[' | ']' | '\n'))
+        else {
             // Unclosed `[`: drop the bracket, keep going.
             rest = after;
             continue;
         };
         let text = &after[..close];
         let tail = &after[close + 1..];
-        let hint = tail.strip_prefix("(/").and_then(|t| {
-            let end = t.find("/)")?;
-            Some((&t[..end], &t[end + 2..]))
-        });
-        match hint {
-            Some((raw, next)) if !raw.contains('\n') => {
+        let Some(t) = tail.strip_prefix("(/") else {
+            // `[text]` without a hint: the text, minus brackets.
+            plain.push_str(text);
+            rest = tail;
+            continue;
+        };
+        let end = t.find(ends_phonemes).unwrap_or(t.len());
+        let raw = &t[..end];
+        rest = match t[end..].chars().next() {
+            Some('/') if !raw.is_empty() && t[end + 1..].starts_with(')') => {
                 match valid_phonemes(raw).filter(|_| !text.trim().is_empty()) {
                     Some(phonemes) => {
                         if !plain.is_empty() {
@@ -63,14 +82,24 @@ pub fn parse(sentence: &str) -> Vec<Segment> {
                     }
                     None => plain.push_str(text),
                 }
-                rest = next;
+                &t[end + 2..]
+            }
+            // A hint missing its `/)`: keep the word, drop the stray
+            // phonemes, never the words after them.
+            Some(')') if !raw.is_empty() => {
+                plain.push_str(text);
+                &t[end + 1..]
+            }
+            None | Some('[' | '\n') if !raw.trim().is_empty() => {
+                plain.push_str(text);
+                &t[raw.trim_end().len()..]
             }
             _ => {
-                // `[text]` without a hint: the text, minus brackets.
+                // A link: the text, minus brackets.
                 plain.push_str(text);
-                rest = tail;
+                tail
             }
-        }
+        };
     }
     plain.push_str(rest);
     if !plain.is_empty() {
@@ -127,14 +156,84 @@ mod tests {
 
     #[test]
     fn invalid_hint_keeps_the_word_as_plain_text() {
-        // `#` is not in Kokoro's vocab.
-        assert_eq!(parse("a [Grok](/ɡɹ#ɑk/) b"), vec![plain("a Grok b")]);
+        // `*` is not in Kokoro's vocab.
+        assert_eq!(parse("a [Grok](/ɡɹ*ɑk/) b"), vec![plain("a Grok b")]);
         // ASCII `g` is folded to `ɡ`, as the lexicon does.
         assert_eq!(parse("[Grok](/gɹˈɑk/)"), vec![hinted("Grok", "ɡɹˈɑk")]);
-        assert_eq!(parse("a [Grok](//) b"), vec![plain("a Grok b")]);
-        // Plain-ASCII "phonemes" are a relative link, not a hint.
-        assert_eq!(parse("see [docs](/docs/)"), vec![plain("see docs")]);
         assert_eq!(parse("[](/pɛk/)"), Vec::<Segment>::new());
+    }
+
+    #[test]
+    fn ascii_phonemes_are_hints_but_paths_and_urls_are_links() {
+        // Same acceptance rule as the web's `HINT_SRC`.
+        assert_eq!(parse("[be](/bi/)"), vec![hinted("be", "bi")]);
+        assert_eq!(
+            parse("[a](/A/) [to](/tu/)"),
+            vec![hinted("a", "A"), plain(" "), hinted("to", "tu")]
+        );
+        assert_eq!(
+            parse("the [api](/api/v1/) doc"),
+            vec![plain("the api(/api/v1/) doc")]
+        );
+        assert_eq!(
+            parse("see [docs](/a/b.md)"),
+            vec![plain("see docs(/a/b.md)")]
+        );
+        assert_eq!(parse("[v2](/v2/)"), vec![plain("v2(/v2/)")]);
+        assert_eq!(parse("a [x](//) b"), vec![plain("a x(//) b")]);
+    }
+
+    #[test]
+    fn fully_hinted_sentence_parses_word_by_word() {
+        let s = "[Got](/ɡˈɑt/) [it](/ɪt/), [I'll](/ˈIl/) [check](/ʧˈɛk/) [Stashify](/stˈæʃɪfˌI/) [now](/nˈW/).";
+        let segs = parse(s);
+        let hinted_words: Vec<&str> = segs
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Hinted { text, .. } => Some(text.as_str()),
+                Segment::Plain(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            hinted_words,
+            ["Got", "it", "I'll", "check", "Stashify", "now"]
+        );
+        assert_eq!(segs.len(), 12, "{segs:?}");
+        assert_eq!(strip(s), "Got it, I'll check Stashify now.");
+        // A bad hint mid-sentence costs only that word its hint.
+        let segs = parse("[Got](/ɡˈɑt/) [it](/ɪ*t/), [now](/nˈW/).");
+        assert_eq!(
+            segs,
+            vec![
+                hinted("Got", "ɡˈɑt"),
+                plain(" it, "),
+                hinted("now", "nˈW"),
+                plain("."),
+            ]
+        );
+    }
+
+    #[test]
+    fn parsing_a_long_fully_hinted_reply_is_fast() {
+        let s = "[Got](/ɡˈɑt/) [it](/ɪt/), ".repeat(100);
+        let t = std::time::Instant::now();
+        let segs = parse(&s);
+        let took = t.elapsed();
+        assert_eq!(segs.len(), 400);
+        // ~10 µs in release; generous for debug builds on a busy box.
+        assert!(took < std::time::Duration::from_millis(5), "{took:?}");
+    }
+
+    #[test]
+    fn every_hint_in_the_voice_prompt_is_valid() {
+        let prompt = crate::service::voice_relay::VOICE_SYSTEM_PROMPT;
+        let written = prompt.matches("](/").count();
+        let parsed = parse(prompt)
+            .iter()
+            .filter(|s| matches!(s, Segment::Hinted { .. }))
+            .count();
+        assert!(written > 25, "{written}");
+        assert_eq!(parsed, written);
     }
 
     #[test]
@@ -147,7 +246,17 @@ mod tests {
             parse("a [link](https://x.y) c"),
             vec![plain("a link(https://x.y) c")]
         );
-        assert_eq!(parse("half [Peck](/pɛk"), vec![plain("half Peck(/pɛk")]);
+        // A hint missing its `/)` keeps the word, loses the stray phonemes,
+        // and never swallows the words after it.
+        assert_eq!(parse("half [Peck](/pɛk"), vec![plain("half Peck")]);
+        assert_eq!(
+            parse("[Got](/ɡˈɑt [it](/ɪt/), ok"),
+            vec![plain("Got "), hinted("it", "ɪt"), plain(", ok")]
+        );
+        assert_eq!(
+            parse("[Got](/ɡˈɑt) [it](/ɪt/)."),
+            vec![plain("Got "), hinted("it", "ɪt"), plain(".")]
+        );
         assert_eq!(
             parse("[a [b](/bˈi/)"),
             vec![plain("a "), hinted("b", "bˈi")]
@@ -174,12 +283,10 @@ mod pipeline_tests {
         // A valid hint is spoken as written, and is not an unknown word.
         let out = ph("Ask [Zorblax](/zˈɔɹbləks/) now.");
         assert!(out.contains("zˈɔɹbləks"), "{out}");
-        // The user lexicon beats the model's hint.
-        let out = ph("Open [Peckboard](/pˈɛk/) now.");
-        assert!(out.contains("pˈɛkbˌɔːɹd"), "{out}");
-        // An invalid hint (ASCII `#`) is dropped: the word reads as if unhinted.
-        assert_eq!(ph("[hello](/hˈ#/) there"), ph("hello there"));
-        assert_eq!(ph("[Quibbix](/kw#/)"), ph("Quibbix"));
+        // An invalid hint (`*` isn't in Kokoro's vocab) is dropped: the word
+        // reads as if unhinted.
+        assert_eq!(ph("[hello](/hˈ*/) there"), ph("hello there"));
+        assert_eq!(ph("[Quibbix](/kw*/)"), ph("Quibbix"));
         lex.flush_unknown().await.unwrap();
         let unknown: Vec<String> = db
             .list_tts_unknown()
@@ -205,5 +312,19 @@ mod pipeline_tests {
         let lex = lexicon::store(&db).await.unwrap();
         let out = phonemize_with(&LexG2p::new(false), Some(&lex), "QXZ", false).unwrap();
         assert_eq!(out.trim(), l2s::spell_letters("QXZ"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn fully_hinted_sentence_speaks_its_hints_except_lexicon_words() {
+        let db = Db::in_memory().unwrap();
+        let lex = lexicon::store(&db).await.unwrap();
+        let g = LexG2p::new(false);
+        let ph = |t: &str| phonemize_with(&g, Some(&lex), t, false).unwrap();
+        let out = ph("[Got](/ɡˈɑt/) [it](/ɪt/), [Peckboard](/pˈɛk/) [works](/wˈɜɹks/).");
+        assert_eq!(out.trim(), "ɡˈɑt ɪt , pˈɛkbˌɔːɹd wˈɜɹks .", "{out}");
+        // A bad hint mid-sentence (`*` isn't in Kokoro's vocab) falls back
+        // to misaki for that word only.
+        let out = ph("[Got](/ɡˈɑt/) [check](/ʧ*k/) [now](/nˈɑ/).");
+        assert_eq!(out.trim(), "ɡˈɑt ʧˈɛk nˈɑ .", "{out}");
     }
 }

@@ -500,6 +500,16 @@ diesel::table! {
     }
 }
 diesel::table! {
+    voice_prompt_versions (id) {
+        id -> Text,
+        content -> Text,
+        source -> Text,
+        note -> Nullable<Text>,
+        created_at -> Text,
+        created_by -> Nullable<Text>,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -731,5 +741,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     tts_lexicon,
     tts_lexicon_seeded,
     tts_unknown_words,
+    voice_prompt_versions,
     session_view_nodes,
 );

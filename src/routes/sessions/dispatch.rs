@@ -96,6 +96,20 @@ pub(super) struct SendMessageRequest {
     attachment_ids: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
+    /// Where a voice-assistant utterance came from (`voice-mic` /
+    /// `voice-typed`), stored on the `user` event so a phantom utterance
+    /// can be traced back to its origin. Any other value is ignored.
+    source: Option<String>,
+}
+
+/// The `source` values a client may stamp on its own message. Server-side
+/// origins (`voice-relay`) are never accepted from a request body.
+fn client_voice_source(source: Option<&str>) -> Option<&'static str> {
+    match source {
+        Some("voice-mic") => Some("voice-mic"),
+        Some("voice-typed") => Some("voice-typed"),
+        _ => None,
+    }
 }
 
 /// POST /api/sessions/:id/message -- send a message to spawn a Claude CLI process.
@@ -105,9 +119,31 @@ pub(super) async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Extension(user): Extension<AuthUser>,
+    connect: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
-    tracing::info!(session_id = %id, "Sending message");
+    let voice_source = client_voice_source(body.source.as_deref());
+    if let Some(source) = voice_source {
+        // Voice sends carry who sent them, so an utterance the user never
+        // said can be tied to a client.
+        let peer = connect.map(|Extension(c)| c.0.to_string());
+        let agent = headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        tracing::info!(
+            session_id = %id,
+            source,
+            peer = peer.as_deref().unwrap_or("?"),
+            user_agent = agent,
+            user_id = %user.user_id,
+            chars = body.text.chars().count(),
+            "Sending voice message"
+        );
+    } else {
+        tracing::info!(session_id = %id, "Sending message");
+    }
     crate::routes::settings::check_model_or_400(body.model.as_deref())?;
     // Verify session exists
     let session = state.db.get_session(&id).await.map_err(|e| {
@@ -360,6 +396,9 @@ pub(super) async fn send_message(
     // queue below with `user_event_appended = true`, so the drain
     // delivers it later without writing a duplicate event.
     let mut user_data = serde_json::json!({ "text": resolved_text });
+    if let Some(source) = voice_source {
+        user_data["source"] = serde_json::json!(source);
+    }
     if let Some(ref ids) = attachment_ids {
         user_data["attachmentIds"] = serde_json::json!(ids);
     }
@@ -1255,5 +1294,17 @@ mod resolve_effective_model_tests {
 
         let effective = resolve_effective_model(&state, "default", None).await;
         assert_eq!(effective, "default");
+    }
+
+    #[test]
+    fn only_client_voice_sources_are_accepted() {
+        assert_eq!(client_voice_source(Some("voice-mic")), Some("voice-mic"));
+        assert_eq!(
+            client_voice_source(Some("voice-typed")),
+            Some("voice-typed")
+        );
+        // A client can't pass its text off as a server-side relay.
+        assert_eq!(client_voice_source(Some("voice-relay")), None);
+        assert_eq!(client_voice_source(None), None);
     }
 }

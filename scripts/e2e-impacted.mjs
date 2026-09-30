@@ -40,6 +40,7 @@ const RELEVANT = [
   /^web\/e2e\//,
   /^migrations\//,
   /^Cargo\.(toml|lock)$/,
+  /^peck-plugins-wasm\//,
   /^build\.rs$/,
   /^web\/(index\.html|package(-lock)?\.json|vite\.config\.ts|tsconfig[^/]*\.json)$/,
 ];
@@ -62,6 +63,7 @@ const ALWAYS_ALL = [
   /^src\/db\//,
   /^migrations\//,
   /^Cargo\.(toml|lock)$/,
+  /^peck-plugins-wasm\//,
   /^build\.rs$/,
 ];
 
@@ -83,8 +85,10 @@ const changed = [
   ...git(["ls-files", "--others", "--exclude-standard"]),
 ];
 
-const relevant = [...new Set(changed)].filter((f) =>
-  RELEVANT.some((re) => re.test(f)),
+// Dot-dirs (editor/agent config such as web/e2e/.cursor/) are never built;
+// matching them against ALWAYS_ALL's harness rule used to force full runs.
+const relevant = [...new Set(changed)].filter(
+  (f) => RELEVANT.some((re) => re.test(f)) && !/(^|\/)\./.test(f),
 );
 
 // A changed spec file impacts exactly itself — the map is source→specs and

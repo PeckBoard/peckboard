@@ -48,6 +48,8 @@ type StubWindow = {
   __spoken: string[]
   __audioStarts: number
   __audioStops: number
+  __audioLive: number
+  __audioStall: boolean
 }
 
 /** 16-bit mono 24 kHz WAV of a quiet tone, `seconds` long. */
@@ -168,15 +170,30 @@ async function primePage(page: Page, token: string, voiceURI?: string) {
 
       w.__audioStarts = 0
       w.__audioStops = 0
+      // Sources started and neither stopped nor ended: still able to sound.
+      w.__audioLive = 0
+      // `__audioStall`: the output device stalls (a Bluetooth route change
+      // freezes the context's clock) — a clip starts but never plays out.
+      w.__audioStall = false
+      const sounding = new Set<AudioBufferSourceNode>()
       const proto = AudioBufferSourceNode.prototype
       const start = proto.start
       const stop = proto.stop
       proto.start = function (...args: Parameters<typeof start>) {
         w.__audioStarts = (w.__audioStarts as number) + 1
+        sounding.add(this)
+        w.__audioLive = sounding.size
+        this.addEventListener('ended', () => {
+          sounding.delete(this)
+          w.__audioLive = sounding.size
+        })
+        if (w.__audioStall) return start.call(this, this.context.currentTime + 1000)
         return start.apply(this, args)
       }
       proto.stop = function (...args: Parameters<typeof stop>) {
         w.__audioStops = (w.__audioStops as number) + 1
+        sounding.delete(this)
+        w.__audioLive = sounding.size
         return stop.apply(this, args)
       }
     },
@@ -272,8 +289,77 @@ test('a failing Kokoro request falls back to the browser voice', async ({ reques
   await page.getByTestId('voice-fab').click()
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect.poll(() => recognizing(page)).toBe(true)
+  // Real speech builds up through a partial result before the final (a
+  // bare final right after the mic starts reads as a recognizer phantom).
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('Fallback'))
   await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('Fallback please.'))
 
   await expect.poll(() => spoken(page), { timeout: 15_000 }).toContain('Fallback please.')
   expect(await audioStarts(page)).toBe(0)
+})
+
+test('a sentence skipped on a stalled output never plays after a barge-in', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token, 'kokoro:af_heart')
+  const ready = { state: 'ready', progress: 1, error: null }
+  await page.route('**/api/voice/tts/prepare', (r) => r.fulfill({ json: ready }))
+  await page.route('**/api/voice/tts/status', (r) => r.fulfill({ json: ready }))
+  const requested: string[] = []
+  await page.route('**/api/voice/tts', (r) => {
+    requested.push(String((r.request().postDataJSON() as { text?: string }).text ?? ''))
+    return r.fulfill({ status: 200, contentType: 'audio/wav', body: wav(0.2) })
+  })
+  await page.goto('/')
+  const audioLive = () => page.evaluate(() => (window as unknown as StubWindow).__audioLive)
+
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
+  await expect.poll(() => recognizing(page)).toBe(true)
+
+  // The output stalls: "Fair enough." starts but never plays out, so the
+  // playback watchdog moves on to the next sentence.
+  await page.evaluate(() => {
+    ;(window as unknown as StubWindow).__audioStall = true
+  })
+  await page.evaluate(
+    (t) => (window as unknown as StubWindow).__voiceSay(t),
+    'Fair enough. Golf is the second point. Hotel is the third point.',
+  )
+  await expect.poll(() => audioStarts(page), { timeout: 15_000 }).toBeGreaterThanOrEqual(2)
+
+  // The user talks over it: nothing already started may still sound once
+  // the output recovers — least of all the first sentence.
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceInterim('stop right there please'),
+  )
+  await expect(page.getByTestId('voice-status')).not.toHaveText('Speaking')
+  await expect.poll(audioLive).toBe(0)
+
+  await page.evaluate(() => {
+    const w = window as unknown as StubWindow
+    w.__audioStall = false
+    w.__voiceSay('stop right there please and count zebras')
+  })
+  await expect
+    .poll(() => requested.some((t) => t.includes('zebras')), { timeout: 15_000 })
+    .toBe(true)
+  const res = await request.post(`/api/sessions/${voice.session_id}/message`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: '[relay] update from "zoo": PANGOLIN count finished.' },
+  })
+  expect(res.ok(), `relay send failed: ${await res.text()}`).toBeTruthy()
+  await expect
+    .poll(() => requested.some((t) => t.includes('PANGOLIN')), { timeout: 15_000 })
+    .toBe(true)
+  await page.waitForTimeout(500)
+  expect(
+    requested.filter((t) => t.startsWith('Fair enough')).length,
+    JSON.stringify(requested),
+  ).toBe(1)
+  expect(await spoken(page)).toEqual([])
 })

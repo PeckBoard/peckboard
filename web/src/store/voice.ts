@@ -2,8 +2,8 @@ import { create } from 'zustand'
 import type { Event } from '../types/api'
 import { authedFetch } from './auth'
 import { useWsStore } from './ws'
-import { getSpeechEngine, voiceLog } from '../voice/engine'
-import { DEFAULT_KOKORO_VOICE, installKokoroEngine } from '../voice/kokoro'
+import { getSpeechEngine, MIN_FINAL_CONFIDENCE, voiceLog, type HeardMeta } from '../voice/engine'
+import { DEFAULT_KOKORO_VOICE, installKokoroEngine, useKokoroDevicePrefs } from '../voice/kokoro'
 import {
   closeOpenHint,
   echoOverlap,
@@ -17,6 +17,15 @@ import {
   stripInterruptMarker,
   takeSpeakable,
 } from '../voice/text'
+import {
+  FILLER_DELAY_MS,
+  pickFiller,
+  playFiller,
+  prepareFillers,
+  startThinkingCue,
+  stopThinkingCue,
+  type FillerPlayback,
+} from '../voice/thinking'
 
 /** How long a stream stalled inside a pronunciation hint is waited on
  *  before the tail is spoken anyway (with the hint's bare word). */
@@ -35,6 +44,10 @@ export interface VoicePrefs {
   autoListen: boolean
   /** Longest pause (ms) waited out when the user stops mid-sentence. */
   maxPauseMs: number
+  /** A soft looping cue plays while the reply is awaited. */
+  thinkingCue: boolean
+  /** A short spoken filler ("One sec.") when the reply is slow to start. */
+  thinkingFiller: boolean
 }
 
 export const VOICE_PREFS_KEY = 'peckboard_voice_prefs'
@@ -46,6 +59,8 @@ const DEFAULT_PREFS: VoicePrefs = {
   lang: '',
   autoListen: true,
   maxPauseMs: 5000,
+  thinkingCue: true,
+  thinkingFiller: true,
 }
 
 function loadPrefs(): VoicePrefs {
@@ -61,6 +76,12 @@ function loadPrefs(): VoicePrefs {
       autoListen:
         typeof parsed.autoListen === 'boolean' ? parsed.autoListen : DEFAULT_PREFS.autoListen,
       maxPauseMs: clamp(Number(parsed.maxPauseMs), 2000, 10000, DEFAULT_PREFS.maxPauseMs),
+      thinkingCue:
+        typeof parsed.thinkingCue === 'boolean' ? parsed.thinkingCue : DEFAULT_PREFS.thinkingCue,
+      thinkingFiller:
+        typeof parsed.thinkingFiller === 'boolean'
+          ? parsed.thinkingFiller
+          : DEFAULT_PREFS.thinkingFiller,
     }
   } catch {
     return DEFAULT_PREFS
@@ -128,7 +149,9 @@ interface VoiceState {
   /** Silence the rest of the current reply (the turn keeps running). */
   stopSpeaking: () => void
   /** Send an utterance (spoken or typed) to the voice session. */
-  sendText: (text: string) => Promise<void>
+  /** `source` is stored on the user event: `voice-mic` for recognized
+   *  speech, `voice-typed` for the typed fallback. */
+  sendText: (text: string, source?: 'voice-mic' | 'voice-typed') => Promise<void>
   /** Speak a sample sentence with the current prefs. */
   testVoice: () => void
   clearError: () => void
@@ -189,10 +212,21 @@ let keepaliveTimer: ReturnType<typeof setInterval> | null = null
 /** Last time the user (not our echo) was heard. */
 let lastHeardAt = 0
 let lastSpeakingReport = 0
+/** A lone word heard over the assistant, held until more speech shows it
+ *  was the user starting to talk (see `LONE_ATTACH_MS`). */
+let heldLone: { text: string; at: number } | null = null
 /** Re-checks speech held back while the user talks. */
 let holdTimer: ReturnType<typeof setTimeout> | null = null
 /** The server was told the assistant is being read aloud. */
 let ttsReported = false
+
+// Thinking feedback (see `voice/thinking.ts`).
+/** Says a filler if no reply audio has started by then. */
+let fillerTimer: ReturnType<typeof setTimeout> | null = null
+/** The filler playing right now. */
+let fillerNow: FillerPlayback | null = null
+/** This turn already had its filler. */
+let fillerUsed = false
 
 // Live stream plumbing.
 let liveListener: ((ev: Event) => void) | null = null
@@ -203,6 +237,8 @@ let heldEvents: Event[] = []
 /** Events at or below this seq were already there when the panel opened
  *  (history, or a WS resume replaying them) — shown, never spoken. */
 let speakAfterSeq = Number.MAX_SAFE_INTEGER
+/** Seqs of events that already drove the speech loop this panel session. */
+let spokenSeqs = new Set<number>()
 
 /** How long after an utterance ends the mic may still deliver it back. */
 const ECHO_TAIL_MS = 1500
@@ -221,6 +257,12 @@ const SPEAKING_KEEPALIVE_MS = 3000
 const SPEAKING_REPORT_MS = 1000
 /** A hypothesis with no update for this long no longer holds speech. */
 const STALE_INTERIM_MS = 8000
+/** A lone word held over the assistant's voice joins the utterance if more
+ *  speech follows within this long; otherwise it was noise. */
+const LONE_ATTACH_MS = 4000
+/** After playback, a hypothesis with this many words we didn't just say is
+ *  the user, however many of our words it shares. */
+const TAIL_NOVEL_WORDS = 2
 
 function mergeEvents(existing: Event[], incoming: Event[]): Event[] {
   const bySeq = new Map<number, Event>()
@@ -266,6 +308,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     echoPool = echoPool.filter((e) => e.until > now)
     const texts = echoPool.map((e) => e.text)
     if (currentUtterance) texts.push(currentUtterance)
+    if (fillerNow) texts.push(fillerNow.filler.text)
     return texts
   }
 
@@ -308,7 +351,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
 
   const pump = () => {
     clearHoldTimer()
-    if (speakingNow) return
+    if (speakingNow || fillerNow) return
     if (speakQueue.length > 0 && userCapturing()) {
       // Never start speaking over the user; resume once they're done (or
       // their hypothesis goes stale without a final result).
@@ -334,9 +377,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       voiceURI: prefs.voiceURI,
       rate: prefs.rate,
       pitch: prefs.pitch,
+      onStart: () => {
+        if (gen === speakGen) stopThinking('reply audio started', false)
+      },
       onError: reportSpeakError,
       onEnd: () => {
         if (gen !== speakGen) return
+        stopThinking('reply utterance ended', false)
         speakingNow = false
         currentUtterance = null
         rememberSpoken(next)
@@ -349,7 +396,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   /** Let a fetching engine (Kokoro) start on the next chunk early. */
   const prefetchNext = () => {
     const head = speakQueue[0]
-    if (!speakingNow || head === undefined) return
+    if (!(speakingNow || fillerNow) || head === undefined) return
     const { prefs } = get()
     engine().prefetch?.(head, {
       voiceURI: prefs.voiceURI,
@@ -396,6 +443,63 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     flushTimer = setTimeout(flushBuffer, delay)
   }
 
+  // ── Thinking feedback (cue + filler while the reply is awaited) ──
+  const audioCtx = () => engine().audioContext?.() ?? null
+
+  const clearFillerTimer = () => {
+    if (fillerTimer) clearTimeout(fillerTimer)
+    fillerTimer = null
+  }
+
+  /** Stop the cue and a pending filler; `withFiller` also cuts one that
+   *  is playing (a reply that just started waits for it instead). */
+  const stopThinking = (reason: string, withFiller = true) => {
+    clearFillerTimer()
+    stopThinkingCue(reason)
+    if (withFiller) fillerNow?.stop()
+  }
+
+  /** An utterance was sent: cue now, a filler if the reply is slow. */
+  const startThinking = () => {
+    stopThinking('new utterance')
+    fillerUsed = false
+    // Still speaking the last reply: that is feedback enough.
+    if (speakingNow || speakQueue.length > 0) return
+    const { prefs } = get()
+    const ctx = audioCtx()
+    if (prefs.thinkingCue && ctx) startThinkingCue(ctx)
+    if (prefs.thinkingFiller) {
+      prepareFillers(prefs.voiceURI, ctx)
+      fillerTimer = setTimeout(sayFiller, FILLER_DELAY_MS)
+    }
+  }
+
+  /** No reply audio yet: say one short filler (at most one per turn). Only
+   *  while nothing is handed to the engine — a clip already fetching would
+   *  otherwise start over it. */
+  const sayFiller = () => {
+    fillerTimer = null
+    if (!get().panelOpen || !awaitingReply || fillerUsed || fillerNow) return
+    if (speakingNow || speakQueue.length > 0 || userCapturing()) return
+    const ctx = audioCtx()
+    const pick = ctx?.state === 'running' ? pickFiller(get().prefs.voiceURI) : null
+    if (!ctx || !pick) {
+      voiceLog('thinking filler: none ready (needs a Kokoro voice with audio unlocked)')
+      return
+    }
+    fillerUsed = true
+    // The filler is audible feedback already: the cue is done for this turn.
+    stopThinkingCue('filler started')
+    const { filler } = pick
+    fillerNow = playFiller(ctx, filler, pick.audio, () => {
+      fillerNow = null
+      rememberSpoken(filler.text)
+      // A reply that arrived meanwhile starts now, never over the filler.
+      pump()
+    })
+    refreshStatus()
+  }
+
   const cancelSpeech = (reason: string) => {
     speakGen++
     if (currentUtterance) rememberSpoken(currentUtterance)
@@ -407,6 +511,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     clearHoldTimer()
     engine().cancelSpeech(reason)
     if (ttsReported) reportActivity('tts_end')
+    stopThinking(reason)
   }
 
   // ── Always-on recognition ──
@@ -416,11 +521,21 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   }
 
   /** Speech is audible, or queued and not held for the user. */
-  const assistantAudible = () => speakingNow || (speakQueue.length > 0 && !userCapturing())
+  const assistantAudible = () =>
+    speakingNow || fillerNow !== null || (speakQueue.length > 0 && !userCapturing())
 
   /** Barge-in: the user talks over the assistant — stop speaking and
    *  interrupt its running turn so the new utterance is answered next. */
   const bargeIn = (heard: string) => {
+    // Only the thinking filler was audible: it's Peckboard's, not the
+    // reply — silence it, but the user hasn't cut the turn off.
+    if (fillerNow && !speakingNow && speakQueue.length === 0) {
+      voiceLog('user talked over the thinking filler:', JSON.stringify(heard))
+      stopThinking('user talked over the filler')
+      userOverSpeech = false
+      refreshStatus()
+      return
+    }
     voiceLog('barge-in: user talked over the assistant:', JSON.stringify(heard))
     cancelSpeech(`barge-in: "${heard}"`)
     const { sessionId } = get()
@@ -458,11 +573,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     clearKeepalive()
     const text = utteranceParts.join(' ').trim()
     utteranceParts = []
+    heldLone = null
     set({ heard: '', turnUnfinished: false })
     userOverSpeech = false
     if (text) {
       voiceLog('end of speech; sending utterance:', JSON.stringify(text))
-      void get().sendText(text)
+      void get().sendText(text, 'voice-mic')
     }
     pump()
   }
@@ -513,14 +629,37 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     flushUtterance()
   }
 
-  const onHeard = (text: string, isFinal: boolean) => {
+  /** A lone word held back over the assistant's voice was the start of
+   *  the user's speech after all: it heads the utterance. */
+  const adoptHeldLone = () => {
+    if (!heldLone) return
+    if (Date.now() - heldLone.at < LONE_ATTACH_MS) {
+      voiceLog('kept a held lone word: more speech followed:', JSON.stringify(heldLone.text))
+      utteranceParts.push(heldLone.text)
+    }
+    heldLone = null
+  }
+  const onHeard = (text: string, isFinal: boolean, meta?: HeardMeta) => {
     const words = speechWords(text)
     const audible = assistantAudible()
     // The echo check runs first, so the assistant's own voice never counts
     // as the user speaking — neither here nor in the server's relay gate.
     const overlap = echoOverlap(text, echoTexts())
+    // Once playback has stopped only the echo tail of the last sentence can
+    // reach the mic, so speech from a user who already holds the floor, or
+    // with clearly new words, is the user even if it shares our words.
+    const novelWords = Math.round(words.length * (1 - overlap))
+    const userHoldsFloor = userCapturing()
+    const userSpeech =
+      !(speakingNow || fillerNow) && (userHoldsFloor || novelWords >= TAIL_NOVEL_WORDS)
+    if (words.length > 0 && overlap >= ECHO_OVERLAP && userSpeech) {
+      voiceLog(
+        `kept speech overlapping our last words (${userHoldsFloor ? 'user holds the floor' : `${novelWords} new words`}):`,
+        JSON.stringify(text),
+      )
+    }
     // Our own voice coming back through the mic: not the user.
-    if (words.length === 0 || overlap >= ECHO_OVERLAP) {
+    if (words.length === 0 || (overlap >= ECHO_OVERLAP && !userSpeech)) {
       if (words.length > 0) {
         voiceLog(`ignored as echo of our own voice (${isFinal ? 'final' : 'interim'}):`, text)
       }
@@ -534,7 +673,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     // Talking over audible speech makes this utterance a barge-in, even if
     // that speech is held back (silent) by the time its final result lands
     // — otherwise the held rest of the reply would play once they finish.
-    if (speakingNow) userOverSpeech = true
+    if (speakingNow || fillerNow) userOverSpeech = true
     const interrupting = audible || userOverSpeech
     // Still talking: never send (or speak) mid-utterance.
     clearSendTimer()
@@ -544,29 +683,47 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     }
     if (!isFinal) {
       set({ interim: text })
+      adoptHeldLone()
       // A partial hypothesis over the assistant's voice is often the
       // speaker bleeding into the mic, misheard enough to slip past the
       // echo check — and a barge-in on it silences the reply at once.
       // Only yield early on clearly different words; otherwise wait for
       // the final result.
+      const lowConfidence =
+        meta !== undefined && meta.confidence > 0 && meta.confidence < MIN_FINAL_CONFIDENCE
       if (
         interrupting &&
+        !lowConfidence &&
         words.length >= INTERIM_BARGE_IN_WORDS &&
         overlap < INTERIM_BARGE_IN_OVERLAP
       ) {
         bargeIn(text)
+      } else if (interrupting && lowConfidence) {
+        voiceLog('no barge-in on a low-confidence interim:', JSON.stringify(text), meta)
       }
       // Mid-utterance: new speech restarts the end-of-turn countdown.
       if (utteranceParts.length > 0) armEndOfTurn()
       return
     }
     set({ interim: '' })
+    // Over the assistant's voice, a final with no interim buildup is the
+    // recognizer inventing words from headset bleed or noise, not the user.
+    if (interrupting && meta && !meta.hadInterim && utteranceParts.length === 0) {
+      voiceLog(
+        'dropped utterance (final over the assistant with no interim buildup):',
+        JSON.stringify(text),
+      )
+      userWentQuiet('no interim buildup')
+      return
+    }
+    adoptHeldLone()
     // A lone word over the assistant's voice is more likely noise or a
-    // misheard echo than the user taking the floor.
-    if (interrupting && words.length < BARGE_IN_WORDS) {
-      voiceLog('ignored a lone word heard over the assistant:', text)
+    // misheard echo than the user taking the floor — unless more speech
+    // follows: hold it, and it heads the utterance if the user goes on.
+    if (interrupting && words.length < BARGE_IN_WORDS && utteranceParts.length === 0) {
+      voiceLog('held a lone word heard over the assistant (kept if more speech follows):', text)
+      heldLone = { text, at: Date.now() }
       userWentQuiet('lone word')
-      if (utteranceParts.length > 0) armEndOfTurn()
       return
     }
     if (interrupting) bargeIn(text)
@@ -584,8 +741,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     engine().startListening(
       { lang: get().prefs.lang, continuous: true },
       {
-        onInterim: (text) => onHeard(text, false),
-        onFinal: (text) => onHeard(text, true),
+        onInterim: (text, meta) => onHeard(text, false, meta),
+        onFinal: (text, meta) => onHeard(text, true, meta),
         onEnd: () => {
           recActive = false
           if (get().interim) {
@@ -653,6 +810,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   // ── Live events ──
   /** Drive the speech loop from one of the voice session's events. */
   const speakEvent = (ev: Event) => {
+    // Each event drives speech at most once: a replay (WS resume/resync,
+    // a reconnect) must never read an already-spoken sentence again.
+    if (spokenSeqs.has(ev.seq)) {
+      if (ev.kind === 'agent-text') voiceLog(`not speaking replayed text (seq ${ev.seq})`)
+      return
+    }
+    spokenSeqs.add(ev.seq)
     switch (ev.kind) {
       case 'agent-start': {
         agentRunning = true
@@ -690,6 +854,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         awaitingReply = false
         muteTurn = false
         pump()
+        // Nothing to say: the thinking cue has nothing left to wait for.
+        if (!speakingNow && speakQueue.length === 0)
+          stopThinking('turn ended with no speech', false)
         refreshStatus()
         break
       }
@@ -750,6 +917,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     historyReady = false
     heldEvents = []
     speakAfterSeq = Number.MAX_SAFE_INTEGER
+    spokenSeqs = new Set()
     speakErrorShown = false
     echoPool = []
     utteranceParts = []
@@ -761,12 +929,19 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     set({ heard: '', turnUnfinished: false })
   }
 
+  // A new Kokoro speed makes the cached fillers stale: re-synthesize them.
+  useKokoroDevicePrefs.subscribe(() => {
+    const { panelOpen, prefs } = get()
+    if (panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, audioCtx())
+  })
+
   return {
     prefs: loadPrefs(),
     setPrefs: (patch) => {
       const prefs = { ...get().prefs, ...patch }
       savePrefs(prefs)
       set({ prefs })
+      if (get().panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, audioCtx())
     },
     recognitionSupported: engine().supportsRecognition(),
     panelOpen: false,
@@ -820,6 +995,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       engine().unlockSynthesis()
       set({ panelOpen: true, error: null })
       const { prefs, recognitionSupported } = get()
+      if (prefs.thinkingFiller) prepareFillers(prefs.voiceURI, audioCtx())
       if (prefs.autoListen && recognitionSupported) setMic(true)
       else refreshStatus()
       const info = await get().ensureSession()
@@ -870,7 +1046,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       refreshStatus()
     },
 
-    sendText: async (raw) => {
+    sendText: async (raw, source = 'voice-typed') => {
       const text = raw.trim()
       if (!text) return
       let { sessionId } = get()
@@ -885,6 +1061,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       const interrupted = interruptPending
       interruptPending = false
       awaitingReply = true
+      startThinking()
       reportActivity('sent')
       set((s) => ({
         pending: [...s.pending, { tempId, text, ts: Date.now() }],
@@ -899,7 +1076,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: interrupted ? INTERRUPT_MARKER + text : text }),
+          body: JSON.stringify({
+            text: interrupted ? INTERRUPT_MARKER + text : text,
+            source,
+          }),
         })
         if (!res.ok) {
           const err = (await res.json().catch(() => null)) as { error?: string } | null
@@ -907,6 +1087,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         }
       } catch (e) {
         awaitingReply = false
+        stopThinking('send failed')
         set((s) => ({
           pending: s.pending.filter((p) => p.tempId !== tempId),
           error: e instanceof Error ? e.message : "Couldn't send that. Please try again.",

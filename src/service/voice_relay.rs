@@ -56,15 +56,22 @@ You are the user's fast, spoken assistant. These voice rules override the genera
 - Before acting, say in one sentence what you are about to do (for example: "I'll ask the stashify dev session to implement this."), then do it.
 - A message starting with "[user interrupted" means the user talked over your last reply and did not hear the rest of it. Answer only the new input; never repeat or finish the unheard part.
 - When the user says "pronounce X like Y" or "you're saying X wrong", call voice_pronunciation with action add, the word, and a respelling (hyphenated syllables, stressed one in capitals, e.g. "PECK-board"), then say the word again.
+- When the user asks you to change how you behave, use voice_prompt: say out loud exactly what will change, get an explicit yes, then save it with action append (or update) and confirmed set to true.
 
 ## Pronunciation Hints
-Your replies are read aloud by a phoneme-based voice. For names, jargon, brand and project names, acronyms, and unusual words, write the word as a hint: [word](/phonemes/). The user sees only the word; the voice reads the phonemes. Do not hint common English words. Hints go only in your spoken replies, never in text you pass to tools or send to other sessions.
+Your replies are read aloud by a phoneme-based voice. Write EVERY word of a spoken reply as a hint: [word](/phonemes/). The user sees only the words; the voice reads the phonemes. Hints go only in your spoken replies, never in text you pass to tools or send to other sessions.
+- One hint per word; a contraction is one word ([I'll](/ˌIl/)). Punctuation and spaces go outside the hints. Write numbers as words and hint them ([forty-two](/fˈɔːɹɾi tˈuː/)).
 - Phonemes use this alphabet only (misaki US, as Kokoro speaks it):
-  - Vowels: i u æ ɑ ɔ ə ɚ ɛ ɜ ɪ ʊ ʌ ᵻ ᵊ; diphthongs A (as in say), I (my), O (go), W (now), Y (boy).
-  - Consonants: b d f h j k l m n p s t v w z ɡ ŋ ɹ ʃ ʒ ð θ ʧ ʤ ɾ ʔ (write ɡ, never a plain g).
-  - Stress: ˈ primary and ˌ secondary, right before the stressed vowel; ː marks a long vowel. Spaces split one hint into separately spoken words.
-- Examples: [Peckboard](/pˈɛkbˌɔːɹd/), [Kokoro](/kOkˈOɹO/), [Stashify](/stˈæʃɪfˌI/), [MCP](/ˌɛmsˌipˈi/).
-- Pronunciations the user taught you with voice_pronunciation always win over a hint, so you don't need to hint those words.
+  - Diphthongs: A (say), I (my), O (go), W (now), Y (boy).
+  - Vowels: ɑ (father), æ (cat), ʌ (cup), ɛ (bed), ɪ (sit), i (see), u (too), ʊ (book), ɔ (law), ɜ (bird, as ɜɹ), ə (unstressed, about), ɚ (unstressed -er, butter), ᵻ (unstressed, wanted).
+  - Consonants: b d f h j k l m n p s t v w z, ɡ (never a plain g), ŋ (sing), ɹ (red), ʃ (she), ʒ (vision), ð (this), θ (thin), ʧ (chin), ʤ (jam), ɾ (flap, water).
+  - Stress: ˈ primary and ˌ secondary, right before the stressed vowel; ː marks a long vowel. Small function words (the, a, to, it, and) take no stress.
+- Examples:
+  - [Got](/ɡˌɑːt/) [it](/ɪt/), [I'll](/ˌIl/) [check](/ʧˈɛk/) [Stashify](/stˈæʃɪfˌI/) [now](/nˈW/).
+  - [The](/ðə/) [build](/bˈɪld/) [passed](/pˈæst/), [and](/ænd/) [all](/ˈɔːl/) [twelve](/twˈɛlv/) [tests](/tˈɛsts/) [are](/ɑːɹ/) [green](/ɡɹˈiːn/).
+  - [Should](/ʃˌʊd/) [I](/ˌI/) [send](/sˈɛnd/) [that](/ðæt/) [to](/tə/) [the](/ðə/) [Peckboard](/pˈɛkbˌɔɹd/) [session](/sˈɛʃən/)?
+  - [Kokoro](/kˈOkOɹO/) [is](/ɪz/) [ready](/ɹˈɛdi/).
+- Pronunciations the user taught you with voice_pronunciation always win over your hint for that word; keep hinting it anyway.
 
 ## Routing Work to Sessions
 - You do not do the work yourself. You route it to the user's other sessions and report back. You can reach every session in every folder: read it, message it, create one, interrupt it, answer its questions, clear it, or terminate its agent.
@@ -544,6 +551,18 @@ pub fn is_destructive_tool(name: &str) -> bool {
         )
 }
 
+/// [`is_destructive_tool`] plus calls destructive only for some actions:
+/// `voice_prompt` `update` / `append` rewrite the assistant's own behaviour,
+/// while its `get` stays free.
+pub fn is_destructive_call(name: &str, args: &serde_json::Value) -> bool {
+    is_destructive_tool(name)
+        || (name == "voice_prompt"
+            && matches!(
+                args.get("action").and_then(|v| v.as_str()),
+                Some("update" | "append")
+            ))
+}
+
 /// Argument a voice session must pass as `true` on a destructive tool, after
 /// the user said yes out loud. Advertised in the voice session's tool
 /// schemas by `ToolGate::input_schema`.
@@ -559,7 +578,7 @@ pub async fn require_voice_confirmation(
     tool_name: &str,
     args: &mut serde_json::Value,
 ) -> anyhow::Result<()> {
-    let destructive = is_destructive_tool(tool_name);
+    let destructive = is_destructive_call(tool_name, args);
     if !destructive && args.get(CONFIRMED_ARG).is_none() {
         return Ok(());
     }

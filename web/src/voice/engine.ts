@@ -7,11 +7,19 @@
  */
 import { stripPronunciationHints } from './text'
 
+/** What the engine knows about a recognition result besides its text. */
+export interface HeardMeta {
+  /** Engine confidence 0..1; 0 = not reported (Chrome, for interims). */
+  confidence: number
+  /** A partial hypothesis built up before this result. */
+  hadInterim: boolean
+}
+
 export interface RecognitionCallbacks {
   /** Partial hypothesis while the user is still talking. */
-  onInterim: (text: string) => void
+  onInterim: (text: string, meta?: HeardMeta) => void
   /** Final transcript for the utterance. */
-  onFinal: (text: string) => void
+  onFinal: (text: string, meta?: HeardMeta) => void
   /** Recognition stopped (after a final result, silence, or `stop()`). */
   onEnd: () => void
   /** Recognition failed. `code` is the engine's error string (e.g.
@@ -35,6 +43,8 @@ export interface SpeakOptions {
   pitch: number
   /** Called when the utterance finishes or is cancelled. */
   onEnd: () => void
+  /** Audio actually started playing (not just queued or fetching). */
+  onStart?: () => void
   /** The engine failed to speak (`not-allowed`, `synthesis-failed`, …). */
   onError?: (code: string) => void
 }
@@ -55,6 +65,10 @@ export interface SpeechEngine {
   /** Optional hint: `text` will be spoken next, so engines that fetch
    *  audio (Kokoro) can start early. */
   prefetch?(text: string, opts: SpeakOptions): void
+  /** The engine's gesture-unlocked Web Audio context, if it plays through
+   *  one (Kokoro on desktop) — for the store's thinking cue and filler.
+   *  Never creates one: `null` until `unlockSynthesis` has. */
+  audioContext?(): AudioContext | null
   /** Cancel the current utterance and anything the engine has queued.
    *  `reason` is logged. */
   cancelSpeech(reason?: string): void
@@ -70,7 +84,7 @@ export interface SpeechEngine {
 // lib.dom does not ship them.
 interface SpeechRecognitionResultLike {
   isFinal: boolean
-  0: { transcript: string }
+  0: { transcript: string; confidence?: number }
   length: number
 }
 interface SpeechRecognitionEventLike {
@@ -114,6 +128,31 @@ export function voiceLog(...args: unknown[]): void {
   console.info('[voice]', ...args)
 }
 
+/** A final result below this (when the engine reports one) is noise. */
+export const MIN_FINAL_CONFIDENCE = 0.5
+/** How soon after a recognition (re)start a lone short final is suspect. */
+export const RESTART_GRACE_MS = 1000
+/** "Short" for a final that arrives with no interim buildup. */
+export const SHORT_FINAL_WORDS = 3
+
+/** Why a final result looks like a recognizer hallucination rather than the
+ *  user (null = keep it). Chrome invents phrases such as "have a good
+ *  morning" from near-silence or headset noise; those arrive with a low
+ *  confidence, or as a short final with no interim right after a restart. */
+export function phantomFinalReason(
+  text: string,
+  meta: HeardMeta,
+  msSinceStart: number,
+): string | null {
+  if (meta.confidence > 0 && meta.confidence < MIN_FINAL_CONFIDENCE) {
+    return `low confidence ${meta.confidence.toFixed(2)}`
+  }
+  const words = text.split(/\s+/).filter(Boolean).length
+  if (!meta.hadInterim && words <= SHORT_FINAL_WORDS && msSinceStart < RESTART_GRACE_MS) {
+    return 'short final with no interim right after recognition (re)start'
+  }
+  return null
+}
 /** Chromium exposes `navigator.userAgentData`; WebKit (incl. Chrome on iOS)
  *  and Firefox don't. */
 function isChromium(): boolean {
@@ -123,6 +162,9 @@ function isChromium(): boolean {
 /** Browser Web Speech API engine: `SpeechRecognition` for STT and
  *  `speechSynthesis` for TTS. */
 export class WebSpeechEngine implements SpeechEngine {
+  /** Bumped per recognition session, so results an ended session delivers
+   *  late are recognized as stale. */
+  private recGen = 0
   private recognition: SpeechRecognitionLike | null = null
   /** Utterances in flight — referenced so Chrome can't GC them mid-speech. */
   private live = new Set<SpeechSynthesisUtterance>()
@@ -153,20 +195,53 @@ export class WebSpeechEngine implements SpeechEngine {
     rec.interimResults = true
     rec.maxAlternatives = 1
     let finalText = ''
+    // Whether a partial hypothesis built up since the last final: real
+    // speech streams interims first; a hallucinated final (Chrome on
+    // near-silence or headset noise) typically arrives out of nowhere.
+    let heardInterim = false
+    const gen = ++this.recGen
+    const startedAt = Date.now()
     rec.onresult = (ev) => {
       let interim = ''
+      let interimConfidence = 0
+      let finalConfidence = 0
+      let finalChunk = ''
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const r = ev.results[i]
         const t = r[0]?.transcript ?? ''
-        if (r.isFinal) finalText += t
-        else interim += t
+        // Chrome reports 0 when it has no estimate (always, for interims).
+        const c = r[0]?.confidence ?? 0
+        if (r.isFinal) {
+          finalChunk += t
+          if (c > 0) finalConfidence = finalConfidence > 0 ? Math.min(finalConfidence, c) : c
+        } else {
+          interim += t
+          if (c > 0) interimConfidence = Math.max(interimConfidence, c)
+        }
       }
+      // Results for a recognition session that already ended (delivered
+      // after an auto-restart) are not live speech.
+      if (gen !== this.recGen || this.recognition !== rec) {
+        const stale = (finalChunk || interim).trim()
+        if (stale) voiceLog('dropped utterance (stale recognition session):', JSON.stringify(stale))
+        return
+      }
+      finalText += finalChunk
       if (finalText.trim()) {
         const text = finalText.trim()
         finalText = ''
-        cb.onFinal(text)
+        const meta: HeardMeta = { confidence: finalConfidence, hadInterim: heardInterim }
+        heardInterim = false
+        const drop = phantomFinalReason(text, meta, Date.now() - startedAt)
+        if (drop) {
+          voiceLog(`dropped utterance (${drop}):`, JSON.stringify(text), meta)
+          return
+        }
+        voiceLog('recognized final:', JSON.stringify(text), meta)
+        cb.onFinal(text, meta)
       } else if (interim) {
-        cb.onInterim(interim)
+        heardInterim = true
+        cb.onInterim(interim, { confidence: interimConfidence, hadInterim: true })
       }
     }
     rec.onerror = (ev) => {
@@ -275,6 +350,7 @@ export class WebSpeechEngine implements SpeechEngine {
       started = true
       if (startWatchdog) clearTimeout(startWatchdog)
       voiceLog('speak: started', JSON.stringify(text))
+      opts.onStart?.()
       // Chrome's network voices stop mid-utterance after ~15s unless the
       // engine is nudged; local voices don't need (or like) it.
       if (effective && !effective.localService) {

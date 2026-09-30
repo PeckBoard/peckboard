@@ -6,6 +6,7 @@ import {
   KOKORO_PREFIX,
   isKokoroVoice,
   preparePreviewPlayback,
+  useKokoroDevicePrefs,
 } from '../voice/kokoro'
 import ConfirmDialog from './ConfirmDialog'
 import FieldError from './FieldError'
@@ -111,7 +112,7 @@ function PronunciationModal({
   onSaved: () => void
 }) {
   const voice = useKokoroVoiceId()
-  const rate = useVoiceStore((s) => s.prefs.rate)
+  const rate = useKokoroDevicePrefs((s) => s.speed)
   const [word, setWord] = useState(draft.word)
   const [mode, setMode] = useState<Mode>(draft.mode)
   const [text, setText] = useState(draft.text)
@@ -339,7 +340,7 @@ function PronunciationModal({
 export default function VoicePronunciations() {
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const voiceURI = useVoiceStore((s) => s.prefs.voiceURI)
-  const rate = useVoiceStore((s) => s.prefs.rate)
+  const rate = useKokoroDevicePrefs((s) => s.speed)
   const voice = useKokoroVoiceId()
 
   const [entries, setEntries] = useState<LexiconEntry[]>([])

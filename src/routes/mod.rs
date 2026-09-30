@@ -38,6 +38,7 @@ pub mod usage;
 pub mod views;
 pub mod voice;
 pub mod voice_lexicon;
+pub mod voice_prompt;
 pub mod voice_tts;
 pub mod workflows;
 
@@ -91,6 +92,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(views::router(state.clone()))
         .merge(voice::router(state.clone()))
         .merge(voice_tts::router(state.clone()))
+        .merge(voice_prompt::router(state.clone()))
         .merge(voice_lexicon::router(state.clone()))
         .merge(agent_vars::router(state.clone()))
         .merge(ssh_keys::router(state.clone()))

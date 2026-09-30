@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.49"
+version = "0.1.50"
 edition = "2024"
 
 [dependencies]
@@ -140,3 +140,13 @@ tokio-tungstenite = "0.30.0"
 # inspection inside a debugger, which we rarely use.
 [profile.dev]
 debug = "line-tables-only"
+
+# Local verify / e2e builds (scripts/build-local-release.sh). Same opt-level
+# as release, but incremental, and in its own target/verify dir so it never
+# fights plain `cargo build --release` runs over fingerprints in
+# target/release. CI and shipped binaries use `--release` unchanged.
+# NOTE: a `build.incremental = false` in ~/.cargo/config.toml overrides this
+# `incremental`; the helper sets CARGO_INCREMENTAL=1, which wins.
+[profile.verify]
+inherits = "release"
+incremental = true

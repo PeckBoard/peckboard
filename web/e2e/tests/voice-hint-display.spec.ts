@@ -88,9 +88,9 @@ test('fully hinted voice replies show plain words in the chat view, mid-stream a
     expect(frame, `streaming frame leaked markup: ${frame}`).not.toMatch(/\(\/[^)]*$|\/\)/)
   }
   // The words arrive whole, whichever bubbles they land in.
-  await expect.poll(async () => (await allText()).replace(/\s+/g, ' '), { timeout: 15_000 }).toContain(
-    'to be a bit faster, Peckboard!',
-  )
+  await expect
+    .poll(async () => (await allText()).replace(/\s+/g, ' '), { timeout: 15_000 })
+    .toContain('to be a bit faster, Peckboard!')
   const text = await allText()
   for (const word of PLAIN.replace(/[.,!]/g, '').split(' ')) expect(text).toContain(word)
   expect(text).not.toContain('](/')

@@ -227,7 +227,7 @@ async fn ask_user_parks_card_until_answered_then_resumes_once() {
         )
         .await
         .unwrap();
-    sweep_stale_card_refs(&state.db, &state.session_manager).await;
+    sweep_stale_card_refs(&state.db, &state.session_manager, &state.background).await;
 
     let card = state.db.get_card("c1").await.unwrap().unwrap();
     assert_eq!(

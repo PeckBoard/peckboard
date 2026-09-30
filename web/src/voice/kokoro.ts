@@ -181,16 +181,32 @@ function silentWavUrl(): string {
 }
 
 const IOS_BROWSER_VOICE_KEY = 'peckboard.voice.iosBrowserVoice'
+const KOKORO_SPEED_KEY = 'peckboard.voice.kokoroSpeed'
+
+/** Kokoro speech speed (the model's `speed`): the Settings → Voice slider
+ *  range and default. A touch under 1× keeps short replies ("Got it.")
+ *  distinct over a Bluetooth headset. */
+export const KOKORO_SPEED_MIN = 0.8
+export const KOKORO_SPEED_MAX = 1.2
+export const DEFAULT_KOKORO_SPEED = 0.95
+
+function clampSpeed(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_KOKORO_SPEED
+  return Math.min(KOKORO_SPEED_MAX, Math.max(KOKORO_SPEED_MIN, n))
+}
 
 /** Per-device Kokoro choices (localStorage). */
-export const useKokoroDevicePrefs = create<{ iosUseBrowserVoice: boolean }>(() => {
+export const useKokoroDevicePrefs = create<{ iosUseBrowserVoice: boolean; speed: number }>(() => {
   let on = false
+  let speed = DEFAULT_KOKORO_SPEED
   try {
     on = localStorage.getItem(IOS_BROWSER_VOICE_KEY) === '1'
+    const raw = localStorage.getItem(KOKORO_SPEED_KEY)
+    if (raw !== null) speed = clampSpeed(Number(raw))
   } catch {
     /* storage unavailable */
   }
-  return { iosUseBrowserVoice: on }
+  return { iosUseBrowserVoice: on, speed }
 })
 
 export function setIosUseBrowserVoice(on: boolean): void {
@@ -200,6 +216,68 @@ export function setIosUseBrowserVoice(on: boolean): void {
     /* storage unavailable */
   }
   useKokoroDevicePrefs.setState({ iosUseBrowserVoice: on })
+}
+
+export function setKokoroSpeed(speed: number): void {
+  const s = clampSpeed(speed)
+  try {
+    localStorage.setItem(KOKORO_SPEED_KEY, String(s))
+  } catch {
+    /* storage unavailable */
+  }
+  useKokoroDevicePrefs.setState({ speed: s })
+}
+
+/**
+ * Bluetooth headsets (AirPods) idle on digital silence and take a few
+ * hundred ms to wake on the next sound, swallowing the first syllable
+ * ("Got it" → "it"). Kokoro clips open with ~350 ms of near-zero samples
+ * (≤ -80 dBFS), too quiet to wake the link. So every clip carries an
+ * inaudible noise floor (~-67 dBFS) from its first sample, and the first
+ * clip of a burst gets extra pre-roll in front.
+ */
+export const FIRST_CLIP_PREROLL_MS = 200
+export const NEXT_CLIP_PREROLL_MS = 0
+/** Idle time after which the next clip counts as the first of a burst. */
+const BURST_GAP_MS = 2000
+/** Peak of the wake noise, in 16-bit LSBs. */
+const WAKE_NOISE_LSB = 24
+
+/**
+ * `wav` (16-bit mono PCM) with `prerollMs` of silence prepended and the
+ * wake noise floor added throughout (faded in over 10 ms). Anything else
+ * comes back as an unchanged copy (decoding detaches its input).
+ */
+export function withWakePreroll(wav: ArrayBuffer, prerollMs: number): ArrayBuffer {
+  const v = new DataView(wav)
+  const pcm16Mono =
+    wav.byteLength >= 44 &&
+    v.getUint32(0) === 0x52494646 && // RIFF
+    v.getUint32(36) === 0x64617461 && // data
+    v.getUint16(20, true) === 1 &&
+    v.getUint16(22, true) === 1 &&
+    v.getUint16(34, true) === 16
+  if (!pcm16Mono) return wav.slice(0)
+  const rate = v.getUint32(24, true)
+  const n = Math.min(v.getUint32(40, true), wav.byteLength - 44) >> 1
+  const pad = Math.round((rate * Math.max(0, prerollMs)) / 1000)
+  const total = pad + n
+  const out = new ArrayBuffer(44 + total * 2)
+  new Uint8Array(out).set(new Uint8Array(wav, 0, 44))
+  const o = new DataView(out)
+  o.setUint32(4, 36 + total * 2, true)
+  o.setUint32(40, total * 2, true)
+  const fade = Math.max(1, Math.round(rate * 0.01))
+  let seed = 0x2545f491
+  for (let i = 0; i < total; i++) {
+    seed ^= seed << 13
+    seed ^= seed >>> 17
+    seed ^= seed << 5
+    const noise = ((seed >>> 0) / 0xffffffff - 0.5) * 2 * WAKE_NOISE_LSB * Math.min(1, i / fade)
+    const s = i < pad ? 0 : v.getInt16(44 + (i - pad) * 2, true)
+    o.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, Math.round(s + noise))), true)
+  }
+  return out
 }
 
 let previewEl: HTMLAudioElement | null = null
@@ -218,7 +296,9 @@ export function preparePreviewPlayback(): (wav: ArrayBuffer) => Promise<void> {
     el.src = silentWavUrl()
     void el.play().catch(() => {})
     return async (wav) => {
-      const url = URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }))
+      const url = URL.createObjectURL(
+        new Blob([withWakePreroll(wav, FIRST_CLIP_PREROLL_MS)], { type: 'audio/wav' }),
+      )
       el.onended = el.onerror = () => URL.revokeObjectURL(url)
       el.src = url
       await el.play()
@@ -230,7 +310,7 @@ export function preparePreviewPlayback(): (wav: ArrayBuffer) => Promise<void> {
   const ctx = previewCtx
   if (ctx.state !== 'running') void ctx.resume()
   return async (wav) => {
-    const audio = await decode(ctx, wav)
+    const audio = await decode(ctx, withWakePreroll(wav, FIRST_CLIP_PREROLL_MS))
     const src = ctx.createBufferSource()
     src.buffer = audio
     src.connect(ctx.destination)
@@ -249,12 +329,17 @@ export class KokoroEngine implements SpeechEngine {
   private elUnlocked = false
   /** Stops whatever is playing right now (either path), silently. */
   private stopCurrent: (() => void) | null = null
+  /** Stops for every Web Audio clip started and not yet ended: cancel
+   *  silences all of them, not only the current one. */
+  private sources = new Set<() => void>()
   /** Finishes the utterance currently playing (once). */
   private finishCurrent: (() => void) | null = null
   /** In-flight fetches: the one being spoken plus at most one prefetch. */
   private pending: Pending[] = []
   private gen = 0
   private failures = 0
+  /** When the last utterance ended (`performance.now()`), for burst pre-roll. */
+  private lastEnd = -Infinity
   private disabled = false
   private voices: VoiceOption[] = []
   private voicesLoading = false
@@ -301,7 +386,17 @@ export class KokoroEngine implements SpeechEngine {
   }
 
   private key(text: string, opts: SpeakOptions): string {
-    return `${opts.voiceURI}|${opts.rate}|${text}`
+    return `${opts.voiceURI}|${useKokoroDevicePrefs.getState().speed}|${text}`
+  }
+
+  /** A private copy of `buf` ready to play: wake noise, plus the burst's
+   *  pre-roll when nothing has played for a while (see
+   *  `FIRST_CLIP_PREROLL_MS`). */
+  private wakeWav(buf: ArrayBuffer): ArrayBuffer {
+    const first = performance.now() - this.lastEnd > BURST_GAP_MS
+    const prerollMs = first ? FIRST_CLIP_PREROLL_MS : NEXT_CLIP_PREROLL_MS
+    voiceLog('kokoro: wake pre-roll', { prerollMs, first })
+    return withWakePreroll(buf, prerollMs)
   }
 
   private request(text: string, opts: SpeakOptions): Pending {
@@ -315,7 +410,9 @@ export class KokoroEngine implements SpeechEngine {
       body: JSON.stringify({
         text,
         voice: opts.voiceURI.slice(KOKORO_PREFIX.length),
-        speed: opts.rate,
+        // Kokoro has its own speed (Settings → Voice); `opts.rate` is the
+        // browser voice's, used on fallback.
+        speed: useKokoroDevicePrefs.getState().speed,
       }),
       signal: ctrl.signal,
     }).then((res) => {
@@ -352,6 +449,7 @@ export class KokoroEngine implements SpeechEngine {
     const finish = () => {
       if (done) return
       done = true
+      this.lastEnd = performance.now()
       if (this.finishCurrent === finish) this.finishCurrent = null
       opts.onEnd()
     }
@@ -360,7 +458,7 @@ export class KokoroEngine implements SpeechEngine {
       ? req.audio.then((buf) => {
           this.pending = this.pending.filter((p) => p !== req)
           if (gen !== this.gen) throw new DOMException('cancelled', 'AbortError')
-          return this.playWithElement(buf, text, finish)
+          return this.playWithElement(this.wakeWav(buf), text, finish)
         })
       : this.playWithWebAudio(req, gen, text, finish)
     played
@@ -371,6 +469,7 @@ export class KokoroEngine implements SpeechEngine {
         }
         if (ok === 'cancelled') return finish()
         this.failures = 0
+        opts.onStart?.()
         voiceLog('kokoro speak: started', JSON.stringify(text), {
           latencyMs: Math.round(performance.now() - started),
           path: playsViaMediaElement() ? 'media-element' : 'web-audio',
@@ -411,8 +510,8 @@ export class KokoroEngine implements SpeechEngine {
     const buf = await req.audio
     if (gen !== this.gen) throw new DOMException('cancelled', 'AbortError')
     // decodeAudioData detaches its input (and prefetch entries share the
-    // promise), so always decode a private copy.
-    const audio = await decode(ctx, buf.slice(0))
+    // promise), so always decode a private copy — `wakeWav` makes one.
+    const audio = await decode(ctx, this.wakeWav(buf))
     this.pending = this.pending.filter((p) => p !== req)
     if (gen !== this.gen) return 'cancelled'
     // iOS reports `interrupted` (call, Siri, route change) as well as
@@ -428,7 +527,11 @@ export class KokoroEngine implements SpeechEngine {
     const src = ctx.createBufferSource()
     src.buffer = audio
     src.connect(ctx.destination)
+    let watchdog: ReturnType<typeof setTimeout> | undefined = undefined
     const stop = () => {
+      clearTimeout(watchdog)
+      this.sources.delete(stop)
+      if (this.stopCurrent === stop) this.stopCurrent = null
       src.onended = null
       try {
         src.stop()
@@ -436,24 +539,26 @@ export class KokoroEngine implements SpeechEngine {
         /* not started */
       }
     }
-    const watchdog = setTimeout(
+    // A stalled output (a Bluetooth route change freezes the context) never
+    // ends the clip: skip it, and silence it too — left scheduled, it would
+    // play whenever the output recovers, after later sentences or a barge-in.
+    watchdog = setTimeout(
       () => {
         console.warn('[voice] kokoro: playback never ended; skipping it')
-        if (this.stopCurrent === stop) this.stopCurrent = null
+        stop()
         finish()
       },
       audio.duration * 1000 + 3000,
     )
     src.onended = () => {
       clearTimeout(watchdog)
+      this.sources.delete(stop)
       if (this.stopCurrent === stop) this.stopCurrent = null
       voiceLog('kokoro speak: ended', JSON.stringify(text))
       finish()
     }
-    this.stopCurrent = () => {
-      clearTimeout(watchdog)
-      stop()
-    }
+    this.stopCurrent = stop
+    this.sources.add(stop)
     src.start()
     return 'started'
   }
@@ -533,13 +638,14 @@ export class KokoroEngine implements SpeechEngine {
 
   cancelSpeech(reason = 'unspecified'): void {
     this.gen++
-    const busy = this.stopCurrent !== null || this.pending.length > 0
+    const busy = this.stopCurrent !== null || this.pending.length > 0 || this.sources.size > 0
     if (busy) voiceLog(`kokoro cancel (${reason})`)
     for (const p of this.pending) p.ctrl.abort()
     this.pending = []
     const stop = this.stopCurrent
     this.stopCurrent = null
     stop?.()
+    for (const s of [...this.sources]) s()
     // An utterance waiting on its fetch/decode ends now, like the browser
     // engine's `interrupted`.
     this.finishCurrent?.()
@@ -574,6 +680,11 @@ export class KokoroEngine implements SpeechEngine {
       this.el.preload = 'auto'
     }
     return this.el
+  }
+
+  audioContext(): AudioContext | null {
+    if (playsViaMediaElement() || !this.ctx || this.ctx.state === 'closed') return null
+    return this.ctx
   }
 
   unlockSynthesis(): void {

@@ -16,10 +16,11 @@
 # runs in exactly one shard — specs that write fixed-path artifacts
 # (screenshots under web/e2e/test-results/) cannot collide.
 #
-# Builds the frontend and the release binary ONCE up front, then sets
+# Builds the frontend and the binary ONCE up front (via
+# scripts/build-local-release.sh → target/verify/peckboard), then sets
 # PECKBOARD_E2E_SKIP_BUILD=1 for the shards. Without that, N shards
-# each fire `cargo build --release` at the same time and contend on
-# the same target dir.
+# each fire a cargo build at the same time and contend on the same
+# target dir.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,13 +40,10 @@ PORT_BASE="${PECKBOARD_E2E_PORT_BASE:-4500}"
 
 # ── build once ────────────────────────────────────────────────────────
 if [[ "${PECKBOARD_E2E_SKIP_BUILD:-}" != "1" ]]; then
-  echo "▶ building frontend + release binary once for all $SHARDS shards"
-  (cd "$ROOT/web" && npm run build) || exit 1
-  # rust-embed keys on Rust source, not on web/dist — without this the
-  # binary re-serves the PREVIOUS bundle. Same reason global-setup.ts
-  # does it.
-  touch "$ROOT/src/frontend.rs"
-  (cd "$ROOT" && cargo build --release) || exit 1
+  echo "▶ building frontend + binary once for all $SHARDS shards"
+  # build.rs watches web/dist, so a changed bundle is re-embedded without
+  # touching any .rs file.
+  "$ROOT/scripts/build-local-release.sh" || exit 1
 fi
 export PECKBOARD_E2E_SKIP_BUILD=1
 

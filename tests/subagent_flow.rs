@@ -336,23 +336,18 @@ async fn claim_and_compose_crash_and_missing_parent() {
             .is_some()
     );
 }
-
 #[tokio::test]
-async fn restart_reconcile_frees_slot_and_notifies_parent() {
+async fn restart_plan_frees_slot_and_notifies_parent() {
     let db = Arc::new(Db::in_memory().unwrap());
     seed_folder(&db, "f1").await;
     seed_session(&db, "parent", "f1", None).await;
     // Fill the parent's cap with subagents that never reported back —
-    // simulating a server restart mid-run (no `subagent_completed_at`).
+    // simulating a server restart before they ran (no `subagent_completed_at`).
     for i in 0..peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS {
         seed_session(&db, &format!("sub: s{i}"), "f1", Some("parent")).await;
     }
 
-    let reconciled = peckboard::subagent::reconcile_orphan_subagents(&db).await;
-    assert_eq!(
-        reconciled as i64,
-        peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS
-    );
+    let plan = peckboard::restart_resume::plan(&db, &[], &Default::default()).await;
 
     for i in 0..peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS {
         let child = db
@@ -363,14 +358,16 @@ async fn restart_reconcile_frees_slot_and_notifies_parent() {
         assert!(child.subagent_completed_at.is_some());
     }
 
-    // Parent got one result event per orphan, each explaining the restart.
-    let events = db.events_tail("parent", 50).await.unwrap();
-    let restart_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.data.contains("terminated by server restart"))
-        .collect();
+    // The parent gets ONE wake carrying a re-spawn notice per child.
+    assert_eq!(plan.parent_notices.len(), 1);
+    let notice = &plan.parent_notices[0];
+    assert_eq!(notice.parent_id, "parent");
+    assert!(notice.wake);
     assert_eq!(
-        restart_events.len() as i64,
+        notice
+            .text
+            .matches("was stopped by a server restart and could not resume")
+            .count() as i64,
         peckboard::subagent::DEFAULT_MAX_CONCURRENT_SUBAGENTS
     );
 
@@ -382,25 +379,20 @@ async fn restart_reconcile_frees_slot_and_notifies_parent() {
 }
 
 #[tokio::test]
-async fn reconcile_is_idempotent() {
+async fn restart_plan_is_idempotent() {
     let db = Db::in_memory().unwrap();
     seed_folder(&db, "f1").await;
     seed_session(&db, "parent", "f1", None).await;
     seed_session(&db, "sub: a", "f1", Some("parent")).await;
 
-    assert_eq!(
-        peckboard::subagent::reconcile_orphan_subagents(&db).await,
-        1
+    let first = peckboard::restart_resume::plan(&db, &[], &Default::default()).await;
+    assert_eq!(first.parent_notices.len(), 1);
+    let second = peckboard::restart_resume::plan(&db, &[], &Default::default()).await;
+    assert!(
+        second.parent_notices.is_empty(),
+        "second pass must not re-notify the parent"
     );
-    assert_eq!(
-        peckboard::subagent::reconcile_orphan_subagents(&db).await,
-        0
-    );
-
-    let events = db.events_tail("parent", 50).await.unwrap();
-    assert_eq!(events.len(), 1, "second pass must not re-notify the parent");
 }
-
 #[tokio::test]
 async fn subagent_limits_setting_overrides_defaults_and_clamps() {
     let db = Db::in_memory().unwrap();

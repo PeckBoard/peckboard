@@ -38,6 +38,7 @@ mod todos;
 mod tts_lexicon;
 mod usage;
 mod users;
+mod voice_prompt_versions;
 mod voice_relay_queue;
 mod workflow_instructions;
 

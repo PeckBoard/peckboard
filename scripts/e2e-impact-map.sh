@@ -27,10 +27,8 @@ SHARDS="${1:-4}"
 IMPACT_DIR="$(mktemp -d)"
 echo "▶ impact capture dir: $IMPACT_DIR"
 
-echo "▶ building frontend WITH sourcemaps + release binary"
-(cd "$ROOT/web" && PECKBOARD_E2E_COVERAGE=1 npm run build) || exit 1
-touch "$ROOT/src/frontend.rs"
-(cd "$ROOT" && cargo build --release) || exit 1
+echo "▶ building frontend WITH sourcemaps + binary"
+PECKBOARD_E2E_COVERAGE=1 "$ROOT/scripts/build-local-release.sh" || exit 1
 
 # The shard script would rebuild without the coverage flag and throw the
 # sourcemaps away, so tell it the build is already done.
@@ -54,12 +52,11 @@ node "$ROOT/scripts/e2e-impact-map.mjs" "$IMPACT_DIR" || exit 1
 (cd "$ROOT/web" && npx prettier --write e2e/impact-map.json) >/dev/null || exit 1
 
 # Leave web/dist as a normal (sourcemap-free) build so nobody accidentally
-# embeds sourcemaps into a release binary. rust-embed keys on Rust source,
-# not on web/dist, so the touch is what makes the NEXT release build pick
-# the clean bundle up instead of re-embedding the instrumented one.
+# embeds sourcemaps into a binary. build.rs watches web/dist, so the NEXT
+# build re-embeds the clean bundle (and build-local-release.sh treats a dist
+# holding sourcemaps as stale anyway).
 echo "▶ rebuilding frontend without sourcemaps"
 (cd "$ROOT/web" && npm run build) >/dev/null || exit 1
-touch "$ROOT/src/frontend.rs"
 
 # The capture is kept: rebuilding the map after tweaking the generator is
 # then `node scripts/e2e-impact-map.mjs <dir>`, not another 8-minute run.

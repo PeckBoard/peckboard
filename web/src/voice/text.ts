@@ -32,6 +32,9 @@ export function stripInterruptMarker(text: string): string {
 const HINT_SRC = String.raw`\[([^[\]\n]+)\]\(\/([^/()[\]\n.:#?=&%0-9]+)\/\)`
 const HINT_RE = new RegExp(HINT_SRC, 'g')
 const HINT_RE_ONE = new RegExp(`^${HINT_SRC}$`)
+/** A hint missing its `/)` (`[Got](/ɡˈɑt [it]…`, `[Got](/ɡˈɑt)`): the word
+ *  is kept and the stray phonemes dropped, as the server parses it. */
+const BROKEN_HINT_RE = /\[([^[\]\n]+)\]\(\/[^/()[\]\n.:#?=&%0-9]+?(?:\)|(?=\s*(?:\[|\n|$)))/g
 /** A hint still being streamed at the end of the text: `[word`, `[word](`,
  *  `[word](/pˈɛk`, … (bounded, so a stray `[` doesn't hold speech forever). */
 const PARTIAL_HINT_RE = /\[([^[\]\n]{0,40})(?:\](?:\((?:\/[^\n)]{0,80})?)?)?$/
@@ -45,7 +48,10 @@ export function stripPronunciationHints(
   opts: { partialTail?: boolean; partialHead?: boolean } = {},
 ): string {
   const head = opts.partialHead ? stripOrphanHead(text) : text
-  const t = head.replace(HINT_RE, '$1')
+  if (!head.includes('[')) return head
+  // Broken hints first: a complete hint's phonemes end at `/`, so it never
+  // matches, and a broken one can't borrow the next hint's `/)`.
+  const t = head.replace(BROKEN_HINT_RE, '$1').replace(HINT_RE, '$1')
   return opts.partialTail ? t.replace(PARTIAL_HINT_RE, (_m, word: string) => word) : t
 }
 
@@ -98,7 +104,7 @@ export function stripForSpeech(text: string): string {
   t = t.replace(/`([^`]*)`/g, '$1')
   // Markdown links / images: keep the label. Pronunciation hints stay —
   // the server's TTS reads them.
-  t = t.replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, (m: string, label: string) =>
+  t = t.replace(/!?\[([^\]\n]*)\]\(([^)[\n]*)\)/g, (m: string, label: string) =>
     HINT_RE_ONE.test(m) ? m : label,
   )
   // Bare URLs.
@@ -131,37 +137,42 @@ export function stripForSpeech(text: string): string {
  */
 export function takeSentences(buffer: string): { sentences: string[]; rest: string } {
   const sentences: string[] = []
-  let rest = buffer
-  const re = /[^.!?:;…\n]*(?:[.!?:;…]+["')\]]*(?=\s)|\n)/
+  // Scan a hint-masked copy (same length, masked once) so a hint is never
+  // split and a fully hinted buffer isn't re-masked per sentence.
+  const masked = maskHints(buffer)
+  const re = /[^.!?:;…\n]*(?:[.!?:;…]+["')\]]*(?=\s)|\n)\s*/y
+  let pos = 0
   for (;;) {
-    // Scan a hint-masked copy (same length) so a hint is never split.
-    const m = re.exec(maskHints(rest))
-    if (!m || m.index !== 0) break
-    const piece = rest.slice(0, m[0].length).trim()
-    rest = rest.slice(m[0].length)
+    re.lastIndex = pos
+    const m = re.exec(masked)
+    if (!m) break
+    const piece = buffer.slice(pos, pos + m[0].length).trim()
+    pos += m[0].length
     if (piece) sentences.push(piece)
-    rest = rest.replace(/^\s+/, '')
   }
-  return { sentences, rest }
+  return { sentences, rest: buffer.slice(pos) }
 }
 
-/** Tail length past which a still-open sentence is cut at a clause
- *  boundary, so a long sentence starts playing before it is finished. */
+/** Heard (hint-stripped) length past which a still-open sentence is cut at
+ *  a clause boundary, so a long sentence starts playing before it is
+ *  finished. */
 const CLAUSE_SPLIT_AT = 90
 
 /**
  * Chunk streamed assistant text for live speech: complete sentences, plus —
  * when the unfinished tail grows long — its leading clauses (cut after a
- * comma / dash). The returned `rest` is still being generated.
+ * comma / dash). The returned `rest` is still being generated. Lengths
+ * count the words heard, not hint markup.
  */
 export function takeSpeakable(buffer: string): { chunks: string[]; rest: string } {
   const { sentences, rest: tail } = takeSentences(buffer)
   const chunks = [...sentences]
   let rest = tail
-  while (rest.length > CLAUSE_SPLIT_AT) {
+  const heard = (s: string) => stripPronunciationHints(s, { partialTail: true }).length
+  while (rest.length > CLAUSE_SPLIT_AT && heard(rest) > CLAUSE_SPLIT_AT) {
     const head = maskHints(rest).slice(0, rest.length - 1)
     const cut = Math.max(head.lastIndexOf(', '), head.lastIndexOf(' — '), head.lastIndexOf(' - '))
-    if (cut < 30) break
+    if (cut < 0 || heard(rest.slice(0, cut)) < 30) break
     chunks.push(rest.slice(0, cut + 1).trim())
     rest = rest.slice(cut + 1).replace(/^\s+/, '')
   }
@@ -202,7 +213,9 @@ const UNFINISHED_TAIL = new Set(
     'that which who whom whose where if when whether then ' +
     'um uh er erm hmm ' +
     'is are was were be been being am will would can could should shall ' +
-    'may might must do does did have has had'
+    'may might must do does did have has had ' +
+    // Verbs and adverbs that wait for what comes next ("I also want …").
+    'want wanna need gonna also just'
   ).split(' '),
 )
 const UNFINISHED_PHRASES = ['you know', 'i mean', 'kind of', 'sort of']

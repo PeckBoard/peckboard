@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
-# Run the full "Definition of Done" verification cycle from CLAUDE.md:
+# Run the "Definition of Done" verification cycle from AGENTS.md:
 #
 #   1. cargo fmt --check          — format clean
 #   2. cargo clippy               — no errors
 #   3. cargo test                 — unit + integration tests
 #   4. web lint                   — eslint clean
 #   5. web format:check           — prettier clean
-#   6. web build                  — the bundle rust-embed compiles in
-#   7. cargo build --release      — binary the e2e suite boots
-#   8. web e2e                    — Playwright suite, sharded
+#   6. local release build        — web bundle (tsc + vite) + the binary the
+#                                   e2e suite boots (scripts/build-local-release.sh)
+#   7. web e2e                    — Playwright suite, sharded
 #
 # Every step runs even if an earlier one fails, so one invocation reports
 # the whole picture; the exit code is non-zero if ANY step failed.
 #
-#   --fast       skip the web/release builds + Playwright suite (steps 6-8)
-#   --impacted   run only the specs the current change can affect (step 8),
-#                falling back to the whole suite whenever that cannot be
-#                proven safe. INNER LOOP ONLY — the full suite is the gate.
+#   (no flag)        the full suite — the gate for larger releases / nightly
+#   --fast           skip the release build + Playwright suite (steps 6-7)
+#   --impacted       all checks in full, e2e narrowed to the specs the change
+#                    can reach (falls back to the whole suite when that can't
+#                    be proven safe)
+#   --changed [ref]  proportional: classify what changed vs <ref> (default
+#                    origin/main, plus working tree + untracked build inputs)
+#                    and run only the checks that change can break — see
+#                    scripts/verify-changed.mjs and "Proportional Verify" in
+#                    AGENTS.md. Schema / build / dependency changes escalate
+#                    to the full suite automatically.
+#
+# Step 6 builds the web bundle only when its inputs changed and builds the
+# release binary incrementally — a LOCAL build. The shipped binary is CI's
+# plain `cargo build --release`; see scripts/build-local-release.sh.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,10 +52,33 @@ if [[ -z "${CARGO_BUILD_JOBS:-}" ]]; then
 fi
 FAST=0
 IMPACTED=0
+CHANGED=0
+BASE="origin/main"
 case "${1:-}" in
 --fast) FAST=1 ;;
 --impacted) IMPACTED=1 ;;
+--changed)
+  CHANGED=1
+  [[ -n "${2:-}" ]] && BASE="$2"
+  ;;
 esac
+
+# --changed: turn the diff into a plan. SCOPE=full falls through to the
+# normal full run below; everything else runs a narrowed step list.
+SCOPE=full
+RUST_CHANGED=1
+WEB_CHANGED=1
+INTEGRATION_TESTS=""
+WEB_FILES=""
+if [[ "$CHANGED" -eq 1 ]]; then
+  plan="$(node "$ROOT/scripts/verify-changed.mjs" "$BASE")" || exit 1
+  eval "$plan"
+  if [[ "$SCOPE" == "none" ]]; then
+    echo "▶ no build inputs changed vs $BASE — nothing to verify"
+    exit 0
+  fi
+  [[ "$SCOPE" == "full" ]] && CHANGED=0
+fi
 
 declare -a NAMES=()
 declare -a RESULTS=()
@@ -56,46 +90,74 @@ run_step() {
   echo "══════════════════════════════════════════════════"
   echo "▶ $name"
   echo "══════════════════════════════════════════════════"
+  local start=$SECONDS
   if "$@"; then
-    RESULTS+=("ok")
+    RESULTS+=("ok ($((SECONDS - start))s)")
   else
-    RESULTS+=("FAILED")
+    RESULTS+=("FAILED ($((SECONDS - start))s)")
   fi
   NAMES+=("$name")
 }
 
 cd "$ROOT"
-run_step "cargo fmt --check" cargo fmt --check
-run_step "cargo clippy" cargo clippy --all-targets --no-deps
-run_step "cargo test" cargo test
-run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
-
-cd "$ROOT/web"
-run_step "web lint" npm run lint
-run_step "web format:check" npm run format:check
-
-if [[ "$FAST" -eq 0 ]]; then
-  # rust-embed bakes web/dist into the release binary at compile time, so a
-  # stale bundle means the e2e suite drives the PREVIOUS UI. Build the web
-  # assets before the binary that embeds them.
-  run_step "web build" npm run build
-  cd "$ROOT"
-  # The Playwright webServer boots target/release/peckboard, so the
-  # release binary must be rebuilt or the suite tests stale code.
-  run_step "cargo build --release" cargo build --release
-  cd "$ROOT/web"
-  # Both builds just ran; don't let the shard runner redo them.
-  export PECKBOARD_E2E_SKIP_BUILD=1
-  if [[ "$IMPACTED" -eq 1 ]]; then
-    run_step "web e2e (impacted)" "$ROOT/scripts/e2e-impacted.sh"
-  else
-    # Sharded: one server + data dir per shard, still workers:1 inside each,
-    # so every isolation assumption the specs make still holds.
-    run_step "web e2e (4 shards)" "$ROOT/scripts/e2e-shards.sh" 4
+if [[ "$CHANGED" -eq 1 ]]; then
+  echo "▶ proportional verify: scope=$SCOPE (rust=$RUST_CHANGED web=$WEB_CHANGED) vs $BASE"
+  if [[ "$RUST_CHANGED" -eq 1 ]]; then
+    run_step "cargo fmt --check" cargo fmt --check
+    run_step "cargo clippy" cargo clippy --all-targets --no-deps
+    run_step "cargo test --lib" cargo test --lib
+    if [[ -n "$INTEGRATION_TESTS" ]]; then
+      read -ra its <<<"$INTEGRATION_TESTS"
+      run_step "cargo test (integration: $INTEGRATION_TESTS)" \
+        cargo test $(printf -- '--test %s ' "${its[@]}")
+    fi
   fi
+  run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
+  if [[ "$WEB_CHANGED" -eq 1 && -n "$WEB_FILES" ]]; then
+    read -ra wf <<<"$WEB_FILES"
+    cd "$ROOT/web"
+    lintable=()
+    for f in "${wf[@]}"; do [[ "$f" =~ \.(tsx?|jsx?|mjs|cjs)$ ]] && lintable+=("$f"); done
+    if ((${#lintable[@]})); then
+      run_step "web lint (changed files)" npx eslint --no-warn-ignored "${lintable[@]}"
+    fi
+    run_step "web format:check (changed files)" npx prettier --check --ignore-unknown "${wf[@]}"
+    cd "$ROOT"
+  fi
+  # tsc -b runs inside the web build (skipped only when web/dist is newer
+  # than every input, i.e. it already passed on this exact tree).
+  run_step "local release build" "$ROOT/scripts/build-local-release.sh"
+  export PECKBOARD_E2E_SKIP_BUILD=1
+  run_step "web e2e (impacted vs $BASE)" "$ROOT/scripts/e2e-impacted.sh" "$BASE"
 else
-  echo ""
-  echo "(--fast: skipping web/release builds + Playwright e2e)"
+  run_step "cargo fmt --check" cargo fmt --check
+  run_step "cargo clippy" cargo clippy --all-targets --no-deps
+  run_step "cargo test" cargo test
+  run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
+
+  cd "$ROOT/web"
+  run_step "web lint" npm run lint
+  run_step "web format:check" npm run format:check
+
+  if [[ "$FAST" -eq 0 ]]; then
+    # rust-embed bakes web/dist into the binary at compile time, so a stale
+    # bundle means the e2e suite drives the PREVIOUS UI; the helper builds
+    # the web assets (when stale) before the binary that embeds them.
+    run_step "local release build" "$ROOT/scripts/build-local-release.sh"
+    cd "$ROOT/web"
+    # Both builds just ran; don't let the shard runner redo them.
+    export PECKBOARD_E2E_SKIP_BUILD=1
+    if [[ "$IMPACTED" -eq 1 ]]; then
+      run_step "web e2e (impacted)" "$ROOT/scripts/e2e-impacted.sh"
+    else
+      # Sharded: one server + data dir per shard, still workers:1 inside each,
+      # so every isolation assumption the specs make still holds.
+      run_step "web e2e (4 shards)" "$ROOT/scripts/e2e-shards.sh" 4
+    fi
+  else
+    echo ""
+    echo "(--fast: skipping release build + Playwright e2e)"
+  fi
 fi
 
 echo ""
@@ -104,7 +166,7 @@ echo "Summary"
 echo "══════════════════════════════════════════════════"
 failed=0
 for i in "${!NAMES[@]}"; do
-  printf '  %-22s %s\n' "${NAMES[$i]}" "${RESULTS[$i]}"
-  [[ "${RESULTS[$i]}" == "FAILED" ]] && failed=1
+  printf '  %-34s %s\n' "${NAMES[$i]}" "${RESULTS[$i]}"
+  [[ "${RESULTS[$i]}" == FAILED* ]] && failed=1
 done
 exit "$failed"

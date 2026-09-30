@@ -104,7 +104,10 @@ impl ToolGate {
         if matches!(name, "get_review_doc" | "submit_review_revision") {
             return self.doc_review;
         }
-        if matches!(name, "show_view" | "voice_queue" | "voice_pronunciation") {
+        if matches!(
+            name,
+            "show_view" | "voice_queue" | "voice_pronunciation" | "voice_prompt"
+        ) {
             return self.voice;
         }
         if self.voice && is_browser_tool(name) {
@@ -180,6 +183,9 @@ impl ToolGate {
         }
         if name == "voice_pronunciation" && !self.voice {
             return Some("tool 'voice_pronunciation' is blocked: only the voice assistant session edits spoken pronunciations.".to_string());
+        }
+        if name == "voice_prompt" && !self.voice {
+            return Some("tool 'voice_prompt' is blocked: only the voice assistant session edits its own prompt.".to_string());
         }
         if self.voice && is_browser_tool(name) {
             return Some(format!(
@@ -359,7 +365,7 @@ mod tests {
     #[test]
     fn voice_queue_is_voice_only() {
         let voice = ToolGate::from_session(&session(false, Some("voice"), None));
-        for tool in ["voice_queue", "voice_pronunciation"] {
+        for tool in ["voice_queue", "voice_pronunciation", "voice_prompt"] {
             assert!(voice.blocked(tool).is_none());
             assert!(voice.advertised(tool));
             for gate in [

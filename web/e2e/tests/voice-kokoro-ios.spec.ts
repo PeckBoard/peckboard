@@ -306,6 +306,8 @@ test('on iPhone a reply plays through an <audio> element, and barge-in stops it'
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
   await expect.poll(() => recognizing(page)).toBe(true)
 
+  // Real speech builds up through a partial result before the final.
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('Read this'))
   await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('Read this back.'))
   await expect.poll(async () => (await state(page)).speechPlays, { timeout: 15_000 }).toBe(1)
   await expect(page.getByTestId('voice-status')).toHaveText('Speaking')
@@ -339,6 +341,8 @@ test('the iPhone browser-voice option persists and routes replies to it', async 
   await page.getByTestId('voice-fab').click()
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect.poll(() => recognizing(page)).toBe(true)
+  // Real speech builds up through a partial result before the final.
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('Browser voice'))
   await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('Browser voice please.'))
 
   await expect

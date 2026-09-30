@@ -25,23 +25,25 @@ when changing this repo.
 
 Run from the repo root unless noted.
 
-| What                          | Command                                        |
-| ----------------------------- | ---------------------------------------------- |
-| Build (debug)                 | `cargo build`                                  |
-| Build release                 | `cargo build --release`                        |
-| Rust unit + integration tests | `cargo test`                                   |
-| Rust lint                     | `cargo clippy --all-targets --no-deps`         |
-| Rust format                   | `cargo fmt` (or `--check` to verify)           |
-| Web install                   | `cd web && npm install`                        |
-| Web build                     | `cd web && npm run build`                      |
-| Web lint                      | `cd web && npm run lint`                       |
-| Web format                    | `cd web && npm run format` (or `format:check`) |
-| Playwright e2e (sharded)      | `scripts/e2e-shards.sh 4`                      |
-| Playwright e2e (single)       | `cd web && npm run e2e`                        |
-| Playwright e2e (impacted)     | `scripts/e2e-impacted.sh`                      |
-| Rebuild the e2e impact map    | `scripts/e2e-impact-map.sh`                    |
-| Refresh provider model seeds  | `scripts/refresh-provider-model-seeds.sh`      |
-| Playwright install (one-time) | `cd web && npm run e2e:install`                |
+| What                            | Command                                        |
+| ------------------------------- | ---------------------------------------------- |
+| Build (debug)                   | `cargo build`                                  |
+| Build release (what CI ships)   | `cargo build --release`                        |
+| Build web + local e2e binary    | `scripts/build-local-release.sh`               |
+| Rust unit + integration tests   | `cargo test`                                   |
+| Rust lint                       | `cargo clippy --all-targets --no-deps`         |
+| Rust format                     | `cargo fmt` (or `--check` to verify)           |
+| Web install                     | `cd web && npm install`                        |
+| Web build                       | `cd web && npm run build`                      |
+| Web lint                        | `cd web && npm run lint`                       |
+| Web format                      | `cd web && npm run format` (or `format:check`) |
+| Verify, proportional to changes | `scripts/verify.sh --changed`                  |
+| Playwright e2e (sharded)        | `scripts/e2e-shards.sh 4`                      |
+| Playwright e2e (single)         | `cd web && npm run e2e`                        |
+| Playwright e2e (impacted)       | `scripts/e2e-impacted.sh`                      |
+| Rebuild the e2e impact map      | `scripts/e2e-impact-map.sh`                    |
+| Refresh provider model seeds    | `scripts/refresh-provider-model-seeds.sh`      |
+| Playwright install (one-time)   | `cd web && npm run e2e:install`                |
 
 First-party providers prefer live CLI/HTTP model discovery at runtime
 (`provider.models`). When discovery fails they serve a last-good catalog
@@ -55,8 +57,33 @@ scripts/refresh-provider-model-seeds.sh --write   # rewrite seed_models()
 scripts/refresh-provider-model-seeds.sh --check   # CI: non-zero on drift
 ```
 
-The Playwright `webServer` block boots `target/release/peckboard` with a
+The Playwright `webServer` block boots `target/verify/peckboard` with a
 fresh `mktemp -d` data dir, so each run starts from a clean state.
+
+### Local Builds vs the Shipped Binary
+
+Every local e2e path (`verify.sh`, `e2e-shards.sh`, `e2e-impact-map.sh`,
+a bare `npm run e2e`) builds through `scripts/build-local-release.sh`:
+
+- **`--profile verify`** (`Cargo.toml`): release opt-level, but
+  incremental, in its own `target/verify` dir, so a small Rust change or
+  a web-only re-embed recompiles only what changed instead of
+  re-optimising the whole crate. The separate dir stops it trading
+  fingerprints with plain `cargo build --release` runs from other agents.
+  The box's `~/.cargo/config.toml` disables incremental globally, so the
+  helper passes `CARGO_INCREMENTAL=1`.
+- **The web bundle is rebuilt only when an input is newer than
+  `web/dist/index.html`** — vite rewrites every file in `web/dist`, and
+  `build.rs` watches that dir, so an unconditional rebuild forced a Rust
+  recompile even with no UI change.
+- `PECKBOARD_E2E_BIN=../../target/release/peckboard` points the suite at
+  a plain release build to test exactly what CI compiles.
+
+**CI and shipped binaries are unchanged**: `Build Main` runs `npm run
+build` + `cargo build --release` per target. CI runs **no tests** — it is
+the compile gate only; the local suite is the only test gate. The verify
+binary differs from CI's only in codegen units (256 incremental vs 16),
+never in features or opt-level.
 
 ### Why the Suite Is Sharded
 
@@ -80,11 +107,11 @@ sourcemap for `web/src/**`, plus the server's route log joined to each
 test's wall-clock window for `src/**`).
 
 **This is the default for iterating; the merge gate is the full suite**
-(see Definition of Done). Selection rules:
+(see Definition of Done and Proportional Verify). Selection rules:
 
 - Only build inputs count as changes (`src/**`, `web/src/**`,
   `web/e2e/**`, `migrations/**`, the build manifests) — scratch files,
-  logs, docs, and scripts can never force a run.
+  logs, docs, scripts, and dot-dirs can never force a run.
 - A changed spec file selects exactly itself.
 - Everything else goes through the map, and the selector falls back to
   the whole suite whenever it cannot prove a narrower set is safe — an
@@ -134,43 +161,76 @@ it surfaces before reporting done — use the script, do not run the steps
 by hand:**
 
 ```bash
-scripts/verify.sh --impacted  # DEFAULT per change: full checks, e2e narrowed to what the change can reach
+scripts/verify.sh --changed   # DEFAULT per change + small releases: only the checks the diff can break
+scripts/verify.sh --impacted  # all Rust/web checks in full, e2e narrowed to what the change can reach
 scripts/verify.sh --fast      # skip the release build + e2e (quick inner-loop check)
-scripts/verify.sh             # the full suite — required before a commit / release
+scripts/verify.sh             # the full suite — larger releases and nightly
 ```
 
-It runs, in order: `cargo fmt --check`, `cargo clippy --all-targets
---no-deps`, `cargo test`, `cd web && npm run lint`, `npm run
-format:check`, then `cargo build --release` (the binary Playwright
-boots) and the e2e suite via `scripts/e2e-shards.sh 4`. Every step runs
-even if an earlier one fails, and it exits non-zero with a per-step
-summary if anything failed.
+The full run does, in order: `cargo fmt --check`, `cargo clippy
+--all-targets --no-deps`, `cargo test`, the plugin-blob check, `cd web &&
+npm run lint`, `npm run format:check`, then the local release build
+(`scripts/build-local-release.sh`: web bundle incl. `tsc -b`, then the
+binary Playwright boots) and the e2e suite via `scripts/e2e-shards.sh 4`.
+Every step runs even if an earlier one fails, and it exits non-zero with
+a per-step summary (with per-step timings) if anything failed.
 
-**Use `--impacted` for every intermediate change** — running all ~480
-specs per edit is the wall-clock sink, and the selector already falls
-back to the whole suite whenever it cannot prove a narrower set is safe
-(shared primitive, schema/build change, unmapped source file). A changed
-spec file selects just itself. The narrowing only ever applies to step 8;
-every Rust/web check always runs in full.
+### Proportional Verify
 
-**Before a commit or release, run one full `scripts/verify.sh`** — the
-map is recorded evidence, not proof, so the merge gate stays the whole
-suite. Regenerate the map (`scripts/e2e-impact-map.sh`) after adding or
-substantially reworking specs, and commit `web/e2e/impact-map.json`.
+`scripts/verify.sh --changed [base]` classifies every changed build input
+— commits since `base` (default `origin/main`), the working tree, and
+untracked files; scratch, docs, and dot-dirs never count — via
+`scripts/verify-changed.mjs`, and runs only what that change can break:
+
+- **Nothing buildable** — nothing runs.
+- **Web only** (`web/src`, `web/e2e/tests`, …) — eslint + prettier on
+  the changed files, the web build (`tsc -b` + vite), the incremental
+  binary re-embed, impacted e2e. No cargo fmt / clippy / test.
+- **Rust** (`src/**`, `tests/**`, `peck-plugins/*/src`) — the web steps
+  if web also changed, plus `cargo fmt --check`, clippy,
+  `cargo test --lib`, and the integration tests that changed or whose
+  file name matches a changed path segment (`src/service/tts/kokoro.rs`
+  → `tests/*tts*`, `tests/*kokoro*`).
+- **Schema / build / deps / shared harness** — `migrations/`, `src/db/`,
+  `src/{main,lib}.rs`, `build.rs`, `Cargo.{toml,lock}`, `tests/common/`,
+  plugin blobs, web build configs — escalates to the **full** suite.
+
+A release's own version bump in `Cargo.toml` / `Cargo.lock` does not
+escalate. The e2e step is `scripts/e2e-impacted.sh <base>`, which still
+falls back to the whole suite whenever it can't prove a narrower set.
+
+**Release policy.**
+
+- **Small release** — one area, a handful of files, no escalation: one
+  `scripts/verify.sh --changed` on the combined changes is enough.
+- **Larger release** — several areas, a shared primitive, a new spec or
+  flow, or anything you're unsure about: run the full `scripts/verify.sh`.
+- **Nightly** — at least one full `scripts/verify.sh` a day, so anything
+  the heuristics missed surfaces within a day.
+
+CI compiles every shipped target on each push to `main` (the final build
+gate) but runs no tests.
+
+The impact map is recorded evidence, not proof — a stale one only narrows
+wrongly, which is why the full suite stays in the rotation. Regenerate it
+(`scripts/e2e-impact-map.sh`, one instrumented full e2e run, roughly 10–15
+minutes) after adding or substantially reworking specs, and commit
+`web/e2e/impact-map.json`.
 
 ### Subagents Run Targeted Tests Only
 
 **Subagents (spawned child sessions working in parallel) never run the
-full suite** — no `scripts/verify.sh`, no full e2e run, no
-workspace-wide `cargo test`. Parallel full runs are slow and fight over
-the machine's CPU and memory. A subagent runs only the fast, targeted
-checks for what it changed — the specific Rust test(s) or module
-(`cargo test --lib <name>`), the specific e2e spec, and type-check /
-lint / format on the files it touched — then reports back.
+full suite** — no `scripts/verify.sh` (not even `--changed`: it runs
+clippy and every lib test), no full e2e run, no workspace-wide `cargo
+test`. Parallel full runs are slow and fight over the machine's CPU and
+memory. A subagent runs only the fast, targeted checks for what it
+changed — the specific Rust test(s) or module (`cargo test --lib
+<name>`), the specific e2e spec, and type-check / lint / format on the
+files it touched — then reports back.
 
-The main (parent) session runs the full `scripts/verify.sh` **once per
-release**, on the combined changes. When spawning a subagent, state this
-rule in its prompt.
+The main (parent) session runs `scripts/verify.sh` (`--changed` or full,
+per the release policy above) **once per release**, on the combined
+changes. When spawning a subagent, state this rule in its prompt.
 
 ## Ship It: Commit, Push, and Release When Done
 

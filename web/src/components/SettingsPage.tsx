@@ -324,6 +324,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
   },
   {
     page: 'voice',
+    section: 'Assistant Prompt',
+    anchor: 'voice-prompt',
+    keywords: 'voice assistant prompt instructions system persona behaviour behavior history',
+  },
+  {
+    page: 'voice',
     section: 'Pronunciations',
     anchor: 'voice-pronunciations',
     keywords: 'voice pronunciation lexicon phonemes respelling kokoro words say',

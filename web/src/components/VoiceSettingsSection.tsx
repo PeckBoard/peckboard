@@ -2,9 +2,18 @@ import { useEffect, useState } from 'react'
 import { useVoiceStore } from '../store/voice'
 import { useResourcesStore } from '../store/resources'
 import { getSpeechEngine, type VoiceOption } from '../voice/engine'
-import { isIOS, isKokoroVoice, setIosUseBrowserVoice, useKokoroDevicePrefs } from '../voice/kokoro'
+import {
+  KOKORO_SPEED_MAX,
+  KOKORO_SPEED_MIN,
+  isIOS,
+  isKokoroVoice,
+  setIosUseBrowserVoice,
+  setKokoroSpeed,
+  useKokoroDevicePrefs,
+} from '../voice/kokoro'
 import ModelPicker from './ModelPicker'
 import VoicePronunciations from './VoicePronunciations'
+import VoicePromptEditor from './VoicePromptEditor'
 
 /** Recognition languages offered in the picker. The browser default (`''`)
  *  follows the page/OS language. */
@@ -82,6 +91,7 @@ export default function VoiceSettingsSection() {
   }, [models.length, fetchModels])
 
   const onIOS = isIOS()
+  const kokoroSpeed = useKokoroDevicePrefs((s) => s.speed)
   const iosUseBrowserVoice = useKokoroDevicePrefs((s) => s.iosUseBrowserVoice)
   const synthesisSupported = getSpeechEngine().supportsSynthesis()
 
@@ -154,7 +164,9 @@ export default function VoiceSettingsSection() {
             </select>
           </label>
           <label className="settings-row voice-settings-row">
-            <span className="settings-label">Rate</span>
+            <span className="settings-label">
+              {isKokoroVoice(prefs.voiceURI) ? 'Browser voice rate' : 'Rate'}
+            </span>
             <input
               type="range"
               className="voice-settings-slider"
@@ -170,6 +182,25 @@ export default function VoiceSettingsSection() {
               {prefs.rate.toFixed(1)}×
             </span>
           </label>
+          {isKokoroVoice(prefs.voiceURI) && (
+            <label className="settings-row voice-settings-row">
+              <span className="settings-label">Natural voice speed</span>
+              <input
+                type="range"
+                className="voice-settings-slider"
+                data-testid="voice-kokoro-speed"
+                min={KOKORO_SPEED_MIN}
+                max={KOKORO_SPEED_MAX}
+                step={0.05}
+                value={kokoroSpeed}
+                onChange={(e) => setKokoroSpeed(Number(e.target.value))}
+                aria-label="Natural voice speed"
+              />
+              <span className="voice-settings-value" data-testid="voice-kokoro-speed-value">
+                {kokoroSpeed.toFixed(2)}×
+              </span>
+            </label>
+          )}
           <label className="settings-row voice-settings-row">
             <span className="settings-label">Pitch</span>
             <input
@@ -233,6 +264,26 @@ export default function VoiceSettingsSection() {
               Turn the microphone on when the voice panel opens
             </span>
           </label>
+          <label className="settings-row settings-row-toggle">
+            <input
+              type="checkbox"
+              data-testid="voice-thinking-cue"
+              checked={prefs.thinkingCue}
+              onChange={(e) => setPrefs({ thinkingCue: e.target.checked })}
+            />
+            <span className="settings-label">Play a soft sound while waiting for a reply</span>
+          </label>
+          <label className="settings-row settings-row-toggle">
+            <input
+              type="checkbox"
+              data-testid="voice-thinking-filler"
+              checked={prefs.thinkingFiller}
+              onChange={(e) => setPrefs({ thinkingFiller: e.target.checked })}
+            />
+            <span className="settings-label">
+              Say &ldquo;One sec&rdquo; when a reply is slow to start (natural voices)
+            </span>
+          </label>
           {onIOS && (
             <label className="settings-row settings-row-toggle">
               <input
@@ -288,6 +339,7 @@ export default function VoiceSettingsSection() {
         )}
       </section>
 
+      <VoicePromptEditor />
       <VoicePronunciations />
     </>
   )

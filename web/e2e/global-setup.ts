@@ -1,19 +1,11 @@
-import { execSync } from 'node:child_process'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-
 /**
  * Global setup for Playwright e2e tests.
  *
- * Builds the frontend (so the binary embeds the latest assets) and the
- * release binary that the webServer block will launch. Both builds are
- * incremental — repeated runs are fast.
+ * Runs against the already-booted webServer: approves the staged wasm
+ * plugins and completes the first-run wizard. The frontend + release
+ * binary are built earlier, at config-eval time in playwright.config.ts.
  */
 export default async function globalSetup() {
-  const here = path.dirname(fileURLToPath(import.meta.url))
-  const webDir = path.resolve(here, '..')
-  const repoRoot = path.resolve(here, '..', '..')
-
   // NOTE: the openai-compat wasm copy lives in playwright.config.ts, not
   // here — Playwright launches the webServer BEFORE globalSetup, so any
   // copy made here lands after the server's plugin load_all and is never
@@ -86,25 +78,8 @@ export default async function globalSetup() {
     )
   }
 
-  // Escape hatch for machines where the release re-link is slow: set
-  // PECKBOARD_E2E_SKIP_BUILD=1 when you've just built the frontend AND
-  // the release binary yourself (in that order — the binary embeds the
-  // dist). CI leaves it unset and always rebuilds.
-  if (process.env.PECKBOARD_E2E_SKIP_BUILD === '1') {
-    console.log('[e2e] PECKBOARD_E2E_SKIP_BUILD=1 — using existing frontend + binary')
-    return
-  }
-
-  console.log('[e2e] Building frontend...')
-  execSync('npm run build', { cwd: webDir, stdio: 'inherit' })
-
-  // rust-embed bakes web/dist into the binary at compile time, but cargo
-  // keys recompilation on Rust source — a dist-only change doesn't
-  // invalidate the embedding module, so the binary would serve STALE
-  // assets (the e2e then fails against UI that "isn't there"). Touch the
-  // module that derives RustEmbed so the fresh dist is always re-embedded.
-  execSync('touch src/frontend.rs', { cwd: repoRoot, stdio: 'inherit' })
-
-  console.log('[e2e] Building release binary (this is slow on first run)...')
-  execSync('cargo build --release', { cwd: repoRoot, stdio: 'inherit' })
+  // No build here: Playwright boots the webServer BEFORE globalSetup, so a
+  // build at this point only ever refreshed the binary for the NEXT run.
+  // playwright.config.ts builds at config-eval time instead (via
+  // scripts/build-local-release.sh), before the server launches.
 }
