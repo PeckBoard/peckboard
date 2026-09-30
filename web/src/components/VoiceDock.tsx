@@ -81,6 +81,7 @@ export default function VoiceDock() {
   const supported = useVoiceStore((s) => s.recognitionSupported)
   const panelOpen = useVoiceStore((s) => s.panelOpen)
   const status = useVoiceStore((s) => s.status)
+  const micOn = useVoiceStore((s) => s.micOn)
   const interim = useVoiceStore((s) => s.interim)
   const events = useVoiceStore((s) => s.events)
   const pending = useVoiceStore((s) => s.pending)
@@ -90,6 +91,7 @@ export default function VoiceDock() {
   const stopSpeaking = useVoiceStore((s) => s.stopSpeaking)
   const sendText = useVoiceStore((s) => s.sendText)
   const clearError = useVoiceStore((s) => s.clearError)
+  const unlockSpeech = useVoiceStore((s) => s.unlockSpeech)
 
   const [draft, setDraft] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
@@ -129,6 +131,9 @@ export default function VoiceDock() {
       data-testid="voice-panel"
       data-status={status}
       aria-label="Voice assistant"
+      // Any click in the panel counts as the user gesture some browsers
+      // need before they allow speech output.
+      onPointerDown={unlockSpeech}
     >
       <header className="voice-panel-header">
         <h2 className="voice-panel-title">Voice Assistant</h2>
@@ -154,8 +159,8 @@ export default function VoiceDock() {
       <div className="voice-transcript" ref={listRef} data-testid="voice-transcript">
         {transcript.length === 0 && !interim && (
           <p className="voice-transcript-empty">
-            Press the microphone and say what you need. Replies are read aloud; updates from other
-            sessions show up here as they arrive.
+            Just talk — the microphone stays on, and you can cut in while a reply is being read
+            aloud. Updates from other sessions show up here as they arrive.
           </p>
         )}
         {transcript.map((it) => {
@@ -210,17 +215,11 @@ export default function VoiceDock() {
       <div className="voice-controls">
         <button
           type="button"
-          className={`voice-mic${status === 'listening' ? ' active' : ''}`}
+          className={`voice-mic${micOn ? ' active' : ''}`}
           data-testid="voice-mic"
-          aria-pressed={status === 'listening'}
-          aria-label={status === 'listening' ? 'Stop listening' : 'Start listening'}
-          title={
-            status === 'speaking'
-              ? 'Interrupt and speak'
-              : status === 'listening'
-                ? 'Stop listening'
-                : 'Start listening'
-          }
+          aria-pressed={micOn}
+          aria-label={micOn ? 'Mute microphone' : 'Start listening'}
+          title={micOn ? 'Listening — just talk. Click to mute the microphone.' : 'Start listening'}
           disabled={!supported}
           onClick={toggleMic}
         >

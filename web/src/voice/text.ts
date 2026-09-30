@@ -49,13 +49,13 @@ export function stripForSpeech(text: string): string {
 
 /**
  * Split streamed text into complete sentences ready to speak and a tail
- * that is still being generated. A sentence ends at `.`, `!`, `?`, `:`
- * followed by whitespace, or at a newline.
+ * that is still being generated. A sentence ends at `.`, `!`, `?`, `…`,
+ * `:` or `;` followed by whitespace, or at a newline.
  */
 export function takeSentences(buffer: string): { sentences: string[]; rest: string } {
   const sentences: string[] = []
   let rest = buffer
-  const re = /[^.!?:\n]*(?:[.!?:]+(?=\s)|\n)/
+  const re = /[^.!?:;…\n]*(?:[.!?:;…]+["')\]]*(?=\s)|\n)/
   for (;;) {
     const m = re.exec(rest)
     if (!m || m.index !== 0) break
@@ -65,6 +65,53 @@ export function takeSentences(buffer: string): { sentences: string[]; rest: stri
     rest = rest.replace(/^\s+/, '')
   }
   return { sentences, rest }
+}
+
+/** Tail length past which a still-open sentence is cut at a clause
+ *  boundary, so a long sentence starts playing before it is finished. */
+const CLAUSE_SPLIT_AT = 90
+
+/**
+ * Chunk streamed assistant text for live speech: complete sentences, plus —
+ * when the unfinished tail grows long — its leading clauses (cut after a
+ * comma / dash). The returned `rest` is still being generated.
+ */
+export function takeSpeakable(buffer: string): { chunks: string[]; rest: string } {
+  const { sentences, rest: tail } = takeSentences(buffer)
+  const chunks = [...sentences]
+  let rest = tail
+  while (rest.length > CLAUSE_SPLIT_AT) {
+    const head = rest.slice(0, rest.length - 1)
+    const cut = Math.max(head.lastIndexOf(', '), head.lastIndexOf(' — '), head.lastIndexOf(' - '))
+    if (cut < 30) break
+    chunks.push(rest.slice(0, cut + 1).trim())
+    rest = rest.slice(cut + 1).replace(/^\s+/, '')
+  }
+  return { chunks, rest }
+}
+
+/** Lowercased words of `text`, punctuation dropped. */
+export function speechWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}'\s]+/gu, ' ')
+    .split(/\s+/)
+    .map((w) => w.replace(/^'+|'+$/g, ''))
+    .filter(Boolean)
+}
+
+/**
+ * Whether recognized speech `heard` is most likely the microphone picking up
+ * the assistant's own voice: nearly all its words occur in what was just
+ * being spoken (`spoken`).
+ */
+export function isLikelyEcho(heard: string, spoken: string[]): boolean {
+  const words = speechWords(heard)
+  if (words.length === 0) return true
+  const pool = new Set(spoken.flatMap(speechWords))
+  if (pool.size === 0) return false
+  const hits = words.filter((w) => pool.has(w)).length
+  return hits / words.length >= 0.6
 }
 
 export type VoiceTranscriptItem =

@@ -1,7 +1,11 @@
 //! Voice assistant route: `POST /api/voice/session` gets or creates the
-//! caller's single voice session (see `service::voice_relay`). Utterances go
-//! through the ordinary `POST /api/sessions/:id/message` route and replies
-//! stream over the normal WS — there is no voice-specific send path.
+//! instance's single, global voice session (see `service::voice_relay`).
+//! Utterances go through the ordinary `POST /api/sessions/:id/message` route
+//! and replies stream over the normal WS — there is no voice-specific send
+//! path.
+//!
+//! The voice session may act on every session in every folder, so it is an
+//! admin surface: non-admins get 403.
 
 use std::sync::Arc;
 
@@ -32,7 +36,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 }
 
 /// Serialises get-or-create so two concurrent first calls can't both
-/// create a voice session for the same user.
+/// create the voice session.
 static GET_OR_CREATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
@@ -61,12 +65,18 @@ async fn voice_session(
         .model
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty());
+    if !user.is_admin() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "the voice assistant controls every session, so it is admin-only",
+        ));
+    }
     crate::routes::settings::check_model_or_400(requested.as_deref())?;
 
     let _guard = GET_OR_CREATE.lock().await;
     let existing = state
         .db
-        .find_user_expert_session(&user.user_id, VOICE_EXPERT_KIND)
+        .find_expert_session(VOICE_EXPERT_KIND)
         .await
         .map_err(internal)?;
 
@@ -118,6 +128,7 @@ async fn voice_session(
                 .map_err(internal)?
         }
     };
+    grant_cross_folder_control(&state, &session.id).await?;
 
     let model = match session.model.clone() {
         Some(m) => m,
@@ -129,6 +140,30 @@ async fn voice_session(
         "session_id": session.id,
         "model": model,
     })))
+}
+
+/// Give the voice session a standing "Approve always" cross-folder grant
+/// for the session-control tools (send_message, terminate_agent, …), so it
+/// can drive sessions in every folder without a per-folder approval prompt.
+/// The grant lives where both the plugin's own gate and the host's
+/// `session_control_auth::authorize` read it. Idempotent.
+async fn grant_cross_folder_control(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    use crate::plugin::session_control_auth::{grant_always, has_always};
+    const PLUGIN_ID: &str = "session-control";
+    let db = state.db.clone();
+    let session_id = session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        if has_always(&db, PLUGIN_ID, &session_id)? {
+            return Ok(());
+        }
+        grant_always(&db, PLUGIN_ID, &session_id)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)
 }
 
 /// Switch the voice session's model. Mirrors the session PATCH's forced
@@ -253,7 +288,9 @@ fn pick_haiku(ids: &[String], app_default: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::middleware::tests::{seed_authenticated_user, test_state};
+    use crate::auth::middleware::tests::{
+        seed_authenticated_user, seed_authenticated_user_with_suffix, test_state,
+    };
     use crate::db::models::NewFolder;
     use axum::body::Body;
     use axum::http::{Request, header};
@@ -299,10 +336,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_session_is_idempotent_and_switches_model() {
+    async fn voice_session_is_global_admin_only_and_switches_model() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
-        let token = seed_authenticated_user(&state, "user").await;
+        let token = seed_authenticated_user(&state, "admin").await;
         state
             .db
             .create_folder(NewFolder {
@@ -325,6 +362,20 @@ mod tests {
         let session = state.db.get_session(&sid).await.unwrap().unwrap();
         assert!(session.is_expert && session.is_permanent);
         assert_eq!(session.expert_kind.as_deref(), Some(VOICE_EXPERT_KIND));
+        // Standing cross-folder grant for the session-control tools.
+        assert!(
+            crate::plugin::session_control_auth::has_always(&state.db, "session-control", &sid)
+                .unwrap()
+        );
+
+        // Global, not per-user: another admin gets the same session; a
+        // non-admin is refused (the session controls every session).
+        let admin2 = seed_authenticated_user_with_suffix(&state, "admin", "b").await;
+        let (_, shared) = post(&app, &admin2, "{}").await;
+        assert_eq!(shared["session_id"], first["session_id"]);
+        let user = seed_authenticated_user_with_suffix(&state, "user", "c").await;
+        let (status, _) = post(&app, &user, "{}").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(session.name, VOICE_SESSION_TITLE);
         assert_eq!(session.user_id.as_deref(), Some("u1"));
         assert_eq!(session.system_prompt.as_deref(), Some(VOICE_SYSTEM_PROMPT));

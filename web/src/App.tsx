@@ -56,6 +56,7 @@ import SoundsListener from './components/SoundsListener'
 import VoiceDock, { VoiceListenButton } from './components/VoiceDock'
 import ConnectionBanner from './components/ConnectionBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
+import { parseVoiceNavigate, useVoiceNavStore, VOICE_PAGE_VIEWS } from './voice/navigation'
 import './App.css'
 
 type View =
@@ -961,6 +962,43 @@ function App() {
     window.addEventListener('peckboard:open-plugin-page', onOpenPluginPage)
     return () => window.removeEventListener('peckboard:open-plugin-page', onOpenPluginPage)
   }, [authenticated, navigate])
+
+  // The voice assistant's `show_view` tool switches what the user is looking
+  // at (ids already resolved server-side; see voice/navigation.ts).
+  useEffect(() => {
+    if (!authenticated) return
+    const onVoiceNavigate = (e: Event) => {
+      const t = parseVoiceNavigate((e as CustomEvent).detail)
+      if (!t) return
+      if (t.target === 'session') {
+        window.dispatchEvent(
+          new CustomEvent('peckboard:open-session', { detail: { session_id: t.id } }),
+        )
+      } else if (t.target === 'project' || t.target === 'card') {
+        const projectId = t.target === 'card' ? t.projectId : t.id
+        if (t.target === 'card') useVoiceNavStore.getState().requestCard(projectId, t.id)
+        const open = () => {
+          setActiveProject(projectId)
+          navigate('projects', projectId)
+        }
+        // A project created after the list loaded would be cleared as
+        // unknown by the active-project effect — refetch first.
+        const { projects, fetchProjects } = useProjectsStore.getState()
+        if (projects.some((p) => p.id === projectId)) open()
+        else void fetchProjects().then(open)
+      } else if (t.target === 'folder') {
+        setActiveFolderId(t.id)
+        navigate('folders', t.id, 'repos')
+      } else {
+        const target = VOICE_PAGE_VIEWS[t.page]
+        if (target === 'sessions') setActiveSession(null)
+        if (target === 'projects') setActiveProject(null)
+        navigate(target, null)
+      }
+    }
+    window.addEventListener('peckboard:voice-navigate', onVoiceNavigate)
+    return () => window.removeEventListener('peckboard:voice-navigate', onVoiceNavigate)
+  }, [authenticated, navigate, setActiveSession, setActiveProject])
   const lastOpenedProjectTab = useRef<string | null>(null)
   useEffect(() => {
     if (!authenticated) return

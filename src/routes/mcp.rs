@@ -202,7 +202,7 @@ async fn mcp_handler(
                     serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "inputSchema": t.input_schema,
+                        "inputSchema": gate.input_schema(&t.name, &t.input_schema),
                         // Hints, not gates. A client that decides whether a
                         // call needs human approval reads these; a tool
                         // shipping none reads as "unknown, assume a write".
@@ -233,7 +233,7 @@ async fn mcp_handler(
                 tools.push(serde_json::json!({
                     "name": t.name,
                     "description": t.description,
-                    "inputSchema": t.input_schema,
+                    "inputSchema": gate.input_schema(&t.name, &t.input_schema),
                     // No annotations for plugin tools: only the plugin knows
                     // whether its tool writes, and inventing a hint here
                     // would advertise a guess as fact.

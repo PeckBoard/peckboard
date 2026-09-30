@@ -193,7 +193,9 @@ export default function VoiceSettingsSection() {
               checked={prefs.autoListen}
               onChange={(e) => setPrefs({ autoListen: e.target.checked })}
             />
-            <span className="settings-label">Listen again after each reply</span>
+            <span className="settings-label">
+              Turn the microphone on when the voice panel opens
+            </span>
           </label>
         </div>
         <div className="voice-settings-actions">

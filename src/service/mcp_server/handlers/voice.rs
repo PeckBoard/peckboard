@@ -11,8 +11,8 @@ impl McpToolRegistry {
     /// so the `mcp` route runs `service::questions::resolve_question` off
     /// the `_resolve_question` marker.
     ///
-    /// Hard-enforced to voice sessions here as well as in `ToolGate`, and to
-    /// targets the voice session's user may act on.
+    /// Hard-enforced to voice sessions here as well as in `ToolGate`. Any
+    /// target session is fair game — the voice session is global.
     pub(crate) async fn handle_answer_question(
         &self,
         args: Value,
@@ -49,25 +49,21 @@ impl McpToolRegistry {
         if caller.expert_kind.as_deref() != Some(VOICE_EXPERT_KIND) {
             anyhow::bail!("answer_question is only available to the voice assistant session");
         }
-        let user_id = caller
-            .user_id
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("voice session has no owner"))?;
 
-        // Unknown and not-yours read the same, so the tool is no oracle.
+        // The voice assistant is global and admin-only (see `routes::voice`):
+        // it may answer any session's question, whoever owns it.
         let target = ctx
             .db
             .get_session(session_id)
             .await?
-            .filter(|t| {
-                crate::auth::access::may_access_session(
-                    false,
-                    &user_id,
-                    t.user_id.as_deref(),
-                    t.project_id.as_deref(),
-                )
-            })
             .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        // Answer under the voice session owner's authority; a legacy unowned
+        // voice row falls back to the target's owner.
+        let user_id = caller
+            .user_id
+            .clone()
+            .or_else(|| target.user_id.clone())
+            .ok_or_else(|| anyhow::anyhow!("neither session has an owner to answer as"))?;
 
         let pending =
             crate::service::questions::pending_question_events(&ctx.db, &target.id).await?;
@@ -175,7 +171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn answer_question_is_voice_only_and_same_user() {
+    async fn answer_question_is_voice_only_and_reaches_any_session() {
         let db = Db::in_memory().unwrap();
         db.create_folder(NewFolder {
             id: "f1".into(),
@@ -217,16 +213,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("voice"), "{err}");
-
-        // Another user's session: indistinguishable from unknown.
-        let err = reg
+        // Another user's session: the global voice session answers it too,
+        // under the voice owner's authority.
+        let ok = reg
             .handle_tool_call(
                 "answer_question",
                 serde_json::json!({"session_id": "other", "question_id": q2.id, "answers": {"0": "x"}}),
                 &ctx(&db, "voice"),
             )
             .await
+            .unwrap();
+        assert_eq!(ok["_resolve_question"]["session_id"], "other");
+        assert_eq!(ok["_resolve_question"]["user_id"], "u1");
+
+        // Unknown session: refused.
+        let err = reg
+            .handle_tool_call(
+                "answer_question",
+                serde_json::json!({"session_id": "nope", "question_id": q2.id, "answers": {"0": "x"}}),
+                &ctx(&db, "voice"),
+            )
+            .await
             .unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
         assert!(err.to_string().contains("not found"), "{err}");
 
         // Happy path: marker carries exactly what resolve_question expects.

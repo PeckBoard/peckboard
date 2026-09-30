@@ -32,6 +32,7 @@ import {
   priorityBadge,
   summarizeEvent,
 } from './kanban/utils'
+import { useVoiceNavStore } from '../voice/navigation'
 import PriorityChevron from './kanban/PriorityChevron'
 
 interface KanbanBoardProps {
@@ -87,6 +88,19 @@ export default function KanbanBoard({
   const [cardFilter, setCardFilter] = useState('')
   const todosByCard = useProjectTodos(cards)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
+  // A card the voice assistant asked to show (voice/navigation.ts): open it
+  // once this board's cards are loaded. Via a timer so the effect body never
+  // setStates synchronously (react-hooks/set-state-in-effect).
+  const pendingVoiceCard = useVoiceNavStore((s) => s.pendingCard)
+  useEffect(() => {
+    if (cardsLoadedProjectId !== projectId || pendingVoiceCard?.projectId !== projectId) return
+    const timer = setTimeout(() => {
+      const cardId = useVoiceNavStore.getState().takePendingCard(projectId)
+      const card = cards.find((c) => c.id === cardId)
+      if (card) setSelectedCard(card)
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [cards, cardsLoadedProjectId, projectId, pendingVoiceCard])
   const [showAddForm, setShowAddForm] = useState(false)
   const [editingProject, setEditingProject] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)

@@ -16,6 +16,11 @@ use super::schemas::{
     worker_hidden_tool_names,
 };
 
+/// Built-in headless-browser tools (`browser_open`, `browser_act`, …).
+fn is_browser_tool(name: &str) -> bool {
+    name.starts_with("browser_")
+}
+
 /// Resolved gate state for one session. Cheap to build (a handful of bools),
 /// so callers construct it fresh per turn rather than caching it.
 pub struct ToolGate {
@@ -23,7 +28,7 @@ pub struct ToolGate {
     pre_hatcher: bool,
     doc_review: bool,
     /// Voice assistant session (`expert_kind == "voice"`): the only role
-    /// that may call `answer_question`.
+    /// that may call `answer_question`, and the one role with no browser.
     voice: bool,
     autoswitch_on: bool,
     /// Names of plugin-owned tools this session's role must never dispatch
@@ -99,8 +104,11 @@ impl ToolGate {
         if matches!(name, "get_review_doc" | "submit_review_revision") {
             return self.doc_review;
         }
-        if name == "answer_question" {
+        if matches!(name, "answer_question" | "show_view") {
             return self.voice;
+        }
+        if self.voice && is_browser_tool(name) {
+            return false;
         }
         if self.is_worker && self.worker_denied_plugin_tools.contains(name) {
             return false;
@@ -111,6 +119,42 @@ impl ToolGate {
             chat_hidden_tool_names()
         };
         !hidden.contains(&name)
+    }
+
+    /// The `inputSchema` to advertise for `name`. For the voice session a
+    /// destructive tool gains a required `confirmed` boolean — the argument
+    /// `voice_relay::require_voice_confirmation` enforces at dispatch.
+    /// Every other case returns the schema unchanged.
+    pub fn input_schema(&self, name: &str, schema: &serde_json::Value) -> serde_json::Value {
+        use crate::service::voice_relay::{CONFIRMED_ARG, is_destructive_tool};
+        let mut schema = schema.clone();
+        if !self.voice || !is_destructive_tool(name) {
+            return schema;
+        }
+        let Some(obj) = schema.as_object_mut() else {
+            return schema;
+        };
+        if let Some(props) = obj
+            .entry("properties")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+        {
+            props.insert(
+                CONFIRMED_ARG.into(),
+                serde_json::json!({
+                    "type": "boolean",
+                    "description": "Voice assistant: true only after the user explicitly said yes out loud to this exact action."
+                }),
+            );
+        }
+        if let Some(required) = obj
+            .entry("required")
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+        {
+            required.push(CONFIRMED_ARG.into());
+        }
+        schema
     }
 
     /// Hard gate: `Some(reason)` refuses the call outright, whatever the
@@ -128,12 +172,21 @@ impl ToolGate {
             ));
         }
 
+        if name == "show_view" && !self.voice {
+            return Some("tool 'show_view' is blocked: only the voice assistant session drives the user's screen.".to_string());
+        }
         if name == "answer_question" && !self.voice {
             return Some(
                 "tool 'answer_question' is blocked: only the voice assistant session \
                  answers other sessions' questions."
                     .to_string(),
             );
+        }
+        if self.voice && is_browser_tool(name) {
+            return Some(format!(
+                "tool '{name}' is blocked: the voice assistant has no browser. \
+                 Route browser work to another session with send_message."
+            ));
         }
         if matches!(name, "get_model_guidance" | "switch_session_model") && !self.autoswitch_on {
             return Some(format!(
@@ -287,8 +340,12 @@ mod tests {
         let voice = ToolGate::from_session(&session(false, Some("voice"), None));
         assert!(voice.blocked("answer_question").is_none());
         assert!(voice.advertised("answer_question"));
-        // Voice keeps the ordinary chat tool surface.
+        // Voice keeps the ordinary chat tool surface, minus the browser.
         assert!(voice.advertised("list_sessions"));
+        assert!(voice.blocked("browser_open").is_some());
+        assert!(!voice.advertised("browser_act"));
+        let chat = ToolGate::from_session(&session(false, None, None));
+        assert!(chat.blocked("browser_open").is_none());
         for gate in [
             ToolGate::from_session(&session(false, None, None)),
             ToolGate::from_session(&session(true, None, None)),

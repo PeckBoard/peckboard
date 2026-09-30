@@ -52,6 +52,7 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "get_review_doc",
         "submit_review_revision",
         "answer_question",
+        "show_view",
     ]
 }
 
@@ -80,6 +81,7 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "get_review_doc",
         "submit_review_revision",
         "answer_question",
+        "show_view",
     ]
 }
 
@@ -1966,6 +1968,23 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "rejected": { "type": "boolean", "description": "true = dismiss the question without answering (answers ignored)." }
                 },
                 "required": ["session_id", "question_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "show_view".into(),
+            description: "Voice assistant only: switch the user's screen to a project, session, card, or folder (by id or spoken name, fuzzy-matched), or to a top-level page. Call it whenever the conversation turns to a specific project or session. Returns what was opened, or candidates (and opens nothing) when the name is ambiguous or unmatched.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["auto", "project", "session", "card", "folder", "page"],
+                        "description": "What to open. auto (default) searches projects, sessions, and folders by name."
+                    },
+                    "id": { "type": "string", "description": "Exact id, when known (e.g. from a candidates list)." },
+                    "name": { "type": "string", "description": "Name as the user said it, e.g. \"stashify\". For target page: sessions, projects, folders, settings, reports, repeating_tasks, usage, or agents." }
+                },
                 "additionalProperties": false
             }),
         },

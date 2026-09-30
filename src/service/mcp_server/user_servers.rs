@@ -432,16 +432,42 @@ pub fn extra_entries_from_session_config(path: &str) -> Vec<(String, serde_json:
         .unwrap_or_default()
 }
 
+/// Whether a user server drives a browser (Playwright, Puppeteer, …) —
+/// judged from its name, command, args, and URL.
+pub fn is_browser_server(s: &UserMcpServer) -> bool {
+    std::iter::once(&s.name)
+        .chain(std::iter::once(&s.command))
+        .chain(s.args.iter())
+        .chain(std::iter::once(&s.url))
+        .map(|v| v.to_ascii_lowercase())
+        .any(|v| {
+            ["playwright", "puppeteer", "browser"]
+                .iter()
+                .any(|k| v.contains(k))
+        })
+}
+
 /// Merge the user's provider-applicable servers into an already-written
 /// per-session config file. Called once per dispatch from
 /// `SessionManager::send_message_locked`; a fresh file is written before
 /// every turn, so this never sees its own output. Best-effort: on any
 /// failure the turn proceeds with just the built-in `peckboard` entry.
-pub async fn append_user_mcp_servers(mcp_config_path: &str, db: &Db, provider_id: &str) {
+/// `exclude_browser` drops [`is_browser_server`] entries (the voice
+/// assistant has no browser).
+pub async fn append_user_mcp_servers(
+    mcp_config_path: &str,
+    db: &Db,
+    provider_id: &str,
+    exclude_browser: bool,
+) {
     if !MCP_SUPPORTED_PROVIDERS.contains(&provider_id) {
         return;
     }
-    let entries = entries_for_provider_with_oauth(db, &load(db).await, provider_id).await;
+    let mut servers = load(db).await;
+    if exclude_browser {
+        servers.retain(|s| !is_browser_server(s));
+    }
+    let entries = entries_for_provider_with_oauth(db, &servers, provider_id).await;
     if entries.is_empty() {
         return;
     }

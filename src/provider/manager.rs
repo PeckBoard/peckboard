@@ -567,8 +567,14 @@ impl SessionManager {
         // permission gate (Claude today); the same setting is read again by
         // the `run_command` MCP tool, which every provider shares, so the
         // escape hatch applies host-wide regardless of backend.
+        // The voice assistant always runs with permissions skipped: it is
+        // driven hands-free, so a permission prompt would stall it. Its
+        // destructive tools are gated instead by a spoken confirmation
+        // (`voice_relay::require_voice_confirmation`).
+        let is_voice =
+            session.expert_kind.as_deref() == Some(crate::service::voice_relay::VOICE_EXPERT_KIND);
         if final_config.permission_mode.is_none()
-            && crate::routes::settings::bypass_permissions_for_db(db.clone()).await
+            && (is_voice || crate::routes::settings::bypass_permissions_for_db(db.clone()).await)
         {
             final_config.permission_mode = Some("bypass".into());
         }
@@ -576,13 +582,15 @@ impl SessionManager {
         // per-session config file here — the one spot every dispatch path
         // crosses AFTER the model (hence provider) is resolved; the
         // construction sites often only know `model: "default"`. Pre-hatcher
-        // research sessions stay locked to the built-in read-only toolset.
+        // research sessions stay locked to the built-in read-only toolset;
+        // the voice assistant has no browser, so browser servers are dropped.
         if !final_config.is_pre_hatcher {
             if let Some(path) = &final_config.mcp_config_path {
                 crate::service::mcp_server::user_servers::append_user_mcp_servers(
                     path,
                     db,
                     &provider_id,
+                    is_voice,
                 )
                 .await;
             }

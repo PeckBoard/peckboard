@@ -205,6 +205,12 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'voice-navigate') {
+        // The voice assistant's `show_view` tool: rides the voice session's
+        // own stream, so only browsers with the voice panel open get it.
+        window.dispatchEvent(new CustomEvent('peckboard:voice-navigate', { detail: msg.data }))
+        return
+      }
       if (msg.type === 'plugin-data') {
         // A plugin's data store changed (identifiers only — no values).
         // PluginFullPage / PluginPanelModal forward it into their sandboxed

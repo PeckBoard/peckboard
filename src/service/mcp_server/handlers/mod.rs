@@ -19,6 +19,7 @@ mod reports;
 mod subagents;
 mod variables;
 mod voice;
+mod voice_nav;
 mod workers;
 
 pub use model_control::autoswitch_enabled;

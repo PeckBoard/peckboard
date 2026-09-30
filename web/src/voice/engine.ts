@@ -21,6 +21,10 @@ export interface RecognitionCallbacks {
 export interface RecognitionOptions {
   /** BCP-47 tag, or `''` for the browser default. */
   lang: string
+  /** Keep recognizing across pauses instead of stopping after one
+   *  utterance. Engines still end sessions on their own (silence, network),
+   *  so an always-on caller restarts on `onEnd`. */
+  continuous?: boolean
 }
 
 export interface SpeakOptions {
@@ -30,6 +34,8 @@ export interface SpeakOptions {
   pitch: number
   /** Called when the utterance finishes or is cancelled. */
   onEnd: () => void
+  /** The engine failed to speak (`not-allowed`, `synthesis-failed`, …). */
+  onError?: (code: string) => void
 }
 
 export interface VoiceOption {
@@ -47,6 +53,9 @@ export interface SpeechEngine {
   speak(text: string, opts: SpeakOptions): void
   /** Cancel the current utterance and anything the engine has queued. */
   cancelSpeech(): void
+  /** Call from a user gesture (click / tap): unlocks speech output on
+   *  engines that only allow it after user activation. */
+  unlockSynthesis(): void
   getVoices(): VoiceOption[]
   /** Subscribe to voice-list changes (async population). Returns unsubscribe. */
   onVoicesChanged(cb: () => void): () => void
@@ -91,10 +100,18 @@ function synthesis(): SpeechSynthesis | null {
   return window.speechSynthesis ?? null
 }
 
+/** Pause between `cancel()` and the next `speak()` (see `speak`). */
+const CANCEL_SETTLE_MS = 120
+
 /** Browser Web Speech API engine: `SpeechRecognition` for STT and
  *  `speechSynthesis` for TTS. */
 export class WebSpeechEngine implements SpeechEngine {
   private recognition: SpeechRecognitionLike | null = null
+  /** Utterances in flight — referenced so Chrome can't GC them mid-speech. */
+  private live = new Set<SpeechSynthesisUtterance>()
+  private lastCancelAt = 0
+  private cancelGen = 0
+  private unlocked = false
 
   supportsRecognition(): boolean {
     return recognitionCtor() !== null
@@ -115,7 +132,7 @@ export class WebSpeechEngine implements SpeechEngine {
     const rec = new Ctor()
     this.recognition = rec
     if (opts.lang) rec.lang = opts.lang
-    rec.continuous = false
+    rec.continuous = opts.continuous ?? false
     rec.interimResults = true
     rec.maxAlternatives = 1
     let finalText = ''
@@ -168,34 +185,94 @@ export class WebSpeechEngine implements SpeechEngine {
   speak(text: string, opts: SpeakOptions): void {
     const synth = synthesis()
     if (!synth || typeof SpeechSynthesisUtterance === 'undefined') {
+      opts.onError?.('unsupported')
       opts.onEnd()
       return
     }
+    // Chrome drops an utterance queued in the same tick as `cancel()`
+    // (cancel completes asynchronously and takes the new one with it).
+    const sinceCancel = Date.now() - this.lastCancelAt
+    if (sinceCancel < CANCEL_SETTLE_MS) {
+      const gen = this.cancelGen
+      setTimeout(() => {
+        if (gen === this.cancelGen) this.speak(text, opts)
+        else opts.onEnd()
+      }, CANCEL_SETTLE_MS - sinceCancel)
+      return
+    }
     const u = new SpeechSynthesisUtterance(text)
-    if (opts.voiceURI) {
-      const voice = synth.getVoices().find((v) => v.voiceURI === opts.voiceURI)
-      if (voice) u.voice = voice
+    const voices = synth.getVoices()
+    const voice = opts.voiceURI ? voices.find((v) => v.voiceURI === opts.voiceURI) : undefined
+    if (voice) {
+      u.voice = voice
+      u.lang = voice.lang
     }
     u.rate = opts.rate
     u.pitch = opts.pitch
     let done = false
+    let watchdog: ReturnType<typeof setTimeout> | null = null
     const finish = () => {
       if (done) return
       done = true
+      if (watchdog) clearTimeout(watchdog)
+      this.live.delete(u)
       opts.onEnd()
     }
     u.onend = finish
-    u.onerror = finish
+    u.onerror = (ev: Event) => {
+      const code = (ev as { error?: string }).error ?? 'error'
+      // `interrupted` / `canceled` are our own cancel(), not failures.
+      if (code !== 'interrupted' && code !== 'canceled') {
+        console.warn('[voice] speechSynthesis error:', code)
+        // Blocked for lack of a user gesture: let the next gesture retry.
+        if (code === 'not-allowed') this.unlocked = false
+        opts.onError?.(code)
+      }
+      finish()
+    }
+    // Chrome garbage-collects an utterance nothing references and then
+    // never fires its `end` — which stalled the speak queue forever. Hold
+    // a reference until it finishes, and back that up with a watchdog in
+    // case the engine goes silent without an event.
+    this.live.add(u)
+    const expectedMs = (text.length / 12 / Math.max(0.5, opts.rate)) * 1000
+    watchdog = setTimeout(() => {
+      console.warn('[voice] speechSynthesis never finished an utterance; skipping it')
+      finish()
+    }, expectedMs + 8000)
+    // A paused engine (Chrome leaves it paused after some tab switches)
+    // queues utterances silently until resumed.
+    if (synth.paused) synth.resume()
     synth.speak(u)
   }
 
   cancelSpeech(): void {
     const synth = synthesis()
     if (!synth) return
+    this.cancelGen++
+    this.lastCancelAt = Date.now()
     try {
       synth.cancel()
     } catch {
       /* nothing queued */
+    }
+  }
+
+  unlockSynthesis(): void {
+    const synth = synthesis()
+    if (!synth || this.unlocked || typeof SpeechSynthesisUtterance === 'undefined') return
+    this.unlocked = true
+    // Speaking (silently) inside a user gesture unlocks speech for the rest
+    // of the page's life on engines that gate it behind activation
+    // (Safari / iOS, Chrome on Android). Also nudges Chrome to load voices.
+    try {
+      const u = new SpeechSynthesisUtterance(' ')
+      u.volume = 0
+      synth.getVoices()
+      if (synth.paused) synth.resume()
+      synth.speak(u)
+    } catch {
+      /* best effort */
     }
   }
 

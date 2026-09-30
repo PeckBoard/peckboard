@@ -226,18 +226,13 @@ impl Db {
         })
         .await
     }
-    /// `user_id`'s oldest expert session of `expert_kind` — the per-user
-    /// singleton lookup behind `POST /api/voice/session`.
-    pub async fn find_user_expert_session(
-        &self,
-        user_id: &str,
-        expert_kind: &str,
-    ) -> anyhow::Result<Option<Session>> {
-        let user_id = user_id.to_string();
+    /// The instance's oldest expert session of `expert_kind`, whoever owns
+    /// it — the global singleton lookup behind `POST /api/voice/session`.
+    /// Oldest-first, so DBs from the per-user era converge on one row.
+    pub async fn find_expert_session(&self, expert_kind: &str) -> anyhow::Result<Option<Session>> {
         let expert_kind = expert_kind.to_string();
         self.with_conn(move |conn| {
             sessions::table
-                .filter(sessions::user_id.eq(&user_id))
                 .filter(sessions::expert_kind.eq(&expert_kind))
                 .select(Session::as_select())
                 .order((sessions::created_at.asc(), sessions::id.asc()))

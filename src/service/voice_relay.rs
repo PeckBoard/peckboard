@@ -1,7 +1,8 @@
 //! Voice assistant relay.
 //!
-//! A user's voice session (`expert_kind = "voice"`, driven from the browser
-//! by speech) routes work to other sessions. This module carries the other
+//! The instance's single, global voice session (`expert_kind = "voice"`,
+//! driven from the browser by speech) routes work to any session in any
+//! folder. This module carries the other
 //! direction: when a session the voice assistant sent work to asks the user
 //! a question or finishes a turn, the voice session gets a `[relay] …` user
 //! turn so it can speak the news and, for questions, collect the answer and
@@ -34,7 +35,7 @@ use crate::ws::broadcaster::Broadcaster;
 /// `expert_kind` of a voice assistant session.
 pub const VOICE_EXPERT_KIND: &str = "voice";
 
-/// Title of the per-user voice session.
+/// Title of the global voice session.
 pub const VOICE_SESSION_TITLE: &str = "Voice assistant";
 
 /// Every relay turn's text starts with exactly this. The frontend renders
@@ -54,19 +55,25 @@ You are the user's fast, spoken assistant. These voice rules override the genera
 - No markdown, code, lists, headings, URLs, file paths, or ids in replies. Say names, not identifiers.
 - Before acting, say in one sentence what you are about to do (for example: "I'll ask the stashify dev session to implement this."), then do it.
 
-## Routing Work to Sessions
-- You do not do the work yourself. You route it to the user's other sessions and report back.
+- You do not do the work yourself. You route it to the user's other sessions and report back. You can reach every session in every folder: read it, message it, create one, interrupt it, answer its questions, clear it, or terminate its agent.
+- You have no browser. Anything that needs a browser goes to another session.
+- Find the right target with find_session, list_sessions, or search_sessions. If more than one session could fit, ask the user which one they mean.
 - Find the right target with find_session, list_sessions, or search_sessions. If more than one session could fit, ask the user which one they mean.
 - Send work with send_message. Write a complete, self-contained prompt: the target has not heard this conversation, so include the goal, the relevant details the user gave, and what "done" looks like.
 - Create a new session with create_session only when the user asks for one or no existing session fits.
 
+## Showing Things on Screen
+- You drive what the user sees. Whenever the conversation turns to a specific project, session, card, or folder (for example the user mentions "stashify" or "infra"), call show_view right away with the name as the user said it, without asking first. When you route work to a session, show that session too.
+- If show_view returns candidates instead of opening something, ask the user which one they mean, then call it again with the chosen id.
+- For a general page (sessions list, projects, settings, reports), call show_view with target page.
+- Don't announce the jump at length; a short "Here's stashify." is enough.
 ## Relay Messages
 Messages starting with "[relay] " come from the system, not from the user speaking.
 - "[relay] question from ...": a session you sent work to needs a decision. Do NOT read the question out verbatim. The user only knows what was said in this voice conversation, so frame it with that context: explain in plain words what is being decided and why it matters, suggest a sensible default, and talk it through until you have a clear answer. Then call answer_question with the session_id, the question_id, and the answers keyed by question index (for example {"0": "Use Postgres"}). If the user wants to skip it, call answer_question with rejected set to true.
 - "[relay] update from ...": a session finished a turn. Summarize briefly what changed and whether the work is done or still needs something.
 
 ## Destructive Actions
-Before any destructive tool (any delete tool, terminate_agent, clear_session, interrupt_session, or any remove or uninstall tool), ALWAYS say what you are about to do and ask the user to confirm out loud. Proceed only on an explicit yes. Anything else means do not do it.
+You run without permission prompts, so you are the safety check. Destructive tools are any delete tool, terminate_agent, clear_session, stop_background, and any remove or uninstall tool. Before calling one, say exactly what it will do (which session, card, or project, by name) and ask the user to confirm out loud. Only after an explicit yes, call it with confirmed set to true. Anything other than a clear yes means do not do it. Never set confirmed to true on your own initiative; the system refuses destructive calls without it.
 "#;
 
 #[derive(Default)]
@@ -428,6 +435,62 @@ pub async fn link_from_tool_call(
     }
 }
 
+/// Tools that destroy or discard work: deletes, removals, uninstalls,
+/// killing an agent, wiping a session's context, stopping a background task.
+/// The voice session runs with permissions skipped, so these are the calls
+/// it must confirm out loud first (see [`require_voice_confirmation`]).
+pub fn is_destructive_tool(name: &str) -> bool {
+    name.starts_with("delete_")
+        || name.starts_with("remove_")
+        || name.ends_with("_remove")
+        || name.starts_with("uninstall")
+        || matches!(
+            name,
+            "terminate_agent" | "clear_session" | "stop_background"
+        )
+}
+
+/// Argument a voice session must pass as `true` on a destructive tool, after
+/// the user said yes out loud. Advertised in the voice session's tool
+/// schemas by `ToolGate::input_schema`.
+pub const CONFIRMED_ARG: &str = "confirmed";
+
+/// Hard gate for the voice session's destructive calls: refuses unless
+/// `args.confirmed == true`, and strips `confirmed` before dispatch so no
+/// handler sees an argument it doesn't declare. A no-op for every other
+/// session and every non-destructive tool.
+pub async fn require_voice_confirmation(
+    db: &Db,
+    caller_session_id: &str,
+    tool_name: &str,
+    args: &mut serde_json::Value,
+) -> anyhow::Result<()> {
+    let destructive = is_destructive_tool(tool_name);
+    if !destructive && args.get(CONFIRMED_ARG).is_none() {
+        return Ok(());
+    }
+    let caller_is_voice = matches!(
+        db.get_session(caller_session_id).await,
+        Ok(Some(s)) if s.expert_kind.as_deref() == Some(VOICE_EXPERT_KIND)
+    );
+    if !caller_is_voice {
+        return Ok(());
+    }
+    let confirmed = args
+        .as_object_mut()
+        .and_then(|o| o.remove(CONFIRMED_ARG))
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    if destructive && !confirmed {
+        anyhow::bail!(
+            "'{tool_name}' is destructive: tell the user out loud exactly what it will do, \
+             ask them to confirm, and only after an explicit yes call it again with \
+             \"{CONFIRMED_ARG}\": true"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +625,56 @@ mod tests {
         assert!(text.starts_with("[relay] update from \"t\" (session s): \u{2026}"));
         assert!(text.ends_with("END"));
         assert!(text.chars().count() < 1600);
+    }
+
+    #[tokio::test]
+    async fn voice_destructive_calls_need_spoken_confirmation() {
+        let db = Db::in_memory().unwrap();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp".into(),
+            created_at: "now".into(),
+        })
+        .await
+        .unwrap();
+        seed(&db, "voice", "Voice", Some(VOICE_EXPERT_KIND)).await;
+        seed(&db, "chat", "Chat", None).await;
+
+        // Voice + destructive + unconfirmed: refused, telling it how to proceed.
+        let mut args = serde_json::json!({"session_id": "chat"});
+        let err = require_voice_confirmation(&db, "voice", "terminate_agent", &mut args)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("\"confirmed\": true"), "{err}");
+
+        // Confirmed: allowed, and the flag is stripped before dispatch.
+        let mut args = serde_json::json!({"project_id": "p", "confirmed": true});
+        require_voice_confirmation(&db, "voice", "delete_project", &mut args)
+            .await
+            .unwrap();
+        assert_eq!(args, serde_json::json!({"project_id": "p"}));
+
+        // Non-destructive voice calls and every non-voice caller: untouched.
+        let mut args = serde_json::json!({"session_id": "chat", "text": "hi"});
+        require_voice_confirmation(&db, "voice", "send_message", &mut args)
+            .await
+            .unwrap();
+        require_voice_confirmation(&db, "chat", "delete_card", &mut args)
+            .await
+            .unwrap();
+
+        // The voice session is told about the argument in its tool schema.
+        let voice_row = db.get_session("voice").await.unwrap().unwrap();
+        let gate = crate::service::mcp_server::ToolGate::from_session(&voice_row);
+        let schema = gate.input_schema(
+            "clear_session",
+            &serde_json::json!({"type": "object", "properties": {}, "required": ["session_id"]}),
+        );
+        assert_eq!(schema["properties"]["confirmed"]["type"], "boolean");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["session_id", "confirmed"])
+        );
     }
 }

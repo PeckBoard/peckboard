@@ -462,11 +462,12 @@ impl McpToolRegistry {
         ctx: &ToolCallContext,
         target_session_id: &str,
     ) -> anyhow::Result<crate::db::models::Session> {
+        let voice = self.caller_is_voice(ctx).await;
         let target_session = ctx
             .db
             .get_session(target_session_id)
             .await?
-            .filter(|s| s.folder_id == ctx.folder_id)
+            .filter(|s| voice || s.folder_id == ctx.folder_id)
             .ok_or_else(|| anyhow::anyhow!("session not found: {target_session_id}"))?;
 
         let my_project = self.resolve_project_id(ctx).await;
@@ -488,6 +489,16 @@ impl McpToolRegistry {
         Ok(target_session)
     }
 
+    /// Whether the caller is the global voice assistant session, which is
+    /// exempt from the folder boundary (it is admin-only; the ownership
+    /// boundary still applies).
+    async fn caller_is_voice(&self, ctx: &ToolCallContext) -> bool {
+        matches!(
+            ctx.db.get_session(&ctx.session_id).await,
+            Ok(Some(s)) if s.expert_kind.as_deref()
+                == Some(crate::service::voice_relay::VOICE_EXPERT_KIND)
+        )
+    }
     /// Resolve the caller's own identity (admin flag + user id) from the
     /// session row backing this MCP token. `ToolCallContext` doesn't carry
     /// `user_id` directly — it's looked up here, the same session row
@@ -523,7 +534,12 @@ impl McpToolRegistry {
         &self,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Vec<crate::db::models::Session>> {
-        let mut sessions = ctx.db.list_sessions_by_folder(&ctx.folder_id).await?;
+        // The global voice assistant sees every folder.
+        let mut sessions = if self.caller_is_voice(ctx).await {
+            ctx.db.list_sessions().await?
+        } else {
+            ctx.db.list_sessions_by_folder(&ctx.folder_id).await?
+        };
         let my_project = self.resolve_project_id(ctx).await;
         if my_project.is_some() {
             sessions.retain(|s| s.project_id == my_project);

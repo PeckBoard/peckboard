@@ -72,6 +72,7 @@ impl McpToolRegistry {
             "complete_step" => self.handle_complete_step(args, ctx).await,
             "finish_card" => self.handle_finish_card(args, ctx).await,
             "answer_question" => self.handle_answer_question(args, ctx).await,
+            "show_view" => self.handle_show_view(args, ctx).await,
             "wont_do_card" => self.handle_wont_do_card(args, ctx).await,
             "ask_user" => self.handle_ask_user(args, ctx).await,
             "get_review_doc" => self.handle_get_review_doc(args, ctx).await,
@@ -336,6 +337,18 @@ pub async fn dispatch_tool_call(
         }
     }
 
+    // The voice session skips permissions, so its destructive calls must
+    // carry `confirmed: true` (the user said yes out loud). Enforced here,
+    // after any plugin arg rewrite, so both the `/mcp` route and in-process
+    // tool runners share it.
+    crate::service::voice_relay::require_voice_confirmation(
+        &ctx.db,
+        &ctx.session_id,
+        tool_name,
+        &mut final_args,
+    )
+    .await?;
+
     // Read before dispatch consumes the args: the voice-relay link below
     // needs the target of a session tool.
     let target_session_arg = final_args
@@ -546,7 +559,8 @@ mod tests {
         assert!(names.contains(&"stop_background"));
         // Voice assistant (only advertised on a voice session).
         assert!(names.contains(&"answer_question"));
-        assert_eq!(names.len(), 89);
+        assert!(names.contains(&"show_view"));
+        assert_eq!(names.len(), 90);
     }
 
     #[test]
