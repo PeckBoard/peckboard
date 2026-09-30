@@ -1,5 +1,6 @@
 import type { Event } from '../../types/api'
 import { bareModelId } from '../../util/cost'
+import { stripPronunciationHints } from '../../voice/text'
 
 // Stable empty array so subscribers don't see a new reference every render
 // when there are no events yet for a given session.
@@ -543,7 +544,8 @@ function flushAssistant(st: FoldState): void {
   if (st.assistantBuffer) {
     st.items.push({
       type: 'assistant',
-      text: st.assistantBuffer,
+      // The voice assistant's inline pronunciation hints are for TTS only.
+      text: stripPronunciationHints(st.assistantBuffer),
       key: st.assistantKey,
       ts: st.assistantTs,
     })

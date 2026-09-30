@@ -88,6 +88,12 @@ impl Db {
         self.data_dir.as_deref()
     }
 
+    /// Identity of the underlying connection, shared by every clone — lets
+    /// per-database caches key on "this database" (tests open many).
+    pub fn instance_key(&self) -> usize {
+        Arc::as_ptr(&self.conn) as usize
+    }
+
     /// Run a closure with access to the underlying Diesel connection.
     ///
     /// Moves work onto a blocking thread so it is safe to call from async code.

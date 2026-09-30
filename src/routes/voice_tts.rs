@@ -6,6 +6,8 @@
 //! - `GET  /api/voice/tts/voices`  → `[{id, name, lang}]`
 //! - `POST /api/voice/tts {text, voice?, speed?}` → `audio/wav`, or 503
 //!   `{status}` until the model is ready.
+//! - `POST /api/voice/tts {text, phonemes}` → speaks exactly `phonemes`
+//!   (Kokoro vocab only, else 400) — the Settings → Voice draft preview.
 
 use std::sync::Arc;
 
@@ -30,6 +32,10 @@ struct TtsRequest {
     voice: Option<String>,
     #[serde(default)]
     speed: Option<f32>,
+    /// Speak exactly these Kokoro phonemes (a lexicon draft preview);
+    /// `text` is still required as the label.
+    #[serde(default)]
+    phonemes: Option<String>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -70,8 +76,21 @@ async fn voices() -> Json<serde_json::Value> {
 async fn synthesize(State(state): State<Arc<AppState>>, Json(body): Json<TtsRequest>) -> Response {
     let svc = tts::service_for(&state.config.data_dir);
     let started = std::time::Instant::now();
+    let lex = match tts::lexicon::store(&state.db).await {
+        Ok(lex) => Some(lex),
+        Err(e) => {
+            tracing::warn!(error = %e, "tts lexicon unavailable");
+            None
+        }
+    };
     match svc
-        .synthesize(&body.text, body.voice.as_deref(), body.speed)
+        .synthesize(
+            &body.text,
+            body.voice.as_deref(),
+            body.speed,
+            body.phonemes.as_deref(),
+            lex,
+        )
         .await
     {
         Ok(wav) => {

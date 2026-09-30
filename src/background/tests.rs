@@ -417,3 +417,166 @@ async fn task_lost_to_restart_is_reported_to_its_session() {
     );
     assert_eq!(data["background_task"]["status"], "lost");
 }
+
+/// Adds folder `f-2` (another directory) and session `s-2` (in `f-1`).
+async fn add_second_folder_and_session(f: &Fixture) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    let other = f._dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    f.db.create_folder(NewFolder {
+        id: "f-2".into(),
+        name: "f-2".into(),
+        path: other.to_string_lossy().to_string(),
+        created_at: ts.clone(),
+    })
+    .await
+    .unwrap();
+    f.db.create_session(NewSession {
+        id: "s-2".into(),
+        name: "worker two".into(),
+        folder_id: "f-1".into(),
+        created_at: ts.clone(),
+        last_activity: ts,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+}
+
+async fn try_start_as(
+    registry: &Arc<BackgroundRegistry>,
+    db: &Db,
+    session: &str,
+    folder: &str,
+    program: &str,
+    args: &[&str],
+) -> Result<TaskInfo, String> {
+    let db = db.clone();
+    let (s, fo, p) = (session.to_string(), folder.to_string(), program.to_string());
+    let prepared = tokio::task::spawn_blocking(move || {
+        let inv = InvocationContext {
+            session_id: Some(s),
+            folder_id: Some(fo),
+            ..Default::default()
+        };
+        prepare_exec(&db, &p, &inv, false, None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    registry
+        .spawn(
+            session,
+            prepared,
+            args.iter().map(|s| s.to_string()).collect(),
+            None,
+            None,
+        )
+        .await
+}
+
+async fn wait_not_running(registry: &BackgroundRegistry, id: &str) {
+    for _ in 0..200 {
+        if registry
+            .get(id)
+            .is_some_and(|t| t.status != TaskStatus::Running)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("task {id} never finished");
+}
+
+#[tokio::test]
+async fn duplicate_start_is_refused_naming_the_running_copy() {
+    let f = fixture().await;
+    add_second_folder_and_session(&f).await;
+    let first = start(&f, "sh", &["-c", "sleep 30  # war"]).await;
+
+    // Another session, same folder, whitespace-only differences, other label.
+    let err = try_start_as(
+        &f.registry,
+        &f.db,
+        "s-2",
+        "f-1",
+        "sh",
+        &[" -c", "sleep   30 # war "],
+    )
+    .await
+    .unwrap_err();
+    assert!(err.starts_with("Already running: task "), "{err}");
+    assert!(err.contains(&first.id), "{err}");
+    assert!(err.contains("session s-1 (s-1)"), "{err}");
+    assert!(err.contains(&first.log_path), "{err}");
+    assert!(err.contains(&first.cwd), "{err}");
+    // The owner itself is pointed at background_status.
+    let err = try_start(&f, "sh", &["-c", "sleep 30  # war"])
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains(&format!("background_status {}", first.id)),
+        "{err}"
+    );
+    assert_eq!(f.registry.list_running().len(), 1);
+
+    // Same command in another directory, or another command here: allowed.
+    try_start_as(
+        &f.registry,
+        &f.db,
+        "s-2",
+        "f-2",
+        "sh",
+        &["-c", "sleep 30  # war"],
+    )
+    .await
+    .unwrap();
+    try_start_as(&f.registry, &f.db, "s-2", "f-1", "sh", &["-c", "sleep 31"])
+        .await
+        .unwrap();
+
+    // Once the first is gone, the command may start again.
+    f.registry.stop(&first.id).unwrap();
+    wait_not_running(&f.registry, &first.id).await;
+    try_start(&f, "sh", &["-c", "sleep 30  # war"])
+        .await
+        .unwrap();
+    f.registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn concurrent_identical_starts_admit_exactly_one() {
+    let f = fixture().await;
+    let (a, b) = tokio::join!(
+        try_start(&f, "sleep", &["30"]),
+        try_start(&f, "sleep", &["30"])
+    );
+    assert_eq!(
+        [&a, &b].iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{a:?} {b:?}"
+    );
+    assert_eq!(f.registry.list_running().len(), 1);
+    f.registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn task_lost_to_restart_does_not_block_a_rerun() {
+    let f = fixture().await;
+    start(&f, "sleep", &["30"]).await;
+    f.registry.shutdown_all().await;
+    let log_dir = f._dir.path().join(LOG_DIR);
+    let lost = clear_stale_logs(&log_dir);
+    assert_eq!(lost.len(), 1);
+    let next = Arc::new(BackgroundRegistry::new(log_dir));
+    next.bind(
+        f.db.clone(),
+        crate::ws::broadcaster::Broadcaster::new(),
+        Some(f.dispatcher.clone()),
+    );
+    next.report_lost(lost).await;
+    try_start_as(&next, &f.db, "s-1", "f-1", "sleep", &["30"])
+        .await
+        .unwrap();
+    next.shutdown_all().await;
+}

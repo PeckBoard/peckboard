@@ -1,4 +1,5 @@
 pub mod account_delete_guard;
+pub mod admin_restart;
 pub mod agent_vars;
 pub mod askpass;
 pub mod attachments;
@@ -36,6 +37,7 @@ pub mod update;
 pub mod usage;
 pub mod views;
 pub mod voice;
+pub mod voice_lexicon;
 pub mod voice_tts;
 pub mod workflows;
 
@@ -89,6 +91,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(views::router(state.clone()))
         .merge(voice::router(state.clone()))
         .merge(voice_tts::router(state.clone()))
+        .merge(voice_lexicon::router(state.clone()))
         .merge(agent_vars::router(state.clone()))
         .merge(ssh_keys::router(state.clone()))
         .merge(env_vars::router(state.clone()))
@@ -109,6 +112,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(plugin_ws::router(state.clone()))
         .merge(usage::router(state.clone()))
         .merge(usage::trends::router(state.clone()))
+        .merge(admin_restart::router(state.clone()))
         .merge(update::router(state.clone()))
         .merge(workflows::router(state.clone()))
         .merge(misc::router(state))

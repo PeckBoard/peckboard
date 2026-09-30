@@ -4,7 +4,23 @@ import { authedFetch } from './auth'
 import { useWsStore } from './ws'
 import { getSpeechEngine, voiceLog } from '../voice/engine'
 import { DEFAULT_KOKORO_VOICE, installKokoroEngine } from '../voice/kokoro'
-import { echoOverlap, isRelayText, speechWords, stripForSpeech, takeSpeakable } from '../voice/text'
+import {
+  closeOpenHint,
+  echoOverlap,
+  endOfTurnDelay,
+  hasOpenHint,
+  INTERRUPT_MARKER,
+  isRelayText,
+  looksUnfinished,
+  speechWords,
+  stripForSpeech,
+  stripInterruptMarker,
+  takeSpeakable,
+} from '../voice/text'
+
+/** How long a stream stalled inside a pronunciation hint is waited on
+ *  before the tail is spoken anyway (with the hint's bare word). */
+const OPEN_HINT_HOLD_MS = 6000
 
 /** Per-browser voice preferences. localStorage, not the DB — they describe
  *  this browser's speech engine (its voices, its microphone language). */
@@ -17,6 +33,8 @@ export interface VoicePrefs {
   lang: string
   /** Open the always-on microphone as soon as the voice panel opens. */
   autoListen: boolean
+  /** Longest pause (ms) waited out when the user stops mid-sentence. */
+  maxPauseMs: number
 }
 
 export const VOICE_PREFS_KEY = 'peckboard_voice_prefs'
@@ -27,6 +45,7 @@ const DEFAULT_PREFS: VoicePrefs = {
   pitch: 1,
   lang: '',
   autoListen: true,
+  maxPauseMs: 5000,
 }
 
 function loadPrefs(): VoicePrefs {
@@ -41,6 +60,7 @@ function loadPrefs(): VoicePrefs {
       lang: typeof parsed.lang === 'string' ? parsed.lang : DEFAULT_PREFS.lang,
       autoListen:
         typeof parsed.autoListen === 'boolean' ? parsed.autoListen : DEFAULT_PREFS.autoListen,
+      maxPauseMs: clamp(Number(parsed.maxPauseMs), 2000, 10000, DEFAULT_PREFS.maxPauseMs),
     }
   } catch {
     return DEFAULT_PREFS
@@ -89,6 +109,10 @@ interface VoiceState {
   micOn: boolean
   /** Partial hypothesis while the user is still talking. */
   interim: string
+  /** Final phrases heard but not yet sent (the utterance in progress). */
+  heard: string
+  /** `heard` looks cut off mid-sentence: waiting longer for the rest. */
+  turnUnfinished: boolean
   /** Raw events of the voice session, sorted by seq. The panel folds them
    *  into transcript lines (see `foldVoiceTranscript`). */
   events: Event[]
@@ -142,6 +166,11 @@ let awaitingReply = false
 let muteTurn = false
 /** Pending interrupt of the running turn; a send waits for it. */
 let interruptInFlight: Promise<void> | null = null
+/** The user talked over audible speech during the utterance being captured:
+ *  its final result is a barge-in even if the rest of the reply is held. */
+let userOverSpeech = false
+/** The next utterance sent interrupted the assistant (barge-in / Stop). */
+let interruptPending = false
 
 // Always-on recognition.
 let micWanted = false
@@ -153,8 +182,10 @@ let restartTimer: ReturnType<typeof setTimeout> | null = null
 // The user's utterance being captured.
 /** Final phrases heard since the last send, waiting for end of speech. */
 let utteranceParts: string[] = []
-/** Sends `utteranceParts` after `END_OF_SPEECH_MS` of silence. */
+/** Sends `utteranceParts` once the end-of-turn silence elapses. */
 let sendTimer: ReturnType<typeof setTimeout> | null = null
+/** Re-reports "speaking" while a paused utterance waits to be sent. */
+let keepaliveTimer: ReturnType<typeof setInterval> | null = null
 /** Last time the user (not our echo) was heard. */
 let lastHeardAt = 0
 let lastSpeakingReport = 0
@@ -183,9 +214,9 @@ const ECHO_OVERLAP = 0.6
  *  and at most this echo overlap; anything weaker waits for the final. */
 const INTERIM_BARGE_IN_WORDS = 3
 const INTERIM_BARGE_IN_OVERLAP = 0.34
-/** Silence after a final result before the utterance is sent: a pause
- *  mid-sentence must not split it into two messages. */
-const END_OF_SPEECH_MS = 1000
+/** While a paused utterance waits to be sent, re-report "speaking" this
+ *  often so the server's relay hold (6s TTL) doesn't lapse. */
+const SPEAKING_KEEPALIVE_MS = 3000
 /** Minimum gap between "speaking" activity reports to the server. */
 const SPEAKING_REPORT_MS = 1000
 /** A hypothesis with no update for this long no longer holds speech. */
@@ -342,20 +373,26 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     flushTimer = null
   }
 
-  /** Speak whatever is buffered, finished sentence or not. */
+  /** Speak whatever is buffered, finished sentence or not. A pronunciation
+   *  hint cut off mid-markup is spoken as its bare word. */
   const flushBuffer = () => {
     clearFlushTimer()
-    const rest = speakBuffer
+    const rest = closeOpenHint(speakBuffer)
     speakBuffer = ''
     if (rest.trim()) enqueue([rest])
   }
 
   /** The stream paused mid-sentence: speak the tail if it stays quiet —
-   *  soon when it already ends in punctuation, later when mid-clause. */
+   *  soon when it already ends in punctuation, later when mid-clause, and
+   *  only after a long hold while a pronunciation hint is still open. */
   const scheduleFlush = () => {
     clearFlushTimer()
     if (!speakBuffer.trim()) return
-    const delay = /[.!?…:;,]["')\]]*\s*$/.test(speakBuffer) ? 300 : 1500
+    const delay = hasOpenHint(speakBuffer)
+      ? OPEN_HINT_HOLD_MS
+      : /[.!?…:;,]["')\]]*\s*$/.test(speakBuffer)
+        ? 300
+        : 1500
     flushTimer = setTimeout(flushBuffer, delay)
   }
 
@@ -387,8 +424,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     voiceLog('barge-in: user talked over the assistant:', JSON.stringify(heard))
     cancelSpeech(`barge-in: "${heard}"`)
     const { sessionId } = get()
+    interruptPending = true
+    userOverSpeech = false
+    // Nothing more of the interrupted turn is spoken, whatever still streams.
+    if (agentRunning) muteTurn = true
     if (agentRunning && sessionId && !interruptInFlight) {
-      muteTurn = true
       interruptInFlight = authedFetch(`/api/sessions/${sessionId}/interrupt`, { method: 'POST' })
         .then(
           () => undefined,
@@ -405,6 +445,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
    *  server, and speak whatever was held back for them. */
   const userWentQuiet = (why: string) => {
     if (utteranceParts.length > 0) return
+    userOverSpeech = false
     voiceLog(`user quiet (${why})`)
     reportActivity('idle')
     pump()
@@ -414,13 +455,62 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
    *  utterance, then speak anything held back while the user talked. */
   const flushUtterance = () => {
     clearSendTimer()
+    clearKeepalive()
     const text = utteranceParts.join(' ').trim()
     utteranceParts = []
+    set({ heard: '', turnUnfinished: false })
+    userOverSpeech = false
     if (text) {
       voiceLog('end of speech; sending utterance:', JSON.stringify(text))
       void get().sendText(text)
     }
     pump()
+  }
+
+  const clearKeepalive = () => {
+    if (keepaliveTimer) clearInterval(keepaliveTimer)
+    keepaliveTimer = null
+  }
+
+  /** (Re)start the end-of-turn countdown on what the user said so far: a
+   *  finished-looking sentence is sent after a short silence, one that
+   *  looks cut off waits up to the `maxPauseMs` pref. */
+  const armEndOfTurn = () => {
+    clearSendTimer()
+    const heard = utteranceParts.join(' ')
+    const text = [heard, get().interim].join(' ').trim()
+    if (!text) return
+    set({ heard, turnUnfinished: looksUnfinished(text) })
+    sendTimer = setTimeout(endOfTurn, endOfTurnDelay(text, get().prefs.maxPauseMs))
+    // Pausing, the user still holds the floor: keep the server's relay
+    // gate held (a "speaking" report lapses on its own after a few seconds).
+    if (!keepaliveTimer) {
+      keepaliveTimer = setInterval(() => {
+        if (utteranceParts.length === 0) {
+          clearKeepalive()
+          return
+        }
+        lastSpeakingReport = Date.now()
+        reportActivity('speaking')
+      }, SPEAKING_KEEPALIVE_MS)
+    }
+  }
+
+  /** The end-of-turn silence elapsed. A hypothesis still pending means its
+   *  final result is on the way: wait for it, unless it has gone stale. */
+  const endOfTurn = () => {
+    sendTimer = null
+    const { interim } = get()
+    const age = Date.now() - lastHeardAt
+    if (interim && age < STALE_INTERIM_MS) {
+      sendTimer = setTimeout(endOfTurn, STALE_INTERIM_MS - age)
+      return
+    }
+    if (interim) {
+      utteranceParts.push(interim)
+      set({ interim: '' })
+    }
+    flushUtterance()
   }
 
   const onHeard = (text: string, isFinal: boolean) => {
@@ -441,6 +531,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       return
     }
     lastHeardAt = Date.now()
+    // Talking over audible speech makes this utterance a barge-in, even if
+    // that speech is held back (silent) by the time its final result lands
+    // — otherwise the held rest of the reply would play once they finish.
+    if (speakingNow) userOverSpeech = true
+    const interrupting = audible || userOverSpeech
     // Still talking: never send (or speak) mid-utterance.
     clearSendTimer()
     if (lastHeardAt - lastSpeakingReport >= SPEAKING_REPORT_MS) {
@@ -454,24 +549,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       // echo check — and a barge-in on it silences the reply at once.
       // Only yield early on clearly different words; otherwise wait for
       // the final result.
-      if (audible && words.length >= INTERIM_BARGE_IN_WORDS && overlap < INTERIM_BARGE_IN_OVERLAP) {
+      if (
+        interrupting &&
+        words.length >= INTERIM_BARGE_IN_WORDS &&
+        overlap < INTERIM_BARGE_IN_OVERLAP
+      ) {
         bargeIn(text)
       }
+      // Mid-utterance: new speech restarts the end-of-turn countdown.
+      if (utteranceParts.length > 0) armEndOfTurn()
       return
     }
     set({ interim: '' })
     // A lone word over the assistant's voice is more likely noise or a
     // misheard echo than the user taking the floor.
-    if (audible && words.length < BARGE_IN_WORDS) {
+    if (interrupting && words.length < BARGE_IN_WORDS) {
       voiceLog('ignored a lone word heard over the assistant:', text)
       userWentQuiet('lone word')
+      if (utteranceParts.length > 0) armEndOfTurn()
       return
     }
-    if (audible) bargeIn(text)
-    // A final result is only the end of one phrase: wait for a short
-    // silence before sending, so a pause mid-sentence doesn't split it.
+    if (interrupting) bargeIn(text)
+    // A final result is only the end of one phrase: the end-of-turn timer
+    // sends the utterance once the user has actually finished.
     utteranceParts.push(text)
-    sendTimer = setTimeout(flushUtterance, END_OF_SPEECH_MS)
+    armEndOfTurn()
   }
 
   const startRecognition = () => {
@@ -487,8 +589,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         onEnd: () => {
           recActive = false
           if (get().interim) {
+            // Engines end sessions on silence mid-hypothesis: keep what was
+            // heard — only the end-of-turn timer sends, never a restart.
+            utteranceParts.push(get().interim)
             set({ interim: '' })
-            userWentQuiet('recognition ended mid-hypothesis')
+            armEndOfTurn()
           }
           if (!micWanted || !get().panelOpen) return
           // Engines end sessions on their own (silence, a finished
@@ -600,7 +705,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     if (ev.kind === 'user') {
       const text = typeof ev.data.text === 'string' ? ev.data.text : ''
       if (!isRelayText(text)) {
-        const idx = pending.findIndex((p) => p.text === text)
+        const idx = pending.findIndex((p) => p.text === stripInterruptMarker(text))
         if (idx >= 0) set({ pending: pending.filter((_, i) => i !== idx) })
       }
     }
@@ -649,7 +754,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     echoPool = []
     utteranceParts = []
     ttsReported = false
+    userOverSpeech = false
+    interruptPending = false
     clearSendTimer()
+    clearKeepalive()
+    set({ heard: '', turnUnfinished: false })
   }
 
   return {
@@ -666,6 +775,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     status: 'idle',
     micOn: false,
     interim: '',
+    heard: '',
+    turnUnfinished: false,
     events: [],
     pending: [],
     error: null,
@@ -753,6 +864,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     },
 
     stopSpeaking: () => {
+      if (speakingNow || speakQueue.length > 0 || agentRunning) interruptPending = true
       cancelSpeech('Stop speaking button')
       if (agentRunning) muteTurn = true
       refreshStatus()
@@ -768,6 +880,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         sessionId = info.session_id
       }
       const tempId = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      // The utterance that talked over the assistant tells the model so:
+      // it must not restate the part of its reply the user never heard.
+      const interrupted = interruptPending
+      interruptPending = false
       awaitingReply = true
       reportActivity('sent')
       set((s) => ({
@@ -783,7 +899,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text: interrupted ? INTERRUPT_MARKER + text : text }),
         })
         if (!res.ok) {
           const err = (await res.json().catch(() => null)) as { error?: string } | null

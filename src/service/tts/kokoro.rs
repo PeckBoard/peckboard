@@ -9,7 +9,9 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, anyhow, bail};
-use misaki_rs::{G2P, Language};
+
+use super::hints::{self, Segment};
+use super::lexicon::{LexG2p, LexiconStore};
 
 pub const SAMPLE_RATE: u32 = 24_000;
 /// Rows per voice pack: the style vector is chosen by token count, so a
@@ -41,20 +43,82 @@ const JOINED: &[(&str, &str)] = &[
     ("t\u{200d}ʃ", "ʧ"),
 ];
 
-/// Normalise a misaki phoneme string into Kokoro's alphabet: fold joined
-/// pairs, then drop any char the vocab doesn't know (ZWJ, `❓`, stray
-/// punctuation).
-pub fn normalize_phonemes(ph: &str) -> String {
+/// Fold misaki's joined pairs into Kokoro's single symbols.
+pub fn fold_joined(ph: &str) -> String {
     let mut s = ph.to_string();
     for (from, to) in JOINED {
         s = s.replace(from, to);
     }
-    s.chars().filter(|c| VOCAB.contains_key(c)).collect()
+    s
+}
+
+/// Chars of `ph` outside Kokoro's vocab, deduplicated, in order.
+pub fn unknown_symbols(ph: &str) -> Vec<char> {
+    let mut out = Vec::new();
+    for c in ph.chars() {
+        if !VOCAB.contains_key(&c) && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Normalise a misaki phoneme string into Kokoro's alphabet: fold joined
+/// pairs, then drop any char the vocab doesn't know (ZWJ, `❓`, stray
+/// punctuation).
+pub fn normalize_phonemes(ph: &str) -> String {
+    fold_joined(ph)
+        .chars()
+        .filter(|c| VOCAB.contains_key(c))
+        .collect()
 }
 
 /// Phoneme string → token ids (unknown chars dropped).
 pub fn tokenize(ph: &str) -> Vec<i64> {
     ph.chars().filter_map(|c| VOCAB.get(&c).copied()).collect()
+}
+
+/// Text → Kokoro phonemes. Per word, first match wins: the custom lexicon
+/// (even over a hint), the assistant's inline `[word](/phonemes/)` hint,
+/// misaki's dictionary, then the letter-to-sound guess in [`LexG2p`].
+/// Words misaki didn't know are reported to `lex` (tallied, logged once).
+pub fn phonemize_with(
+    g2p: &LexG2p,
+    lex: Option<&LexiconStore>,
+    text: &str,
+    british: bool,
+) -> anyhow::Result<String> {
+    // Re-emit only validated hints as misaki overrides; everything else
+    // goes through the lexicon rewrite.
+    let mut rewritten = String::with_capacity(text.len());
+    for seg in hints::parse(text) {
+        match seg {
+            Segment::Plain(t) => match lex {
+                Some(lex) => rewritten.push_str(&lex.apply(&t, british)),
+                None => rewritten.push_str(&t),
+            },
+            Segment::Hinted { text, phonemes } => {
+                let ph = lex
+                    .and_then(|lex| lex.lookup(&text, british))
+                    .unwrap_or(phonemes);
+                rewritten.push_str(&format!("[{text}](/{ph}/)"));
+            }
+        }
+    }
+    let text = rewritten;
+    let (ph, unknown) = g2p.g2p(&text)?;
+    if let Some(lex) = lex {
+        lex.record_unknown(&unknown);
+    }
+    // Multi-subtoken overrides (`e2e`) leave empty tokens behind.
+    let norm = normalize_phonemes(&ph);
+    let mut out = String::with_capacity(norm.len());
+    for c in norm.chars() {
+        if !(c == ' ' && out.ends_with(' ')) {
+            out.push(c);
+        }
+    }
+    Ok(out)
 }
 
 /// Split a normalised phoneme string into chunks of at most `MAX_TOKENS`
@@ -176,8 +240,8 @@ pub struct Kokoro {
     voices: HashMap<String, Vec<f32>>,
     input_names: [String; 3],
     speed_is_int: bool,
-    g2p_us: Mutex<Option<G2P>>,
-    g2p_gb: Mutex<Option<G2P>>,
+    g2p_us: Mutex<Option<LexG2p>>,
+    g2p_gb: Mutex<Option<LexG2p>>,
 }
 
 impl Kokoro {
@@ -220,33 +284,47 @@ impl Kokoro {
         };
         // Warm up (US lexicon parse + first ORT run) so the user's first
         // sentence doesn't pay for it; a failure here surfaces as "not ready".
-        engine.synthesize("Ready.", super::DEFAULT_VOICE, 1.0)?;
+        engine.synthesize("Ready.", super::DEFAULT_VOICE, 1.0, None)?;
         Ok(engine)
     }
 
-    fn phonemize(&self, text: &str, british: bool) -> anyhow::Result<String> {
+    fn phonemize(
+        &self,
+        text: &str,
+        british: bool,
+        lex: Option<&LexiconStore>,
+    ) -> anyhow::Result<String> {
         let slot = if british { &self.g2p_gb } else { &self.g2p_us };
         let mut g = slot.lock().unwrap();
-        let g2p = g.get_or_insert_with(|| {
-            G2P::new(if british {
-                Language::EnglishGB
-            } else {
-                Language::EnglishUS
-            })
-        });
-        let (ph, _) = g2p.g2p(text).map_err(|e| anyhow!("g2p: {e:?}"))?;
-        Ok(normalize_phonemes(&ph))
+        let g2p = g.get_or_insert_with(|| LexG2p::new(british));
+        phonemize_with(g2p, lex, text, british)
     }
 
-    /// Synthesize `text` → f32 samples at [`SAMPLE_RATE`].
-    pub fn synthesize(&self, text: &str, voice: &str, speed: f32) -> anyhow::Result<Vec<f32>> {
+    /// Synthesize `text` → f32 samples at [`SAMPLE_RATE`], applying `lex`.
+    pub fn synthesize(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+        lex: Option<&LexiconStore>,
+    ) -> anyhow::Result<Vec<f32>> {
+        let ph = self.phonemize(text, voice.starts_with('b'), lex)?;
+        self.synthesize_phonemes(&ph, voice, speed)
+    }
+
+    /// Speak Kokoro phonemes verbatim → f32 samples at [`SAMPLE_RATE`].
+    pub fn synthesize_phonemes(
+        &self,
+        ph: &str,
+        voice: &str,
+        speed: f32,
+    ) -> anyhow::Result<Vec<f32>> {
         let pack = self
             .voices
             .get(voice)
             .ok_or_else(|| anyhow!("unknown voice '{voice}'"))?;
-        let ph = self.phonemize(text, voice.starts_with('b'))?;
         let mut audio = Vec::new();
-        for chunk in chunk_phonemes(&ph) {
+        for chunk in chunk_phonemes(ph) {
             let toks = tokenize(&chunk);
             if toks.is_empty() {
                 continue;
@@ -294,7 +372,7 @@ mod tests {
 
     #[test]
     fn g2p_output_maps_to_tokens() {
-        let g2p = G2P::new(Language::EnglishUS);
+        let g2p = misaki_rs::G2P::new(misaki_rs::Language::EnglishUS);
         let (ph, _) = g2p.g2p("Hello world.").unwrap();
         let norm = normalize_phonemes(&ph);
         assert!(!norm.contains('\u{200d}'));
@@ -320,6 +398,65 @@ mod tests {
         assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
         assert_eq!(wav.len(), 50);
         assert_eq!(i16::from_le_bytes([wav[46], wav[47]]), i16::MAX);
+    }
+
+    fn u16_at(b: &[u8], i: usize) -> u16 {
+        u16::from_le_bytes([b[i], b[i + 1]])
+    }
+
+    fn u32_at(b: &[u8], i: usize) -> u32 {
+        u32::from_le_bytes(b[i..i + 4].try_into().unwrap())
+    }
+
+    /// Every header field a strict decoder (WebKit/CoreAudio) reads, plus a
+    /// sine round-trip through the i16 samples.
+    #[test]
+    fn wav_header_fields_and_sine_round_trip() {
+        let n = 2401; // odd sample count: data stays even-sized (2 bytes each)
+        let sine: Vec<f32> = (0..n)
+            .map(|i| 0.8 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 24_000.0).sin())
+            .collect();
+        let wav = encode_wav(&sine, SAMPLE_RATE);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(u32_at(&wav, 4) as usize, wav.len() - 8);
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(u32_at(&wav, 16), 16, "fmt chunk size");
+        assert_eq!(u16_at(&wav, 20), 1, "PCM");
+        assert_eq!(u16_at(&wav, 22), 1, "mono");
+        assert_eq!(u32_at(&wav, 24), 24_000, "sample rate");
+        assert_eq!(u32_at(&wav, 28), 48_000, "byte rate");
+        assert_eq!(u16_at(&wav, 32), 2, "block align");
+        assert_eq!(u16_at(&wav, 34), 16, "bits per sample");
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32_at(&wav, 40) as usize, n * 2, "data size");
+        assert_eq!(wav.len(), 44 + n * 2);
+        for (i, s) in sine.iter().enumerate() {
+            let v = i16::from_le_bytes([wav[44 + 2 * i], wav[45 + 2 * i]]) as f32 / 32767.0;
+            assert!((v - s).abs() < 1.0 / 16384.0, "sample {i}: {v} vs {s}");
+        }
+    }
+
+    /// Out-of-range and non-finite model output clamps; it never wraps
+    /// (a wrapped i16 is full-scale noise — audible static).
+    #[test]
+    fn wav_clamps_out_of_range_samples() {
+        let wav = encode_wav(
+            &[
+                1.7,
+                -3.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NAN,
+                1.0001,
+            ],
+            SAMPLE_RATE,
+        );
+        let s: Vec<i16> = wav[44..]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(s, vec![32767, -32767, 32767, -32767, 0, 32767]);
     }
 
     fn npy(data: &[f32]) -> Vec<u8> {

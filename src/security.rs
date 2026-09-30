@@ -29,6 +29,8 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     // are a CSS-based exfiltration vector when combined with any other
     // XSS toehold, and the React app uses class/CSS-module styling
     // rather than dynamic inline `style` for almost everything.
+    // `media-src blob:`: iOS plays Kokoro speech through an <audio> element
+    // fed a blob: URL of the fetched WAV (see web/src/voice/kokoro.ts).
     headers.insert(
         "Content-Security-Policy",
         HeaderValue::from_static(
@@ -36,6 +38,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
              script-src 'self'; \
              style-src 'self'; \
              img-src 'self' data: blob:; \
+             media-src 'self' blob:; \
              connect-src 'self'; \
              frame-ancestors 'none'; \
              object-src 'none'",
@@ -135,34 +138,38 @@ pub async fn origin_check(request: Request, next: Next) -> Response {
 pub const MAX_JSON_BODY_SIZE: usize = 20 * 1024 * 1024;
 
 /// Startup state repair: detect dangling agent-starts and synthesize agent-end events.
-pub async fn repair_dangling_sessions(db: &crate::db::Db) -> anyhow::Result<u32> {
-    // Get all sessions
+///
+/// A turn is dangling when its session's newest lifecycle event is an
+/// `agent-start` — not merely when the very last event is one: a turn killed
+/// mid-tool ends on `agent-tool-*` / `agent-text` rows. Returns the ids of
+/// the sessions repaired (the turns this restart killed), which
+/// [`crate::restart_resume::plan`] resumes.
+pub async fn repair_dangling_sessions(db: &crate::db::Db) -> anyhow::Result<Vec<String>> {
     let sessions = db.list_sessions().await?;
-    let mut repaired = 0u32;
+    let mut repaired = Vec::new();
 
     for session in sessions {
-        // Check the latest event
-        let tail = db.events_tail(&session.id, 1).await?;
-        if let Some(last_event) = tail.first() {
-            if last_event.kind == "agent-start" {
-                // Dangling agent-start — synthesize a crashed agent-end
-                db.append_event(
-                    &session.id,
-                    "agent-end",
-                    serde_json::json!({
-                        "status": "crashed",
-                        "reason": "server-shutdown",
-                    }),
-                )
-                .await?;
-                repaired += 1;
-                tracing::warn!("Repaired dangling agent-start for session {}", session.id);
-            }
+        let last = db
+            .latest_event_of_kinds(&session.id, &["agent-start", "agent-end"])
+            .await?;
+        if last.is_some_and(|e| e.kind == "agent-start") {
+            // Dangling agent-start — synthesize a crashed agent-end
+            db.append_event(
+                &session.id,
+                "agent-end",
+                serde_json::json!({
+                    "status": "crashed",
+                    "reason": "server-shutdown",
+                }),
+            )
+            .await?;
+            tracing::warn!("Repaired dangling agent-start for session {}", session.id);
+            repaired.push(session.id);
         }
     }
 
-    if repaired > 0 {
-        tracing::info!("Repaired {repaired} dangling session(s)");
+    if !repaired.is_empty() {
+        tracing::info!("Repaired {} dangling session(s)", repaired.len());
     }
 
     // Resume interrupted workers: at startup no processes are running, so
@@ -251,6 +258,8 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap();
         assert!(csp.contains("default-src 'self'"));
+        // Kokoro speech on iOS plays its WAV from a blob: URL.
+        assert!(csp.contains("media-src 'self' blob:"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff");
         assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");
@@ -393,9 +402,17 @@ mod tests {
         .await
         .unwrap();
 
-        // s1 ends with a dangling agent-start; s2 ended cleanly.
+        // s1 ends with a dangling agent-start; s2 ended cleanly; s3 died
+        // mid-tool (the 0.1.46 restart shape: tool rows after the start).
         seed_session(&db, "s1").await;
         seed_session(&db, "s2").await;
+        seed_session(&db, "s3").await;
+        db.append_event("s3", "agent-start", serde_json::json!({}))
+            .await
+            .unwrap();
+        db.append_event("s3", "agent-tool-end", serde_json::json!({}))
+            .await
+            .unwrap();
         db.append_event("s1", "agent-start", serde_json::json!({}))
             .await
             .unwrap();
@@ -406,8 +423,13 @@ mod tests {
             .await
             .unwrap();
 
-        let repaired = repair_dangling_sessions(&db).await.unwrap();
-        assert_eq!(repaired, 1);
+        let mut repaired = repair_dangling_sessions(&db).await.unwrap();
+        repaired.sort();
+        assert_eq!(repaired, vec!["s1".to_string(), "s3".to_string()]);
+
+        // A turn killed mid-tool ends on tool rows, not on its agent-start.
+        let tail = db.events_tail("s3", 1).await.unwrap();
+        assert_eq!(tail[0].kind, "agent-end");
 
         let tail = db.events_tail("s1", 1).await.unwrap();
         assert_eq!(tail[0].kind, "agent-end");
@@ -419,7 +441,7 @@ mod tests {
         assert_eq!(s2_tail.len(), 2);
 
         // Repair is idempotent — re-running finds nothing dangling.
-        assert_eq!(repair_dangling_sessions(&db).await.unwrap(), 0);
+        assert!(repair_dangling_sessions(&db).await.unwrap().is_empty());
     }
 
     #[tokio::test]

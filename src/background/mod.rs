@@ -136,6 +136,7 @@ pub enum Attached {
 type AttachedResult = (TaskInfo, Vec<String>);
 
 struct Task {
+    key: DedupKey,
     info: Mutex<TaskInfo>,
     tail: Mutex<VecDeque<String>>,
     started: Instant,
@@ -178,6 +179,35 @@ impl Task {
     fn is_running(&self) -> bool {
         lock(&self.info).status == TaskStatus::Running
     }
+}
+
+/// What makes two starts "the same run": the command and argv with each
+/// element trimmed and inner whitespace collapsed, plus the resolved
+/// absolute cwd. Env and label are ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DedupKey {
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+impl DedupKey {
+    fn new(program: &str, args: &[String], cwd: &Path) -> Self {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        Self {
+            program: norm(program),
+            args: args.iter().map(|a| norm(a)).collect(),
+            cwd: std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
+        }
+    }
+}
+
+/// Why [`BackgroundRegistry::admit`] refused a start.
+enum Refusal {
+    Other(String),
+    /// The same command is already running in the same cwd: that task's
+    /// snapshot and how long it has been running.
+    Duplicate(Box<TaskInfo>, Duration),
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -329,15 +359,30 @@ impl BackgroundRegistry {
 
     /// Tell each owning session that its task died with the previous server
     /// process, instead of leaving it to discover a silent "not found".
-    /// Delivered like a normal exit report (persisted + session woken).
+    /// Delivered like a normal exit report (persisted + session woken), except
+    /// that a paused project's session or a card worker is not woken.
     pub async fn report_lost(&self, lost: Vec<LostTask>) {
         let Some(reporter) = self.reporter.get() else {
             return;
         };
         for t in lost {
-            if !matches!(reporter.db.get_session(&t.session_id).await, Ok(Some(_))) {
+            let Ok(Some(session)) = reporter.db.get_session(&t.session_id).await else {
                 continue;
-            }
+            };
+            // A paused project's session (or a card worker, which only the
+            // orchestrator may run) gets the report persisted, not woken.
+            let blocked = if session.card_id.is_some() {
+                Some("card worker: the orchestrator owns its runs".to_string())
+            } else {
+                crate::restart_resume::wake_blocked_by_project(&reporter.db, &session).await
+            };
+            let dispatcher = match &blocked {
+                Some(reason) => {
+                    tracing::info!(session_id = %t.session_id, task_id = %t.id, reason = %reason, "lost-task report: not waking session");
+                    None
+                }
+                None => reporter.dispatcher.as_deref(),
+            };
             let text = format!(
                 "Background task \"{}\" (id {}, `{}`, started {}) was lost: the Peckboard \
                  server restarted before it finished, so its process and output are gone. \
@@ -351,7 +396,7 @@ impl BackgroundRegistry {
             if let Err(e) = crate::service::session_notify::notify_session(
                 &reporter.db,
                 &reporter.broadcaster,
-                reporter.dispatcher.as_deref(),
+                dispatcher,
                 &t.session_id,
                 &text,
                 serde_json::json!({
@@ -408,6 +453,19 @@ impl BackgroundRegistry {
         })
     }
 
+    /// Every still-running visible task across all sessions, oldest first.
+    /// A `run_command` still inside its attach window is left out: its
+    /// session is mid-turn and is reported as such.
+    pub fn list_running(&self) -> Vec<TaskInfo> {
+        let mut out: Vec<(Instant, TaskInfo)> = lock(&self.tasks)
+            .values()
+            .filter(|t| !t.hidden.load(Ordering::SeqCst) && t.is_running())
+            .map(|t| (t.started, t.info()))
+            .collect();
+        out.sort_by_key(|(s, _)| *s);
+        out.into_iter().map(|(_, i)| i).collect()
+    }
+
     /// Test seam: register a process-less task that reads as running for
     /// `session_id`, so callers of [`Self::has_running_for_session`] can be
     /// exercised without forking.
@@ -433,6 +491,7 @@ impl BackgroundRegistry {
             stopping: false,
         };
         let task = Arc::new(Task {
+            key: DedupKey::new("true", &[], Path::new("")),
             info: Mutex::new(info),
             tail: Mutex::new(VecDeque::new()),
             started: Instant::now(),
@@ -445,6 +504,15 @@ impl BackgroundRegistry {
         });
         lock(&self.tasks).insert(id.clone(), task);
         id
+    }
+
+    /// Test seam: mark a task from [`Self::insert_running_for_test`] as
+    /// finished.
+    #[cfg(test)]
+    pub(crate) fn finish_for_test(&self, id: &str) {
+        if let Some(t) = self.task(id) {
+            lock(&t.info).status = TaskStatus::Succeeded;
+        }
     }
 
     /// Stop every running task of `session_id` with no completion report,
@@ -563,11 +631,14 @@ impl BackgroundRegistry {
             return Err("background tasks are not configured on this server".into());
         }
         self.prune_finished();
+        let (program, cwd, env, masker) = prepared.into_parts();
+        let key = DedupKey::new(&program, &args, &cwd);
         // Cheap early refusal before forking; repeated authoritatively under
         // the same lock acquisition as the insert below.
-        self.admit(&lock(&self.tasks), session_id)?;
-
-        let (program, cwd, env, masker) = prepared.into_parts();
+        let early = self.admit(&lock(&self.tasks), session_id, &key);
+        if let Err(r) = early {
+            return Err(self.refusal_message(r, session_id).await);
+        }
         std::fs::create_dir_all(&self.log_dir)
             .map_err(|e| format!("failed to create the background log dir: {e}"))?;
         let id = uuid::Uuid::new_v4().to_string();
@@ -629,6 +700,7 @@ impl BackgroundRegistry {
         };
         let hidden = attached.is_some();
         let task = Arc::new(Task {
+            key,
             info: Mutex::new(info.clone()),
             tail: Mutex::new(VecDeque::with_capacity(TAIL_LINES)),
             started: Instant::now(),
@@ -639,22 +711,28 @@ impl BackgroundRegistry {
             attached: Mutex::new(attached),
             hidden: AtomicBool::new(hidden),
         });
-        {
+        let refused = {
             let mut tasks = lock(&self.tasks);
             // Check + insert under one lock: concurrent spawns can't both
-            // pass the cap, and a spawn racing `kill_session` can't register
-            // a task for a session that was just deleted.
-            if let Err(e) = self.admit(&tasks, session_id) {
-                drop(tasks);
-                signal_group(info.pid, Signal::Kill);
-                let _ = child.start_kill();
-                tokio::spawn(async move {
-                    let _ = child.wait().await;
-                });
-                let _ = std::fs::remove_file(&log_path);
-                return Err(e);
+            // pass the cap or the duplicate check, and a spawn racing
+            // `kill_session` can't register a task for a session that was
+            // just deleted.
+            match self.admit(&tasks, session_id, &task.key) {
+                Err(r) => Some(r),
+                Ok(()) => {
+                    tasks.insert(id, task.clone());
+                    None
+                }
             }
-            tasks.insert(id, task.clone());
+        };
+        if let Some(r) = refused {
+            signal_group(info.pid, Signal::Kill);
+            let _ = child.start_kill();
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            let _ = std::fs::remove_file(&log_path);
+            return Err(self.refusal_message(r, session_id).await);
         }
         if !hidden {
             self.persist_meta(&info);
@@ -781,11 +859,30 @@ impl BackgroundRegistry {
         }
     }
 
-    /// May `session_id` start another task? Takes the caller's `tasks` guard
-    /// so the check and the following insert share one lock acquisition.
-    fn admit(&self, tasks: &HashMap<String, Arc<Task>>, session_id: &str) -> Result<(), String> {
+    /// May `session_id` start another task running `key`? Takes the caller's
+    /// `tasks` guard so the check and the following insert share one lock
+    /// acquisition — two concurrent identical starts can't both pass.
+    fn admit(
+        &self,
+        tasks: &HashMap<String, Arc<Task>>,
+        session_id: &str,
+        key: &DedupKey,
+    ) -> Result<(), Refusal> {
         if lock(&self.deleted_sessions).contains(session_id) {
-            return Err("session was deleted".into());
+            return Err(Refusal::Other("session was deleted".into()));
+        }
+        // Any session's running, tracked task with the same command in the
+        // same directory. A `run_command` still inside its attach window
+        // (hidden) is an inline call, not a tracked run, so it doesn't count.
+        if let Some(dup) = tasks
+            .values()
+            .filter(|t| !t.hidden.load(Ordering::SeqCst) && t.key == *key && t.is_running())
+            .min_by_key(|t| t.started)
+        {
+            return Err(Refusal::Duplicate(
+                Box::new(dup.info()),
+                dup.started.elapsed(),
+            ));
         }
         let running = tasks
             .values()
@@ -795,12 +892,50 @@ impl BackgroundRegistry {
             })
             .count();
         if running >= MAX_RUNNING_PER_SESSION {
-            return Err(format!(
+            return Err(Refusal::Other(format!(
                 "this session already has {running} background tasks running (max \
                  {MAX_RUNNING_PER_SESSION}); stop one with stop_background first"
-            ));
+            )));
         }
         Ok(())
+    }
+
+    /// The error text for a refused start. A duplicate names the running
+    /// copy — id, owner, runtime, cwd, log — so the caller reuses it.
+    async fn refusal_message(&self, refusal: Refusal, caller: &str) -> String {
+        let (info, elapsed) = match refusal {
+            Refusal::Other(m) => return m,
+            Refusal::Duplicate(info, elapsed) => (info, elapsed),
+        };
+        let name = match self.reporter.get() {
+            Some(r) => {
+                r.db.get_session(&info.session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|s| s.name)
+            }
+            None => None,
+        }
+        .unwrap_or_else(|| "?".into());
+        // `background_status` only sees the caller's own tasks: point
+        // another session's caller at the log file instead.
+        let wait = if info.session_id == caller {
+            format!("background_status {}", info.id)
+        } else {
+            "read its log file above".to_string()
+        };
+        format!(
+            "Already running: task {} started by session {name} ({}) {} ago with the same \
+             command in {}: `{}`. Log: {}. Wait for it ({wait}) or read its output instead \
+             of starting another copy.",
+            info.id,
+            info.session_id,
+            report::fmt_duration(elapsed.as_secs()),
+            info.cwd,
+            report::display_command(&info.program, &info.args),
+            info.log_path,
+        )
     }
 
     /// Forget finished tasks older than the retention window.

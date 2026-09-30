@@ -15,6 +15,7 @@ pub mod questions;
 pub mod redact;
 pub mod repo_diff;
 pub mod repo_scan;
+pub mod restart;
 pub mod retention;
 pub mod secret_mask;
 pub mod session_notify;

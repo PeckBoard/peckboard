@@ -17,6 +17,10 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
+      # Ride out transient runner network/DNS failures (0.1.46 lost a
+      # release to one "Could not resolve host: index.crates.io").
+      CARGO_NET_RETRY: 10
+      CARGO_HTTP_TIMEOUT: 60
 
     steps:
       - name: Checkout
@@ -46,6 +50,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: windows-x86_64
+
+      # Pre-fetch with retries: a DNS blip on the runner otherwise fails
+      # the whole build (cargo's own retries span only ~1 minute).
+      - name: Fetch crates (retry)
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do cargo fetch && exit 0; echo "fetch failed (attempt $i), retrying in 30s"; sleep 30; done; exit 1
 
       - name: Build release binary
         run: cargo build --release --target x86_64-pc-windows-msvc

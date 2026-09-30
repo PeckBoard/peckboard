@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { useVoiceStore } from '../store/voice'
 import { useResourcesStore } from '../store/resources'
 import { getSpeechEngine, type VoiceOption } from '../voice/engine'
-import { isKokoroVoice } from '../voice/kokoro'
+import { isIOS, isKokoroVoice, setIosUseBrowserVoice, useKokoroDevicePrefs } from '../voice/kokoro'
 import ModelPicker from './ModelPicker'
+import VoicePronunciations from './VoicePronunciations'
 
 /** Recognition languages offered in the picker. The browser default (`''`)
  *  follows the page/OS language. */
@@ -80,6 +81,8 @@ export default function VoiceSettingsSection() {
     if (models.length === 0) void fetchModels()
   }, [models.length, fetchModels])
 
+  const onIOS = isIOS()
+  const iosUseBrowserVoice = useKokoroDevicePrefs((s) => s.iosUseBrowserVoice)
   const synthesisSupported = getSpeechEngine().supportsSynthesis()
 
   const changeModel = async (id: string) => {
@@ -202,6 +205,23 @@ export default function VoiceSettingsSection() {
               ))}
             </select>
           </label>
+          <label className="settings-row voice-settings-row">
+            <span className="settings-label">Wait for me to finish (mid-sentence pause)</span>
+            <input
+              type="range"
+              className="voice-settings-slider"
+              data-testid="voice-max-pause"
+              min={2000}
+              max={10000}
+              step={500}
+              value={prefs.maxPauseMs}
+              onChange={(e) => setPrefs({ maxPauseMs: Number(e.target.value) })}
+              aria-label="Longest mid-sentence pause to wait out"
+            />
+            <span className="voice-settings-value" data-testid="voice-max-pause-value">
+              {(prefs.maxPauseMs / 1000).toFixed(1)}s
+            </span>
+          </label>
           <label className="settings-row settings-row-toggle">
             <input
               type="checkbox"
@@ -213,6 +233,19 @@ export default function VoiceSettingsSection() {
               Turn the microphone on when the voice panel opens
             </span>
           </label>
+          {onIOS && (
+            <label className="settings-row settings-row-toggle">
+              <input
+                type="checkbox"
+                data-testid="voice-ios-browser-voice"
+                checked={iosUseBrowserVoice}
+                onChange={(e) => setIosUseBrowserVoice(e.target.checked)}
+              />
+              <span className="settings-label">
+                On iPhone/iPad, use the browser voice instead of Kokoro
+              </span>
+            </label>
+          )}
         </div>
         <div className="voice-settings-actions">
           <button
@@ -254,6 +287,8 @@ export default function VoiceSettingsSection() {
           </p>
         )}
       </section>
+
+      <VoicePronunciations />
     </>
   )
 }

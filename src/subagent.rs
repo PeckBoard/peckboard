@@ -45,11 +45,6 @@ pub const SUBAGENT_NAME_PREFIX: &str = "sub: ";
 /// `read_worker_session`). See [`load_limits`].
 pub const DEFAULT_RESULT_CHAR_CAP: usize = 12_000;
 
-/// Reported to the parent when a subagent's completion is only discovered by
-/// the startup reconcile pass (server restarted while the child was still
-/// running, so it never got the chance to finish or crash cleanly).
-pub const RESTART_REASON: &str = "subagent terminated by server restart";
-
 /// Plugin-store namespace/collection/key for the subagent limits override
 /// (`{"max_concurrent": i64, "result_char_cap": usize}`, both optional;
 /// missing/rotted falls back to the `DEFAULT_*` constants). Same store the
@@ -136,7 +131,7 @@ pub const AUTH_CRASH_GRACE: Duration = Duration::from_secs(60);
 
 /// Children reported CRASHED for an auth failure, so a later release of
 /// their park knows to un-claim them and announce the resume. In-memory:
-/// after a restart the reconcile pass reports every incomplete child anyway.
+/// after a restart `crate::restart_resume` re-decides every incomplete child.
 static AUTH_CRASH_REPORTED: LazyLock<std::sync::Mutex<HashSet<String>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
@@ -246,7 +241,7 @@ async fn deliver_to_parent(state: &Arc<AppState>, child_id: &str, parent_id: &st
 /// after `spawn_subagent` returns). Without this, a dispatch failure only
 /// logged a `tracing::warn!` and left `subagent_completed_at` NULL forever,
 /// so `count_active_subagents` counted the row until server restart
-/// (`reconcile_orphan_subagents`) — eventually exhausting the parent's
+/// (`crate::restart_resume::plan`) — eventually exhausting the parent's
 /// concurrency slots. Delegates to [`handle_subagent_done`] so the slot is
 /// freed and the parent gets the same CRASHED report shape as a real crash.
 pub async fn fail_subagent_dispatch(state: &Arc<AppState>, child_id: &str, error: &str) {
@@ -452,65 +447,6 @@ pub(crate) async fn last_reply_text(db: &crate::db::Db, session_id: &str) -> Str
     reply
 }
 
-/// Startup reconcile pass: find subagent sessions still marked
-/// `subagent_completed_at IS NULL` whose parent link exists but whose
-/// completion was never claimed — orphaned by a server restart, since the
-/// only writer of `subagent_completed_at` is the in-process completion
-/// listener in `main.rs`, which never ran for them. Left alone these rows
-/// permanently occupy the parent's concurrent-subagent slot and the
-/// parent waits forever for a result that will never arrive.
-///
-/// Call once at boot, before any provider/session traffic starts (nothing
-/// can be genuinely "running" yet at that point, so every incomplete row
-/// found here is by definition orphaned — no liveness probe needed). Each
-/// orphan is claimed (freeing its parent's slot) and reported to its parent
-/// as a crashed subagent via [`claim_and_compose`], same as a real crash,
-/// with [`RESTART_REASON`] as the error detail. Deliberately does not
-/// resume the parent's agent turn (unlike [`handle_subagent_done`]) — the
-/// parent's own process is equally dead at boot, so driving it here would
-/// mean auto-running arbitrary sessions on startup; the persisted event is
-/// picked up the next time the parent session runs. Returns the number of
-/// orphans reconciled.
-pub async fn reconcile_orphan_subagents(db: &crate::db::Db) -> usize {
-    let orphans = match db.list_incomplete_subagents().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!("subagent reconcile: list_incomplete_subagents failed: {e}");
-            return 0;
-        }
-    };
-
-    let mut reconciled = 0usize;
-    for session in &orphans {
-        let Some((parent_id, text)) =
-            claim_and_compose(db, session, false, Some(RESTART_REASON), false).await
-        else {
-            continue;
-        };
-        if let Err(e) = db
-            .append_event(
-                &parent_id,
-                "user",
-                serde_json::json!({ "text": &text, "source": "subagent-result" }),
-            )
-            .await
-        {
-            tracing::warn!(
-                parent_session_id = %parent_id,
-                "subagent reconcile: result event append failed: {e}"
-            );
-            continue;
-        }
-        reconciled += 1;
-    }
-    if reconciled > 0 {
-        tracing::info!(
-            count = reconciled,
-            "subagent reconcile: orphans reported to parents"
-        );
-    }
-    reconciled
-}
 #[cfg(test)]
 mod tests {
     use super::*;

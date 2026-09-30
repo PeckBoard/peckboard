@@ -1,0 +1,65 @@
+# Built-in TTS pronunciations, seeded once into the `tts_lexicon` table
+# (source 'default'). Runtime edits go through Settings → Voice or the
+# voice assistant's `voice_pronunciation` tool, not this file; a word listed
+# here is only ever seeded once, so a user edit or delete always wins.
+#
+# One entry per line: <word as displayed> <phonemes>. Phonemes use misaki's
+# US alphabet as Kokoro consumes it (single-symbol diphthongs: A=/eɪ/
+# I=/aɪ/ O=/oʊ/ W=/aʊ/ Y=/ɔɪ/, ʤ ʧ), with ˈ primary and ˌ secondary stress
+# right before the stressed vowel. Only symbols in kokoro_vocab.json are
+# allowed (a unit test enforces it). Spaces split a pronunciation into
+# separately spoken words. Acronyms follow misaki's own letter-by-letter
+# style: every letter secondary-stressed, the last primary.
+
+# Product and project names
+Peckboard   pˈɛkbˌɔːɹd
+Kokoro      kOkˈOɹO
+Stashify    stˈæʃɪfˌI
+TCGTradeGG  tˌisˌiʤˈi tɹˈAd ʤˌiʤˈi
+MacMini     mˈæk mˈɪni
+Grok        ɡɹˈɑk
+Playwright  plˈAɹIt
+misaki      mɪsˈɑki
+graphify    ɡɹˈæfɪfˌI
+infra       ˈɪnfɹə
+
+# Tech words misaki doesn't know
+e2e         ˈi tʊ ˈi
+GitHub      ɡˈɪthˌʌb
+Postgres    pˈOstɡɹˌɛs
+SQLite      sˈikwəlˌIt
+TypeScript  tˈIpskɹˌɪpt
+WASM        wˈɑzəm
+localhost   lˈOkəlhˌOst
+frontend    fɹˈʌntˌɛnd
+webhook     wˈɛbhˌʊk
+worktree    wˈɜːktɹˌi
+clippy      klˈɪpi
+Kimi        kˈimi
+Ollama      Olˈɑmə
+Zustand     zˈustˌænd
+Axum        ˈæksəm
+Tailscale   tˈAlskˌAl
+Kubernetes  kˌubɚnˈɛtiz
+YAML        jˈæməl
+OAuth       ˈOˌɔθ
+nginx       ˌɛnʤɪnˈɛks
+pytest      pˈItˌɛst
+
+# Acronyms
+API         ˌApˌiˈI
+UI          jˌuˈI
+DB          dˌibˈi
+VM          vˌiˈɛm
+URL         jˌuˌɑɹˈɛl
+CLI         sˌiˌɛlˈI
+MCP         ˌɛmsˌipˈi
+PR          pˌiˈɑɹ
+CI          sˌiˈI
+SSH         ˌɛsˌɛsˈAʧ
+TTS         tˌitˌiˈɛs
+npm         ˌɛnpˌiˈɛm
+GPU         ʤˌipˌijˈu
+SSD         ˌɛsˌɛsdˈi
+JSON        ʤˈAsˌɑn
+iOS         ˌIˌOˈɛs

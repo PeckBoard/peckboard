@@ -55,6 +55,7 @@ import EnvUnlockDialog from './components/EnvUnlockDialog'
 import SoundsListener from './components/SoundsListener'
 import VoiceDock, { VoiceListenButton } from './components/VoiceDock'
 import ConnectionBanner from './components/ConnectionBanner'
+import RestartPendingBanner from './components/RestartPendingBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import { parseVoiceNavigate, useVoiceNavStore, VOICE_PAGE_VIEWS } from './voice/navigation'
 import './App.css'
@@ -1714,6 +1715,7 @@ function App() {
           </div>
         )}
         <ConnectionBanner connected={connected} />
+        <RestartPendingBanner />
         <AskpassDialog />
         <EnvUnlockDialog />
         {/* The tab strip's panel. Every chip's `aria-controls` points at

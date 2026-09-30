@@ -1241,6 +1241,31 @@ pub struct VoiceRelayItem {
     pub summary: String,
     pub created_at: String,
 }
+// ── TTS Lexicon ──────────────────────────────────
+
+/// A custom TTS pronunciation (`service::tts::lexicon`). `word` is the
+/// lowercased match key; `display` the word as typed. `source` is
+/// `default` (built-in seed) or `user`.
+#[derive(Queryable, Selectable, Insertable, AsChangeset, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = tts_lexicon, treat_none_as_null = true)]
+pub struct TtsLexiconEntry {
+    pub word: String,
+    pub display: String,
+    pub respelling: Option<String>,
+    pub phonemes: String,
+    pub source: String,
+    pub updated_at: String,
+}
+
+/// A word misaki had no pronunciation for, with how often it was spoken.
+#[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+#[diesel(table_name = tts_unknown_words)]
+pub struct TtsUnknownWord {
+    pub word: String,
+    pub count: i64,
+    pub first_seen: String,
+    pub last_seen: String,
+}
 
 // ── Agent Vars ───────────────────────────────────
 

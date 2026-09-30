@@ -287,6 +287,7 @@ impl Ctx<'_> {
 
         match self.scenario {
             "echo" => self.echo()?,
+            "echo-stream" => self.echo_stream()?,
             "happy-path" => self.happy_path()?,
             "run-command" => self.run_command()?,
             "subagent" => self.subagent()?,
@@ -368,6 +369,18 @@ impl Ctx<'_> {
 
     fn echo(&self) -> Result<(), String> {
         self.emit_text(self.message)
+    }
+
+    /// Echo the message in 5-char `text` chunks, like a real token stream.
+    fn echo_stream(&self) -> Result<(), String> {
+        let chars: Vec<char> = self.message.chars().collect();
+        for piece in chars.chunks(5) {
+            if !self.tick()? {
+                return Ok(());
+            }
+            self.emit_text(&piece.iter().collect::<String>())?;
+        }
+        Ok(())
     }
 
     fn happy_path(&mut self) -> Result<(), String> {

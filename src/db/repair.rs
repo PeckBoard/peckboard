@@ -71,6 +71,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_devices_table(conn)?;
     ensure_device_activity_table(conn)?;
     ensure_voice_relay_queue_table(conn)?;
+    ensure_tts_lexicon_tables(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -270,6 +271,42 @@ fn ensure_voice_relay_queue_table(conn: &mut SqliteConnection) -> anyhow::Result
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_voice_relay_queue_voice \
          ON voice_relay_queue (voice_session_id, created_at)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+/// Heal DBs that predate `1790739953_tts_lexicon`. `CREATE TABLE IF NOT
+/// EXISTS` is idempotent so this is safe on a fully-migrated DB and only does
+/// work on one that lacks the tables. DDL mirrors the migration.
+fn ensure_tts_lexicon_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "tts_lexicon")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS tts_lexicon (
+            word        TEXT PRIMARY KEY NOT NULL,
+            display     TEXT NOT NULL,
+            respelling  TEXT,
+            phonemes    TEXT NOT NULL,
+            source      TEXT NOT NULL CHECK (source IN ('default', 'user')),
+            updated_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    log_if_healing_table(conn, "tts_lexicon_seeded")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS tts_lexicon_seeded (
+            word       TEXT PRIMARY KEY NOT NULL,
+            seeded_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    log_if_healing_table(conn, "tts_unknown_words")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS tts_unknown_words (
+            word        TEXT PRIMARY KEY NOT NULL,
+            count       INTEGER NOT NULL,
+            first_seen  TEXT NOT NULL,
+            last_seen   TEXT NOT NULL
+        )",
     )
     .execute(conn)?;
     Ok(())

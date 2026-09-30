@@ -10,8 +10,10 @@ import path from 'node:path'
  * Confirm performs the action.
  *
  * Covered here: "Cancel as Won't Do" on a kanban card, folder delete,
- * user delete, "Upgrade & restart", and the Claude permission Bypass
- * toggle (plus the standing badge it puts on the settings hub).
+ * user delete, and the Claude permission Bypass toggle (plus the standing
+ * badge it puts on the settings hub). "Upgrade & restart" is confirmed
+ * only while work is running (restart-confirm.spec); here it applies
+ * straight away.
  *
  * Projects use `worker_count: 0` so the orchestrator can't move a card
  * itself and race the assertions.
@@ -201,7 +203,7 @@ test('deleting a user is confirmed first and names the user', async ({ request, 
   await expect.poll(() => userExists()).toBe(false)
 })
 
-test('"Upgrade & restart" only POSTs the apply after the confirmation', async ({
+test('"Upgrade & restart" with nothing running applies without a dialog', async ({
   request,
   page,
 }) => {
@@ -234,28 +236,19 @@ test('"Upgrade & restart" only POSTs the apply after the confirmation', async ({
     applied = true
     await route.fulfill({ json: { ok: true } })
   })
+  // The post-restart poll reloads once health answers; keep it waiting.
+  await page.route('**/api/health', (route) => route.fulfill({ status: 503, body: '' }))
 
   await loadAt(page, token, '/settings')
   await page.locator('[data-testid="settings-nav-server"]').click()
   const applyBtn = page.locator('[data-testid="update-apply"]')
   await expect(applyBtn).toBeVisible({ timeout: 10_000 })
 
-  const dialog = page.locator('[data-testid="update-apply-confirm"]')
-
-  // Cancel → no request left the browser.
+  // Nothing is running on the test server, so the restart guard applies
+  // straight away (the guarded dialog is covered by restart-confirm.spec).
   await applyBtn.click()
-  await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText('9.9.9')
-  await expect(dialog).toContainText('restarts the server')
-  await dialog.locator('[data-testid="confirm-dialog-cancel"]').click()
-  await expect(dialog).toHaveCount(0)
-  expect(applyCalls).toBe(0)
-
-  // Confirm → exactly one apply, and the section switches to "restarting".
-  await applyBtn.click()
-  await expect(dialog).toBeVisible()
-  await dialog.locator('[data-testid="confirm-dialog-confirm"]').click()
   await expect(page.locator('[data-testid="update-restarting"]')).toBeVisible()
+  await expect(page.locator('[data-testid="restart-confirm"]')).toHaveCount(0)
   expect(applyCalls).toBe(1)
 })
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
-import ConfirmDialog from './ConfirmDialog'
+import { waitForServerThenReload } from '../store/restart'
+import useGuardedRestart from '../hooks/useGuardedRestart'
 
 /** Mirrors the backend `UpdateStatus` from `/api/update/check`. */
 interface UpdateStatus {
@@ -16,21 +17,17 @@ interface UpdateStatus {
 /**
  * "Software Update" settings section. Checks `/api/update/check` for a newer
  * PeckBoard release and, when one exists, offers a one-click "Upgrade &
- * restart" that POSTs `/api/update/apply`. The backend swaps its binary and
- * re-execs (same port), so after applying we poll until the server is back and
- * then reload to pick up the new embedded frontend.
+ * restart" that POSTs `/api/update/apply`; "Restart server" re-execs the
+ * current binary. Both go through `useGuardedRestart`: with work still
+ * running the user first sees what would be interrupted and can restart
+ * anyway or once idle. After an immediate restart we poll until the server
+ * is back, then reload to pick up the (new) embedded frontend.
  */
 export default function SoftwareUpdate() {
   const [status, setStatus] = useState<UpdateStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [applying, setApplying] = useState(false)
-  const [restarting, setRestarting] = useState(false)
-  // Applying an update re-execs the server, so it goes through a confirm.
-  // `applyError` is the dialog's own error slot: a failed apply keeps the
-  // dialog open instead of dropping the user back to the section.
-  const [confirmApply, setConfirmApply] = useState(false)
-  const [applyError, setApplyError] = useState<string | null>(null)
+  const [restarting, setRestarting] = useState<'update' | 'restart' | null>(null)
 
   const check = useCallback(async () => {
     setLoading(true)
@@ -69,43 +66,29 @@ export default function SoftwareUpdate() {
     }
   }, [])
 
-  // After applying, the server re-execs and is briefly unreachable. Poll the
-  // check endpoint until it answers again, then reload to load the new bundle.
-  const waitForRestartThenReload = useCallback(async () => {
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 2000))
-      try {
-        const res = await authedFetch('/api/update/check')
-        if (res.ok) {
-          window.location.reload()
-          return
-        }
-      } catch {
-        // server still restarting — keep polling
-      }
-    }
-    // Gave up waiting; let the user reload manually.
-    setRestarting(false)
+  // The server re-execs and is briefly unreachable; reload once it's back.
+  const afterRestart = useCallback(async () => {
+    if (await waitForServerThenReload()) return
+    setRestarting(null)
     setError('The server is taking longer than expected to restart. Reload the page to check.')
   }, [])
 
-  const apply = useCallback(async () => {
-    setApplying(true)
-    setError(null)
-    setApplyError(null)
-    try {
-      const res = await authedFetch('/api/update/apply', { method: 'POST' })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
-      setConfirmApply(false)
-      setRestarting(true)
-      void waitForRestartThenReload()
-    } catch (e) {
-      setApplyError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setApplying(false)
-    }
-  }, [waitForRestartThenReload])
+  const onUpdateRestarting = useCallback(() => {
+    setRestarting('update')
+    void afterRestart()
+  }, [afterRestart])
+  const onRestarting = useCallback(() => {
+    setRestarting('restart')
+    void afterRestart()
+  }, [afterRestart])
+
+  const upgrade = useGuardedRestart('update', {
+    version: status?.latest_version,
+    onRestarting: onUpdateRestarting,
+  })
+  const restart = useGuardedRestart('restart', { onRestarting })
+  const busy = upgrade.busy || restart.busy
+  const actionError = upgrade.error ?? restart.error
 
   return (
     <section className="settings-section" data-testid="settings-update">
@@ -126,68 +109,75 @@ export default function SoftwareUpdate() {
 
       {restarting ? (
         <p className="settings-loading" data-testid="update-restarting">
-          Upgrading and restarting… this page will reload automatically.
+          {restarting === 'update' ? 'Upgrading and restarting…' : 'Restarting…'} this page will
+          reload automatically.
         </p>
-      ) : loading ? (
-        <p className="settings-loading">Checking for updates…</p>
-      ) : error ? (
-        <div className="settings-update-actions">
-          <p className="settings-error">{error}</p>
-          <button type="button" className="btn-secondary" onClick={() => void check()}>
-            Try again
-          </button>
-        </div>
-      ) : status && !status.supported ? (
-        <p className="settings-loading">Self-update isn’t supported on this platform.</p>
-      ) : status?.update_available ? (
-        <div className="settings-update-actions">
-          <p data-testid="update-available">
-            Update available — <strong>{status.latest_version}</strong>
-          </p>
-          {status.html_url && (
-            <a href={status.html_url} target="_blank" rel="noreferrer" className="settings-link">
-              Release notes
-            </a>
-          )}
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => {
-              setApplyError(null)
-              setConfirmApply(true)
-            }}
-            disabled={applying}
-            data-testid="update-apply"
-          >
-            {applying ? 'Starting…' : 'Upgrade & restart'}
-          </button>
-        </div>
       ) : (
-        <div className="settings-update-actions">
-          <p data-testid="update-uptodate">You’re on the latest version.</p>
-          <button type="button" className="btn-secondary" onClick={() => void check()}>
-            Check again
-          </button>
-        </div>
+        <>
+          {loading ? (
+            <p className="settings-loading">Checking for updates…</p>
+          ) : error ? (
+            <div className="settings-update-actions">
+              <p className="settings-error">{error}</p>
+              <button type="button" className="btn-secondary" onClick={() => void check()}>
+                Try again
+              </button>
+            </div>
+          ) : status && !status.supported ? (
+            <p className="settings-loading">Self-update isn’t supported on this platform.</p>
+          ) : status?.update_available ? (
+            <div className="settings-update-actions">
+              <p data-testid="update-available">
+                Update available — <strong>{status.latest_version}</strong>
+              </p>
+              {status.html_url && (
+                <a
+                  href={status.html_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="settings-link"
+                >
+                  Release notes
+                </a>
+              )}
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void upgrade.request()}
+                disabled={busy}
+                data-testid="update-apply"
+              >
+                {upgrade.busy ? 'Starting…' : 'Upgrade & restart'}
+              </button>
+            </div>
+          ) : (
+            <div className="settings-update-actions">
+              <p data-testid="update-uptodate">You’re on the latest version.</p>
+              <button type="button" className="btn-secondary" onClick={() => void check()}>
+                Check again
+              </button>
+            </div>
+          )}
+          <div className="settings-update-actions">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void restart.request()}
+              disabled={busy}
+              data-testid="server-restart"
+            >
+              {restart.busy ? 'Checking…' : 'Restart server'}
+            </button>
+          </div>
+          {actionError && (
+            <p className="settings-error" role="alert" data-testid="restart-error">
+              {actionError}
+            </p>
+          )}
+        </>
       )}
-      {confirmApply && (
-        <ConfirmDialog
-          testId="update-apply-confirm"
-          danger
-          title={`Upgrade to ${status?.latest_version ?? 'the latest release'} and restart?`}
-          message="PeckBoard replaces its own binary and restarts the server. Everyone connected is disconnected, and any agent run in flight is killed. Sessions, projects and cards on disk are kept."
-          confirmLabel="Upgrade & restart"
-          cancelLabel="Not now"
-          error={applyError}
-          busy={applying}
-          busyLabel="Starting…"
-          onConfirm={() => void apply()}
-          onCancel={() => {
-            setConfirmApply(false)
-            setApplyError(null)
-          }}
-        />
-      )}
+      {upgrade.dialog}
+      {restart.dialog}
     </section>
   )
 }

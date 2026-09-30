@@ -49,3 +49,14 @@
   background: var(--surface2);
   color: var(--text);
 }
+
+/* Pending-restart variant: the waiting count is the point, so it wraps
+   instead of ellipsizing on narrow screens. */
+.restart-pending-banner .announcement-content {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.restart-pending-banner .announcement-content span {
+  white-space: normal;
+}

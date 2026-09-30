@@ -7,7 +7,10 @@
 //! blocking pool behind a small semaphore.
 
 pub mod download;
+pub mod hints;
 pub mod kokoro;
+pub mod l2s;
+pub mod lexicon;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -226,13 +229,18 @@ impl TtsService {
         Ok(())
     }
 
-    /// Synthesize `text` → WAV bytes. Reports `NotReady` until `prepare`
-    /// has finished loading the model (the browser calls it explicitly).
+    /// Synthesize `text` → WAV bytes, applying the custom lexicon `lex`.
+    /// With `phonemes`, speaks exactly those (validated against the Kokoro
+    /// vocab) instead — `text` is then only a label. Reports `NotReady`
+    /// until `prepare` has finished loading the model (the browser calls it
+    /// explicitly).
     pub async fn synthesize(
         &self,
         text: &str,
         voice: Option<&str>,
         speed: Option<f32>,
+        phonemes: Option<&str>,
+        lex: Option<Arc<lexicon::LexiconStore>>,
     ) -> Result<Vec<u8>, TtsError> {
         let text = text.trim();
         if text.is_empty() {
@@ -247,6 +255,19 @@ impl TtsService {
         if !VOICES.iter().any(|(id, _)| *id == voice) {
             return Err(TtsError::BadRequest(format!("unknown voice '{voice}'")));
         }
+        let phonemes = match phonemes {
+            Some(p) => {
+                let p = lexicon::validate_phonemes(p)
+                    .map_err(|e| TtsError::BadRequest(e.to_string()))?;
+                if p.chars().count() > MAX_TEXT_CHARS {
+                    return Err(TtsError::BadRequest(format!(
+                        "phonemes are longer than {MAX_TEXT_CHARS} characters"
+                    )));
+                }
+                Some(p)
+            }
+            None => None,
+        };
         let speed = speed.unwrap_or(1.0).clamp(0.5, 2.0);
         let Some(engine) = self.engine.get().cloned() else {
             return Err(TtsError::NotReady(self.status()));
@@ -257,10 +278,13 @@ impl TtsService {
             .await
             .map_err(|e| TtsError::Failed(e.into()))?;
         let (text, voice) = (text.to_string(), voice.to_string());
-        let samples = tokio::task::spawn_blocking(move || engine.synthesize(&text, &voice, speed))
-            .await
-            .map_err(|e| TtsError::Failed(e.into()))?
-            .map_err(TtsError::Failed)?;
+        let samples = tokio::task::spawn_blocking(move || match phonemes {
+            Some(ph) => engine.synthesize_phonemes(&ph, &voice, speed),
+            None => engine.synthesize(&text, &voice, speed, lex.as_deref()),
+        })
+        .await
+        .map_err(|e| TtsError::Failed(e.into()))?
+        .map_err(TtsError::Failed)?;
         Ok(kokoro::encode_wav(&samples, kokoro::SAMPLE_RATE))
     }
 }

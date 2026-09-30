@@ -5,6 +5,7 @@
  * the browser Web Speech API implementation below can be swapped for a
  * cloud STT/TTS engine later without touching the panel or the loop.
  */
+import { stripPronunciationHints } from './text'
 
 export interface RecognitionCallbacks {
   /** Partial hypothesis while the user is still talking. */
@@ -233,7 +234,8 @@ export class WebSpeechEngine implements SpeechEngine {
       this.speak(text, opts)
       return
     }
-    const u = new SpeechSynthesisUtterance(text)
+    // Pronunciation hints are for Kokoro; the browser voice reads the words.
+    const u = new SpeechSynthesisUtterance(stripPronunciationHints(text))
     const voices = synth.getVoices()
     const voice = opts.voiceURI ? voices.find((v) => v.voiceURI === opts.voiceURI) : undefined
     if (voice) {

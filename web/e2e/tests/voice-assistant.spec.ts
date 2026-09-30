@@ -24,6 +24,32 @@ import path from 'node:path'
 
 const E2E_USER = 'e2e-user'
 const E2E_PASS = 'e2e-password-1234'
+/** Prefix the client puts on an utterance that talked over the assistant. */
+const INTERRUPT_MARKER =
+  '[user interrupted; the rest of your previous reply was not heard, do not repeat it] '
+
+/** 16-bit mono 24 kHz WAV of a quiet tone, `seconds` long. */
+function wav(seconds: number): Buffer {
+  const rate = 24_000
+  const n = Math.round(rate * seconds)
+  const buf = Buffer.alloc(44 + n * 2)
+  buf.write('RIFF', 0)
+  buf.writeUInt32LE(36 + n * 2, 4)
+  buf.write('WAVEfmt ', 8)
+  buf.writeUInt32LE(16, 16)
+  buf.writeUInt16LE(1, 20)
+  buf.writeUInt16LE(1, 22)
+  buf.writeUInt32LE(rate, 24)
+  buf.writeUInt32LE(rate * 2, 28)
+  buf.writeUInt16LE(2, 32)
+  buf.writeUInt16LE(16, 34)
+  buf.write('data', 36)
+  buf.writeUInt32LE(n * 2, 40)
+  for (let i = 0; i < n; i++) {
+    buf.writeInt16LE(Math.round(Math.sin((i / rate) * 2 * Math.PI * 440) * 2000), 44 + i * 2)
+  }
+  return buf
+}
 
 /** Log in and make sure at least one folder exists: the voice session is
  *  created inside the user's most recent folder, so a bare install (as the
@@ -51,6 +77,7 @@ type StubWindow = {
   __spoken: string[]
   __cancels: number
   __ttsHold: boolean
+  __ttsFinish: () => void
 }
 
 /** Install the Web Speech stubs + the auth token before any app script runs. */
@@ -163,6 +190,12 @@ async function primePage(page: Page, token: string) {
       resume: () => {},
       addEventListener: () => {},
       removeEventListener: () => {},
+    }
+    // Ends the utterances `__ttsHold` kept "playing", as if read to the end.
+    w.__ttsFinish = () => {
+      const held = current
+      current = []
+      for (const u of held) u.onend?.()
     }
     Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true })
   }, token)
@@ -371,7 +404,9 @@ test('speech streams while the turn runs; talking over it ignores echo, then bar
         )
         const endIdx = events.findIndex((e, i) => i > firstTurn && e.kind === 'agent-end')
         const nextUser = events.findIndex(
-          (e) => e.kind === 'user' && e.data.text === 'no wait actually do the short one',
+          (e) =>
+            e.kind === 'user' &&
+            e.data.text === INTERRUPT_MARKER + 'no wait actually do the short one',
         )
         return firstTurn >= 0 && endIdx > firstTurn && nextUser > endIdx
       },
@@ -383,6 +418,172 @@ test('speech streams while the turn runs; talking over it ignores echo, then bar
   await request.post(`/api/sessions/${voice.session_id}/interrupt`, {
     headers: { Authorization: `Bearer ${token}` },
   })
+})
+
+test('an interrupted reply is never spoken again, and the model is told it was cut off', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
+    .toBe(true)
+  await page.evaluate(() => {
+    ;(window as unknown as StubWindow).__ttsHold = true
+  })
+
+  // `mock:echo` replies with the utterance itself: four sentences, read
+  // one at a time.
+  const reply = [
+    'Alpha is the first point.',
+    'Bravo is the second point.',
+    'Charlie is the third point.',
+    'Delta is the fourth point.',
+  ]
+  await page.evaluate((t) => (window as unknown as StubWindow).__voiceSay(t), reply.join(' '))
+  await expect.poll(async () => spoken(page), { timeout: 15_000 }).toContain(reply[0])
+  await expect(page.getByTestId('voice-status')).toHaveText('Speaking')
+
+  // The user starts talking over it — too few words to cut in yet — and
+  // the sentence being read finishes: the rest waits while they talk.
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('hold on'))
+  await page.evaluate(() => {
+    const w = window as unknown as StubWindow
+    w.__ttsHold = false
+    w.__ttsFinish()
+  })
+  await page.waitForTimeout(300)
+  expect(await spoken(page)).not.toContain(reply[1])
+
+  // They finish their sentence. It talked over the reply, so the held rest
+  // is dropped, not read out once they stop.
+  const said = 'hold on tell me about zebras'
+  await page.evaluate((t) => (window as unknown as StubWindow).__voiceSay(t), said)
+  await expect(page.getByTestId('voice-line-user').last()).toContainText(said, {
+    timeout: 10_000,
+  })
+  // The transcript shows what they said, not the marker for the model…
+  await expect(
+    page.getByTestId('voice-line-user').filter({ hasText: '[user interrupted' }),
+  ).toHaveCount(0)
+  // …which the session did receive.
+  await expect
+    .poll(
+      async () =>
+        (await sessionEvents(request, token, voice.session_id)).some(
+          (e) => e.kind === 'user' && e.data.text === INTERRUPT_MARKER + said,
+        ),
+      { timeout: 10_000 },
+    )
+    .toBe(true)
+  await expect
+    .poll(async () => (await spoken(page)).some((s) => s.includes('zebras')), {
+      timeout: 15_000,
+    })
+    .toBe(true)
+
+  // A later turn (a relay reply) is spoken — and still nothing of the
+  // interrupted reply.
+  const res = await request.post(`/api/sessions/${voice.session_id}/message`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: '[relay] update from "zoo": PANGOLIN count finished.' },
+  })
+  expect(res.ok(), `relay send failed: ${await res.text()}`).toBeTruthy()
+  await expect
+    .poll(async () => (await spoken(page)).some((s) => s.includes('PANGOLIN')), {
+      timeout: 15_000,
+    })
+    .toBe(true)
+  await page.waitForTimeout(500)
+  const all = await spoken(page)
+  for (const unheard of reply.slice(1)) {
+    expect(all.some((s) => s.includes(unheard.split(' ')[0]))).toBe(false)
+  }
+})
+
+test('Kokoro audio fetched before a barge-in never plays after it', async ({ request, page }) => {
+  const token = await authenticate(request)
+  await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, number>
+    w.__audioStarts = 0
+    const proto = AudioBufferSourceNode.prototype
+    const start = proto.start
+    proto.start = function (...args: Parameters<typeof start>) {
+      w.__audioStarts += 1
+      return start.apply(this, args)
+    }
+  })
+  // Kokoro (the default voice) is ready; the first sentence plays for a
+  // while, and every later sentence's audio arrives only after a delay.
+  const ready = { state: 'ready', progress: 1, error: null }
+  await page.route('**/api/voice/tts/prepare', (r) => r.fulfill({ json: ready }))
+  await page.route('**/api/voice/tts/status', (r) => r.fulfill({ json: ready }))
+  const requested: { text: string; at: number }[] = []
+  await page.route('**/api/voice/tts', async (r) => {
+    const text = String((r.request().postDataJSON() as { text?: string }).text ?? '')
+    requested.push({ text, at: Date.now() })
+    if (!text.startsWith('Kilo')) await new Promise((res) => setTimeout(res, 1500))
+    await r
+      .fulfill({
+        status: 200,
+        contentType: 'audio/wav',
+        body: wav(text.startsWith('Kilo') ? 6 : 0.2),
+      })
+      .catch(() => undefined)
+  })
+  await page.goto('/')
+  const audioStarts = () =>
+    page.evaluate(() => (window as unknown as { __audioStarts: number }).__audioStarts)
+
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  // A click inside the panel is the gesture that unlocks audio output.
+  await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
+    .toBe(true)
+
+  const reply = [
+    'Kilo is the first point.',
+    'Lima is the second point.',
+    'Mike is the third point.',
+  ]
+  await page.evaluate((t) => (window as unknown as StubWindow).__voiceSay(t), reply.join(' '))
+  await expect.poll(audioStarts, { timeout: 15_000 }).toBe(1)
+  // The next sentence is being prefetched while the first plays.
+  await expect.poll(() => requested.some((q) => q.text.startsWith('Lima'))).toBe(true)
+
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceInterim('stop right there please'),
+  )
+  const bargedAt = Date.now()
+  await expect(page.getByTestId('voice-status')).not.toHaveText('Speaking')
+  // The prefetched audio lands after the barge-in: it must not play.
+  await page.waitForTimeout(2500)
+  expect(await audioStarts()).toBe(1)
+  expect(
+    requested.some((q) => q.at > bargedAt && /^(Lima|Mike)/.test(q.text)),
+    'no unheard sentence is fetched after the barge-in',
+  ).toBe(false)
+
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceSay('stop right there please and count zebras'),
+  )
+  await expect
+    .poll(() => requested.some((q) => q.text.includes('zebras')), {
+      timeout: 15_000,
+    })
+    .toBe(true)
+  await page.waitForTimeout(500)
+  expect(requested.some((q) => q.at > bargedAt && /^(Lima|Mike)/.test(q.text))).toBe(false)
 })
 
 test('a relay arriving mid-utterance is not spoken over the user and does not split the utterance', async ({
@@ -459,6 +660,169 @@ test('a relay arriving mid-utterance is not spoken over the user and does not sp
   )
 })
 
+/** Open the panel and wait for the always-on mic to be live. */
+async function openListening(page: Page) {
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
+    .toBe(true)
+}
+
+function say(page: Page, text: string) {
+  return page.evaluate((t) => (window as unknown as StubWindow).__voiceSay(t), text)
+}
+
+async function userTexts(
+  request: APIRequestContext,
+  token: string,
+  sessionId: string,
+): Promise<string[]> {
+  return (await sessionEvents(request, token, sessionId))
+    .filter((e) => e.kind === 'user')
+    .map((e) => String(e.data.text ?? ''))
+}
+
+test('a mid-sentence pause waits for the rest; the finished sentence goes as one message', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+  await openListening(page)
+
+  const fragment = 'OK I think you might be affected by the'
+  await say(page, fragment)
+  // It ends on "the": the line stays up, marked as waiting for the rest.
+  const heard = page.getByTestId('voice-interim')
+  await expect(heard).toContainText(fragment)
+  await expect(heard).toHaveAttribute('data-unfinished', 'true')
+  // Well past the short end-of-turn gap: still not sent.
+  await page.waitForTimeout(2000)
+  expect(await userTexts(request, token, voice.session_id)).not.toContain(fragment)
+  await expect(heard).toContainText(fragment)
+
+  const resumedAt = Date.now()
+  await say(page, 'latest update')
+  const full = `${fragment} latest update`
+  await expect(page.getByTestId('voice-line-user').filter({ hasText: full })).toHaveCount(1, {
+    timeout: 5_000,
+  })
+  // Complete-looking, it goes after the short gap, not the long wait.
+  expect(Date.now() - resumedAt).toBeLessThan(3_500)
+  await expect.poll(() => userTexts(request, token, voice.session_id)).toContain(full)
+  expect(await userTexts(request, token, voice.session_id)).not.toContain(fragment)
+})
+
+test('a finished sentence is sent after a short silence', async ({ request, page }) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+  await openListening(page)
+
+  const sentence = "What's the status of Stashify?"
+  const line = page.getByTestId('voice-line-user').filter({ hasText: sentence })
+  const saidAt = Date.now()
+  await say(page, sentence)
+  await page.waitForTimeout(800)
+  await expect(line).toHaveCount(0)
+  await expect(page.getByTestId('voice-interim')).not.toHaveAttribute('data-unfinished', 'true')
+  await expect(line).toHaveCount(1, { timeout: 5_000 })
+  const elapsed = Date.now() - saidAt
+  expect(elapsed).toBeGreaterThanOrEqual(1_200)
+  expect(elapsed).toBeLessThan(3_000)
+  await expect.poll(() => userTexts(request, token, voice.session_id)).toContain(sentence)
+})
+
+test('a recognition restart mid-utterance neither sends nor drops what was heard', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+  await openListening(page)
+  const recStarts = () => page.evaluate(() => (window as unknown as StubWindow).__recStarts)
+
+  await say(page, 'please remind me to')
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('check the'))
+  const startsBefore = await recStarts()
+  // Chrome ends recognition sessions on silence, even mid-hypothesis.
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceRec?.finish())
+  await expect.poll(recStarts).toBeGreaterThan(startsBefore)
+  await expect(page.getByTestId('voice-interim')).toContainText('please remind me to check the')
+  await page.waitForTimeout(1_500)
+  const early = await userTexts(request, token, voice.session_id)
+  expect(early.some((t) => t.startsWith('please remind me'))).toBe(false)
+
+  await say(page, 'deploy logs')
+  const full = 'please remind me to check the deploy logs'
+  await expect
+    .poll(() => userTexts(request, token, voice.session_id), { timeout: 10_000 })
+    .toContain(full)
+  const all = await userTexts(request, token, voice.session_id)
+  expect(all.filter((t) => t.startsWith('please remind me'))).toEqual([full])
+})
+
+test('a relay arriving during a mid-sentence pause is not spoken; the user still holds the floor', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  // The longest pause, so the relay's round trip can't outlast it.
+  await page.addInitScript(() =>
+    localStorage.setItem('peckboard_voice_prefs', JSON.stringify({ maxPauseMs: 10_000 })),
+  )
+  const activity: { state: string; at: number }[] = []
+  page.on('request', (r) => {
+    if (!r.url().endsWith('/api/voice/activity')) return
+    const body = r.postDataJSON() as { state?: string }
+    activity.push({ state: String(body.state), at: Date.now() })
+  })
+  await page.goto('/')
+  await openListening(page)
+
+  const saidAt = Date.now()
+  await say(page, 'can you ask the stashify session about')
+  const relay = '[relay] update from "stashify dev": WOMBAT deploy finished.'
+  const res = await request.post(`/api/sessions/${voice.session_id}/message`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: relay },
+  })
+  expect(res.ok(), `relay send failed: ${await res.text()}`).toBeTruthy()
+  await expect
+    .poll(
+      async () =>
+        (await sessionEvents(request, token, voice.session_id)).some(
+          (e) => e.kind === 'agent-text' && String(e.data.text ?? '').includes('WOMBAT'),
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe(true)
+  // Past the server's 6s "speaking" hold minus slack, the client re-reported it.
+  await page.waitForTimeout(Math.max(500, saidAt + 4_000 - Date.now()))
+  expect((await spoken(page)).some((s) => s.includes('WOMBAT'))).toBe(false)
+  await expect(page.getByTestId('voice-status')).not.toHaveText('Speaking')
+  expect(activity.some((a) => a.state === 'speaking' && a.at > saidAt + 2_500)).toBe(true)
+  expect(activity.some((a) => a.state === 'idle' && a.at > saidAt)).toBe(false)
+
+  await say(page, 'the release notes')
+  const full = 'can you ask the stashify session about the release notes'
+  await expect
+    .poll(() => userTexts(request, token, voice.session_id), { timeout: 10_000 })
+    .toContain(full)
+  // Once the turn is sent, the held reply is spoken.
+  await expect
+    .poll(async () => (await spoken(page)).some((s) => s.includes('WOMBAT')), { timeout: 15_000 })
+    .toBe(true)
+})
+
 test('Settings → Voice persists the chosen voice across reloads', async ({ request, page }) => {
   const token = await authenticate(request)
   await primePage(page, token)
@@ -475,6 +839,8 @@ test('Settings → Voice persists the chosen voice across reloads', async ({ req
   await page.getByTestId('voice-rate').fill('1.5')
   await expect(page.getByTestId('voice-rate-value')).toHaveText('1.5×')
   await page.getByTestId('voice-auto-listen').uncheck()
+  await page.getByTestId('voice-max-pause').fill('3000')
+  await expect(page.getByTestId('voice-max-pause-value')).toHaveText('3.0s')
 
   // Test voice speaks a sample right away.
   await page.getByTestId('voice-test').click()
@@ -486,10 +852,61 @@ test('Settings → Voice persists the chosen voice across reloads', async ({ req
   })
   await expect(page.getByTestId('voice-rate')).toHaveValue('1.5')
   await expect(page.getByTestId('voice-auto-listen')).not.toBeChecked()
+  await expect(page.getByTestId('voice-max-pause')).toHaveValue('3000')
 
   // The model section reads the voice session's model from the backend.
   await expect(page.getByTestId('voice-model')).toBeVisible()
   await expect(page.getByTestId('voice-model')).not.toContainText('Loading…', {
     timeout: 10_000,
   })
+})
+
+test('pronunciation hints show as plain words but reach Kokoro intact, even split across chunks', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  // `mock:echo-stream` echoes the message in 5-char chunks, so each hint
+  // below arrives split across several `agent-text` events.
+  await setVoiceModel(request, token, 'mock:echo-stream')
+  await primePage(page, token)
+  const ready = { state: 'ready', progress: 1, error: null }
+  await page.route('**/api/voice/tts/prepare', (r) => r.fulfill({ json: ready }))
+  await page.route('**/api/voice/tts/status', (r) => r.fulfill({ json: ready }))
+  const requested: string[] = []
+  await page.route('**/api/voice/tts', async (r) => {
+    requested.push(String((r.request().postDataJSON() as { text?: string }).text ?? ''))
+    await r
+      .fulfill({ status: 200, contentType: 'audio/wav', body: wav(0.1) })
+      .catch(() => undefined)
+  })
+  await page.goto('/')
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+
+  const sentences = ['Open [Peckboard](/pˈɛkbˌɔɹd/) now.', 'Then say [Kokoro](/kOkˈOɹO/) twice.']
+  await page.getByTestId('voice-type-input').fill(sentences.join(' '))
+  await page.getByTestId('voice-type-send').click()
+
+  const line = page.getByTestId('voice-line-assistant').last()
+  await expect(line).toContainText('Open Peckboard now. Then say Kokoro twice.', {
+    timeout: 15_000,
+  })
+  await expect(line).not.toContainText('](/')
+  // Each sentence is sent whole, hint markup included, for the server to read.
+  await expect.poll(() => [...new Set(requested)], { timeout: 15_000 }).toEqual(sentences)
+})
+
+test('the browser voice reads a hinted word without the markup', async ({ request, page }) => {
+  const token = await authenticate(request)
+  await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await page.goto('/')
+  await page.getByTestId('voice-fab').click()
+  await page.getByTestId('voice-type-input').fill('Ask [Grok](/ɡɹˈɑk/) about it.')
+  await page.getByTestId('voice-type-send').click()
+  await expect(page.getByTestId('voice-line-assistant').last()).toHaveText(/Ask Grok about it\./, {
+    timeout: 15_000,
+  })
+  await expect.poll(() => spoken(page), { timeout: 15_000 }).toContain('Ask Grok about it.')
 })

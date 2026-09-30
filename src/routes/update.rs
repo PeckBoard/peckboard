@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -18,6 +18,8 @@ use axum::{
 };
 
 use crate::auth::middleware::{require_admin, require_auth};
+use crate::routes::admin_restart::WhenQuery;
+use crate::service::restart::{self, RestartKind};
 use crate::service::update;
 use crate::state::AppState;
 
@@ -51,7 +53,12 @@ async fn check_update(State(_state): State<Arc<AppState>>) -> impl IntoResponse 
     }
 }
 
-async fn apply_update(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+/// `?when=idle` swaps the binary now but defers the re-exec until nothing
+/// is running (see [`restart::schedule_idle_restart`]).
+async fn apply_update(
+    State(state): State<Arc<AppState>>,
+    Query(when): Query<WhenQuery>,
+) -> impl IntoResponse {
     let client = http_client();
 
     // Re-check so we apply exactly the release we'd report — and refuse if
@@ -94,18 +101,25 @@ async fn apply_update(State(_state): State<Arc<AppState>>) -> impl IntoResponse 
 
     // Download, verify, and swap the binary on disk.
     match update::download_and_swap(&client, &tag).await {
+        Ok(exe) if when.is_idle() => {
+            // The new binary is already on disk; only the re-exec waits.
+            let pending = restart::schedule_idle_restart(
+                state,
+                exe,
+                RestartKind::Update,
+                Some(tag.clone()),
+                crate::routes::admin_restart::reexec,
+            );
+            Json(serde_json::json!({ "ok": true, "pending": pending, "version": tag }))
+                .into_response()
+        }
         Ok(exe) => {
             // Re-exec AFTER this response is flushed. exec() replaces the
             // process image, so do it from a detached task on a short delay.
             // Use the path captured before the swap — re-deriving it here via
             // current_exe() would resolve to "<path> (deleted)" and exec() fail.
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-                tracing::warn!("Self-update applied — re-exec into the new binary");
-                if let Err(e) = update::restart(&exe) {
-                    tracing::error!("Self-update re-exec failed: {e}");
-                }
-            });
+            restart::cancel_pending(&state.broadcaster);
+            restart::restart_soon(exe, std::time::Duration::from_millis(600));
             Json(serde_json::json!({ "ok": true, "restarting": true, "version": tag }))
                 .into_response()
         }

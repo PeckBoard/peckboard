@@ -84,6 +84,8 @@ export default function VoiceDock() {
   const status = useVoiceStore((s) => s.status)
   const micOn = useVoiceStore((s) => s.micOn)
   const interim = useVoiceStore((s) => s.interim)
+  const heard = useVoiceStore((s) => s.heard)
+  const turnUnfinished = useVoiceStore((s) => s.turnUnfinished)
   const events = useVoiceStore((s) => s.events)
   const pending = useVoiceStore((s) => s.pending)
   const error = useVoiceStore((s) => s.error)
@@ -112,7 +114,7 @@ export default function VoiceDock() {
   useEffect(() => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [transcript, interim])
+  }, [transcript, interim, heard])
 
   // Close the panel (and stop the mic / speech) when the app unmounts.
   useEffect(() => () => useVoiceStore.getState().closePanel(), [])
@@ -158,7 +160,7 @@ export default function VoiceDock() {
       </header>
 
       <div className="voice-transcript" ref={listRef} data-testid="voice-transcript">
-        {transcript.length === 0 && !interim && (
+        {transcript.length === 0 && !interim && !heard && (
           <p className="voice-transcript-empty">
             Just talk — the microphone stays on, and you can cut in while a reply is being read
             aloud. Updates from other sessions show up here as they arrive.
@@ -197,9 +199,14 @@ export default function VoiceDock() {
             </div>
           )
         })}
-        {interim && (
-          <div className="voice-line voice-line-user interim" data-testid="voice-interim">
-            {interim}…
+        {(heard || interim) && (
+          <div
+            className={`voice-line voice-line-user interim${turnUnfinished ? ' unfinished' : ''}`}
+            data-testid="voice-interim"
+            data-unfinished={turnUnfinished ? 'true' : undefined}
+            title={turnUnfinished ? 'Waiting for you to finish the sentence' : undefined}
+          >
+            {[heard, interim].filter(Boolean).join(' ')}…
           </div>
         )}
       </div>

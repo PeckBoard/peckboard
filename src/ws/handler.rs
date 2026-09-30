@@ -459,6 +459,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // so the Agents panel refreshes live. Not tied
                             // to any session subscription.
                             | "device-update"
+                            // restart-pending: a server-wide restart is
+                            // parked until idle (counts only, no names), so
+                            // every client can show it and offer Cancel.
+                            | "restart-pending"
                     );
 
                     let should_send = if is_global {

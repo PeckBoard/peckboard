@@ -13,6 +13,7 @@ pub mod keepalive;
 pub mod plugin;
 pub mod provider;
 pub mod repeating;
+pub mod restart_resume;
 pub mod routes;
 pub mod security;
 pub mod server;

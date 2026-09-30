@@ -86,7 +86,7 @@ pub async fn run_server(
     crate::routes::settings::ensure_setup_state(&db, bootstrap_outcome.is_some()).await;
 
     // Startup state repair: fix dangling agent-starts from previous crash
-    repair_dangling_sessions(&db).await?;
+    let interrupted_sessions = repair_dangling_sessions(&db).await?;
 
     // Purge expired auth sessions
     let now = std::time::SystemTime::now()
@@ -256,6 +256,10 @@ pub async fn run_server(
     // Background tasks that were still running when the previous process
     // died: tell each owning session instead of leaving it to hit "not
     // found" later. Detached for the same reason as review recovery.
+    let lost_task_sessions: std::collections::HashSet<String> = lost_background_tasks
+        .iter()
+        .map(|t| t.session_id.clone())
+        .collect();
     if !lost_background_tasks.is_empty() {
         let bg_state = state.clone();
         tokio::spawn(async move {
@@ -366,17 +370,16 @@ pub async fn run_server(
     // last-tab-close delete failed mid-way). One-shot at boot; failures
     // are retried on the next boot.
 
-    // Subagent orphan reconcile: a subagent whose completion was only ever
-    // going to be stamped by the in-process completion listener never gets
-    // that chance if the server restarts mid-run — it would otherwise sit
-    // "running" forever, occupying its parent's concurrent-subagent slot.
-    // One-shot at boot, before any provider traffic starts.
-    let reconciled = crate::subagent::reconcile_orphan_subagents(&state.db).await;
-    if reconciled > 0 {
-        tracing::info!(
-            count = reconciled,
-            "Reconciled orphaned subagent sessions at startup"
-        );
+    // Restart resume: sessions whose turn the restart killed are resumed
+    // with a continuation message (staggered, detached — a CLI spawn can take
+    // minutes); subagents that can't resume are claimed and their parents
+    // woken with a re-spawn notice. Planning (and the claims) runs here,
+    // before any provider traffic; see `restart_resume`.
+    let restart_plan =
+        crate::restart_resume::plan(&state.db, &interrupted_sessions, &lost_task_sessions).await;
+    {
+        let resume_state = state.clone();
+        tokio::spawn(crate::restart_resume::execute(resume_state, restart_plan));
     }
 
     // Handover reconcile: a `handover_to_model` still parked at boot has no
@@ -457,6 +460,11 @@ pub async fn run_server(
     // Voice assistant relay: forwards linked sessions' questions and turn
     // ends into the voice session (see `service::voice_relay`).
     crate::service::voice_relay::spawn_listener(state.clone());
+    // TTS pronunciation lexicon: seed defaults, load the cache, and start
+    // the unknown-word flusher (see `service::tts::lexicon`).
+    if let Err(e) = crate::service::tts::lexicon::store(&state.db).await {
+        tracing::warn!(error = %e, "tts lexicon failed to load");
+    }
     // Start worker completion listener -- receives notifications when a
     // streaming process finishes and runs the worker-done handler +
     // orchestration outside the tokio::spawn boundary (avoiding Send issues

@@ -55,6 +55,7 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "reattach_worker",
         "show_view",
         "voice_queue",
+        "voice_pronunciation",
     ]
 }
 
@@ -84,6 +85,7 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "submit_review_revision",
         "show_view",
         "voice_queue",
+        "voice_pronunciation",
     ]
 }
 
@@ -2012,6 +2014,20 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["list", "next"], "description": "list (default) or next." }
+                },
+                "additionalProperties": false
+            }),
+        },
+        McpToolDef {
+            name: "voice_pronunciation".into(),
+            description: "Voice assistant only: fix how the text-to-speech voice pronounces a word. action add = save a pronunciation (applies to the next sentence), given a respelling like \"PECK-board\" or \"koh-KOH-roh\" (hyphens split syllables, the ALL-CAPS syllable is stressed, spaces split words, single letters are said as letters) or raw Kokoro phonemes. action list = the saved pronunciations and the words the voice didn't know, most spoken first. action remove = delete a word's pronunciation.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["add", "list", "remove"], "description": "add, list (default), or remove." },
+                    "word": { "type": "string", "description": "The word as written, e.g. \"Peckboard\". Required for add and remove." },
+                    "respelling": { "type": "string", "description": "add: how it sounds, e.g. \"PECK-board\". Give this or phonemes." },
+                    "phonemes": { "type": "string", "description": "add: raw Kokoro/misaki phonemes, e.g. \"pˈɛkbˌɔːɹd\". Give this or respelling." }
                 },
                 "additionalProperties": false
             }),

@@ -19,6 +19,14 @@ pub fn seed_models() -> serde_json::Value {
             "tier": 1
         },
         {
+            "id": "echo-stream",
+            // Not "Mock: echo …": specs pick "Mock: echo" by accessible-name
+            // substring, so a shared prefix makes that locator ambiguous.
+            "display_name": "Mock: streamed chunks echo",
+            "capabilities": ["mock"],
+            "tier": 1
+        },
+        {
             "id": "plan-review",
             "display_name": "Mock: plan review (thinking)",
             "capabilities": ["mock", "reasoning"],

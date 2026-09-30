@@ -5,6 +5,7 @@ import { useSessionsStore } from './sessions'
 import { appendEventOrdered, nextLastSeq } from './eventOrder'
 import { getToken } from './auth'
 import { useBackgroundStore } from './background'
+import { useRestartStore } from './restart'
 
 const SEQ_KEY = 'peckboard_last_seq'
 
@@ -224,6 +225,12 @@ export const useWsStore = create<WsState>((set, get) => ({
         // request count changed (identifiers + counters only). AgentsView
         // listens and patches its rows / refetches.
         window.dispatchEvent(new CustomEvent('peckboard:device-update', { detail: msg }))
+        return
+      }
+      if (msg.type === 'restart-pending') {
+        // A server restart is parked until idle (or just fired). Counts
+        // only; the banner renders it for every connected client.
+        useRestartStore.getState().applyEvent(msg.data ?? {})
         return
       }
       if (msg.type === 'repeating-task-changed') {

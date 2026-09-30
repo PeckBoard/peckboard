@@ -176,6 +176,11 @@
   color: var(--text);
   font-style: italic;
 }
+/* Waiting out a mid-sentence pause: the line stays, dimmed and dashed. */
+.voice-line-user.interim.unfinished {
+  opacity: 0.75;
+  outline: 1px dashed var(--accent);
+}
 .voice-line-assistant {
   align-self: flex-start;
   background: var(--surface2);
@@ -332,6 +337,29 @@
 }
 .voice-settings-actions {
   margin-top: 12px;
+}
+
+/* Settings → Voice → Pronunciations */
+.voice-lexicon-mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+.voice-lexicon-filter {
+  margin: 8px 0;
+  max-width: 320px;
+}
+.voice-lexicon-subhead {
+  margin: 20px 0 4px;
+}
+.voice-lexicon-preview {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+#voice-lexicon-text {
+  margin-top: 8px;
 }
 
 /* Phone: the rail is a top toolbar (the button rides along in its right

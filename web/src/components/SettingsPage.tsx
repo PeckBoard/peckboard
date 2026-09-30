@@ -323,6 +323,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'voice assistant model fast cheap',
   },
   {
+    page: 'voice',
+    section: 'Pronunciations',
+    anchor: 'voice-pronunciations',
+    keywords: 'voice pronunciation lexicon phonemes respelling kokoro words say',
+  },
+  {
     page: 'chat',
     section: 'Default Model',
     anchor: 'default-model',

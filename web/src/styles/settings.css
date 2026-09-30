@@ -199,6 +199,60 @@
   flex-basis: 100%;
   margin: 0;
 }
+/* Restart confirmation: what a restart would interrupt, one collapsible
+   group per category. */
+.restart-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+  font-size: var(--text-sm);
+}
+.restart-activity-group {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.restart-activity-group > summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  color: var(--text);
+}
+.restart-activity-count {
+  color: var(--text3);
+  margin-left: 4px;
+}
+.restart-activity-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px 8px;
+}
+.restart-activity-group li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.restart-activity-name {
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.restart-activity-context {
+  color: var(--text2);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.restart-activity-time {
+  color: var(--text3);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
 .settings-error {
   color: var(--danger);
   font-size: var(--text-sm);

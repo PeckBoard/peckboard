@@ -11,6 +11,59 @@ export function isRelayText(text: string): boolean {
 export function stripRelayPrefix(text: string): string {
   return isRelayText(text) ? text.slice(RELAY_PREFIX.length) : text
 }
+/** Prefix on an utterance that talked over the assistant: the model must
+ *  not restate the part of its reply the user never heard. */
+export const INTERRUPT_MARKER =
+  '[user interrupted; the rest of your previous reply was not heard, do not repeat it] '
+
+export function stripInterruptMarker(text: string): string {
+  return text.startsWith(INTERRUPT_MARKER) ? text.slice(INTERRUPT_MARKER.length) : text
+}
+/**
+ * Inline pronunciation hint in the voice assistant's replies, misaki's
+ * markup: `[Peckboard](/pˈɛkbɔɹd/)`. The chat shows the word; TTS speaks
+ * the phonemes. Phonemes must hold a space or a non-ASCII symbol (IPA,
+ * stress marks), so a relative link like `[docs](/docs/)` is not a hint.
+ * Mirrors `src/service/tts/hints.rs`.
+ */
+const HINT_SRC = String.raw`\[([^[\]\n]+)\]\(\/((?:(?!\/\))[^\n])*?[^\x21-\x7e\n](?:(?!\/\))[^\n])*?)\/\)`
+const HINT_RE = new RegExp(HINT_SRC, 'g')
+const HINT_RE_ONE = new RegExp(`^${HINT_SRC}$`)
+/** A hint still being streamed at the end of the text: `[word`, `[word](`,
+ *  `[word](/pˈɛk`, … (bounded, so a stray `[` doesn't hold speech forever). */
+const PARTIAL_HINT_RE = /\[([^[\]\n]{0,40})(?:\](?:\((?:\/[^\n)]{0,80})?)?)?$/
+
+/** Replace every pronunciation hint with its plain word. `partialTail`
+ *  also hides a half-streamed hint at the end (keeping the word). */
+export function stripPronunciationHints(
+  text: string,
+  opts: { partialTail?: boolean } = {},
+): string {
+  const t = text.replace(HINT_RE, '$1')
+  return opts.partialTail ? t.replace(PARTIAL_HINT_RE, (_m, word: string) => word) : t
+}
+
+/** Same-length copy of `text` with every hint — complete, or still open at
+ *  the end — blanked out, so sentence/clause scanning never cuts one. */
+function maskHints(text: string): string {
+  return blankHints(text).replace(PARTIAL_HINT_RE, (m) => 'x'.repeat(m.length))
+}
+
+function blankHints(text: string): string {
+  return text.replace(HINT_RE, (m) => 'x'.repeat(m.length))
+}
+
+/** Does `text` end in a pronunciation hint that is still being streamed? */
+export function hasOpenHint(text: string): boolean {
+  return PARTIAL_HINT_RE.test(blankHints(text))
+}
+
+/** Replace a half-streamed hint at the end of `text` with its bare word,
+ *  keeping complete hints — for speaking a tail that will not be finished. */
+export function closeOpenHint(text: string): string {
+  const m = PARTIAL_HINT_RE.exec(blankHints(text))
+  return m ? text.slice(0, m.index) + m[1] : text
+}
 
 /**
  * Turn markdown-ish assistant text into something worth reading aloud:
@@ -22,8 +75,11 @@ export function stripForSpeech(text: string): string {
   t = t.replace(/```[\s\S]*?```/g, ' code block ')
   // Inline code: keep the content, lose the ticks.
   t = t.replace(/`([^`]*)`/g, '$1')
-  // Markdown links / images: keep the label.
-  t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+  // Markdown links / images: keep the label. Pronunciation hints stay —
+  // the server's TTS reads them.
+  t = t.replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, (m: string, label: string) =>
+    HINT_RE_ONE.test(m) ? m : label,
+  )
   // Bare URLs.
   t = t.replace(/https?:\/\/\S+/g, ' link ')
   // Headings, blockquotes, list bullets, horizontal rules.
@@ -57,9 +113,10 @@ export function takeSentences(buffer: string): { sentences: string[]; rest: stri
   let rest = buffer
   const re = /[^.!?:;…\n]*(?:[.!?:;…]+["')\]]*(?=\s)|\n)/
   for (;;) {
-    const m = re.exec(rest)
+    // Scan a hint-masked copy (same length) so a hint is never split.
+    const m = re.exec(maskHints(rest))
     if (!m || m.index !== 0) break
-    const piece = m[0].trim()
+    const piece = rest.slice(0, m[0].length).trim()
     rest = rest.slice(m[0].length)
     if (piece) sentences.push(piece)
     rest = rest.replace(/^\s+/, '')
@@ -81,7 +138,7 @@ export function takeSpeakable(buffer: string): { chunks: string[]; rest: string 
   const chunks = [...sentences]
   let rest = tail
   while (rest.length > CLAUSE_SPLIT_AT) {
-    const head = rest.slice(0, rest.length - 1)
+    const head = maskHints(rest).slice(0, rest.length - 1)
     const cut = Math.max(head.lastIndexOf(', '), head.lastIndexOf(' — '), head.lastIndexOf(' - '))
     if (cut < 30) break
     chunks.push(rest.slice(0, cut + 1).trim())
@@ -108,9 +165,103 @@ export function speechWords(text: string): string[] {
 export function echoOverlap(heard: string, spoken: string[]): number {
   const words = speechWords(heard)
   if (words.length === 0) return 1
-  const pool = new Set(spoken.flatMap(speechWords))
+  // What was spoken may carry pronunciation hints; the mic hears the words.
+  const pool = new Set(spoken.flatMap((s) => speechWords(stripPronunciationHints(s))))
   if (pool.size === 0) return 0
   return words.filter((w) => pool.has(w)).length / words.length
+}
+
+/** Words a sentence rarely ends on: conjunctions, prepositions, articles,
+ *  determiners, auxiliaries and fillers — the speaker is mid-thought. */
+const UNFINISHED_TAIL = new Set(
+  (
+    'and but or nor so because since though although unless until while ' +
+    'the a an this these those my your his her its our their some any every ' +
+    'to of for with in on at by from into onto about like than as ' +
+    'that which who whom whose where if when whether then ' +
+    'um uh er erm hmm ' +
+    'is are was were be been being am will would can could should shall ' +
+    'may might must do does did have has had'
+  ).split(' '),
+)
+const UNFINISHED_PHRASES = ['you know', 'i mean', 'kind of', 'sort of']
+
+/** `text` ends in sentence-final punctuation (`.`, `!`, `?`). */
+export function endsSentence(text: string): boolean {
+  return /[.!?]["')\]]*\s*$/.test(text) && !/(\.\.\.|…)\s*$/.test(text)
+}
+
+/**
+ * The user's transcript so far looks cut off mid-sentence: it ends on a
+ * connective / article / auxiliary / filler, on a comma, dash or ellipsis,
+ * or is a very short fragment with no sentence-final punctuation.
+ */
+/** Short replies that are complete on their own — answers to the
+ *  assistant's yes/no questions must not wait out the mid-sentence pause. */
+const COMPLETE_SHORT_REPLIES = new Set([
+  'yes',
+  'yeah',
+  'yep',
+  'yup',
+  'sure',
+  'no',
+  'nope',
+  'nah',
+  'ok',
+  'okay',
+  'stop',
+  'wait',
+  'thanks',
+  'thank you',
+  'go ahead',
+  'do it',
+  'sounds good',
+  'got it',
+  'never mind',
+  'cancel',
+  'continue',
+  'next',
+  'correct',
+  'right',
+  'exactly',
+  'perfect',
+  'great',
+  'cool',
+  'fine',
+  'done',
+  'hello',
+  'hi',
+  'hey',
+  'yes please',
+  'no thanks',
+  'not now',
+  'later',
+  'stop that',
+  'shut up',
+])
+
+export function looksUnfinished(text: string): boolean {
+  const t = text.trim()
+  if (!t) return false
+  if (/(,|-|–|—|\.\.\.|…)\s*$/.test(t)) return true
+  if (endsSentence(t)) return false
+  const words = speechWords(t)
+  if (COMPLETE_SHORT_REPLIES.has(words.join(' '))) return false
+  if (words.length <= 2) return true
+  const tail = words.slice(-2).join(' ')
+  return UNFINISHED_TAIL.has(words[words.length - 1]) || UNFINISHED_PHRASES.includes(tail)
+}
+
+/** Silence after a finished-looking utterance before it is sent. */
+export const END_OF_TURN_MS = 1300
+/** Extra wait when the recognizer gave no sentence-final punctuation (it
+ *  often doesn't), without anything else suggesting an unfinished thought. */
+export const UNPUNCTUATED_EXTRA_MS = 500
+
+/** How long to wait in silence before sending `text` as the user's turn. */
+export function endOfTurnDelay(text: string, maxPauseMs: number): number {
+  if (looksUnfinished(text)) return Math.max(END_OF_TURN_MS, maxPauseMs)
+  return endsSentence(text) ? END_OF_TURN_MS : END_OF_TURN_MS + UNPUNCTUATED_EXTRA_MS
 }
 
 export type VoiceTranscriptItem =
@@ -138,9 +289,14 @@ export function foldVoiceTranscript(events: Event[]): VoiceTranscriptItem[] {
         close()
         const text = typeof ev.data.text === 'string' ? ev.data.text : ''
         if (isRelayText(text)) {
-          items.push({ kind: 'relay', key: ev.id, text: stripRelayPrefix(text), ts: ev.ts })
+          items.push({
+            kind: 'relay',
+            key: ev.id,
+            text: stripPronunciationHints(stripRelayPrefix(text)),
+            ts: ev.ts,
+          })
         } else {
-          items.push({ kind: 'user', key: ev.id, text, ts: ev.ts })
+          items.push({ kind: 'user', key: ev.id, text: stripInterruptMarker(text), ts: ev.ts })
         }
         break
       }
@@ -158,6 +314,12 @@ export function foldVoiceTranscript(events: Event[]): VoiceTranscriptItem[] {
         break
       default:
         break
+    }
+  }
+  // Hints can straddle streamed chunks: strip once the turn is joined.
+  for (const it of items) {
+    if (it.kind === 'assistant') {
+      it.text = stripPronunciationHints(it.text, { partialTail: it.streaming })
     }
   }
   return items.filter((it) => it.kind !== 'assistant' || it.text.trim() !== '')

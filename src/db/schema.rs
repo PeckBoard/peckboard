@@ -476,6 +476,30 @@ diesel::table! {
     }
 }
 diesel::table! {
+    tts_lexicon (word) {
+        word -> Text,
+        display -> Text,
+        respelling -> Nullable<Text>,
+        phonemes -> Text,
+        source -> Text,
+        updated_at -> Text,
+    }
+}
+diesel::table! {
+    tts_lexicon_seeded (word) {
+        word -> Text,
+        seeded_at -> Text,
+    }
+}
+diesel::table! {
+    tts_unknown_words (word) {
+        word -> Text,
+        count -> BigInt,
+        first_seen -> Text,
+        last_seen -> Text,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -704,5 +728,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     device_activity,
     session_views,
     voice_relay_queue,
+    tts_lexicon,
+    tts_lexicon_seeded,
+    tts_unknown_words,
     session_view_nodes,
 );
