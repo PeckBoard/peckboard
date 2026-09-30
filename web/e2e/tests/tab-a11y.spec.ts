@@ -108,6 +108,8 @@ test.describe('tab strip semantics', () => {
     const { sessionId: idB } = await seedFolderAndSession(request, auth, 'beta')
 
     await loadAt(page, token, `/sessions/${idA}`)
+    // Let A's tab land before navigating, or B's replaces it mid-sync.
+    await expect(page.locator('[role="tab"]')).toHaveCount(1)
     await page.evaluate((id) => {
       history.pushState(null, '', `/sessions/${id}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
@@ -161,6 +163,8 @@ test.describe('tab strip semantics', () => {
     const { sessionId: idB } = await seedFolderAndSession(request, auth, 'delta')
 
     await loadAt(page, token, `/sessions/${idA}`)
+    // Let A's tab land before navigating, or B's replaces it mid-sync.
+    await expect(page.locator('[role="tab"]')).toHaveCount(1)
     await page.evaluate((id) => {
       history.pushState(null, '', `/sessions/${id}`)
       window.dispatchEvent(new PopStateEvent('popstate'))

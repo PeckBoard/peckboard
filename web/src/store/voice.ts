@@ -2,14 +2,8 @@ import { create } from 'zustand'
 import type { Event } from '../types/api'
 import { authedFetch } from './auth'
 import { useWsStore } from './ws'
-import { getSpeechEngine } from '../voice/engine'
-import {
-  isLikelyEcho,
-  isRelayText,
-  speechWords,
-  stripForSpeech,
-  takeSpeakable,
-} from '../voice/text'
+import { getSpeechEngine, voiceLog } from '../voice/engine'
+import { echoOverlap, isRelayText, speechWords, stripForSpeech, takeSpeakable } from '../voice/text'
 
 /** Per-browser voice preferences. localStorage, not the DB — they describe
  *  this browser's speech engine (its voices, its microphone language). */
@@ -168,6 +162,12 @@ let speakAfterSeq = Number.MAX_SAFE_INTEGER
 const ECHO_TAIL_MS = 1500
 /** Words the user must say over the assistant before it yields. */
 const BARGE_IN_WORDS = 2
+/** Share of heard words found in what we just said that marks it as echo. */
+const ECHO_OVERLAP = 0.6
+/** A partial hypothesis only interrupts the assistant with this many words
+ *  and at most this echo overlap; anything weaker waits for the final. */
+const INTERIM_BARGE_IN_WORDS = 3
+const INTERIM_BARGE_IN_OVERLAP = 0.34
 
 function mergeEvents(existing: Event[], incoming: Event[]): Event[] {
   const bySeq = new Map<number, Event>()
@@ -234,6 +234,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     currentUtterance = next
     refreshStatus()
     const { prefs } = get()
+    voiceLog('dequeue for speech:', JSON.stringify(next), `(${speakQueue.length} more queued)`)
     engine().speak(next, {
       voiceURI: prefs.voiceURI,
       rate: prefs.rate,
@@ -279,7 +280,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     flushTimer = setTimeout(flushBuffer, delay)
   }
 
-  const cancelSpeech = () => {
+  const cancelSpeech = (reason: string) => {
     speakGen++
     if (currentUtterance) rememberSpoken(currentUtterance)
     speakQueue = []
@@ -287,7 +288,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     speakingNow = false
     currentUtterance = null
     clearFlushTimer()
-    engine().cancelSpeech()
+    engine().cancelSpeech(reason)
   }
 
   // ── Always-on recognition ──
@@ -300,8 +301,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
 
   /** Barge-in: the user talks over the assistant — stop speaking and
    *  interrupt its running turn so the new utterance is answered next. */
-  const bargeIn = () => {
-    cancelSpeech()
+  const bargeIn = (heard: string) => {
+    voiceLog('barge-in: user talked over the assistant:', JSON.stringify(heard))
+    cancelSpeech(`barge-in: "${heard}"`)
     const { sessionId } = get()
     if (agentRunning && sessionId && !interruptInFlight) {
       muteTurn = true
@@ -320,21 +322,35 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   const onHeard = (text: string, isFinal: boolean) => {
     const words = speechWords(text)
     const audible = assistantAudible()
+    const overlap = echoOverlap(text, echoTexts())
     // Our own voice coming back through the mic: not the user.
-    if (words.length === 0 || isLikelyEcho(text, echoTexts())) {
+    if (words.length === 0 || overlap >= ECHO_OVERLAP) {
+      if (words.length > 0) {
+        voiceLog(`ignored as echo of our own voice (${isFinal ? 'final' : 'interim'}):`, text)
+      }
       if (isFinal || get().interim) set({ interim: '' })
       return
     }
     if (!isFinal) {
       set({ interim: text })
-      if (audible && words.length >= BARGE_IN_WORDS) bargeIn()
+      // A partial hypothesis over the assistant's voice is often the
+      // speaker bleeding into the mic, misheard enough to slip past the
+      // echo check — and a barge-in on it silences the reply at once.
+      // Only yield early on clearly different words; otherwise wait for
+      // the final result.
+      if (audible && words.length >= INTERIM_BARGE_IN_WORDS && overlap < INTERIM_BARGE_IN_OVERLAP) {
+        bargeIn(text)
+      }
       return
     }
     set({ interim: '' })
     // A lone word over the assistant's voice is more likely noise or a
     // misheard echo than the user taking the floor.
-    if (audible && words.length < BARGE_IN_WORDS) return
-    if (audible) bargeIn()
+    if (audible && words.length < BARGE_IN_WORDS) {
+      voiceLog('ignored a lone word heard over the assistant:', text)
+      return
+    }
+    if (audible) bargeIn(text)
     void get().sendText(text)
   }
 
@@ -419,7 +435,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       }
       case 'agent-text': {
         // A built-in subagent's narration isn't the assistant talking.
-        if (muteTurn || ev.data.parent_tool_use_id) break
+        if (ev.data.parent_tool_use_id || ev.data.parentToolUseId) break
+        if (muteTurn) {
+          voiceLog('not speaking: this turn was muted by a barge-in or Stop')
+          break
+        }
         const chunk = typeof ev.data.text === 'string' ? ev.data.text : ''
         speakBuffer += chunk
         const { chunks, rest } = takeSpeakable(speakBuffer)
@@ -466,6 +486,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       return
     }
     if (ev.seq > speakAfterSeq) speakEvent(ev)
+    else if (ev.kind === 'agent-text') {
+      voiceLog(`not speaking replayed text (seq ${ev.seq} <= history ${speakAfterSeq})`)
+    }
   }
 
   /** Load the transcript, then start speaking only what arrives after it. */
@@ -492,7 +515,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   }
 
   const resetLoop = () => {
-    cancelSpeech()
+    cancelSpeech('voice panel opened/closed')
     agentRunning = false
     awaitingReply = false
     muteTurn = false
@@ -604,7 +627,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     },
 
     stopSpeaking: () => {
-      cancelSpeech()
+      cancelSpeech('Stop speaking button')
       if (agentRunning) muteTurn = true
       refreshStatus()
     },
@@ -651,7 +674,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
 
     testVoice: () => {
       engine().unlockSynthesis()
-      cancelSpeech()
+      cancelSpeech('test voice')
       speakErrorShown = false
       const { prefs } = get()
       engine().speak('Hi, this is your Peckboard voice assistant.', {

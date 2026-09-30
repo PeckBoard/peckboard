@@ -101,17 +101,16 @@ export function speechWords(text: string): string[] {
 }
 
 /**
- * Whether recognized speech `heard` is most likely the microphone picking up
- * the assistant's own voice: nearly all its words occur in what was just
- * being spoken (`spoken`).
+ * Share (0–1) of the words in recognized speech `heard` that occur in what
+ * was just being spoken (`spoken`) — high means the microphone is most
+ * likely picking up the assistant's own voice. Empty `heard` counts as 1.
  */
-export function isLikelyEcho(heard: string, spoken: string[]): boolean {
+export function echoOverlap(heard: string, spoken: string[]): number {
   const words = speechWords(heard)
-  if (words.length === 0) return true
+  if (words.length === 0) return 1
   const pool = new Set(spoken.flatMap(speechWords))
-  if (pool.size === 0) return false
-  const hits = words.filter((w) => pool.has(w)).length
-  return hits / words.length >= 0.6
+  if (pool.size === 0) return 0
+  return words.filter((w) => pool.has(w)).length / words.length
 }
 
 export type VoiceTranscriptItem =
