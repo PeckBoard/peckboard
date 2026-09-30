@@ -22,11 +22,14 @@ export function stripInterruptMarker(text: string): string {
 /**
  * Inline pronunciation hint in the voice assistant's replies, misaki's
  * markup: `[Peckboard](/pˈɛkbɔɹd/)`. The chat shows the word; TTS speaks
- * the phonemes. Phonemes must hold a space or a non-ASCII symbol (IPA,
- * stress marks), so a relative link like `[docs](/docs/)` is not a hint.
+ * the phonemes. With every word hinted, many phoneme strings are plain
+ * ASCII (`[be](/bi/)`, `[a](/A/)`), so a hint is any `/…/` run free of the
+ * characters paths and URLs are made of (`/ . : # ? = & %`, digits,
+ * brackets). A bare relative link like `[docs](/docs/)` would read as a
+ * hint too — an accepted cost; the voice assistant doesn't write those.
  * Mirrors `src/service/tts/hints.rs`.
  */
-const HINT_SRC = String.raw`\[([^[\]\n]+)\]\(\/((?:(?!\/\))[^\n])*?[^\x21-\x7e\n](?:(?!\/\))[^\n])*?)\/\)`
+const HINT_SRC = String.raw`\[([^[\]\n]+)\]\(\/([^/()[\]\n.:#?=&%0-9]+)\/\)`
 const HINT_RE = new RegExp(HINT_SRC, 'g')
 const HINT_RE_ONE = new RegExp(`^${HINT_SRC}$`)
 /** A hint still being streamed at the end of the text: `[word`, `[word](`,
@@ -34,13 +37,31 @@ const HINT_RE_ONE = new RegExp(`^${HINT_SRC}$`)
 const PARTIAL_HINT_RE = /\[([^[\]\n]{0,40})(?:\](?:\((?:\/[^\n)]{0,80})?)?)?$/
 
 /** Replace every pronunciation hint with its plain word. `partialTail`
- *  also hides a half-streamed hint at the end (keeping the word). */
+ *  also hides a half-streamed hint at the end (keeping the word);
+ *  `partialHead` hides the tail end of a hint that a bubble starts inside
+ *  (`team](/tˈim/) …` → `team …`), for text split across bubbles. */
 export function stripPronunciationHints(
   text: string,
-  opts: { partialTail?: boolean } = {},
+  opts: { partialTail?: boolean; partialHead?: boolean } = {},
 ): string {
-  const t = text.replace(HINT_RE, '$1')
+  const head = opts.partialHead ? stripOrphanHead(text) : text
+  const t = head.replace(HINT_RE, '$1')
   return opts.partialTail ? t.replace(PARTIAL_HINT_RE, (_m, word: string) => word) : t
+}
+
+/** Drop the remainder of a hint the text starts inside: `word](/ph…/)`
+ *  keeps `word`; `(/ph…/)` and a bare IPA `ph…/)` go entirely. */
+function stripOrphanHead(text: string): string {
+  const end = text.indexOf('/)')
+  if (end < 0) return text
+  const head = text.slice(0, end)
+  if (head.includes('[')) return text
+  const rest = text.slice(end + 2)
+  const labelled = /^([^\]\n]*?)\]\(\/[^/()\n]*$/.exec(head)
+  if (labelled) return labelled[1] + rest
+  if (/^\(\/[^/()\n]*$/.test(head)) return rest
+  if (/^[^\s/()[\]]+$/.test(head) && /[\u0080-\uffff]/.test(head)) return rest
+  return text
 }
 
 /** Same-length copy of `text` with every hint — complete, or still open at

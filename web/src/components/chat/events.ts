@@ -545,7 +545,7 @@ function flushAssistant(st: FoldState): void {
     st.items.push({
       type: 'assistant',
       // The voice assistant's inline pronunciation hints are for TTS only.
-      text: stripPronunciationHints(st.assistantBuffer),
+      text: stripPronunciationHints(st.assistantBuffer, { partialHead: true, partialTail: true }),
       key: st.assistantKey,
       ts: st.assistantTs,
     })
@@ -1144,7 +1144,8 @@ function foldResult(st: FoldState): DisplayItem[] {
   if (st.assistantBuffer) {
     out.push({
       type: 'assistant',
-      text: st.assistantBuffer,
+      // Hints are TTS-only; a hint still streaming in hides until closed.
+      text: stripPronunciationHints(st.assistantBuffer, { partialHead: true, partialTail: true }),
       key: st.assistantKey,
       ts: st.assistantTs,
     })

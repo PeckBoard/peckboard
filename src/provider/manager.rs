@@ -490,7 +490,11 @@ impl SessionManager {
         // Interactive caveman mode: the global `caveman_mode` app setting
         // appends a terse output-style block to every non-worker session's
         // system prompt (workers carry their own copy in the worker prompt).
-        let system_prompt_suffix = if session.is_worker {
+        // The voice assistant is excluded too: its prompt defines how it
+        // speaks, and a terse text style makes spoken replies clipped.
+        let skip_output_style =
+            session.is_worker || session.expert_kind.as_deref() == Some("voice");
+        let system_prompt_suffix = if skip_output_style {
             config.system_prompt_suffix
         } else {
             let db2 = db.clone();
