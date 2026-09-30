@@ -7,6 +7,35 @@ nav_order: 8
 
 [Core Concepts]({{ "/core-concepts.html" | relative_url }}) covers the board, cards, and sessions; this page tours everything else a working install gives you, grouped by where you meet it.
 
+## Voice Assistant
+
+![The Voice Assistant panel docked over the sessions list, answering a relayed question from a worker session]({{ "/assets/screenshots/voice-assistant.png" | relative_url }})
+
+Press **Listen** (the microphone in the navigation rail) and talk. The panel docks top-right and keeps the microphone on, so there is nothing to hold down; you can also type into it. One global voice session works across every folder:
+
+- **Reads and manages your work** — sessions, cards, and projects in any folder: "what's running?", "add a card to the storefront board for the search bug".
+- **Drives the UI** — "open the storefront project" opens it; the same goes for sessions and cards by name.
+- **Routes work only when you ask** — it hands a task to another session when you tell it to, never on its own initiative.
+- **Relays questions from other sessions** — when a session needs a decision, the assistant brings it to you one topic at a time and answers on your behalf. It waits for you to finish; it never interrupts you.
+- **Instant barge-in** — start talking and it stops mid-sentence. Content you cut off is not replayed.
+- **A thinking cue** — a soft sound from the moment you finish until the reply starts, plus a short filler ("One sec.") if the answer takes a moment.
+
+Speech comes from [Kokoro](https://github.com/hexgrad/kokoro), a natural-sounding text-to-speech model that runs on your PeckBoard server — the model downloads on first use and no audio leaves your machine for synthesis. Replies are fully phonetic: the assistant marks the pronunciation of every spoken word, so project names and identifiers come out right. When Kokoro isn't available, the browser's built-in voice takes over.
+
+Settings → Voice holds the rest:
+
+- **Speech** — voice picker (Kokoro voices and browser voices), speed, and recognition language.
+- **Pronunciations** — an editable list of words and how to say them. You can also add one by voice: "pronounce Kubectl like cube control".
+- **Assistant Prompt** — the assistant's system prompt, editable live, with version history, diffs, restore, and reset to default.
+
+### Browser Support
+
+| What                       | Works in                                                                                                         |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Listening (speech to text) | Chrome, Edge, and Safari, including iPhone and iPad. Not Firefox.                                                |
+| Kokoro speech              | Any modern browser.                                                                                              |
+| Browser-voice fallback     | Needs a system voice. On Linux, install one, e.g. `speech-dispatcher` with `espeak-ng`, and restart the browser. |
+
 ## In the Chat
 
 Messages accept image attachments — paste or drop them in — and `@` mentions that reference other sessions, so "look at what @Fix cart rounding did" hands the agent a real pointer. When an agent needs a decision it asks with a question card (multiple choice or free text) that pauses its turn until you answer; questions queue up if you are away, and a pending question can also reach you as a notification. When a git operation under an agent needs credentials, an askpass dialog surfaces in the session tab and the secret goes to git without entering the transcript.

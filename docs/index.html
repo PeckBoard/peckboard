@@ -12,7 +12,7 @@ layout: null
     <title>PeckBoard — mission control for AI agents</title>
     <meta
       name="description"
-      content="PeckBoard is self-hosted mission control for AI coding agents: run a board the dispatcher works card by card, put orchestrators in charge of a standing goal, or let agents spawn subagents you watch live in split panes. One binary on your own machine."
+      content="PeckBoard is self-hosted mission control for AI coding agents: run a board the dispatcher works card by card, put orchestrators in charge of a standing goal, or let agents spawn subagents you watch live in split panes — and run it all by voice. One binary on your own machine."
     />
     <link rel="icon" href="{{ '/assets/icon.png' | relative_url }}" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -79,7 +79,8 @@ layout: null
           <p class="pitch">
             Run a board the dispatcher works card by card, put orchestrators in
             charge of a goal, or let any agent spawn subagents you watch live in
-            split panes — your whole flock, from one screen.
+            split panes — then just talk to it. Your whole flock, from one
+            screen, by keyboard or by voice.
           </p>
           <div class="cta-row">
             <a
@@ -136,16 +137,83 @@ layout: null
         </div>
         <div class="marquee" aria-hidden="true">
           <div class="marquee-track">
-            <span>Claude</span><span>Grok</span><span>Kimi Code</span
-            ><span>Cursor</span><span>Ollama</span><span>WASM plugins</span
-            ><span>MCP servers</span><span>Subagents</span
-            ><span>Doc review</span><span>Test replay</span
-            ><span>Diff viewer</span><span>SQLite inside</span
+            <span>Voice assistant</span><span>Claude</span><span>Grok</span
+            ><span>Kimi Code</span><span>Cursor</span><span>Ollama</span
+            ><span>WASM plugins</span><span>MCP servers</span
+            ><span>Subagents</span><span>Doc review</span
+            ><span>Test replay</span><span>Diff viewer</span
+            ><span>SQLite inside</span><span>Voice assistant</span
             ><span>Claude</span><span>Grok</span><span>Kimi Code</span
             ><span>Cursor</span><span>Ollama</span><span>WASM plugins</span
             ><span>MCP servers</span><span>Subagents</span
             ><span>Doc review</span><span>Test replay</span
             ><span>Diff viewer</span><span>SQLite inside</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="voice" id="voice">
+        <div class="wrap">
+          <div class="voice-copy">
+            <span class="kicker">Voice assistant</span>
+            <h2>Run the flock by voice</h2>
+            <p class="voice-lead">
+              Press Listen and talk. One voice session sees every session, card,
+              and project across all your folders — ask what's running, open a
+              board by name, or answer a worker's question without touching the
+              keyboard.
+            </p>
+            <ul class="voice-points">
+              <li>
+                <b>Reads and manages your work.</b> Sessions, cards, and
+                projects in every folder, from one conversation.
+              </li>
+              <li>
+                <b>Drives the screen.</b> Say a name and it opens the project,
+                session, or card.
+              </li>
+              <li>
+                <b>Routes work only when you ask.</b> It hands a task to another
+                session on your say-so, never on its own.
+              </li>
+              <li>
+                <b>Relays questions, one topic at a time.</b> When a session
+                needs a decision, the assistant brings it to you and answers on
+                your behalf — never talking over you.
+              </li>
+              <li>
+                <b>Natural speech, on your server.</b> Kokoro TTS runs inside
+                PeckBoard, with a voice picker, speed control, and fully
+                phonetic replies so names come out right.
+              </li>
+              <li>
+                <b>Cut in any time.</b> It stops the moment you speak and never
+                replays what you cut off. A soft cue and a short filler cover
+                the wait while it works.
+              </li>
+              <li>
+                <b>Yours to tune.</b> Edit the pronunciation list — or just say
+                “pronounce X like Y” — and edit its system prompt, with every
+                version kept.
+              </li>
+            </ul>
+            <p class="voice-note">
+              Listening works in Chrome, Edge, and Safari, including iPhone and
+              iPad — not Firefox. Kokoro speech plays in any modern browser.
+            </p>
+            <a
+              class="more"
+              href="{{ '/features.html#voice-assistant' | relative_url }}"
+              >The voice assistant →</a
+            >
+          </div>
+          <div class="voice-shot">
+            <img
+              src="{{ '/assets/screenshots/voice-assistant.png' | relative_url }}"
+              alt="The Voice Assistant panel docked over the sessions list, answering a relayed question from a worker session"
+              width="1280"
+              height="800"
+            />
           </div>
         </div>
       </section>

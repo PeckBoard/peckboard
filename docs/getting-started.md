@@ -83,3 +83,7 @@ The last step is to create a project. A _project_ pairs a folder on your machine
 ![A project board with cards in Backlog, In Progress, Review, and Done columns]({{ "/assets/screenshots/board.png" | relative_url }})
 
 Each column is a step in the project's workflow, and agents move cards across the board as they finish them. [Core Concepts]({{ "/core-concepts.html" | relative_url }}) explains how cards, workers, and sessions fit together.
+
+## Using the Voice Assistant
+
+Press **Listen** — the microphone near the bottom of the navigation rail — allow microphone access, and talk: "what's running?", "open the storefront project". Listening needs Chrome, Edge, or Safari (including iPhone and iPad); Firefox has no speech recognition. Browsers only grant the microphone on a secure page, so from another device use the HTTPS port (`3345`) rather than plain HTTP. The natural Kokoro voice downloads to the server the first time the panel opens; the browser's own voice speaks meanwhile. [Feature Tour]({{ "/features.html#voice-assistant" | relative_url }}) covers everything it can do.

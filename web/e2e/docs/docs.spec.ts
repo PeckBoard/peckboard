@@ -125,6 +125,16 @@ test.describe('Landing', () => {
     await expect(page.locator('.extra')).toHaveCount(12)
   })
 
+  test('voice assistant section sits right after the hero', async ({ page }) => {
+    const voice = page.locator('main > section.hero + section.voice')
+    await expect(voice).toBeVisible()
+    await expect(voice.locator('h2')).toHaveText('Run the flock by voice')
+    await expect(voice.locator('.voice-points li')).toHaveCount(7)
+    await expect(voice).toContainText('not Firefox')
+    await expect(voice.locator('a.more')).toHaveAttribute('href', /features\.html#voice-assistant$/)
+    await expect(voice.locator('.voice-shot img')).toBeVisible()
+  })
+
   test('no unrendered Liquid', async ({ page }) => {
     const leak = await liquidLeak(page)
     expect(leak, `raw Liquid leaked into rendered text: ${leak}`).toBeNull()

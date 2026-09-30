@@ -1,7 +1,12 @@
 # Screens that scroll through the landing-page hero marquee, in order.
 # Files live in assets/screenshots/ and are captured by
 # web/e2e/screenshots/screenshots.spec.ts (`cd web && npm run screenshots`).
-# Opens on the three pillars: subagents, orchestrators, then the board.
+# Opens on the voice assistant, then the three pillars: subagents,
+# orchestrators, and the board. voice-assistant.png is not captured by
+# screenshots.spec.ts yet; it was taken by hand from a scratch instance.
+- file: voice-assistant.png
+  caption: Voice assistant
+  alt: The Voice Assistant panel docked over the sessions list, answering a relayed question from a worker session
 - file: subagent-panes.png
   caption: Subagent panes
   alt: A session with three running subagents, each streaming in its own split pane beside the parent chat
