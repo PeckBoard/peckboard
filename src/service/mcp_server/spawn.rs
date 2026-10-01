@@ -280,6 +280,8 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
             })
             .collect();
         self.rt.spawn(async move {
+            // A follow-up to a finished subagent must report back again.
+            crate::subagent::rearm_for_follow_up(&state.db, &session_id).await;
             if let Err(e) = AppExpertDispatcher::new(state)
                 .send_message_with_attachments(&session_id, text, attachments)
                 .await

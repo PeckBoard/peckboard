@@ -51,6 +51,33 @@ if [[ -z "${CARGO_BUILD_JOBS:-}" ]]; then
   echo "(memory guard: CARGO_BUILD_JOBS=$jobs — MemAvailable ${avail_kb} kB, ${cpu_jobs} CPUs)"
 fi
 
+# Test-binary prune: every full `cargo test` links one ~300 MB executable
+# per tests/*.rs (66 of them, ~20 GB), and they pile up across runs. Before
+# any build, drop test executables not relinked for
+# PECKBOARD_VERIFY_TEST_BIN_MAX_AGE_H hours (default 24), and — when free
+# space is under PECKBOARD_VERIFY_PRUNE_BELOW_GB (default 40) — all of them.
+# Cargo relinks whatever a run needs; rlibs are never touched.
+prune_test_bins() {
+  local deps="${CARGO_TARGET_DIR:-$ROOT/target}/debug/deps"
+  [[ -d "$deps" ]] || return 0
+  local below_gb="${PECKBOARD_VERIFY_PRUNE_BELOW_GB:-40}"
+  local max_age_min=$((${PECKBOARD_VERIFY_TEST_BIN_MAX_AGE_H:-24} * 60))
+  local free_kb age=() why="older than $((max_age_min / 60))h"
+  free_kb=$(df -Pk "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ -n "$free_kb" ]] && ((free_kb < below_gb * 1048576)); then
+    why="all: under ${below_gb} GB free"
+  else
+    age=(-mmin "+$max_age_min")
+  fi
+  local n
+  n=$(find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' "${age[@]}" -print -delete | wc -l)
+  if ((n > 0)); then
+    echo "(test-binary prune: removed $n from $deps — $why)"
+  fi
+  return 0
+}
+prune_test_bins
+
 # Disk guard: this box also runs the live Peckboard, whose SQLite DB shares
 # the root filesystem. On 2026-09-30 a cold `target/verify` build plus four
 # e2e shards filled the disk and the live service crash-looped (~60

@@ -447,6 +447,27 @@ pub(crate) async fn last_reply_text(db: &crate::db::Db, session_id: &str) -> Str
     reply
 }
 
+/// A message is about to start a new turn on `session_id`. If it is a
+/// subagent whose result was already reported, clear the claim so this
+/// turn's result reports to the parent too — the claim is one-shot, so a
+/// follow-up sent to a finished child otherwise finished silently and the
+/// parent waited forever. Also puts the child back in the parent's active
+/// count while it works. Returns true iff a claim was cleared.
+pub async fn rearm_for_follow_up(db: &crate::db::Db, session_id: &str) -> bool {
+    let Ok(Some(session)) = db.get_session(session_id).await else {
+        return false;
+    };
+    if session.parent_session_id.is_none() || session.subagent_completed_at.is_none() {
+        return false;
+    }
+    match db.unclaim_subagent_completion(session_id).await {
+        Ok(cleared) => cleared,
+        Err(e) => {
+            tracing::warn!(session_id, "subagent re-arm failed: {e}");
+            false
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +589,52 @@ mod tests {
                 .await
                 .is_some()
         );
+    }
+    /// A finished child given a follow-up message reports again when that
+    /// turn ends (regression: the one-shot claim dropped the second report
+    /// and the parent sat idle). Plain sessions are left alone.
+    #[tokio::test]
+    async fn follow_up_message_rearms_the_report() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "parent".into(),
+            name: "parent".into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let kid = child_of(&db, "parent", "kid").await;
+        assert!(
+            claim_and_compose(&db, &kid, true, None, false)
+                .await
+                .is_some()
+        );
+        // Without a re-arm the second completion is swallowed.
+        assert!(
+            claim_and_compose(&db, &kid, true, None, false)
+                .await
+                .is_none()
+        );
+
+        assert!(rearm_for_follow_up(&db, "kid").await);
+        assert!(
+            claim_and_compose(&db, &kid, true, None, false)
+                .await
+                .is_some(),
+            "the follow-up turn reports to the parent"
+        );
+        assert!(!rearm_for_follow_up(&db, "parent").await);
     }
 }
