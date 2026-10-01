@@ -68,7 +68,7 @@ pub(super) async fn list_events(
     Path(id): Path<String>,
     Query(params): Query<EventsQuery>,
 ) -> impl IntoResponse {
-    tracing::info!(
+    tracing::debug!(
         session_id = %id,
         after_seq = ?params.after_seq,
         before_seq = ?params.before_seq,
@@ -246,7 +246,7 @@ pub(super) async fn get_session_todos(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    tracing::info!(session_id = %id, "Getting session todos");
+    tracing::debug!(session_id = %id, "Getting session todos");
     let todos = state.db.list_session_todos(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

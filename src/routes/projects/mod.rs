@@ -381,7 +381,7 @@ async fn list_projects(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListProjectsQuery>,
 ) -> impl IntoResponse {
-    tracing::info!(folder_id = ?params.folder_id, "Listing projects");
+    tracing::debug!(folder_id = ?params.folder_id, "Listing projects");
     let projects = if let Some(folder_id) = params.folder_id {
         state.db.list_projects_by_folder(&folder_id).await
     } else {

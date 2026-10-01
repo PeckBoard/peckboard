@@ -173,7 +173,7 @@ pub async fn run_once(
         let at = chrono::Utc::now().to_rfc3339();
         record_run(&target, at.clone());
         match ping(db, session_manager, broadcaster, &folder_id, &target).await {
-            Ok(()) => tracing::info!(login = %target.label, at = %at, "keep-alive ping ok"),
+            Ok(()) => tracing::debug!(login = %target.label, at = %at, "keep-alive ping ok"),
             Err(e) => {
                 tracing::warn!(login = %target.label, at = %at, "keep-alive ping failed: {e}")
             }

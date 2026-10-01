@@ -24,7 +24,9 @@ import {
   prepareFillers,
   startThinkingCue,
   stopThinkingCue,
+  thinkingOutputReady,
   type FillerPlayback,
+  type ThinkingOutput,
 } from '../voice/thinking'
 
 /** How long a stream stalled inside a pronunciation hint is waited on
@@ -444,7 +446,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   }
 
   // ── Thinking feedback (cue + filler while the reply is awaited) ──
-  const audioCtx = () => engine().audioContext?.() ?? null
+  /** The engine's unlocked output for the cue and filler: its AudioContext
+   *  (desktop) or its thinking `<audio>` element (iOS). */
+  const thinkingOut = (): ThinkingOutput | null =>
+    engine().audioContext?.() ?? engine().thinkingElement?.() ?? null
 
   const clearFillerTimer = () => {
     if (fillerTimer) clearTimeout(fillerTimer)
@@ -466,10 +471,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     // Still speaking the last reply: that is feedback enough.
     if (speakingNow || speakQueue.length > 0) return
     const { prefs } = get()
-    const ctx = audioCtx()
-    if (prefs.thinkingCue && ctx) startThinkingCue(ctx)
+    const out = thinkingOut()
+    if (prefs.thinkingCue && out) startThinkingCue(out)
     if (prefs.thinkingFiller) {
-      prepareFillers(prefs.voiceURI, ctx)
+      prepareFillers(prefs.voiceURI, out)
       fillerTimer = setTimeout(sayFiller, FILLER_DELAY_MS)
     }
   }
@@ -481,9 +486,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     fillerTimer = null
     if (!get().panelOpen || !awaitingReply || fillerUsed || fillerNow) return
     if (speakingNow || speakQueue.length > 0 || userCapturing()) return
-    const ctx = audioCtx()
-    const pick = ctx?.state === 'running' ? pickFiller(get().prefs.voiceURI) : null
-    if (!ctx || !pick) {
+    const out = thinkingOut()
+    const pick = thinkingOutputReady(out) ? pickFiller(get().prefs.voiceURI) : null
+    if (!out || !pick) {
       voiceLog('thinking filler: none ready (needs a Kokoro voice with audio unlocked)')
       return
     }
@@ -491,7 +496,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     // The filler is audible feedback already: the cue is done for this turn.
     stopThinkingCue('filler started')
     const { filler } = pick
-    fillerNow = playFiller(ctx, filler, pick.audio, () => {
+    fillerNow = playFiller(out, filler, pick.clip, () => {
       fillerNow = null
       rememberSpoken(filler.text)
       // A reply that arrived meanwhile starts now, never over the filler.
@@ -932,7 +937,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   // A new Kokoro speed makes the cached fillers stale: re-synthesize them.
   useKokoroDevicePrefs.subscribe(() => {
     const { panelOpen, prefs } = get()
-    if (panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, audioCtx())
+    if (panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
   })
 
   return {
@@ -941,7 +946,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       const prefs = { ...get().prefs, ...patch }
       savePrefs(prefs)
       set({ prefs })
-      if (get().panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, audioCtx())
+      if (get().panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
     },
     recognitionSupported: engine().supportsRecognition(),
     panelOpen: false,
@@ -995,7 +1000,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       engine().unlockSynthesis()
       set({ panelOpen: true, error: null })
       const { prefs, recognitionSupported } = get()
-      if (prefs.thinkingFiller) prepareFillers(prefs.voiceURI, audioCtx())
+      if (prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
       if (prefs.autoListen && recognitionSupported) setMic(true)
       else refreshStatus()
       const info = await get().ensureSession()

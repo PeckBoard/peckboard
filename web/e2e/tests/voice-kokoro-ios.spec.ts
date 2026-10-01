@@ -6,13 +6,14 @@ import path from 'node:path'
 /**
  * Kokoro on iPhone/iPad. Web Audio on iOS shares the audio session with the
  * always-on recognizer and plays as static there, so iOS plays the WAV
- * through an `<audio>` element instead — or, if the user opts in, through
- * the browser voice.
+ * through an `<audio>` element instead — and the thinking cue and filler
+ * through a second one.
  *
  * This runs Chromium with an iPhone user agent (no WebKit build on the CI
- * host): it proves the iOS routing, the gesture unlock, barge-in, and that
- * the encoder's WAV layout decodes faithfully at the context's default
- * rate. It can't reproduce iOS's audio-session behaviour itself.
+ * host): it proves the iOS routing, the gesture unlock, barge-in, the
+ * thinking feedback, and that the encoder's WAV layout decodes faithfully
+ * at the context's default rate. It can't reproduce iOS's audio-session
+ * behaviour itself.
  */
 
 const IPHONE_UA =
@@ -53,7 +54,7 @@ async function setVoiceModel(request: APIRequestContext, token: string, model: s
   return (await res.json()) as { session_id: string; model: string }
 }
 
-type MediaPlay = { src: string; seconds: number }
+type MediaPlay = { src: string; seconds: number; loop: boolean; start: number; end: number | null }
 type StubWindow = {
   __voiceRec: unknown
   __voiceSay: (t: string) => void
@@ -94,9 +95,9 @@ function wav(seconds: number): Buffer {
 
 /** Stubs: Web Speech (recognition + synthesis), Web Audio and media
  *  element hooks, auth. */
-async function primePage(page: Page, token: string, iosBrowserVoice = false) {
+async function primePage(page: Page, token: string) {
   await page.addInitScript(
-    ([t, browserVoice]) => {
+    ([t]) => {
       localStorage.setItem('peckboard_token', t)
       localStorage.setItem(
         'peckboard_voice_prefs',
@@ -108,7 +109,6 @@ async function primePage(page: Page, token: string, iosBrowserVoice = false) {
           autoListen: true,
         }),
       )
-      if (browserVoice) localStorage.setItem('peckboard.voice.iosBrowserVoice', '1')
       type Handler<T> = ((ev: T) => void) | null
       class FakeRecognition {
         lang = ''
@@ -188,26 +188,50 @@ async function primePage(page: Page, token: string, iosBrowserVoice = false) {
         w.__audioStarts = (w.__audioStarts as number) + 1
         return start.apply(this, args)
       }
-      // Record media-element playback: source + length, and pauses (barge-in).
+      // Record media-element playback: source, length, loop, when it
+      // started (play() resolved) and ended (ended / paused / replaced),
+      // and pauses (barge-in).
       w.__mediaPlays = [] as MediaPlay[]
       w.__mediaPauses = 0
+      type Tagged = { __play?: MediaPlay; __hooked?: boolean }
       const play = HTMLMediaElement.prototype.play
       const pause = HTMLMediaElement.prototype.pause
       HTMLMediaElement.prototype.play = function () {
+        const el = this as HTMLMediaElement & Tagged
+        if (el.__play) el.__play.end ??= performance.now()
+        const rec: MediaPlay = {
+          src: this.src,
+          seconds: NaN,
+          loop: this.loop,
+          start: performance.now(),
+          end: null,
+        }
+        el.__play = rec
+        if (!el.__hooked) {
+          el.__hooked = true
+          this.addEventListener('ended', () => {
+            if (el.__play) el.__play.end ??= performance.now()
+          })
+        }
         const p = play.call(this)
-        const src = this.src
         p.then(
-          () => (w.__mediaPlays as MediaPlay[]).push({ src, seconds: this.duration }),
+          () => {
+            rec.seconds = this.duration
+            rec.start = performance.now()
+            ;(w.__mediaPlays as MediaPlay[]).push(rec)
+          },
           () => {},
         )
         return p
       }
       HTMLMediaElement.prototype.pause = function () {
         w.__mediaPauses = (w.__mediaPauses as number) + 1
+        const rec = (this as HTMLMediaElement & Tagged).__play
+        if (rec) rec.end ??= performance.now()
         return pause.call(this)
       }
     },
-    [token, iosBrowserVoice] as const,
+    [token] as const,
   )
 }
 
@@ -227,8 +251,11 @@ const state = (page: Page) =>
     const s = window as unknown as StubWindow
     return {
       audioStarts: s.__audioStarts,
-      // Speech, not the 0.05 s silent WAV that unlocks the element.
-      speechPlays: s.__mediaPlays.filter((p) => p.src.startsWith('blob:') && p.seconds > 1).length,
+      // Speech, not the 0.05 s silent WAV that unlocks the element, nor
+      // the looping thinking cue.
+      speechPlays: s.__mediaPlays.filter(
+        (p) => p.src.startsWith('blob:') && !p.loop && p.seconds > 1,
+      ).length,
       pauses: s.__mediaPauses,
       spoken: s.__spoken,
     }
@@ -321,34 +348,157 @@ test('on iPhone a reply plays through an <audio> element, and barge-in stops it'
   await expect(page.getByTestId('voice-status')).not.toHaveText('Speaking')
 })
 
-test('the iPhone browser-voice option persists and routes replies to it', async ({
+// ── Thinking cue + filler on iPhone (through `<audio>`, not Web Audio) ──
+
+/** Must match `FILLERS` in web/src/voice/thinking.ts. */
+const FILLER_TEXTS = [
+  'One sec.',
+  'Let me think about that.',
+  'Give me a second.',
+  'One moment.',
+  'Let me check.',
+]
+/** Filler `i` synthesizes to `fillerBase + 0.1·i` s (plus Kokoro's 0.2 s
+ *  wake pre-roll); every other text to a 0.3 s reply clip (0.5 s played). */
+async function stubKokoroFillers(page: Page, fillerBase: number) {
+  const ready = { state: 'ready', progress: 1, error: null }
+  await page.route('**/api/voice/tts/prepare', (r) => r.fulfill({ json: ready }))
+  await page.route('**/api/voice/tts/status', (r) => r.fulfill({ json: ready }))
+  await page.route('**/api/voice/tts', (r) => {
+    const text = String((r.request().postDataJSON() as { text?: string }).text ?? '')
+    const plain = text.replace(/\[([^\]]*)\]\(\/[^/]*\/\)/g, '$1')
+    const i = FILLER_TEXTS.indexOf(plain)
+    return r.fulfill({
+      status: 200,
+      contentType: 'audio/wav',
+      body: wav(i >= 0 ? fillerBase + 0.1 * i : 0.3),
+    })
+  })
+}
+
+/** The reply is slow: hold every message POST for `ms`. */
+async function delayReplies(page: Page, ms: number) {
+  await page.route('**/api/sessions/*/message', async (r) => {
+    await new Promise((res) => setTimeout(res, ms))
+    await r.continue()
+  })
+}
+
+/** Media plays split into the looping cue, fillers, and reply clips. */
+async function mediaPlays(page: Page, fillerBase: number) {
+  const plays = await page.evaluate(() => (window as unknown as StubWindow).__mediaPlays)
+  const clips = plays.filter((p) => p.src.startsWith('blob:') && !p.loop && p.seconds > 0.2)
+  return {
+    cues: plays.filter((p) => p.loop),
+    fillers: clips.filter((p) => p.seconds >= fillerBase + 0.15),
+    replies: clips.filter((p) => p.seconds < fillerBase + 0.15),
+  }
+}
+
+async function openPanel(page: Page) {
+  await page.goto('/')
+  await page.getByTestId('voice-fab').click()
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
+  await expect.poll(() => recognizing(page)).toBe(true)
+}
+
+async function say(page: Page, text: string) {
+  await page.evaluate((t) => (window as unknown as StubWindow).__voiceInterim(t), text)
+  await page.evaluate((t) => (window as unknown as StubWindow).__voiceSay(t), text)
+}
+
+test('on iPhone a slow reply gets the cue and one filler through <audio>', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  await stubKokoroFillers(page, 0.6)
+  await delayReplies(page, 3500)
+  await openPanel(page)
+
+  await say(page, 'Slow question number one.')
+  await expect.poll(async () => (await mediaPlays(page, 0.6)).cues.length).toBe(1)
+  await expect
+    .poll(async () => (await mediaPlays(page, 0.6)).replies.length, { timeout: 20_000 })
+    .toBe(1)
+  await page.waitForTimeout(800)
+  const { cues, fillers, replies } = await mediaPlays(page, 0.6)
+  expect(fillers, JSON.stringify(fillers)).toHaveLength(1)
+  const [cue] = cues
+  const [filler] = fillers
+  const [reply] = replies
+  // The cue gave way to the filler, which ended before the reply began.
+  expect(cue.end, 'cue stopped').not.toBeNull()
+  expect(cue.end!).toBeLessThanOrEqual(filler.start + 50)
+  expect(filler.end, 'filler ended').not.toBeNull()
+  expect(filler.end!).toBeLessThanOrEqual(reply.start + 20)
+  expect((await state(page)).audioStarts).toBe(0)
+  expect((await mediaPlays(page, 0.6)).cues).toHaveLength(1)
+
+  // The filler never reaches the transcript or the session.
+  const panelText = await page.getByTestId('voice-panel').innerText()
+  const res = await request.get(`/api/sessions/${voice.session_id}/events?limit=500`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const events = JSON.stringify(await res.json())
+  for (const f of FILLER_TEXTS) {
+    expect(panelText).not.toContain(f)
+    expect(events).not.toContain(f)
+  }
+
+  // The old "use the browser voice on iPhone" option is gone.
+  await page.goto('/settings/voice')
+  await expect(page.getByTestId('voice-thinking-cue')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('voice-ios-browser-voice')).toHaveCount(0)
+})
+
+test('on iPhone a quick reply stops the cue as it starts, with no filler', async ({
   request,
   page,
 }) => {
   const token = await authenticate(request)
   await setVoiceModel(request, token, 'mock:echo')
   await primePage(page, token)
-  await stubKokoro(page, wav(0.3))
-  await page.goto('/settings/voice')
+  await stubKokoroFillers(page, 0.6)
+  await openPanel(page)
 
-  const toggle = page.getByTestId('voice-ios-browser-voice')
-  await expect(toggle).not.toBeChecked()
-  await toggle.check()
-  await page.reload()
-  await expect(page.getByTestId('voice-ios-browser-voice')).toBeChecked()
-
-  await page.goto('/')
-  await page.getByTestId('voice-fab').click()
-  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
-  await expect.poll(() => recognizing(page)).toBe(true)
-  // Real speech builds up through a partial result before the final.
-  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('Browser voice'))
-  await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('Browser voice please.'))
-
+  await say(page, 'Quick question.')
   await expect
-    .poll(async () => (await state(page)).spoken, { timeout: 15_000 })
-    .toContain('Browser voice please.')
-  const s = await state(page)
-  expect(s.speechPlays).toBe(0)
-  expect(s.audioStarts).toBe(0)
+    .poll(async () => (await mediaPlays(page, 0.6)).replies.length, { timeout: 15_000 })
+    .toBe(1)
+  await page.waitForTimeout(2500)
+  const { cues, fillers, replies } = await mediaPlays(page, 0.6)
+  expect(fillers).toHaveLength(0)
+  expect(cues).toHaveLength(1)
+  expect(cues[0].end, 'cue stopped').not.toBeNull()
+  expect(cues[0].end!).toBeLessThanOrEqual(replies[0].start + 50)
+})
+
+test('on iPhone talking over the filler silences it and the cue', async ({ request, page }) => {
+  const token = await authenticate(request)
+  await setVoiceModel(request, token, 'mock:echo')
+  await primePage(page, token)
+  // Long fillers, so the user can talk over one.
+  await stubKokoroFillers(page, 3)
+  await delayReplies(page, 6000)
+  await openPanel(page)
+
+  await say(page, 'Tell me a long story.')
+  await expect
+    .poll(async () => (await mediaPlays(page, 3)).fillers.length, { timeout: 15_000 })
+    .toBe(1)
+  const [playing] = (await mediaPlays(page, 3)).fillers
+  expect(playing.end).toBeNull()
+
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceInterim('hold on please stop talking'),
+  )
+  await expect.poll(async () => (await mediaPlays(page, 3)).fillers[0].end).not.toBeNull()
+  const { cues, fillers } = await mediaPlays(page, 3)
+  // Cut off well before its ~3 s end.
+  expect(fillers[0].end! - fillers[0].start).toBeLessThan(2500)
+  expect(cues[0].end).not.toBeNull()
 })

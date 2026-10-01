@@ -69,6 +69,10 @@ export interface SpeechEngine {
    *  one (Kokoro on desktop) — for the store's thinking cue and filler.
    *  Never creates one: `null` until `unlockSynthesis` has. */
   audioContext?(): AudioContext | null
+  /** iOS counterpart of `audioContext`: a second `<audio>` element, primed
+   *  in the same gesture as the one replies play through, for the thinking
+   *  cue and filler. `null` elsewhere, and until `unlockSynthesis` ran. */
+  thinkingElement?(): HTMLAudioElement | null
   /** Cancel the current utterance and anything the engine has queued.
    *  `reason` is logged. */
   cancelSpeech(reason?: string): void

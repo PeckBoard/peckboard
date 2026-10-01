@@ -23,7 +23,7 @@ impl McpToolRegistry {
         args: Value,
         ctx: &ToolCallContext,
     ) -> anyhow::Result<Value> {
-        tracing::info!(session_id = %ctx.session_id, tool = %name, "MCP tool: common");
+        tracing::debug!(session_id = %ctx.session_id, tool = %name, "MCP tool: common");
         let db = ctx.db.clone();
         let inv = common_tools::inv_from_ctx(ctx);
         let name = name.to_string();

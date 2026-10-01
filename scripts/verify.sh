@@ -50,6 +50,21 @@ if [[ -z "${CARGO_BUILD_JOBS:-}" ]]; then
   export CARGO_BUILD_JOBS="$jobs"
   echo "(memory guard: CARGO_BUILD_JOBS=$jobs — MemAvailable ${avail_kb} kB, ${cpu_jobs} CPUs)"
 fi
+
+# Disk guard: this box also runs the live Peckboard, whose SQLite DB shares
+# the root filesystem. On 2026-09-30 a cold `target/verify` build plus four
+# e2e shards filled the disk and the live service crash-looped (~60
+# restarts, "migration failed: disk I/O error") for six minutes. Refuse to
+# start below PECKBOARD_VERIFY_MIN_FREE_GB (default 20) free on the volume
+# holding target/ — free space first, or override deliberately.
+min_free_gb="${PECKBOARD_VERIFY_MIN_FREE_GB:-20}"
+free_kb=$(df -Pk "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
+if [[ -n "$free_kb" ]] && ((free_kb < min_free_gb * 1048576)); then
+  echo "verify.sh: only $((free_kb / 1048576)) GB free on the volume holding $ROOT" >&2
+  echo "  (need ${min_free_gb} GB; builds could fill the disk and crash the live Peckboard)." >&2
+  echo "  Free space (e.g. old target/ dirs) or set PECKBOARD_VERIFY_MIN_FREE_GB to override." >&2
+  exit 2
+fi
 FAST=0
 IMPACTED=0
 CHANGED=0

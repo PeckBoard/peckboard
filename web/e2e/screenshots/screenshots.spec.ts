@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
  *   - providers.png         — Settings → Providers & Accounts with accounts
  *   - subagent-panes.png    — a session with running subagents tiled in split panes
  *   - background-tasks.png  — the Background tasks panel over a chat session
+ *   - voice-assistant.png   — the Voice Assistant panel over the sessions list
  *
  * The last three run against the same live server but stub the relevant
  * API routes in the page (same convention as the tests/ specs): the
@@ -1216,4 +1217,114 @@ test('capture background tasks screenshot @screenshot', async ({ request, page }
     await panel.getByTestId('bg-task-output').getByTestId('bg-task-stop').click()
     await page.getByTestId('bg-task-stop-confirm').getByTestId('confirm-dialog-confirm').click()
   })
+})
+
+// voice-assistant.png — the Voice Assistant panel over the sessions list,
+// mid-conversation: a status question, a question relayed from a worker,
+// and the user's answer. The transcript is a scripted backfill for the
+// voice session (no model runs), speech recognition is stubbed so the
+// panel opens in headless Chromium, and the Kokoro status reads "ready"
+// so the first-use download notice (downloads are off in e2e) stays out.
+test('capture voice assistant screenshot @screenshot', async ({ request, page }) => {
+  mkdirSync(OUT_DIR, { recursive: true })
+  const { token, authHeader } = await authenticate(request)
+  const folder = await createFolder(
+    request,
+    authHeader,
+    'storefront',
+    mkdtempSync(path.join(tmpdir(), 'peckboard-shots-voice-')),
+  )
+  const sessionIds = new Set<string>()
+  for (const name of [
+    'Checkout retry logic',
+    'Changelog for the next release',
+    'Fix cart rounding',
+    'Storefront search facets',
+  ]) {
+    const res = await request.post('/api/sessions', {
+      headers: authHeader,
+      data: { name, folder_id: folder },
+    })
+    expect(res.ok(), `create session ${name} failed: ${await res.text()}`).toBeTruthy()
+    sessionIds.add(((await res.json()) as { id: string }).id)
+  }
+  const voiceRes = await request.post('/api/voice/session', {
+    headers: authHeader,
+    data: { model: 'mock:echo' },
+  })
+  expect(voiceRes.ok(), `voice session failed: ${await voiceRes.text()}`).toBeTruthy()
+  const voiceId = ((await voiceRes.json()) as { session_id: string }).session_id
+
+  // Only this shot's sessions in the list behind the panel, whatever the
+  // other captures seeded on the shared server.
+  await page.route(
+    (url) => url.pathname === '/api/sessions',
+    async (route) => {
+      const res = await route.fetch()
+      const body = (await res.json()) as { items?: { id: string }[] }
+      if (route.request().method() !== 'GET' || !Array.isArray(body.items)) {
+        return route.fulfill({ response: res, json: body })
+      }
+      const items = body.items.filter((s) => sessionIds.has(s.id))
+      await route.fulfill({ response: res, json: { ...body, items, next_cursor: null } })
+    },
+  )
+
+  const now = Date.now()
+  const script: [kind: string, text: string][] = [
+    ['user', "What's running right now?"],
+    [
+      'agent-text',
+      'Three sessions are busy: the checkout worker, the changelog, and Fix cart rounding, which is waiting on your review.',
+    ],
+    ['agent-end', ''],
+    ['user', '[relay] The checkout worker asks: should the retry limit be three or five attempts?'],
+    ['agent-text', 'The checkout worker wants to know: three retries or five?'],
+    ['agent-end', ''],
+    ['user', 'Three. Tell it to log each retry.'],
+    ['agent-text', 'Sent to the checkout worker.'],
+    ['agent-end', ''],
+  ]
+  const events = script.map(([kind, text], i) => ({
+    id: `voice-shot-${i + 1}`,
+    session_id: voiceId,
+    seq: i + 1,
+    kind,
+    data: { text },
+    ts: now - (script.length - i) * 15_000,
+  }))
+  await page.route(`**/api/sessions/${voiceId}/events**`, (route) =>
+    route.fulfill({ json: events }),
+  )
+  const ready = { state: 'ready', progress: 1, error: null }
+  await page.route('**/api/voice/tts/prepare', (route) => route.fulfill({ json: ready }))
+  await page.route('**/api/voice/tts/status', (route) => route.fulfill({ json: ready }))
+  await page.addInitScript(() => {
+    class FakeRecognition {
+      lang = ''
+      continuous = false
+      interimResults = false
+      maxAlternatives = 1
+      onresult = null
+      onend = null
+      onerror = null
+      start() {}
+      stop() {}
+      abort() {}
+    }
+    const w = window as unknown as Record<string, unknown>
+    w.SpeechRecognition = FakeRecognition
+    w.webkitSpeechRecognition = FakeRecognition
+  })
+
+  await loadAppAt(page, token, '/')
+  const fab = page.getByTestId('voice-fab')
+  await expect(fab).toBeVisible({ timeout: 15_000 })
+  await fab.click()
+  const panel = page.getByTestId('voice-panel')
+  await expect(panel).toContainText('three retries or five')
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await expect(page.getByText('Storefront search facets')).toBeVisible()
+  await page.waitForTimeout(800)
+  await capture(page, 'voice-assistant.png')
 })

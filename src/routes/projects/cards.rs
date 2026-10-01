@@ -291,7 +291,7 @@ pub(super) async fn list_cards(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
 ) -> impl IntoResponse {
-    tracing::info!(project_id = %project_id, "Listing cards");
+    tracing::debug!(project_id = %project_id, "Listing cards");
     let cards = state
         .db
         .list_cards_by_project(&project_id)

@@ -2,12 +2,9 @@ use clap::Parser;
 use peckboard::auth::reset::reset_user_password;
 use peckboard::config::{CliArgs, Config};
 use peckboard::db::Db;
-use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    peckboard::logging::init();
 
     let args = CliArgs::parse();
 

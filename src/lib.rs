@@ -10,6 +10,7 @@ pub mod frontend;
 pub mod handover;
 pub mod impact_log;
 pub mod keepalive;
+pub mod logging;
 pub mod plugin;
 pub mod provider;
 pub mod repeating;

@@ -240,7 +240,7 @@ async fn list_sessions(
     Extension(user): Extension<AuthUser>,
     Query(params): Query<ListSessionsQuery>,
 ) -> impl IntoResponse {
-    tracing::info!(
+    tracing::debug!(
         folder_id = ?params.folder_id,
         cursor = ?(params.cursor_la.as_deref(), params.cursor_id.as_deref()),
         limit = ?params.limit,
@@ -337,7 +337,7 @@ async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    tracing::info!(session_id = %id, "Getting session");
+    tracing::debug!(session_id = %id, "Getting session");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -907,7 +907,7 @@ async fn mark_read(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    tracing::info!(session_id = %id, "Marking session as read");
+    tracing::debug!(session_id = %id, "Marking session as read");
     let session = state.db.get_session(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

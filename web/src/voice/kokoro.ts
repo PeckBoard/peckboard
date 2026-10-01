@@ -148,39 +148,42 @@ function decode(ctx: AudioContext, buf: ArrayBuffer): Promise<AudioBuffer> {
 }
 
 /** Duration of a PCM WAV from its header (byte rate at offset 28). */
-function wavSeconds(buf: ArrayBuffer): number {
+export function wavSeconds(buf: ArrayBuffer): number {
   if (buf.byteLength < 44) return 0
   const byteRate = new DataView(buf).getUint32(28, true)
   return byteRate > 0 ? (buf.byteLength - 44) / byteRate : 0
+}
+
+/** A mono 16-bit PCM WAV of `pcm` at `rate` Hz. */
+export function wavBlob(pcm: Int16Array, rate: number): Blob {
+  const b = new DataView(new ArrayBuffer(44 + pcm.length * 2))
+  const str = (o: number, s: string) => {
+    for (let i = 0; i < s.length; i++) b.setUint8(o + i, s.charCodeAt(i))
+  }
+  str(0, 'RIFF')
+  b.setUint32(4, 36 + pcm.length * 2, true)
+  str(8, 'WAVEfmt ')
+  b.setUint32(16, 16, true)
+  b.setUint16(20, 1, true)
+  b.setUint16(22, 1, true)
+  b.setUint32(24, rate, true)
+  b.setUint32(28, rate * 2, true)
+  b.setUint16(32, 2, true)
+  b.setUint16(34, 16, true)
+  str(36, 'data')
+  b.setUint32(40, pcm.length * 2, true)
+  for (let i = 0; i < pcm.length; i++) b.setInt16(44 + i * 2, pcm[i], true)
+  return new Blob([b.buffer], { type: 'audio/wav' })
 }
 
 let silentUrl: string | null = null
 
 /** A 0.05 s silent 24 kHz WAV, for unlocking a media element in a gesture. */
 function silentWavUrl(): string {
-  if (silentUrl) return silentUrl
-  const n = 1200
-  const b = new DataView(new ArrayBuffer(44 + n * 2))
-  const str = (o: number, s: string) => {
-    for (let i = 0; i < s.length; i++) b.setUint8(o + i, s.charCodeAt(i))
-  }
-  str(0, 'RIFF')
-  b.setUint32(4, 36 + n * 2, true)
-  str(8, 'WAVEfmt ')
-  b.setUint32(16, 16, true)
-  b.setUint16(20, 1, true)
-  b.setUint16(22, 1, true)
-  b.setUint32(24, 24000, true)
-  b.setUint32(28, 48000, true)
-  b.setUint16(32, 2, true)
-  b.setUint16(34, 16, true)
-  str(36, 'data')
-  b.setUint32(40, n * 2, true)
-  silentUrl = URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }))
+  silentUrl ??= URL.createObjectURL(wavBlob(new Int16Array(1200), 24000))
   return silentUrl
 }
 
-const IOS_BROWSER_VOICE_KEY = 'peckboard.voice.iosBrowserVoice'
 const KOKORO_SPEED_KEY = 'peckboard.voice.kokoroSpeed'
 
 /** Kokoro speech speed (the model's `speed`): the Settings → Voice slider
@@ -196,27 +199,16 @@ function clampSpeed(n: number): number {
 }
 
 /** Per-device Kokoro choices (localStorage). */
-export const useKokoroDevicePrefs = create<{ iosUseBrowserVoice: boolean; speed: number }>(() => {
-  let on = false
+export const useKokoroDevicePrefs = create<{ speed: number }>(() => {
   let speed = DEFAULT_KOKORO_SPEED
   try {
-    on = localStorage.getItem(IOS_BROWSER_VOICE_KEY) === '1'
     const raw = localStorage.getItem(KOKORO_SPEED_KEY)
     if (raw !== null) speed = clampSpeed(Number(raw))
   } catch {
     /* storage unavailable */
   }
-  return { iosUseBrowserVoice: on, speed }
+  return { speed }
 })
-
-export function setIosUseBrowserVoice(on: boolean): void {
-  try {
-    localStorage.setItem(IOS_BROWSER_VOICE_KEY, on ? '1' : '0')
-  } catch {
-    /* storage unavailable */
-  }
-  useKokoroDevicePrefs.setState({ iosUseBrowserVoice: on })
-}
 
 export function setKokoroSpeed(speed: number): void {
   const s = clampSpeed(speed)
@@ -327,6 +319,9 @@ export class KokoroEngine implements SpeechEngine {
   /** iOS playback element, reused so its gesture unlock sticks. */
   private el: HTMLAudioElement | null = null
   private elUnlocked = false
+  /** iOS element for the thinking cue and filler (see `thinkingElement`). */
+  private thinkEl: HTMLAudioElement | null = null
+  private thinkElUnlocked = false
   /** Stops whatever is playing right now (either path), silently. */
   private stopCurrent: (() => void) | null = null
   /** Stops for every Web Audio clip started and not yet ended: cancel
@@ -366,16 +361,14 @@ export class KokoroEngine implements SpeechEngine {
     this.web.stopListening()
   }
 
-  /** Kokoro for a `kokoro:` voice, unless it failed repeatedly this session,
-   *  the server reported it unavailable (a later `prepareKokoro` — e.g.
-   *  reopening the panel — retries), or this is iOS and the user chose the
-   *  browser voice there. */
+  /** Kokoro for a `kokoro:` voice, unless it failed repeatedly this session
+   *  or the server reported it unavailable (a later `prepareKokoro` — e.g.
+   *  reopening the panel — retries). */
   private useKokoro(voiceURI: string): boolean {
     return (
       isKokoroVoice(voiceURI) &&
       !this.disabled &&
       useKokoroStatus.getState().state !== 'unavailable' &&
-      !(isIOS() && useKokoroDevicePrefs.getState().iosUseBrowserVoice) &&
       canPlayKokoro()
     )
   }
@@ -687,13 +680,28 @@ export class KokoroEngine implements SpeechEngine {
     return this.ctx
   }
 
+  thinkingElement(): HTMLAudioElement | null {
+    return playsViaMediaElement() ? this.thinkEl : null
+  }
+
   unlockSynthesis(): void {
     this.web.unlockSynthesis()
     if (playsViaMediaElement()) {
       // iOS only lets a media element play() later once it has played
-      // inside a gesture; prime the one element every utterance reuses.
+      // inside a gesture; prime the one element every utterance reuses,
+      // and the one the thinking cue and filler share.
+      if (!this.thinkEl) this.thinkEl = new Audio()
+      const think = this.thinkEl
+      if (!this.thinkElUnlocked && think.paused) {
+        think.src = silentWavUrl()
+        think.play().then(
+          () => {
+            this.thinkElUnlocked = true
+          },
+          () => {},
+        )
+      }
       if (this.elUnlocked || this.stopCurrent) return
-      if (useKokoroDevicePrefs.getState().iosUseBrowserVoice) return
       const el = this.audioEl()
       el.src = silentWavUrl()
       el.play().then(

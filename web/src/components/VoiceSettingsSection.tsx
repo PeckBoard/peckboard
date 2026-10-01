@@ -5,9 +5,7 @@ import { getSpeechEngine, type VoiceOption } from '../voice/engine'
 import {
   KOKORO_SPEED_MAX,
   KOKORO_SPEED_MIN,
-  isIOS,
   isKokoroVoice,
-  setIosUseBrowserVoice,
   setKokoroSpeed,
   useKokoroDevicePrefs,
 } from '../voice/kokoro'
@@ -90,9 +88,7 @@ export default function VoiceSettingsSection() {
     if (models.length === 0) void fetchModels()
   }, [models.length, fetchModels])
 
-  const onIOS = isIOS()
   const kokoroSpeed = useKokoroDevicePrefs((s) => s.speed)
-  const iosUseBrowserVoice = useKokoroDevicePrefs((s) => s.iosUseBrowserVoice)
   const synthesisSupported = getSpeechEngine().supportsSynthesis()
 
   const changeModel = async (id: string) => {
@@ -284,19 +280,6 @@ export default function VoiceSettingsSection() {
               Say &ldquo;One sec&rdquo; when a reply is slow to start (natural voices)
             </span>
           </label>
-          {onIOS && (
-            <label className="settings-row settings-row-toggle">
-              <input
-                type="checkbox"
-                data-testid="voice-ios-browser-voice"
-                checked={iosUseBrowserVoice}
-                onChange={(e) => setIosUseBrowserVoice(e.target.checked)}
-              />
-              <span className="settings-label">
-                On iPhone/iPad, use the browser voice instead of Kokoro
-              </span>
-            </label>
-          )}
         </div>
         <div className="voice-settings-actions">
           <button

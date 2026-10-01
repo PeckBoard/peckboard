@@ -738,7 +738,7 @@ impl BackgroundRegistry {
             self.persist_meta(&info);
             self.broadcast("started", &info);
         }
-        tracing::info!(
+        tracing::debug!(
             session_id = %info.session_id,
             task_id = %info.id,
             pid = ?info.pid,
@@ -1047,13 +1047,25 @@ impl BackgroundRegistry {
             i.clone()
         };
         let elapsed = task.started.elapsed().as_secs();
-        tracing::info!(
-            session_id = %info.session_id,
-            task_id = %info.id,
-            status = info.status.as_str(),
-            exit_code = ?info.exit_code,
-            "background task finished after {elapsed}s"
-        );
+        // A sync `run_command` finish is routine (the MCP handler already
+        // logged the command); only detached tasks log at info.
+        if lock(&task.attached).is_some() {
+            tracing::debug!(
+                session_id = %info.session_id,
+                task_id = %info.id,
+                status = info.status.as_str(),
+                exit_code = ?info.exit_code,
+                "background task finished after {elapsed}s"
+            );
+        } else {
+            tracing::info!(
+                session_id = %info.session_id,
+                task_id = %info.id,
+                status = info.status.as_str(),
+                exit_code = ?info.exit_code,
+                "background task finished after {elapsed}s"
+            );
+        }
         // A `run_command` caller still inside its sync window takes the
         // result inline: no UI event, no report, nothing left behind.
         if let Some(tx) = lock(&task.attached).take() {

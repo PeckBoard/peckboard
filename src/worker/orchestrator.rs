@@ -327,7 +327,7 @@ pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::Date
         available.retain(|c| !backing_off.contains(c.id.as_str()));
 
         let slots = cap.saturating_sub(active_workers);
-        tracing::info!(
+        tracing::debug!(
             project_id = %project.id,
             project_name = %project.name,
             active_workers = active_workers,
@@ -537,7 +537,7 @@ async fn spawn_worker_for_card(
         .unwrap_or_default()
     {
         if state.session_manager.is_running(&sibling.id).await {
-            tracing::info!(
+            tracing::debug!(
                 card_id = %card.id,
                 running_session_id = %sibling.id,
                 "Card already has a running worker; deferring spawn to a later tick"
@@ -620,7 +620,7 @@ async fn spawn_worker_for_card(
 
     let (session, is_resume, created_now) = match resume_session {
         Some(prev) => {
-            tracing::info!(
+            tracing::debug!(
                 session_id = %prev.id,
                 card_id = %card.id,
                 project_id = %project.id,
@@ -988,7 +988,7 @@ async fn spawn_worker_for_card(
     // re-prompt an agent with nothing to do yet.
     if is_resume && state.background.has_running_for_session(&session_id) {
         drop(lock);
-        tracing::info!(
+        tracing::debug!(
             session_id = %session_id,
             card_id = %card.id,
             "Resume target is waiting on a background task; releasing claim"
@@ -1367,7 +1367,7 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
             // (e.g. a long test run). It hasn't stalled — the task's exit
             // report resumes it — so keep the assignment and don't count
             // this turn toward the no-progress block.
-            tracing::info!(
+            tracing::debug!(
                 card_id = %card_id,
                 session_id = %session_id,
                 "Worker waiting on a running background task; keeping assignment"
