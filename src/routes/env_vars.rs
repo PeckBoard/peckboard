@@ -12,7 +12,7 @@
 
 use axum::body::Body;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, State},
     http::{Request, StatusCode},
     middleware,
@@ -121,8 +121,13 @@ struct EnvVarView {
     updated_at: String,
 }
 
-/// GET /api/env-vars — list every var. Encrypted rows expose metadata only.
-async fn list(State(state): State<Arc<AppState>>) -> Response {
+/// GET /api/env-vars — list every var. Encrypted rows expose metadata only;
+/// plaintext values are admin-only (vars are host-wide secrets and only an
+/// admin may edit them), so non-admins see names/scope with `value: null`.
+async fn list(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Response {
     let vars = match state.db.list_env_vars().await {
         Ok(v) => v,
         Err(e) => return internal_err(e),
@@ -173,7 +178,11 @@ async fn list(State(state): State<Arc<AppState>>) -> Response {
             encrypted_by_username,
             folder_id: v.folder_id,
             folder_name,
-            value: if v.encrypted { None } else { v.value },
+            value: if v.encrypted || !user.is_admin() {
+                None
+            } else {
+                v.value
+            },
             created_at: v.created_at,
             updated_at: v.updated_at,
         });
@@ -484,4 +493,55 @@ async fn unlock_status(State(state): State<Arc<AppState>>, request: Request<Body
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::test_state;
+
+    #[tokio::test]
+    async fn list_masks_plaintext_values_for_non_admins() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .upsert_env_var(NewEnvVar {
+                id: "e1".into(),
+                name: "API_KEY".into(),
+                value: Some("s3cret".into()),
+                ciphertext: None,
+                nonce: None,
+                kdf_salt: None,
+                encrypted: false,
+                encrypted_by: None,
+                folder_id: None,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let body = |role: &str| {
+            let state = state.clone();
+            let user = AuthUser {
+                user_id: "u1".into(),
+                role: role.into(),
+                session_id: "as1".into(),
+            };
+            async move {
+                let res = list(State(state), Extension(user)).await;
+                let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        };
+        let member = body("member").await;
+        assert!(
+            member.contains("API_KEY") && !member.contains("s3cret"),
+            "{member}"
+        );
+        assert!(body("admin").await.contains("s3cret"));
+    }
 }

@@ -56,7 +56,7 @@ export function stripPronunciationHints(
 }
 
 /** Drop the remainder of a hint the text starts inside: `word](/ph…/)`
- *  keeps `word`; `(/ph…/)` and a bare IPA `ph…/)` go entirely. */
+ *  keeps `word`; `(/ph…/)`, `/ph…/)` and a bare IPA `ph…/)` go entirely. */
 function stripOrphanHead(text: string): string {
   const end = text.indexOf('/)')
   if (end < 0) return text
@@ -65,7 +65,7 @@ function stripOrphanHead(text: string): string {
   const rest = text.slice(end + 2)
   const labelled = /^([^\]\n]*?)\]\(\/[^/()\n]*$/.exec(head)
   if (labelled) return labelled[1] + rest
-  if (/^\(\/[^/()\n]*$/.test(head)) return rest
+  if (/^\(?\/[^/()\n]*$/.test(head)) return rest
   if (/^[^\s/()[\]]+$/.test(head) && /[\u0080-\uffff]/.test(head)) return rest
   return text
 }

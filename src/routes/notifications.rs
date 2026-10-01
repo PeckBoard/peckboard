@@ -240,11 +240,19 @@ async fn create_announcement(
     ))
 }
 
-/// DELETE /api/announcements/:id
+/// DELETE /api/announcements/:id — admin-only: announcements are host-wide,
+/// so a delete removes it for every user (non-admins' dismiss stays local).
 async fn delete_announcement(
     State(state): State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if !user.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "admin access required" })),
+        ));
+    }
     let deleted = state.db.delete_announcement(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -473,8 +481,8 @@ async fn force_queued_message(
         queued.effort.clone(),
     )
     .await;
-
-    state
+    let retry = queued.clone();
+    if let Err(e) = state
         .session_manager
         .force_queued(
             &session_id,
@@ -485,7 +493,26 @@ async fn force_queued_message(
             &state.config.data_dir,
         )
         .await
-        .map_err(|e| err500(e.to_string()))?;
+    {
+        // The row was popped above: put it back so a failed force never
+        // silently loses the user's message.
+        let requeued = state
+            .db
+            .enqueue_message(crate::db::models::NewQueuedMessage {
+                session_id: retry.session_id,
+                text: retry.text,
+                queued_at: retry.queued_at,
+                model: retry.model,
+                effort: retry.effort,
+                attachment_ids: retry.attachment_ids,
+                user_event_appended: retry.user_event_appended,
+            })
+            .await;
+        if let Err(re) = requeued {
+            tracing::warn!(session_id = %session_id, "force failed and requeue failed: {re}");
+        }
+        return Err(err500(e.to_string()));
+    }
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
         serde_json::json!({ "status": "forced", "id": msg_id }),
@@ -533,6 +560,43 @@ mod tests {
             .await
             .unwrap();
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// Announcements are host-wide, so deleting one hides it for everybody;
+    /// only an admin (who alone may create them) may delete one.
+    #[tokio::test]
+    async fn non_admin_cannot_delete_an_announcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "user").await;
+        state
+            .db
+            .create_announcement(NewAnnouncement {
+                id: "a1".into(),
+                kind: "info".into(),
+                title: "t".into(),
+                message: "m".into(),
+                detail: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .await
+            .unwrap();
+
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/api/announcements/a1")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let list = Request::builder()
+            .uri("/api/announcements")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let body = body_text(app(state.clone()).oneshot(list).await.unwrap()).await;
+        assert!(body.contains("a1"), "{body}");
     }
 
     /// The queued message is text that will be sent into the session, so

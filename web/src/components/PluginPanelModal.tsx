@@ -3,6 +3,7 @@ import Modal from './Modal'
 import { authedFetch } from '../store/auth'
 import { withPluginTheme } from '../util/appearance'
 import usePluginDataForward from '../hooks/usePluginDataForward'
+import { resolvePluginUiPath } from '../utils/pluginUiPath'
 
 interface Props {
   /** Human label for the panel (the iframe/page title). */
@@ -15,8 +16,7 @@ interface Props {
   onClose: () => void
 }
 
-/** Path prefix a panel iframe is allowed to reach through the data bridge. */
-const PLUGIN_UI_PREFIX = '/api/plugin-ui/'
+/** Methods a panel iframe may use through the data bridge. */
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 
 /**
@@ -89,9 +89,10 @@ export default function PluginPanelModal({ title, plugin, path, onClose }: Props
         )
 
       const method = typeof msg.method === 'string' ? msg.method.toUpperCase() : 'GET'
-      const reqPath = typeof msg.path === 'string' ? msg.path : ''
-      // Hard scope: only the plugin-UI surface, no traversal, allowed methods.
-      if (!reqPath.startsWith(PLUGIN_UI_PREFIX) || reqPath.includes('..')) {
+      // Hard scope: only this plugin's own plugin-UI surface, no traversal
+      // (literal or percent-encoded), allowed methods.
+      const reqPath = resolvePluginUiPath(plugin, msg.path)
+      if (!reqPath) {
         reply(403, JSON.stringify({ error: 'path not allowed' }))
         return
       }

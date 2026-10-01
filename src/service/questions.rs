@@ -496,6 +496,24 @@ pub async fn pending_question_events(
         .collect())
 }
 
+/// True when `question` is an approval / permission prompt: a `run_command`
+/// approval, a plugin permission prompt (incl. *Approve always*), or any
+/// other plugin-emitted question. All of those carry the plugin's
+/// `approval_token` correlation id (`emit_plugin_question`, the plugin
+/// `ask` host function), and the emitting code trusts the answer as the
+/// human's decision — so only a human may answer them, via the UI / HTTP
+/// route, never an agent through the `answer_question` MCP tool. An
+/// unreadable payload fails closed (treated as an approval).
+pub fn is_approval_question(question: &crate::db::models::Event) -> bool {
+    let Ok(d) = serde_json::from_str::<serde_json::Value>(&question.data) else {
+        return true;
+    };
+    d.get("approval_token")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.is_empty())
+        || d.get("source").and_then(|v| v.as_str()) == Some("plugin")
+}
+
 /// Park `card_id` on the user's answer: set `blocked` with
 /// [`ASK_USER_BLOCK_REASON`] and broadcast the card update. No-op when the
 /// card is already blocked — an existing block (money-loop defense, a

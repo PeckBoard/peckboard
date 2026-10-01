@@ -417,6 +417,19 @@ impl PluginProviderRuntime {
         self.turn(session_id).is_some()
     }
 
+    /// Whether `plugin_id` owns the in-flight turn for `session_id`. The
+    /// runtime is shared by every provider adapter, so an adapter's
+    /// `is_running` must use this rather than [`is_active`](Self::is_active):
+    /// otherwise every provider claims every run, and
+    /// `SessionManager::running_provider` returns whichever one the
+    /// registry's HashMap yields first — e.g. Claude (mid-stream) for a
+    /// mock/per-turn run, so a force-send skips the cancel and the
+    /// dispatch fails against the still-live turn.
+    pub fn is_active_for(&self, plugin_id: &str, session_id: &str) -> bool {
+        self.turn(session_id)
+            .is_some_and(|t| t.plugin_id == plugin_id)
+    }
+
     /// Whether the turn for `session_id` has settled and is only keeping
     /// its child alive for background work. See [`TurnState::lingering`].
     /// A stopped or retired turn never takes another message, so it does
@@ -1900,7 +1913,7 @@ impl AgentProvider for PluginProviderAdapter {
         self.mid_stream
     }
     async fn is_running(&self, session_id: &str) -> bool {
-        self.runtime.is_active(session_id)
+        self.runtime.is_active_for(&self.plugin_id, session_id)
     }
 
     async fn wait_for_termination(&self, session_id: &str) {
@@ -2270,6 +2283,11 @@ mod tests {
             )
         };
         begin(&runtime, tx.clone());
+        // Only the owning plugin reports the run: the runtime is shared, and
+        // a non-owner claiming it made `running_provider` pick a provider at
+        // random (a force-send then skipped the cancel for per-turn runs).
+        assert!(runtime.is_active_for("p1", "s1"));
+        assert!(!runtime.is_active_for("p2", "s1"));
 
         let completed = ProviderEvent::Completed {
             conversation_id: None,

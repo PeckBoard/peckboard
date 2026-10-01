@@ -107,6 +107,36 @@ pub async fn load_limits(db: &crate::db::Db) -> SubagentLimits {
     }
 }
 
+/// Serialises the cap check and the child insert of [`create_capped`]:
+/// without it, concurrent `spawn_subagent` calls all read `active < max`
+/// before any of them inserts, and the parent ends up over its cap. Global
+/// rather than per-parent — both statements are quick single-row queries.
+static SPAWN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Create the subagent row `new` (its `parent_session_id` names the parent)
+/// only if that parent has fewer than `max_concurrent` subagents in flight.
+/// The count and the insert run under one lock, so concurrent spawns can't
+/// overshoot the cap.
+pub async fn create_capped(
+    db: &crate::db::Db,
+    new: crate::db::models::NewSession,
+    max_concurrent: i64,
+) -> anyhow::Result<crate::db::models::Session> {
+    let parent = new
+        .parent_session_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("subagent row has no parent_session_id"))?;
+    let _guard = SPAWN_LOCK.lock().await;
+    let active = db.count_active_subagents(&parent).await?;
+    if active >= max_concurrent {
+        anyhow::bail!(
+            "subagent limit reached ({active} in flight, max {max_concurrent}). Results arrive \
+             automatically as they finish; peek with list_sessions / read_worker_session."
+        );
+    }
+    db.create_session(new).await
+}
+
 /// Preamble + task for a subagent's first turn. Restates the standing
 /// Peckboard rules so non-Claude subagents get them even though their
 /// provider has no hook mechanism (the child's own spawn also carries the
@@ -636,5 +666,59 @@ mod tests {
             "the follow-up turn reports to the parent"
         );
         assert!(!rearm_for_follow_up(&db, "parent").await);
+    }
+
+    /// Concurrent spawns can't overshoot the cap: count + insert are atomic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn create_capped_holds_the_cap_under_concurrency() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "parent".into(),
+            name: "parent".into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let db = db.clone();
+                let now = now.clone();
+                tokio::spawn(async move {
+                    create_capped(
+                        &db,
+                        crate::db::models::NewSession {
+                            id: format!("kid{i}"),
+                            name: format!("{SUBAGENT_NAME_PREFIX}kid{i}"),
+                            folder_id: "f1".into(),
+                            created_at: now.clone(),
+                            last_activity: now,
+                            parent_session_id: Some("parent".into()),
+                            ..Default::default()
+                        },
+                        2,
+                    )
+                    .await
+                    .is_ok()
+                })
+            })
+            .collect();
+        let mut created = 0;
+        for t in tasks {
+            created += t.await.unwrap() as i64;
+        }
+        assert_eq!(created, 2);
+        assert_eq!(db.count_active_subagents("parent").await.unwrap(), 2);
     }
 }

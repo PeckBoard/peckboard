@@ -85,12 +85,20 @@ impl McpToolRegistry {
 
         let pending =
             crate::service::questions::pending_question_events(&ctx.db, &target.id).await?;
-        if !pending.iter().any(|q| q.id == question_id) {
+        let Some(question) = pending.iter().find(|q| q.id == question_id) else {
             anyhow::bail!(
                 "question {question_id} is not pending on session {session_id} (already answered, dismissed, or unknown)"
             );
+        };
+        // Approval / permission prompts (run_command approval, a plugin's
+        // Approve once / Approve always / Deny) are the human's decision:
+        // an agent answering one would approve itself or another session.
+        if crate::service::questions::is_approval_question(question) {
+            anyhow::bail!(
+                "question {question_id} is an approval/permission prompt; only the user can answer \
+                 it, in the Peckboard UI. Tell the user it is waiting for them."
+            );
         }
-
         let data = if rejected {
             serde_json::json!({ "question_id": question_id, "rejected": true })
         } else {
@@ -291,6 +299,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not pending"), "{err}");
+    }
+
+    /// A `run_command` approval / plugin permission prompt carries an
+    /// `approval_token`; no agent may answer it — not even the voice
+    /// session — or it could grant itself "Approve always".
+    #[tokio::test]
+    async fn answer_question_refuses_approval_prompts() {
+        let db = Db::in_memory().unwrap();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f".into(),
+            path: "/tmp".into(),
+            created_at: "now".into(),
+        })
+        .await
+        .unwrap();
+        seed(&db, "voice", Some("voice"), "u1").await;
+        let q = db
+            .append_event(
+                "voice",
+                "question",
+                serde_json::json!({
+                    "questions": [{"question": "Run rm?", "header": "Approval"}],
+                    "approval_token": "tok",
+                    "source": "plugin",
+                }),
+            )
+            .await
+            .unwrap();
+        let err = McpToolRegistry::new()
+            .handle_tool_call(
+                "answer_question",
+                serde_json::json!({"session_id": "voice", "question_id": q.id, "answers": {"0": "Approve always"}}),
+                &ctx(&db, "voice"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("only the user"), "{err}");
     }
 
     #[tokio::test]

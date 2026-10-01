@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::auth::mfa::{self, MfaError, PasswordVerified};
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::auth::password::{hash_password, verify_password};
+use crate::auth::rate_limit::RateLimiter;
 use crate::auth::session::issue_session_token;
 use crate::db::models::NewUser;
 use crate::state::AppState;
@@ -36,6 +37,55 @@ fn timing_decoy_hash() -> &'static str {
     DECOY.get_or_init(|| {
         hash_password("PECKBOARD_LOGIN_TIMING_DECOY").expect("hashing a constant must not fail")
     })
+}
+
+/// MFA code failures allowed per user per minute at the login code step.
+const MFA_CODES_PER_MINUTE: u32 = 5;
+
+/// Per-user throttle on MFA code guesses at login. Keyed by user, not IP,
+/// and NOT reset by a correct password — otherwise an attacker holding the
+/// password re-logs in for a fresh challenge (and a cleared IP limiter)
+/// every few guesses. Only a successful code clears it.
+fn mfa_code_limiter() -> &'static RateLimiter<String> {
+    static LIMITER: std::sync::OnceLock<RateLimiter<String>> = std::sync::OnceLock::new();
+    LIMITER.get_or_init(|| RateLimiter::new(MFA_CODES_PER_MINUTE))
+}
+
+/// Per-user throttle shared by every authenticated password re-check
+/// (change-password, MFA enrol / confirm / disable / regenerate), so a
+/// stolen bearer token isn't an unthrottled password / code oracle.
+async fn throttle_user(
+    state: &AppState,
+    user_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let delay = state
+        .password_change_limiter
+        .check(user_id.to_string())
+        .map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "too many attempts, try again later"})),
+            )
+        })?;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    Ok(())
+}
+
+/// [`mfa_authed_err`], recording a wrong password / code against the
+/// caller's [`throttle_user`] budget.
+fn throttled_mfa_err(
+    state: &AppState,
+    user_id: &str,
+    e: MfaError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if matches!(e, MfaError::InvalidPassword | MfaError::InvalidCode) {
+        state
+            .password_change_limiter
+            .record_failure(user_id.to_string());
+    }
+    mfa_authed_err(e)
 }
 
 #[derive(Deserialize)]
@@ -283,8 +333,9 @@ async fn login(
             let methods = mfa::available_methods(&state.db, proof.user_id())
                 .await
                 .map_err(mfa_http_err)?;
-            // Password was correct; don't count this toward the failure ramp.
-            state.login_limiter.reset(&ip);
+            // Deliberately no `login_limiter.reset` here: the login isn't
+            // complete until the code is verified (`mfa_verify` resets on
+            // success), so a known password can't wipe the code-guess ramp.
             Ok(LoginSuccess::Mfa(Json(MfaRequiredResponse {
                 mfa_required: true,
                 challenge: issued.raw_token,
@@ -349,7 +400,7 @@ async fn change_password(
 
     // Per-user rate limit: a stolen token can otherwise spam this and
     // lock out the legitimate user before they notice.
-    let _delay = state
+    let delay = state
         .password_change_limiter
         .check(auth_user.user_id.clone())
         .map_err(|_| {
@@ -358,6 +409,9 @@ async fn change_password(
                 Json(serde_json::json!({"error": "too many password changes, try again later"})),
             )
         })?;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
 
     let body: ChangePasswordRequest = {
         let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
@@ -982,6 +1036,26 @@ async fn mfa_verify(
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
+    // Per-user throttle on code guesses, keyed off the challenge's owner so
+    // a fresh challenge (re-entering a known password) doesn't reset it.
+    let challenge_user = state
+        .db
+        .get_mfa_challenge_by_token_hash(&crate::auth::token::hash_token(body.challenge.trim()))
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.user_id);
+    if let Some(uid) = &challenge_user {
+        let delay = mfa_code_limiter().check(uid.clone()).map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "too many MFA attempts, try again later"})),
+            )
+        })?;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    }
 
     match mfa::verify_challenge(
         &state.db,
@@ -1013,6 +1087,9 @@ async fn mfa_verify(
                 )
             })?;
             state.login_limiter.reset(&ip);
+            if let Some(uid) = &challenge_user {
+                mfa_code_limiter().reset(uid);
+            }
             let user = state.db.get_user(grant.user_id()).await.ok().flatten();
             let info = match user {
                 Some(u) => user_info(&state.db, &u).await,
@@ -1028,6 +1105,9 @@ async fn mfa_verify(
         Err(e) => {
             if matches!(e, MfaError::InvalidCode | MfaError::LockedOut) {
                 state.login_limiter.record_failure(ip);
+                if let Some(uid) = &challenge_user {
+                    mfa_code_limiter().record_failure(uid.clone());
+                }
             }
             Err(mfa_http_err(e))
         }
@@ -1053,9 +1133,10 @@ async fn mfa_totp_begin(
     Json(body): Json<PasswordBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let user = authed_user(&state, &auth).await?;
+    throttle_user(&state, &auth.user_id).await?;
     let mat = mfa::begin_totp(&state.db, &state.mfa_vault_key, &user, &body.password)
         .await
-        .map_err(mfa_authed_err)?;
+        .map_err(|e| throttled_mfa_err(&state, &auth.user_id, e))?;
     Ok(Json(serde_json::json!({
         "secret": mat.secret_b32,
         "otpauth_url": mat.otpauth_url,
@@ -1070,6 +1151,7 @@ async fn mfa_totp_confirm(
     Json(body): Json<TotpConfirmBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let user = authed_user(&state, &auth).await?;
+    throttle_user(&state, &auth.user_id).await?;
     let codes = mfa::confirm_totp(
         &state.db,
         &state.mfa_vault_key,
@@ -1078,7 +1160,7 @@ async fn mfa_totp_confirm(
         &body.code,
     )
     .await
-    .map_err(mfa_authed_err)?;
+    .map_err(|e| throttled_mfa_err(&state, &auth.user_id, e))?;
     Ok(Json(serde_json::json!({ "recovery_codes": codes })))
 }
 
@@ -1089,6 +1171,7 @@ async fn mfa_disable(
     Json(body): Json<MfaCodeBody>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
     let user = authed_user(&state, &auth).await?;
+    throttle_user(&state, &auth.user_id).await?;
     mfa::disable(
         &state.db,
         &state.mfa_vault_key,
@@ -1098,7 +1181,7 @@ async fn mfa_disable(
         &body.code,
     )
     .await
-    .map_err(mfa_authed_err)?;
+    .map_err(|e| throttled_mfa_err(&state, &auth.user_id, e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1109,6 +1192,7 @@ async fn mfa_regen_recovery(
     Json(body): Json<MfaCodeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let user = authed_user(&state, &auth).await?;
+    throttle_user(&state, &auth.user_id).await?;
     let codes = mfa::regenerate_recovery(
         &state.db,
         &state.mfa_vault_key,
@@ -1118,7 +1202,7 @@ async fn mfa_regen_recovery(
         &body.code,
     )
     .await
-    .map_err(mfa_authed_err)?;
+    .map_err(|e| throttled_mfa_err(&state, &auth.user_id, e))?;
     Ok(Json(serde_json::json!({ "recovery_codes": codes })))
 }
 
@@ -1153,4 +1237,52 @@ async fn admin_wipe_mfa(
         )
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::{seed_authenticated_user_with_suffix, test_state};
+    use crate::db::models::NewMfaChallenge;
+
+    /// A fresh challenge (what re-entering a known password mints) must not
+    /// reset the per-user MFA code budget.
+    #[tokio::test]
+    async fn mfa_code_guesses_are_throttled_per_user_across_challenges() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_authenticated_user_with_suffix(&state, "user", "mfa-throttle").await;
+        let uid = "u1-mfa-throttle".to_string();
+        let now = chrono::Utc::now().timestamp();
+        state
+            .db
+            .insert_mfa_challenge(NewMfaChallenge {
+                id: "c-fresh".into(),
+                user_id: uid.clone(),
+                token_hash: crate::auth::token::hash_token("fresh-token"),
+                created_at: now,
+                expires_at: now + 300,
+                consumed_at: None,
+                failures: 0,
+            })
+            .await
+            .unwrap();
+        // Budget spent on earlier challenges.
+        for _ in 0..MFA_CODES_PER_MINUTE {
+            mfa_code_limiter().record_failure(uid.clone());
+        }
+
+        let res = mfa_verify(
+            State(state),
+            ConnectInfo("10.9.8.7:1".parse().unwrap()),
+            HeaderMap::new(),
+            Json(MfaVerifyBody {
+                challenge: "fresh-token".into(),
+                method: "totp".into(),
+                code: "000000".into(),
+            }),
+        )
+        .await;
+        assert_eq!(res.err().unwrap().0, StatusCode::TOO_MANY_REQUESTS);
+    }
 }

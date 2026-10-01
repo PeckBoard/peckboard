@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { authedFetch } from '../store/auth'
 import { withPluginTheme } from '../util/appearance'
 import usePluginDataForward from '../hooks/usePluginDataForward'
+import { resolvePluginUiPath } from '../utils/pluginUiPath'
 
 interface Props {
   /** Human label for the page (shown in the header). */
@@ -24,8 +25,7 @@ interface Props {
   onBack: () => void
 }
 
-/** Path prefix a plugin page's data bridge is allowed to reach. */
-const PLUGIN_UI_PREFIX = '/api/plugin-ui/'
+/** Methods a plugin page's data bridge may use. */
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 
 /**
@@ -144,8 +144,8 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
         )
 
       const method = typeof msg.method === 'string' ? msg.method.toUpperCase() : 'GET'
-      const reqPath = typeof msg.path === 'string' ? msg.path : ''
-      if (!reqPath.startsWith(PLUGIN_UI_PREFIX) || reqPath.includes('..')) {
+      const reqPath = resolvePluginUiPath(plugin, msg.path)
+      if (!reqPath) {
         reply(403, JSON.stringify({ error: 'path not allowed' }))
         return
       }

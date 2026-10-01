@@ -108,6 +108,14 @@ pub async fn run_server(
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
     let ssh_vault_key = load_or_create_vault_key(&config.data_dir)?;
     let mfa_vault_key = load_or_create_mfa_vault_key(&config.data_dir)?;
+    // The server's own keys never reach an agent's env, but an agent that
+    // reads the files must not get them into transcripts either: mask their
+    // text encodings in command output.
+    crate::service::secret_mask::register_server_keys([
+        jwt_secret.as_slice(),
+        ssh_vault_key.as_slice(),
+        mfa_vault_key.as_slice(),
+    ]);
     // 60/min is plenty for a single-tenant LAN server; the previous 5
     // was so aggressive that even a normal user with a few tabs open
     // (each authenticating its own WS) could trip it. Rate-limiting

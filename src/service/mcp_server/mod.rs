@@ -317,6 +317,14 @@ pub async fn dispatch_tool_call(
 ) -> anyhow::Result<Value> {
     use crate::plugin::hooks::HookResult;
 
+    // A worker's subagent inherits the worker's tool gate. The callers'
+    // `ToolGate::from_session` sees only the child's own (non-worker) row.
+    if let Some(reason) =
+        gates::inherited_worker_block(&ctx.db, &ctx.session_id, tool_name, plugins).await
+    {
+        anyhow::bail!(reason);
+    }
+
     // ── Hook: mcp.tool.call.before ── (may rewrite args or cancel)
     let mut final_args = arguments;
     match plugins
@@ -454,6 +462,26 @@ async fn handle_upgrade_plugin(
     let repository = args.get("repository").and_then(|v| v.as_str());
 
     tracing::info!(session_id = %ctx.session_id, plugin_id = %id, "MCP tool: upgrade_plugin");
+
+    // Same bar as the HTTP `registry/install` route (admin-only router):
+    // installing code is host-wide, so only a session owned by an admin may
+    // do it. An unowned (legacy) session fails closed.
+    let owner = ctx
+        .db
+        .get_session(&ctx.session_id)
+        .await?
+        .and_then(|s| s.user_id);
+    let is_admin = match owner {
+        Some(uid) => ctx
+            .db
+            .get_user(&uid)
+            .await?
+            .is_some_and(|u| u.role == "admin"),
+        None => false,
+    };
+    if !is_admin {
+        anyhow::bail!("upgrade_plugin is admin only: this session's owner is not an admin");
+    }
 
     let info = plugins.install_from_registry(id, repository).await?;
     // The install replaces the loaded instance — reconcile any AI provider
@@ -746,6 +774,141 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("plugin_id"), "got: {err}");
+    }
+
+    fn test_ctx(db: &crate::db::Db, session_id: &str) -> ToolCallContext {
+        ToolCallContext {
+            session_id: session_id.into(),
+            project_id: None,
+            card_id: None,
+            db: Arc::new(db.clone()),
+            broadcaster: crate::ws::broadcaster::Broadcaster::new(),
+            provider_registry: None,
+            data_dir: None,
+            folder_id: "f1".into(),
+            device_registry: None,
+            background: None,
+        }
+    }
+
+    async fn seed_folder_session(
+        db: &crate::db::Db,
+        id: &str,
+        user: Option<&str>,
+        is_worker: bool,
+        parent: Option<&str>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        if db.get_folder("f1").await.unwrap().is_none() {
+            db.create_folder(crate::db::models::NewFolder {
+                id: "f1".into(),
+                name: "f".into(),
+                path: "/tmp/f1".into(),
+                created_at: now.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        db.create_session(crate::db::models::NewSession {
+            id: id.into(),
+            name: id.into(),
+            folder_id: "f1".into(),
+            created_at: now.clone(),
+            last_activity: now,
+            is_worker,
+            user_id: user.map(str::to_string),
+            parent_session_id: parent.map(str::to_string),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+
+    /// `upgrade_plugin` matches the HTTP install route: admin-owned
+    /// sessions only, and never a bundled first-party id.
+    #[tokio::test]
+    async fn upgrade_plugin_requires_admin_and_refuses_first_party() {
+        let registry = McpToolRegistry::new();
+        let db = crate::db::Db::in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = crate::plugin::manager::PluginManager::new(tmp.path(), db.clone());
+        for (id, role) in [("admin", "admin"), ("bob", "user")] {
+            db.create_user(crate::db::models::NewUser {
+                id: id.into(),
+                username: id.into(),
+                email: None,
+                password_hash: "x".into(),
+                role: role.into(),
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            })
+            .await
+            .unwrap();
+        }
+        seed_folder_session(&db, "s-admin", Some("admin"), false, None).await;
+        seed_folder_session(&db, "s-bob", Some("bob"), false, None).await;
+
+        let call = |sid: &'static str, id: &'static str| {
+            let (plugins, registry, ctx) = (&plugins, &registry, test_ctx(&db, sid));
+            async move {
+                dispatch_tool_call(
+                    plugins,
+                    registry,
+                    "upgrade_plugin",
+                    serde_json::json!({ "plugin_id": id }),
+                    &ctx,
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+            }
+        };
+        let err = call("s-bob", "some-plugin").await;
+        assert!(err.contains("admin only"), "got: {err}");
+        let err = call("s-admin", "session-control").await;
+        assert!(err.contains("bundled first-party"), "got: {err}");
+    }
+
+    /// A worker's subagent row is not a worker, but it must not escape the
+    /// worker gate; a chat session's subagent is unaffected.
+    #[tokio::test]
+    async fn worker_subagent_inherits_worker_gate() {
+        let registry = McpToolRegistry::new();
+        let db = crate::db::Db::in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = crate::plugin::manager::PluginManager::new(tmp.path(), db.clone());
+        seed_folder_session(&db, "worker", None, true, None).await;
+        seed_folder_session(&db, "wkid", None, false, Some("worker")).await;
+        seed_folder_session(&db, "chat", None, false, None).await;
+        seed_folder_session(&db, "ckid", None, false, Some("chat")).await;
+
+        for tool in [
+            "delete_project",
+            "update_project",
+            "answer_question",
+            "upgrade_plugin",
+        ] {
+            let err = dispatch_tool_call(
+                &plugins,
+                &registry,
+                tool,
+                serde_json::json!({}),
+                &test_ctx(&db, "wkid"),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("worker sessions"), "{tool}: {err}");
+        }
+        let err = dispatch_tool_call(
+            &plugins,
+            &registry,
+            "delete_project",
+            serde_json::json!({}),
+            &test_ctx(&db, "ckid"),
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.to_string().contains("worker sessions"), "{err}");
     }
 
     /// write_report / read_report must use the configured data dir from

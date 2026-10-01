@@ -1279,6 +1279,15 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, caller: &TrustedCaller) 
     {
         return error_json(e);
     }
+    // `voice` is the instance's single voice-assistant role: the manager runs
+    // it with permission bypass and the MCP gate grants it a privileged tool
+    // set. Only core's voice gate may mint one — never a plugin.
+    if req.expert_kind.as_deref().is_some_and(|k| {
+        k.trim()
+            .eq_ignore_ascii_case(crate::service::voice_relay::VOICE_EXPERT_KIND)
+    }) {
+        return error_json("expert_kind \"voice\" is reserved");
+    }
     // Cap the optional system-prompt body so a runaway prompt can't bloat a
     // session row (mirrors set_session_system_prompt's MAX_LEN).
     if let Some(ref sp) = req.system_prompt
@@ -2483,9 +2492,10 @@ struct HttpFetchRequest {
 }
 
 /// Whether `ip` is in a range a public-web fetch must never reach — loopback,
-/// private (RFC 1918 / ULA), link-local, CGNAT, unspecified, or otherwise
-/// non-globally-routable. IPv4-mapped IPv6 is unwrapped first so `::ffff:10.x`
-/// is judged as the v4 address it really is.
+/// private (RFC 1918 / ULA), link-local, CGNAT, multicast, unspecified, or
+/// otherwise non-globally-routable. IPv6 forms that embed an IPv4 address
+/// (mapped, compatible, NAT64, 6to4) are judged by the v4 address they carry,
+/// so `::ffff:10.x` / `64:ff9b::a9fe:a9fe` can't sneak past the v4 list.
 fn is_blocked_fetch_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -2496,20 +2506,40 @@ fn is_blocked_fetch_ip(ip: &IpAddr) -> bool {
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || v4.is_unspecified()
+                || v4.is_multicast() // 224.0.0.0/4
                 || o[0] == 0 // "this network" 0.0.0.0/8
                 || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64.0.0/10
-                || o[0] >= 240 // reserved / multicast 240.0.0.0/4+
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF 192.0.0.0/24
+                || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking 198.18.0.0/15
+                || o[0] >= 240 // reserved 240.0.0.0/4 + broadcast
         }
         IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_blocked_fetch_ip(&IpAddr::V4(mapped));
+            let s = v6.segments();
+            let embedded = |hi: u16, lo: u16| {
+                std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+            };
+            // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible; also covers
+            // :: and ::1, which land in 0.0.0.0/8).
+            if let Some(v4) = v6.to_ipv4() {
+                return is_blocked_fetch_ip(&IpAddr::V4(v4));
             }
-            let seg0 = v6.segments()[0];
+            // NAT64 well-known prefix 64:ff9b::/96.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_blocked_fetch_ip(&IpAddr::V4(embedded(s[6], s[7])));
+            }
+            // 6to4 2002::/16 carries the v4 address in bits 16..48.
+            if s[0] == 0x2002 {
+                return is_blocked_fetch_ip(&IpAddr::V4(embedded(s[1], s[2])));
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (seg0 & 0xfe00) == 0xfc00 // unique-local fc00::/7
-                || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (s[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
                 || v6.is_multicast()
+                || (s[0] == 0x64 && s[1] == 0xff9b) // local-use NAT64 64:ff9b:1::/48
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo 2001::/32 (obfuscated v4)
+                || (s[0] == 0x2001 && s[1] == 0xdb8) // documentation 2001:db8::/32
+                || s[..4] == [0x100, 0, 0, 0] // discard-only 100::/64
         }
     }
 }
@@ -5695,6 +5725,13 @@ mod tests {
         assert!(v2.get("error").is_none(), "create flagged: {out2}");
         assert_eq!(v2["session"]["is_expert"], true);
         assert_eq!(v2["session"]["expert_kind"], "knowledge");
+        // `voice` is core-only: it would run the session with bypass.
+        let voice = create_session_impl(
+            &db,
+            r#"{"name":"sneaky","is_expert":true,"expert_kind":" Voice "}"#,
+            &caller,
+        );
+        assert!(voice.contains("reserved"), "voice kind: {voice}");
         // Before the plugin marks it, it doesn't "own" it → not found.
         let pre = get_session_impl(&db, pid, &format!(r#"{{"session_id":"{sid}"}}"#), &caller);
         assert!(pre.contains("not found"), "unowned read: {pre}");
@@ -6115,6 +6152,14 @@ mod tests {
             IpAddr::V6("fc00::1".parse().unwrap()), // unique-local
             IpAddr::V6("fe80::1".parse().unwrap()), // link-local
             IpAddr::V6("::ffff:10.0.0.1".parse().unwrap()), // v4-mapped private
+            IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), // multicast
+            IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)), // benchmarking
+            IpAddr::V4(Ipv4Addr::new(192, 0, 0, 8)), // IETF protocol
+            IpAddr::V6("::127.0.0.1".parse().unwrap()), // v4-compatible
+            IpAddr::V6("64:ff9b::a9fe:a9fe".parse().unwrap()), // NAT64 metadata
+            IpAddr::V6("2002:0a00:0001::1".parse().unwrap()), // 6to4 of 10.0.0.1
+            IpAddr::V6("2001::1".parse().unwrap()), // Teredo
+            IpAddr::V6("ff02::1".parse().unwrap()), // multicast
         ];
         for ip in blocked {
             assert!(is_blocked_fetch_ip(&ip), "should block {ip}");
@@ -6123,6 +6168,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             IpAddr::V6("2606:4700:4700::1111".parse().unwrap()),
+            IpAddr::V6("64:ff9b::808:808".parse().unwrap()), // NAT64 of 8.8.8.8
+            IpAddr::V6("2002:0808:0808::1".parse().unwrap()), // 6to4 of 8.8.8.8
         ];
         for ip in allowed {
             assert!(!is_blocked_fetch_ip(&ip), "should allow {ip}");

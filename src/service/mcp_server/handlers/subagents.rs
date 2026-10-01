@@ -43,6 +43,8 @@ impl McpToolRegistry {
                 "subagents cannot spawn subagents; return your findings and let the parent fan out"
             );
         }
+        // Cheap early refusal before the catalog lookup below; the
+        // authoritative check is atomic with the insert (`create_capped`).
         let limits = crate::subagent::load_limits(&ctx.db).await;
         let active = ctx.db.count_active_subagents(&ctx.session_id).await?;
         if active >= limits.max_concurrent {
@@ -92,15 +94,21 @@ impl McpToolRegistry {
             None => (None, None),
         };
 
+        // Cap check + insert are one atomic step (`create_capped`), so
+        // concurrent spawns can't overshoot `max_concurrent`.
         let now = chrono::Utc::now().to_rfc3339();
-        let child = ctx
-            .db
-            .create_session(crate::db::models::NewSession {
+        let child = crate::subagent::create_capped(
+            &ctx.db,
+            crate::db::models::NewSession {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: format!("{}{name}", crate::subagent::SUBAGENT_NAME_PREFIX),
                 folder_id: caller.folder_id.clone(),
                 model,
                 effort,
+                // Not a worker row (the completion listener routes worker
+                // rows to `handle_worker_done`, never the subagent report);
+                // a worker parent's restrictions are inherited at dispatch
+                // instead — see `gates::inherited_worker_block`.
                 is_worker: false,
                 project_id: caller.project_id.clone(),
                 created_at: now.clone(),
@@ -112,9 +120,10 @@ impl McpToolRegistry {
                 system_prompt_name,
                 parent_session_id: Some(ctx.session_id.clone()),
                 ..Default::default()
-            })
-            .await?;
-
+            },
+            limits.max_concurrent,
+        )
+        .await?;
         // Persist the first turn; the route's marker handler drives the agent.
         let full_prompt = crate::subagent::build_subagent_prompt(name, &ctx.session_id, prompt);
         ctx.db

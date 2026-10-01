@@ -31,6 +31,9 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     // rather than dynamic inline `style` for almost everything.
     // `media-src blob:`: iOS plays Kokoro speech through an <audio> element
     // fed a blob: URL of the fetched WAV (see web/src/voice/kokoro.ts).
+    // `base-uri 'none'` stops an injected `<base>` from re-pointing relative
+    // script/asset URLs; `form-action 'self'` stops an injected `<form>` from
+    // posting to another origin (neither falls back to `default-src`).
     headers.insert(
         "Content-Security-Policy",
         HeaderValue::from_static(
@@ -41,7 +44,9 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
              media-src 'self' blob:; \
              connect-src 'self'; \
              frame-ancestors 'none'; \
-             object-src 'none'",
+             object-src 'none'; \
+             base-uri 'none'; \
+             form-action 'self'",
         ),
     );
 
@@ -261,6 +266,8 @@ mod tests {
         // Kokoro speech on iOS plays its WAV from a blob: URL.
         assert!(csp.contains("media-src 'self' blob:"));
         assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+        assert!(csp.contains("form-action 'self'"));
         assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff");
         assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");
         assert_eq!(

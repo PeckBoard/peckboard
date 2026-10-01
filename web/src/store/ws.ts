@@ -43,6 +43,11 @@ interface WsState {
   subscribe: (sessionId: string) => void
   unsubscribe: (sessionId: string) => void
   resume: (sessionId: string, lastSeq: number) => void
+  /** Replay what was broadcast after an HTTP events snapshot (`snapshotSeq`
+   *  = its highest seq, 0 if empty). `subscribe` has no replay, so events
+   *  sent between the snapshot and the server registering the subscription
+   *  would otherwise be lost — e.g. the first chunks of a streaming reply. */
+  catchUp: (sessionId: string, snapshotSeq: number) => void
   addEventListener: (listener: EventListener) => void
   removeEventListener: (listener: EventListener) => void
 }
@@ -74,6 +79,13 @@ function sendJson(data: unknown) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(data))
   }
+}
+
+/** Highest seq of the events the chat already holds for `sessionId` (its
+ *  HTTP snapshot plus live events), if any. */
+function heldSeq(sessionId: string): number | undefined {
+  const held = useSessionsStore.getState().eventsBySession[sessionId] ?? []
+  return held.length > 0 ? held.reduce((m, e) => (e.seq > m ? e.seq : m), held[0].seq) : undefined
 }
 
 export const useWsStore = create<WsState>((set, get) => ({
@@ -122,7 +134,10 @@ export const useWsStore = create<WsState>((set, get) => ({
         const { subscribedSessions, lastSeqBySession } = get()
         for (const sid of subscribedSessions) {
           sendJson({ type: 'subscribe', session_id: sid })
-          const lastSeq = lastSeqBySession[sid]
+          // No live seq yet (first connect): catch up from the snapshot the
+          // chat already holds, so nothing broadcast before this subscribe
+          // registers is lost.
+          const lastSeq = lastSeqBySession[sid] ?? heldSeq(sid)
           if (lastSeq !== undefined) {
             sendJson({ type: 'resume', session_id: sid, last_seq: lastSeq })
           }
@@ -434,6 +449,10 @@ export const useWsStore = create<WsState>((set, get) => ({
     if (lastSeq !== undefined) {
       sendJson({ type: 'resume', session_id: sessionId, last_seq: lastSeq })
     }
+  },
+  catchUp: (sessionId: string, snapshotSeq: number) => {
+    if (!get().subscribedSessions.has(sessionId)) return
+    sendJson({ type: 'resume', session_id: sessionId, last_seq: snapshotSeq })
   },
 
   unsubscribe: (sessionId: string) => {

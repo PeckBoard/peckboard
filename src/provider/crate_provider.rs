@@ -352,7 +352,9 @@ impl AgentProvider for CrateAgentProvider {
     }
 
     async fn is_running(&self, session_id: &str) -> bool {
-        self.runtime.is_active(session_id)
+        // Owner-scoped: the runtime is shared by every provider, so a bare
+        // `is_active` would make all of them claim this session's run.
+        self.runtime.is_active_for(&self.plugin_id, session_id)
     }
 
     async fn wait_for_termination(&self, session_id: &str) {

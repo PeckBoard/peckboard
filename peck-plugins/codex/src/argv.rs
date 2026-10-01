@@ -38,7 +38,8 @@ pub fn build_cli_args(
         args.push("-c".into());
         args.push(format!("model_reasoning_effort={effort}"));
     }
-    if let Some(cid) = conversation_id.filter(|c| !c.is_empty()) {
+    let conversation_id = conversation_id.filter(|c| is_valid_conversation_id(c));
+    if let Some(cid) = conversation_id {
         args.push("resume".into());
         args.push(cid.to_string());
     }
@@ -52,8 +53,21 @@ pub fn build_cli_args(
         }
         _ => prompt.to_string(),
     };
+    // `--` so a prompt starting with `-` is never parsed as a flag.
+    args.push("--".into());
     args.push(prompt);
     args
+}
+
+/// Codex thread ids are UUIDs; accept that alphabet only (plus `_`), so a
+/// stored id can never smuggle a flag or extra argument into argv.
+fn is_valid_conversation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('-')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[cfg(test)]
@@ -94,5 +108,22 @@ mod tests {
         let resume_at = args.iter().position(|a| a == "resume").unwrap();
         let image_at = args.iter().position(|a| a == "--image").unwrap();
         assert!(resume_at < image_at);
+    }
+
+    #[test]
+    fn prompt_follows_double_dash_and_bad_thread_ids_are_dropped() {
+        let args = build_cli_args("auto", "--help", Some("--config=x"), None, "", &[], &[]);
+        assert!(!args.iter().any(|a| a == "resume"));
+        assert_eq!(&args[args.len() - 2..], ["--", "--help"]);
+        let args = build_cli_args(
+            "auto",
+            "hi",
+            Some("019a1b2c-3d4e-7f00-8a9b-0c1d2e3f4a5b"),
+            None,
+            "",
+            &[],
+            &[],
+        );
+        assert!(args.iter().any(|a| a == "resume"));
     }
 }

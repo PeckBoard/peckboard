@@ -132,6 +132,13 @@ pub(super) async fn list_events(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(events_json))
 }
 
+/// Event kinds a non-admin may append through the REST API. The web client
+/// only ever posts `question-resolved`; everything else (agent output,
+/// lifecycle, tool calls) is written by the server itself, so accepting it
+/// from a user would let them forge what the agent said or did. Admins keep
+/// raw append for tooling and e2e fixtures.
+const USER_POSTABLE_EVENT_KINDS: &[&str] = &["question-resolved"];
+
 /// POST /api/sessions/:id/events -- append an event
 pub(super) async fn append_event(
     State(state): State<Arc<AppState>>,
@@ -139,6 +146,14 @@ pub(super) async fn append_event(
     Path(id): Path<String>,
     Json(body): Json<AppendEventRequest>,
 ) -> impl IntoResponse {
+    if !user.is_admin() && !USER_POSTABLE_EVENT_KINDS.contains(&body.kind.as_str()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                serde_json::json!({ "error": format!("event kind '{}' cannot be posted", body.kind) }),
+            ),
+        ));
+    }
     tracing::info!(session_id = %id, kind = %body.kind, "Appending event");
     // question-resolved routes through the shared resolver (event append,
     // broadcast, expert feed, conversation resume) so answering from the API
@@ -255,4 +270,60 @@ pub(super) async fn get_session_todos(
     })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "todos": todos })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::{seed_session, test_state};
+
+    fn user(role: &str) -> AuthUser {
+        AuthUser {
+            user_id: "u1".into(),
+            role: role.into(),
+            session_id: "as1".into(),
+        }
+    }
+
+    async fn post(state: &Arc<AppState>, role: &str, kind: &str) -> StatusCode {
+        append_event(
+            State(state.clone()),
+            Extension(user(role)),
+            Path("s1".into()),
+            Json(AppendEventRequest {
+                kind: kind.into(),
+                data: serde_json::json!({ "text": "forged" }),
+            }),
+        )
+        .await
+        .into_response()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn non_admin_cannot_forge_agent_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        seed_session(&state, "s1", Some("u1"), None).await;
+        for kind in ["agent-text", "agent-start", "agent-end", "agent-tool-use"] {
+            assert_eq!(
+                post(&state, "member", kind).await,
+                StatusCode::FORBIDDEN,
+                "{kind}"
+            );
+        }
+        assert!(
+            state
+                .db
+                .list_events_by_session("s1", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Admins keep raw append (e2e fixtures inject transcripts this way).
+        assert_eq!(
+            post(&state, "admin", "agent-text").await,
+            StatusCode::CREATED
+        );
+    }
 }

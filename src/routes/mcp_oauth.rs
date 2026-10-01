@@ -28,9 +28,7 @@ use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
-        .route("/api/mcp-oauth/start", post(start_login))
         .route("/api/mcp-oauth/tokens", get(list_tokens))
-        .route("/api/mcp-oauth/claim", post(claim_login))
         .merge(admin_router())
         .route_layer(middleware::from_fn_with_state(state, require_auth));
     // Public on purpose: the provider's redirect arrives without our JWT.
@@ -40,15 +38,19 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     public.merge(protected)
 }
 
-/// Disconnecting revokes a shared MCP server's stored OAuth tokens (no
-/// `user_id` on the row), so it's admin-only — same reasoning as
-/// `routes/settings.rs`.
+/// MCP server definitions and their stored OAuth tokens are shared (no
+/// `user_id` on the row), so signing a server in (start + broker claim) or
+/// disconnecting it is admin-only — otherwise any user could bind a shared
+/// server to their own account, or revoke it, for everyone. Same reasoning
+/// as `routes/settings.rs`.
 ///
 /// Layers run outer-to-inner on the request, so `require_admin` is appended
 /// here and `require_auth` in [`router`] afterwards, which puts `AuthUser`
 /// into the extensions before this middleware reads it.
 fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/mcp-oauth/start", post(start_login))
+        .route("/api/mcp-oauth/claim", post(claim_login))
         .route("/api/mcp-oauth/tokens/{server_id}", delete(disconnect))
         .route_layer(middleware::from_fn(require_admin))
 }
@@ -83,6 +85,21 @@ fn bad_request(msg: impl Into<String>) -> Response {
         Json(serde_json::json!({ "error": msg.into() })),
     )
         .into_response()
+}
+
+/// A redirect broker briefly holds a live authorization code, so it must be
+/// `https://`, or plain `http://` only to an exact loopback host — the URL is
+/// parsed, so `http://localhost.evil.com` / `http://localhost@evil.com` fail.
+fn broker_url_ok(broker: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(broker) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => url.host_str().is_some_and(|h| !h.is_empty()),
+        // `host_str` is normalised (lowercased domain, bracketed IPv6).
+        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -122,7 +139,7 @@ async fn start_login(
         .map(|b| b.trim_end_matches('/').to_string());
     if let Some(b) = &broker {
         // The broker holds a live authorization code, briefly — no cleartext.
-        if !(b.starts_with("https://") || b.starts_with("http://localhost")) {
+        if !broker_url_ok(b) {
             return bad_request("the callback broker must be an https:// URL");
         }
     }
@@ -440,5 +457,27 @@ mod tests {
     #[test]
     fn esc_neutralises_html() {
         assert_eq!(esc("<b>&\"'"), "&lt;b&gt;&amp;&quot;&#39;");
+    }
+
+    #[test]
+    fn broker_must_be_https_or_exact_loopback() {
+        for ok in [
+            "https://broker.example",
+            "http://localhost:8787",
+            "http://127.0.0.1:9000",
+            "http://[::1]:9000",
+        ] {
+            assert!(broker_url_ok(ok), "{ok}");
+        }
+        for bad in [
+            "http://localhost.evil.com",
+            "http://localhost@evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://evil.com",
+            "ftp://localhost",
+            "not a url",
+        ] {
+            assert!(!broker_url_ok(bad), "{bad}");
+        }
     }
 }

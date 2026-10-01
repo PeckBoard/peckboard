@@ -3,6 +3,7 @@ import type { Event, Session } from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
 import { appendEventOrdered } from './eventOrder'
+import { useWsStore } from './ws'
 
 const DRAFTS_KEY = 'peckboard_drafts'
 
@@ -415,6 +416,12 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           },
         }
       })
+      // Events broadcast after this snapshot but before the WS subscription
+      // registered reach neither — replay them.
+      useWsStore.getState().catchUp(
+        sessionId,
+        events.reduce((m, e) => (e.seq > m ? e.seq : m), 0),
+      )
     } catch {
       set((s) => ({
         loadingEventsBySession: { ...s.loadingEventsBySession, [sessionId]: false },

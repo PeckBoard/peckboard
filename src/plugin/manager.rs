@@ -2564,6 +2564,15 @@ impl PluginManager {
     ) -> anyhow::Result<WasmPluginInfo> {
         use super::registry;
 
+        // First-party ids are compiled in (or embedded WASM) and owned by
+        // the binary: a registry entry under the same id must never replace
+        // them. The HTTP route only ever activates the bundled code for
+        // these ids; this path has no such activation, so it refuses.
+        if super::crates::is_crate_plugin_id(id) || FIRST_PARTY_PLUGIN_IDS.contains(&id) {
+            anyhow::bail!(
+                "'{id}' is a bundled first-party plugin and cannot be upgraded from a registry"
+            );
+        }
         let db = self
             .db
             .as_ref()

@@ -225,6 +225,32 @@ impl ToolGate {
     }
 }
 
+/// A subagent spawned by a worker keeps the worker's project-scoped token,
+/// but its own row is not a worker (see `handlers::subagents`), so
+/// [`ToolGate::from_session`] alone would hand it the admin tools the
+/// worker itself is denied. `Some(reason)` when `session_id` is a subagent
+/// whose parent is a worker and the worker gate blocks `name`. A parent row
+/// that can't be read fails closed (treated as a worker).
+pub async fn inherited_worker_block(
+    db: &crate::db::Db,
+    session_id: &str,
+    name: &str,
+    plugins: &crate::plugin::manager::PluginManager,
+) -> Option<String> {
+    let session = db.get_session(session_id).await.ok().flatten()?;
+    let parent_id = session.parent_session_id.as_deref()?;
+    let parent_is_worker = match db.get_session(parent_id).await {
+        Ok(Some(parent)) => parent.is_worker,
+        _ => true,
+    };
+    if !parent_is_worker {
+        return None;
+    }
+    let mut gate = ToolGate::from_session(&session).with_plugin_tools(&plugins.mcp_tools().await);
+    gate.is_worker = true;
+    gate.blocked(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

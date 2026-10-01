@@ -161,7 +161,7 @@ pub async fn write_snapshot(db: &Db, data_dir: &Path, out_path: &Path) -> anyhow
         ));
 
         let result = (|| -> anyhow::Result<()> {
-            let file = std::fs::File::create(&tmp_out)?;
+            let file = create_private_file(&tmp_out)?;
             build_tar_gz(&data_dir, &tmp_db, app_version, now_unix, file)?;
             std::fs::rename(&tmp_out, &out_path)?;
             Ok(())
@@ -204,7 +204,7 @@ async fn run_scheduled_backup(
     data_dir: &Path,
     settings: &BackupSettings,
 ) -> anyhow::Result<()> {
-    std::fs::create_dir_all(&settings.dir)
+    create_private_dir_all(&settings.dir)
         .with_context(|| format!("cannot create backup dir {}", settings.dir.display()))?;
     let now = unix_now();
     let out_path = settings.dir.join(format!("peckboard-backup-{now}.tar.gz"));
@@ -249,7 +249,8 @@ pub fn prune_old_backups(dir: &Path, keep: usize) -> anyhow::Result<()> {
 ///
 /// Validates gzip magic and `manifest.json` presence. Refuses if
 /// `peckboard.db` already exists unless `force` is `true`.
-/// Rejects path-traversal entries (`..`, absolute paths).
+/// Rejects path-traversal entries (`..`, absolute paths) and any path
+/// [`build_tar_gz`] would not have written (see [`is_backup_path`]).
 pub fn restore_from(archive_path: &Path, data_dir: &Path, force: bool) -> anyhow::Result<()> {
     // 1. Check gzip magic bytes
     let mut f = std::fs::File::open(archive_path)
@@ -262,16 +263,20 @@ pub fn restore_from(archive_path: &Path, data_dir: &Path, force: bool) -> anyhow
     }
     drop(f);
 
-    // 2. Verify manifest.json is present
+    // 2. Verify manifest.json is present and every entry is a path the
+    // backup itself writes — checked up front so a bad archive is refused
+    // before anything is unpacked.
     {
         let gz = flate2::read::GzDecoder::new(std::fs::File::open(archive_path)?);
         let mut archive = tar::Archive::new(gz);
         let mut found = false;
         for entry in archive.entries()? {
             let entry = entry?;
-            if entry.path()?.to_str() == Some("manifest.json") {
+            let path = entry.path()?;
+            if path.to_str() == Some("manifest.json") {
                 found = true;
-                break;
+            } else if !is_backup_path(&path) {
+                bail!("archive contains unexpected path: {}", path.display());
             }
         }
         if !found {
@@ -325,6 +330,9 @@ pub fn restore_from(archive_path: &Path, data_dir: &Path, force: bool) -> anyhow
         {
             bail!("archive contains unsafe path: {}", path.display());
         }
+        if !is_backup_path(&path) {
+            bail!("archive contains unexpected path: {}", path.display());
+        }
         // Only regular files and directories. A symlink entry could point
         // outside the data dir and redirect later entries through it; our
         // own snapshots never contain one (build_tar_gz follows symlinks).
@@ -359,4 +367,127 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// True for a relative path [`build_tar_gz`] itself writes: the DB snapshot,
+/// `config.json`, `vapid_keys.json`, anything under `reports/` or
+/// `attachments/`, and top-level `plugins/*.wasm`. Restore accepts nothing
+/// else, so a crafted archive cannot drop e.g. `certs/` or a `plugins/` dir
+/// tree into the data dir.
+fn is_backup_path(path: &Path) -> bool {
+    use std::path::Component;
+    let mut parts = Vec::new();
+    for c in path.components() {
+        match c {
+            Component::Normal(s) => match s.to_str() {
+                Some(s) => parts.push(s),
+                None => return false,
+            },
+            Component::CurDir => {}
+            _ => return false,
+        }
+    }
+    match parts.as_slice() {
+        ["peckboard-backup.db" | "config.json" | "vapid_keys.json"] => true,
+        ["reports" | "attachments", ..] => true,
+        ["plugins"] => true,
+        ["plugins", name] => name.ends_with(".wasm"),
+        _ => false,
+    }
+}
+
+/// Create `dir` (and missing parents) owner-only (0700) on unix. An existing
+/// directory's mode is left alone — it may be a user-chosen shared location.
+fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Create (truncate) `path` owner-only (0600) on unix — a backup holds the
+/// whole DB plus `vapid_keys.json` and must not be world-readable.
+fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_whitelist_matches_what_backup_writes() {
+        for ok in [
+            "peckboard-backup.db",
+            "config.json",
+            "vapid_keys.json",
+            "reports",
+            "reports/a/b.md",
+            "attachments/x.png",
+            "plugins/foo.wasm",
+        ] {
+            assert!(is_backup_path(Path::new(ok)), "{ok}");
+        }
+        for bad in [
+            "peckboard.db",
+            "certs/key.pem",
+            "plugins/foo.so",
+            "plugins/sub/foo.wasm",
+            "worker-mcp/x",
+            "../config.json",
+            "/etc/passwd",
+        ] {
+            assert!(!is_backup_path(Path::new(bad)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn restore_rejects_unlisted_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("b.tar.gz");
+        {
+            let enc = GzEncoder::new(
+                std::fs::File::create(&archive).unwrap(),
+                Compression::default(),
+            );
+            let mut tar = tar::Builder::new(enc);
+            for (name, body) in [("manifest.json", &b"{}"[..]), ("certs/key.pem", b"x")] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(body.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                tar.append_data(&mut h, name, body).unwrap();
+            }
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let data = tmp.path().join("data");
+        let err = restore_from(&archive, &data, false).unwrap_err();
+        assert!(err.to_string().contains("unexpected path"), "{err}");
+        assert!(!data.join("certs/key.pem").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_file_and_dir_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a/b");
+        create_private_dir_all(&dir).unwrap();
+        let f = dir.join("x.tar.gz");
+        create_private_file(&f).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&f), 0o600);
+    }
 }

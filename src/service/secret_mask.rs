@@ -344,6 +344,9 @@ pub fn command_env_blocking(
             secrets.push(value);
         }
     }
+    if let Some(forms) = SERVER_KEY_FORMS.get() {
+        secrets.extend(forms.iter().cloned());
+    }
     (inject.into_iter().collect(), SecretMasker::new(secrets))
 }
 
@@ -352,6 +355,33 @@ pub fn command_env_blocking(
 /// `ssh_run` output). Blocking — call from a blocking thread only.
 pub fn masker_blocking(db: &crate::db::Db) -> SecretMasker {
     command_env_blocking(db, None).1
+}
+
+/// Text encodings of the server's own keys (`jwt_secret`, vault keys),
+/// registered once at startup. Mask-only: these are never injected into any
+/// command env — they exist so an agent that reads a key file can't get it
+/// into its transcript in a common encoding.
+static SERVER_KEY_FORMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Register the server's raw key bytes for masking (hex, upper/lower via the
+/// case-insensitive scan, and standard / url-safe base64 with and without
+/// padding). First call wins.
+pub fn register_server_keys<'a>(keys: impl IntoIterator<Item = &'a [u8]>) {
+    let forms = keys.into_iter().flat_map(key_text_forms).collect();
+    let _ = SERVER_KEY_FORMS.set(forms);
+}
+
+fn key_text_forms(key: &[u8]) -> Vec<String> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    vec![
+        hex,
+        STANDARD.encode(key),
+        STANDARD_NO_PAD.encode(key),
+        URL_SAFE.encode(key),
+        URL_SAFE_NO_PAD.encode(key),
+    ]
 }
 
 #[cfg(test)]
@@ -524,5 +554,21 @@ mod tests {
         let mut v = serde_json::json!({"secret123": "fine"});
         mask_json_strings(&mut v, &m);
         assert_eq!(v["secret123"], "fine");
+    }
+
+    #[test]
+    fn server_key_encodings_are_masked() {
+        let key: Vec<u8> = (0u8..32)
+            .map(|i| i.wrapping_mul(37).wrapping_add(11))
+            .collect();
+        let forms = key_text_forms(&key);
+        let m = SecretMasker::new(forms.clone());
+        for f in &forms {
+            let line = format!("leak: {f}\n");
+            let out = m.mask(&line);
+            assert!(!out.contains(f.as_str()), "{f} leaked: {out}");
+        }
+        let upper = forms[0].to_ascii_uppercase();
+        assert!(m.mask(&upper).contains(MASK), "uppercase hex masked");
     }
 }

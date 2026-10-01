@@ -430,7 +430,9 @@ if (!pkgDir) {
       console.error(`[peckboard-sidecar] listen failed: ${err}`);
       process.exit(1);
     });
-    srv.listen(PORT, () => {
+    // Loopback only: the sidecar has no auth and opens any URL (file://
+    // included), so it must never be reachable from the network.
+    srv.listen(PORT, "127.0.0.1", () => {
       console.log(`[peckboard-sidecar] capturing on http://127.0.0.1:${PORT}`);
     });
   } catch (err) {
