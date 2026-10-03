@@ -21,7 +21,6 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::Notify;
 
 use crate::provider::agent::emit_event;
@@ -222,7 +221,16 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
         cli_args.join(" ")
     );
 
-    let mut cmd = Command::new(cli_path);
+    // Agent sandbox (see `crate::sandbox`): the working dir is writable,
+    // the data dir is off limits. The constructor also defaults SIGINT/
+    // SIGQUIT in the child even when the server inherited them ignored —
+    // otherwise [`graceful_cancel`]'s SIGINT is silently dropped and every
+    // interrupt degrades to the SIGKILL fallback, losing the CLI's final
+    // frame. See [`reset_child_signals`].
+    let mut cmd = crate::sandbox::SandboxedTokioCommand::new(
+        cli_path,
+        &crate::sandbox::SpawnScope::folder(working_dir),
+    );
     cmd.args(cli_args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
@@ -232,12 +240,7 @@ pub async fn run_turn(spec: TurnSpec<'_>, stream: &mut dyn TurnStream) -> TurnRe
     for (key, value) in env {
         cmd.env(key, value);
     }
-
-    // Default SIGINT/SIGQUIT in the child even when the server inherited them
-    // ignored — otherwise [`graceful_cancel`]'s SIGINT is silently dropped
-    // and every interrupt degrades to the SIGKILL fallback, losing the
-    // CLI's final frame. See [`reset_child_signals`].
-    reset_child_signals(&mut cmd);
+    let mut cmd = cmd.into_inner();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

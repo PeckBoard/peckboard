@@ -10,8 +10,8 @@ impl McpToolRegistry {
     /// prompt (`service::voice_prompt`). `get` returns it; `update` replaces
     /// it; `append` adds a line. Changes apply from the next turn.
     ///
-    /// `update` / `append` need `confirmed: true`, enforced (and stripped)
-    /// before dispatch by `voice_relay::require_voice_confirmation`.
+    /// `update` / `append` are parked for the user's confirmation by the
+    /// dispatch gate (`service::voice_actions`) before this ever runs.
     /// Hard-enforced to voice sessions here as well as in `ToolGate`.
     pub(crate) async fn handle_voice_prompt(
         &self,
@@ -87,8 +87,9 @@ mod tests {
     use crate::db::Db;
     use crate::db::models::{NewFolder, NewSession};
     use crate::service::mcp_server::{McpToolRegistry, ToolCallContext};
+    use crate::service::voice_actions::{ToolPolicy, policy};
     use crate::service::voice_prompt;
-    use crate::service::voice_relay::{VOICE_SYSTEM_PROMPT, require_voice_confirmation};
+    use crate::service::voice_relay::VOICE_SYSTEM_PROMPT;
 
     fn ctx(db: &Db, session_id: &str) -> ToolCallContext {
         ToolCallContext {
@@ -106,7 +107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_prompt_needs_confirmation_and_voice_session() {
+    async fn voice_prompt_is_gated_and_voice_only() {
         let db = Db::in_memory().unwrap();
         db.create_folder(NewFolder {
             id: "f1".into(),
@@ -144,22 +145,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("voice"), "{err}");
-
-        // The dispatch gate: get is free; append without confirmed refused.
-        let mut get = serde_json::json!({"action": "get"});
-        require_voice_confirmation(&db, "vp-voice", "voice_prompt", &mut get)
-            .await
-            .unwrap();
-        let mut unconfirmed = serde_json::json!({"action": "append", "text": "Be brief."});
-        let err = require_voice_confirmation(&db, "vp-voice", "voice_prompt", &mut unconfirmed)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("confirmed"), "{err}");
-        let mut confirmed = serde_json::json!({"action": "append", "text": "Be brief.", "note": "asked", "confirmed": true});
-        require_voice_confirmation(&db, "vp-voice", "voice_prompt", &mut confirmed)
-            .await
-            .unwrap();
-        assert!(confirmed.get("confirmed").is_none());
+        // The dispatch gate: get is free; append is parked for the user.
+        assert_eq!(
+            policy("voice_prompt", &serde_json::json!({"action": "get"})),
+            ToolPolicy::Free
+        );
+        assert_eq!(
+            policy("voice_prompt", &serde_json::json!({"action": "append"})),
+            ToolPolicy::Gated
+        );
+        let confirmed =
+            serde_json::json!({"action": "append", "text": "Be brief.", "note": "asked"});
 
         let out = reg
             .handle_tool_call("voice_prompt", confirmed, &ctx(&db, "vp-voice"))

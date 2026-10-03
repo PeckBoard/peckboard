@@ -83,7 +83,13 @@ impl McpClient {
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut cmd = tokio::process::Command::new(command);
+            // User-configured stdio servers run under the agent sandbox with
+            // no writable folder of their own: their tool calls are agent
+            // driven, so they must not reach the data dir either.
+            let mut cmd = crate::sandbox::SandboxedTokioCommand::new(
+                command,
+                &crate::sandbox::SpawnScope::none(),
+            );
             cmd.args(&args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())

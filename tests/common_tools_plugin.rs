@@ -1,3 +1,5 @@
+// Test fixtures run git themselves; none of it is an agent process.
+#![allow(clippy::disallowed_methods)]
 //! End-to-end test of the **common-tools WASM plugin** against the real core
 //! host functions. Loads the actual compiled
 //! `peckboard_common_tools_plugin.wasm`, approves it, and drives its MCP tools

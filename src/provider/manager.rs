@@ -571,14 +571,22 @@ impl SessionManager {
         // permission gate (Claude today); the same setting is read again by
         // the `run_command` MCP tool, which every provider shares, so the
         // escape hatch applies host-wide regardless of backend.
-        // The voice assistant always runs with permissions skipped: it is
-        // driven hands-free, so a permission prompt would stall it. Its
-        // destructive tools are gated instead by a spoken confirmation
-        // (`voice_relay::require_voice_confirmation`).
+        // The voice assistant gets no forced bypass: it is a router, so the
+        // CLI's native shell / file / agent tools are denied outright
+        // (`voice_lockdown`, read by the Claude provider's argv builder),
+        // and its gated MCP tools wait for a human confirmation
+        // (`service::voice_actions`). The host-wide escape hatch still
+        // applies to it like any other session.
         let is_voice =
             session.expert_kind.as_deref() == Some(crate::service::voice_relay::VOICE_EXPERT_KIND);
+        if is_voice {
+            if !final_config.metadata.is_object() {
+                final_config.metadata = serde_json::json!({});
+            }
+            final_config.metadata["voice_lockdown"] = serde_json::Value::Bool(true);
+        }
         if final_config.permission_mode.is_none()
-            && (is_voice || crate::routes::settings::bypass_permissions_for_db(db.clone()).await)
+            && crate::routes::settings::bypass_permissions_for_db(db.clone()).await
         {
             final_config.permission_mode = Some("bypass".into());
         }

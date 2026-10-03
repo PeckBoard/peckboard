@@ -227,6 +227,12 @@ export const useWsStore = create<WsState>((set, get) => ({
         window.dispatchEvent(new CustomEvent('peckboard:voice-navigate', { detail: msg.data }))
         return
       }
+      if (msg.type === 'voice-action') {
+        // A gated voice tool call was parked or resolved: the voice panel
+        // refetches its Confirm / Cancel cards.
+        window.dispatchEvent(new CustomEvent('peckboard:voice-action', { detail: msg.data }))
+        return
+      }
       if (msg.type === 'plugin-data') {
         // A plugin's data store changed (identifiers only — no values).
         // PluginFullPage / PluginPanelModal forward it into their sandboxed

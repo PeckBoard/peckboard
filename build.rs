@@ -65,6 +65,8 @@ fn resolve_version() -> String {
 /// suffixed `describe` form (`0.0.191-3-gSHA`): a suffixed stamp would
 /// compare against releases unpredictably, and `Cargo.toml` is the right
 /// answer for untagged builds.
+// Build script: runs at compile time, not in the server; no agent sandbox.
+#[allow(clippy::disallowed_methods)]
 fn git_described_version() -> Option<String> {
     let out = Command::new("git")
         .args(["describe", "--tags", "--exact-match"])

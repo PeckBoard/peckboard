@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::db::Db;
@@ -307,6 +307,9 @@ pub struct PluginProviderRuntime {
     /// CLI children keyed by session_id. At most one per in-flight turn;
     /// dropped (and killed) when the turn ends.
     children: std::sync::Mutex<HashMap<String, ProviderChild>>,
+    /// session_id -> (MCP bearer token, config path) the in-flight turn's
+    /// agent process started with; revoked when the turn ends.
+    mcp_tokens: std::sync::Mutex<HashMap<String, (String, std::path::PathBuf)>>,
 }
 
 /// One host-owned CLI child a plugin spawned for an in-flight turn.
@@ -370,8 +373,43 @@ impl PluginProviderRuntime {
                 "a provider turn is already in flight for session '{session_id}'"
             ));
         }
+        self.bind_mcp_token(session_id, &turn);
         turns.insert(session_id.to_string(), Arc::new(turn));
         Ok(())
+    }
+
+    /// The turn's agent process starts with the token in its MCP config:
+    /// make it the session's only live token, remembered until turn end.
+    fn bind_mcp_token(&self, session_id: &str, turn: &TurnState) {
+        let Some(path) = turn.snapshot.mcp_config_path.as_deref() else {
+            return;
+        };
+        let Some(token) = crate::service::mcp_server::read_mcp_config_token(Path::new(path)) else {
+            return;
+        };
+        if let Some(live) = turn.plugins.as_ref().and_then(|p| p.live_host()) {
+            live.mcp_token_bind(session_id, &token);
+        }
+        if let Ok(mut m) = self.mcp_tokens.lock() {
+            m.insert(session_id.to_string(), (token, path.into()));
+        }
+    }
+
+    /// The turn's process is gone: revoke its token, and delete the config
+    /// file unless a newer dispatch already rewrote it for the next turn.
+    fn release_mcp_token(&self, session_id: &str, turn: &TurnState) {
+        let Some((token, path)) = self
+            .mcp_tokens
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(session_id))
+        else {
+            return;
+        };
+        if let Some(live) = turn.plugins.as_ref().and_then(|p| p.live_host()) {
+            live.mcp_token_release(session_id);
+        }
+        crate::service::mcp_server::delete_mcp_config_if_token(&path, &token);
     }
 
     /// Remove the turn and report the terminal event it emitted (if any).
@@ -394,6 +432,7 @@ impl PluginProviderRuntime {
                 untaken: Vec::new(),
             };
         };
+        self.release_mcp_token(session_id, &turn);
         let untaken: Vec<serde_json::Value> = turn
             .injected
             .lock()
@@ -646,15 +685,19 @@ impl PluginProviderRuntime {
             &req.command,
             crate::provider::turn::COMMON_CLI_FALLBACK_DIRS,
         );
-        let mut cmd = Command::new(&command);
+        // Agent sandbox: the session folder and the account dir are
+        // writable, this session's own MCP config is readable, the rest of
+        // the data dir is off limits. Every tool the CLI runs inherits it.
+        let mut scope = crate::sandbox::SpawnScope::folder(cwd).account_env(&req.env);
+        if let Some(p) = turn.snapshot.mcp_config_path.as_deref() {
+            scope = scope.mcp_config(p);
+        }
+        let mut cmd = crate::sandbox::SandboxedCommand::new(&command, &scope);
         cmd.args(&req.args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Default SIGINT/SIGQUIT for the CLI and every shell it runs, even
-        // when the server itself inherited them ignored (see the helper).
-        crate::provider::turn::reset_child_signals_std(&mut cmd);
         for k in &req.env_remove {
             if !k.is_empty() && !k.contains('\0') {
                 cmd.env_remove(k);
@@ -1457,7 +1500,13 @@ fn probe_cli_uncached(input: &str) -> String {
         crate::provider::turn::COMMON_CLI_FALLBACK_DIRS,
     );
     let timeout = Duration::from_millis(req.timeout_ms.unwrap_or(15_000).clamp(1_000, 30_000));
-    let mut cmd = Command::new(&command);
+    // Sandboxed like the turn spawn: the probe runs the same CLI binary,
+    // possibly from the session folder, with the account's config dir.
+    let mut scope = crate::sandbox::SpawnScope::none().account_env(&req.env);
+    if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
+        scope = scope.rw(cwd);
+    }
+    let mut cmd = crate::sandbox::SandboxedCommand::new(&command, &scope);
     cmd.args(&req.args)
         .stdin(if req.stdin.is_some() {
             Stdio::piped()
@@ -1466,7 +1515,6 @@ fn probe_cli_uncached(input: &str) -> String {
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::provider::turn::reset_child_signals_std(&mut cmd);
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         cmd.current_dir(cwd);
     }

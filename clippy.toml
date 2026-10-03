@@ -1,0 +1,8 @@
+# Agent-side processes must go through the agent sandbox
+# (`crate::sandbox::SandboxedCommand` / `SandboxedTokioCommand`), whose only
+# constructors apply the Landlock policy. Server-internal spawns that never
+# run agent-chosen programs carry an explicit `#[allow]` with a reason.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "agent-side spawns must use crate::sandbox::SandboxedCommand; server-internal spawns need #[allow(clippy::disallowed_methods)] with a justification" },
+    { path = "tokio::process::Command::new", reason = "agent-side spawns must use crate::sandbox::SandboxedTokioCommand; server-internal spawns need #[allow(clippy::disallowed_methods)] with a justification" },
+]

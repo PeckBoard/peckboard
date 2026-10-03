@@ -150,6 +150,11 @@ fn admin_router() -> Router<Arc<AppState>> {
             put(set_provider_prompt),
         )
         .route("/api/settings/setup/complete", post(complete_setup))
+        // Loosening the agent sandbox is a host-wide security change.
+        .route(
+            "/api/settings/agent-sandbox/config",
+            put(crate::sandbox::settings::put_sandbox),
+        )
         .route_layer(middleware::from_fn(require_admin))
 }
 
@@ -175,6 +180,11 @@ fn user_router() -> Router<Arc<AppState>> {
         .route("/api/settings/providers", get(get_providers))
         .route("/api/settings/setup", get(get_setup))
         .route("/api/settings/providers/{id}", put(set_provider_hidden))
+        // Read-only status: every user sees the "agents are unsandboxed" banner.
+        .route(
+            "/api/settings/agent-sandbox",
+            get(crate::sandbox::settings::get_sandbox),
+        )
 }
 
 /// GET /api/settings/caveman → `{"level":"off|lite|full"}` (default "off").

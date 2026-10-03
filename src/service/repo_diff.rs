@@ -64,6 +64,7 @@ pub async fn working_tree_diff(tree: &Path) -> Result<TreeDiff, String> {
                 "--no-color",
                 "--no-ext-diff",
                 "--find-renames",
+                "--no-textconv",
             ],
         )
         .await?;
@@ -90,17 +91,12 @@ pub async fn working_tree_diff(tree: &Path) -> Result<TreeDiff, String> {
     })
 }
 
-/// Run one read-only git command in `tree`; stdout on success.
+/// Run one read-only git command in `tree`; stdout on success. Hardened and
+/// sandboxed ([`crate::sandbox::git_command`]): the tree is agent-written,
+/// so its `.git/config` must not get to run code with server authority.
 async fn git(tree: &Path, args: &[&str]) -> Result<String, String> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(tree)
-        .args(args)
-        // Same env scrub as `worker::worktree::git_command`: an inherited
-        // GIT_DIR would silently retarget every command.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE");
+    let mut cmd = crate::sandbox::git_command_tokio(tree);
+    cmd.arg("-C").arg(tree).args(args);
     match cmd.output().await {
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
@@ -146,7 +142,14 @@ async fn untracked_files(tree: &Path, has_head: bool) -> Result<Vec<String>, Str
 fn untracked_diff(tree: &Path, rel: &str) -> FileDiff {
     let abs = tree.join(rel);
     let size = abs.metadata().map(|m| m.len()).unwrap_or(0);
-    let content = if size <= MAX_UNTRACKED_BYTES {
+    // Never follow an agent-planted symlink (or a path through a symlinked
+    // dir) out of the tree — `x -> ~/.peckboard/jwt_secret` would otherwise
+    // be read with server authority and rendered as a diff.
+    let is_link = abs
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink());
+    let inside = std::fs::canonicalize(&abs).is_ok_and(|p| p.starts_with(tree));
+    let content = if size <= MAX_UNTRACKED_BYTES && inside && !is_link {
         std::fs::read(&abs).ok()
     } else {
         None
@@ -322,11 +325,10 @@ index 000..444
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::sandbox::git_command(&root)
                 .arg("-C")
                 .arg(&root)
                 .args(args)
-                .env_remove("GIT_DIR")
                 .output()
                 .unwrap();
             assert!(out.status.success(), "git {args:?}: {:?}", out);
@@ -356,7 +358,7 @@ index 000..444
     async fn unborn_repo_lists_everything_as_untracked() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::sandbox::git_command(&root)
             .arg("-C")
             .arg(&root)
             .args(["init", "-q", "-b", "main"])

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVoiceStore, type VoiceStatus } from '../store/voice'
 import { foldVoiceTranscript, type VoiceTranscriptItem } from '../voice/text'
+import VoiceActionCard from './VoiceActionCard'
 import KokoroStatusNotice from './KokoroStatusNotice'
 
 const STATUS_LABEL: Record<VoiceStatus, string> = {
@@ -89,6 +90,7 @@ export default function VoiceDock() {
   const events = useVoiceStore((s) => s.events)
   const pending = useVoiceStore((s) => s.pending)
   const error = useVoiceStore((s) => s.error)
+  const actions = useVoiceStore((s) => s.actions)
   const closePanel = useVoiceStore((s) => s.closePanel)
   const toggleMic = useVoiceStore((s) => s.toggleMic)
   const stopSpeaking = useVoiceStore((s) => s.stopSpeaking)
@@ -211,6 +213,9 @@ export default function VoiceDock() {
         )}
       </div>
 
+      {actions.map((a) => (
+        <VoiceActionCard key={a.id} action={a} />
+      ))}
       {error && (
         <div className="voice-error" role="alert" data-testid="voice-error">
           <span>{error}</span>

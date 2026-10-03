@@ -141,6 +141,12 @@ pub fn seed_models() -> serde_json::Value {
             "tier": 1
         },
         {
+            "id": "sandbox-probe",
+            "display_name": "Mock: agent sandbox probe",
+            "capabilities": ["mock", "tools"],
+            "tier": 1
+        },
+        {
             "id": "block",
             "display_name": "Mock: block",
             "capabilities": ["mock", "interactive"],

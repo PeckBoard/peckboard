@@ -18,7 +18,6 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 
 use crate::provider::login_stash::CredentialStash;
@@ -85,7 +84,12 @@ impl CodexLoginManager {
         // broken) credentials: move them aside for the duration.
         let stash = CredentialStash::stash(config_dir, "auth.json");
 
-        let mut cmd = Command::new(cli_path);
+        // Sandboxed like an agent spawn: only the account dir is writable
+        // inside the data dir. Also resets SIGINT/SIGQUIT.
+        let mut cmd = crate::sandbox::SandboxedTokioCommand::new(
+            cli_path,
+            &crate::sandbox::SpawnScope::none().account_dir(config_dir),
+        );
         cmd.args(["login", "--device-auth"])
             .env("CODEX_HOME", config_dir)
             // ChatGPT sign-in, not API-key: drop env that would flip the CLI
@@ -98,7 +102,6 @@ impl CodexLoginManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        crate::provider::turn::reset_child_signals(&mut cmd);
 
         let mut child = match cmd.spawn() {
             Ok(child) => child,

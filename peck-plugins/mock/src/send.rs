@@ -318,6 +318,7 @@ impl Ctx<'_> {
                     return Ok(());
                 }
             }
+            "sandbox-probe" => self.sandbox_probe()?,
             "markdown" => self.markdown()?,
             "ask" => return self.ask(),
             "block" => return self.block(),
@@ -1341,6 +1342,37 @@ impl Ctx<'_> {
             }
         }
         self.emit_text(&format!("started {started}/3 background tasks"))
+    }
+
+    /// Agent-sandbox probe: spawns a REAL child through `provider.spawn` (the
+    /// same host path a CLI provider's turn uses) that tries to read the
+    /// server's `jwt_secret`, then writes and reads a file in the project
+    /// folder, and reports each result as one text event. The secret's bytes
+    /// never reach stdout (`cat`'s stdout goes to /dev/null; only its error
+    /// does), so the probe can't leak it even when unsandboxed.
+    fn sandbox_probe(&mut self) -> Result<(), String> {
+        const SCRIPT: &str = r#"if [ -z "$PECKBOARD_DATA_DIR" ]; then echo NO_DATA_DIR; else cat "$PECKBOARD_DATA_DIR/jwt_secret" 2>&1 >/dev/null; echo "SECRET_EXIT=$?"; fi; echo probe > .sandbox-probe && cat .sandbox-probe && echo PROJECT_OK; rm -f .sandbox-probe; echo "SANDBOX=$PECKBOARD_AGENT_SANDBOX""#;
+        host::call_host(
+            HostFn::ProviderSpawn,
+            &json!({
+                "session_id": self.session_id,
+                "command": "sh",
+                "args": ["-c", SCRIPT],
+            }),
+        )?;
+        let mut out = Vec::new();
+        loop {
+            let v = host::call_host(
+                HostFn::ProviderReadLine,
+                &json!({ "session_id": self.session_id, "timeout_ms": 15000 }),
+            )?;
+            if let Some(line) = v.get("line").and_then(|l| l.as_str()) {
+                out.push(line.to_string());
+                continue;
+            }
+            break;
+        }
+        self.emit_text(&out.join("\n"))
     }
 }
 

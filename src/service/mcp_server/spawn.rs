@@ -327,6 +327,17 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
         });
     }
 
+    fn mcp_token_bind(&self, session_id: &str, token: &str) {
+        if let Some(state) = self.state.upgrade() {
+            state.mcp_tokens.bind_process(session_id, token);
+        }
+    }
+
+    fn mcp_token_release(&self, session_id: &str) {
+        if let Some(state) = self.state.upgrade() {
+            state.mcp_tokens.release_process(session_id);
+        }
+    }
     fn terminate_agent(&self, session_id: String) {
         let Some(state) = self.state.upgrade() else {
             return;

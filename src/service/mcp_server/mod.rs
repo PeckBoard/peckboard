@@ -17,7 +17,10 @@ mod spawn;
 pub mod user_servers;
 
 pub use auth::McpTokenRegistry;
-pub use config::{delete_mcp_config, write_mcp_config};
+pub use config::{
+    delete_mcp_config, delete_mcp_config_if_token, read_mcp_config_token, sweep_mcp_configs,
+    write_mcp_config,
+};
 pub use context::{ExpertDispatcher, McpToolDef, ScopedFolderId, ScopedProjectId, ToolCallContext};
 pub use gates::ToolGate;
 pub use handlers::autoswitch_enabled;
@@ -315,6 +318,46 @@ pub async fn dispatch_tool_call(
     arguments: Value,
     ctx: &ToolCallContext,
 ) -> anyhow::Result<Value> {
+    dispatch_inner(plugins, registry, tool_name, arguments, ctx, None).await
+}
+
+/// Run a pending action the user confirmed: exactly the STORED call, on the
+/// session that parked it, past the voice gate. The [`ConfirmedAction`]
+/// proof token is consumed, so one confirmation runs once; the result is
+/// recorded on the action row (audit).
+///
+/// [`ConfirmedAction`]: crate::service::voice_actions::ConfirmedAction
+pub async fn run_confirmed_action(
+    plugins: &crate::plugin::manager::PluginManager,
+    registry: &McpToolRegistry,
+    action: crate::service::voice_actions::ConfirmedAction,
+    ctx: &ToolCallContext,
+) -> anyhow::Result<Value> {
+    if action.session_id() != ctx.session_id {
+        anyhow::bail!("confirmed action belongs to another session");
+    }
+    let result = dispatch_inner(
+        plugins,
+        registry,
+        action.tool(),
+        action.args().clone(),
+        ctx,
+        Some(&action),
+    )
+    .await;
+    let audit = result.as_ref().cloned().map_err(|e| e.to_string());
+    crate::service::voice_actions::record_result(&ctx.db, action.id(), &audit).await;
+    result
+}
+
+async fn dispatch_inner(
+    plugins: &crate::plugin::manager::PluginManager,
+    registry: &McpToolRegistry,
+    tool_name: &str,
+    arguments: Value,
+    ctx: &ToolCallContext,
+    confirmed: Option<&crate::service::voice_actions::ConfirmedAction>,
+) -> anyhow::Result<Value> {
     use crate::plugin::hooks::HookResult;
 
     // A worker's subagent inherits the worker's tool gate. The callers'
@@ -349,17 +392,32 @@ pub async fn dispatch_tool_call(
         }
     }
 
-    // The voice session skips permissions, so its destructive calls must
-    // carry `confirmed: true` (the user said yes out loud). Enforced here,
-    // after any plugin arg rewrite, so both the `/mcp` route and in-process
-    // tool runners share it.
-    crate::service::voice_relay::require_voice_confirmation(
-        &ctx.db,
-        &ctx.session_id,
-        tool_name,
-        &mut final_args,
-    )
-    .await?;
+    // The voice session's tool gate: an allowlist, and gated tools are
+    // parked as a pending action for a human confirmation instead of run.
+    // Enforced here, after any plugin arg rewrite, so both the `/mcp` route
+    // and in-process tool runners share it. Only a `ConfirmedAction` (a
+    // human press on the confirm route) gets past it, for its own call.
+    match confirmed {
+        Some(action) => {
+            if action.tool() != tool_name || action.session_id() != ctx.session_id {
+                anyhow::bail!("confirmed action does not match this call");
+            }
+        }
+        None => {
+            if let crate::service::voice_actions::Gate::Parked(out) =
+                crate::service::voice_actions::gate_call(
+                    &ctx.db,
+                    &ctx.broadcaster,
+                    &ctx.session_id,
+                    tool_name,
+                    &mut final_args,
+                )
+                .await?
+            {
+                return Ok(out);
+            }
+        }
+    }
 
     // Read before dispatch consumes the args: the voice-relay link below
     // needs the target of a session tool.

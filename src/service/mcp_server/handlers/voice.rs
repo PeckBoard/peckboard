@@ -41,6 +41,13 @@ impl McpToolRegistry {
             rejected,
             "MCP tool: answer_question"
         );
+        // A session never answers its own question: that would be the agent
+        // deciding for the user it asked.
+        if session_id == ctx.session_id {
+            anyhow::bail!(
+                "answer_question: a session cannot answer its own question; the user answers it in the Peckboard UI"
+            );
+        }
 
         let caller = ctx
             .db
@@ -336,7 +343,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("only the user"), "{err}");
+        // Refused twice over: its own question, and an approval prompt.
+        assert!(err.to_string().contains("the user"), "{err}");
     }
 
     #[tokio::test]
@@ -438,12 +446,10 @@ mod tests {
         scoped.project_id = Some(pid.clone());
         assert!(scoped.scope_project(Some(&pid)).await.is_err());
 
-        assert!(crate::service::voice_relay::is_destructive_tool(
-            "move_card_to_wont_do"
-        ));
-        assert!(crate::service::voice_relay::is_destructive_tool(
-            "pause_project"
-        ));
+        use crate::service::voice_actions::{ToolPolicy, policy};
+        for tool in ["move_card_to_wont_do", "pause_project"] {
+            assert_eq!(policy(tool, &serde_json::json!({})), ToolPolicy::Gated);
+        }
     }
 
     /// An orchestrating chat may answer a worker question in a project of

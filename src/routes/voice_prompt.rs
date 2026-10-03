@@ -1,7 +1,8 @@
 //! `/api/voice/prompt*` — the voice assistant's editable system prompt (see
-//! `service::voice_prompt`). Reads need a login; writes are admin-only, like
-//! the voice session itself. A write applies from the voice session's next
-//! turn — no restart, and an in-flight turn is never cut short.
+//! `service::voice_prompt`). Reading the active prompt needs a login;
+//! history and writes are admin-only, like the voice session itself. A
+//! write applies from the voice session's next turn — no restart, and an
+//! in-flight turn is never cut short.
 //!
 //! - `GET  /api/voice/prompt` → `{content, source, is_default, updated_at, default_content}`
 //! - `PUT  /api/voice/prompt {content, note?}` → `{id, changed, diff, diff_stats}`, 400 `{error}`
@@ -35,15 +36,17 @@ struct PutBody {
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reads = Router::new()
         .route("/api/voice/prompt", get(current))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+    // History may hold the admin's past instructions: admin-only, like
+    // the voice session itself.
+    let admin = Router::new()
         .route("/api/voice/prompt/history", get(history))
         .route("/api/voice/prompt/history/{id}", get(version))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
-    let writes = Router::new()
         .route("/api/voice/prompt", axum::routing::put(save))
         .route("/api/voice/prompt/reset", post(reset))
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth));
-    reads.merge(writes)
+    reads.merge(admin)
 }
 
 fn err(status: StatusCode, msg: impl ToString) -> Response {

@@ -1,3 +1,5 @@
+// Test fixtures run git/ssh themselves; none of it is an agent process.
+#![allow(clippy::disallowed_methods)]
 //! End-to-end test of the **diff-viewer WASM plugin** against the real core
 //! host functions. Loads the actual compiled `diff-viewer.wasm`, approves it,
 //! and drives its authenticated `/api/plugin-ui/diff/*` endpoints through

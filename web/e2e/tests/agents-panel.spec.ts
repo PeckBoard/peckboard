@@ -78,7 +78,8 @@ async function sessionMcpToken(
   const session = (await sessionRes.json()) as { id: string }
   const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
     headers: authHeader,
-    data: { text: 'go', model: 'mock:happy-path' },
+    // mock:block keeps the agent process alive: an MCP token dies with it.
+    data: { text: 'go', model: 'mock:block' },
   })
   expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
   const cfgPath = path.join(process.env.PECKBOARD_E2E_DATA_DIR!, 'worker-mcp', `${session.id}.json`)
@@ -278,7 +279,7 @@ test('remote_agent_echo round-trips through a mock device: in-flight count and a
 
   const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
     headers: authHeader,
-    data: { text: 'go', model: 'mock:happy-path' },
+    data: { text: 'go', model: 'mock:block' },
   })
   expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
 
@@ -427,7 +428,7 @@ test('remote_agent_screenshot targets a monitor: monitor forwarded, display alia
   const session = (await sessionRes.json()) as { id: string }
   const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
     headers: authHeader,
-    data: { text: 'go', model: 'mock:happy-path' },
+    data: { text: 'go', model: 'mock:block' },
   })
   expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
   const dataDir = process.env.PECKBOARD_E2E_DATA_DIR
@@ -554,7 +555,7 @@ test('remote_agent window targets: old agents refused, window capture + window-r
   const session = (await sessionRes.json()) as { id: string }
   const sendRes = await request.post(`/api/sessions/${session.id}/message`, {
     headers: authHeader,
-    data: { text: 'go', model: 'mock:happy-path' },
+    data: { text: 'go', model: 'mock:block' },
   })
   expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
   const mcpCfgPath = path.join(

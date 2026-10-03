@@ -1,3 +1,5 @@
+// Test fixtures run ssh-keygen/sshd themselves; none of it is an agent process.
+#![allow(clippy::disallowed_methods)]
 //! Integration test for the **ssh-fleet WASM plugin** against the real core
 //! host functions.
 //!

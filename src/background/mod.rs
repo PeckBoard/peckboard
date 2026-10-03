@@ -646,7 +646,12 @@ impl BackgroundRegistry {
         let file = std::fs::File::create(&log_path)
             .map_err(|e| format!("failed to create the task log: {e}"))?;
 
-        let mut cmd = tokio::process::Command::new(&program);
+        // Agent sandbox: only the task's folder is writable, the data dir is
+        // off limits (see `crate::sandbox`). Also resets SIGINT/SIGQUIT.
+        let mut cmd = crate::sandbox::SandboxedTokioCommand::new(
+            &program,
+            &crate::sandbox::SpawnScope::folder(&cwd),
+        );
         cmd.args(&args)
             .envs(env)
             .current_dir(&cwd)
@@ -656,7 +661,7 @@ impl BackgroundRegistry {
         // Own process group: stop / timeout / shutdown signal the whole tree.
         #[cfg(unix)]
         cmd.process_group(0);
-        crate::provider::turn::reset_child_signals(&mut cmd);
+        let mut cmd = cmd.into_inner();
         set_parent_death_signal(&mut cmd);
         let mut child = match spawn_child(cmd).await {
             Ok(c) => c,

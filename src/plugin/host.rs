@@ -176,6 +176,13 @@ pub trait LiveHost: Send + Sync {
     /// model and account credentials, so reusing it would keep answering (and
     /// billing) as the old model/account. Fire-and-forget; no-op default.
     fn recycle_agent_after_turn(&self, _session_id: String) {}
+    /// An agent process for `session_id` is starting with MCP bearer `token`:
+    /// revoke the session's other tokens so only this process's stays live
+    /// (`McpTokenRegistry::bind_process`). No-op default.
+    fn mcp_token_bind(&self, _session_id: &str, _token: &str) {}
+    /// The agent process for `session_id` exited: revoke its MCP token
+    /// (`McpTokenRegistry::release_process`). No-op default.
+    fn mcp_token_release(&self, _session_id: &str) {}
     /// Emit a single-question user prompt to `session_id` (same UI surface as
     /// the worker `ask_user` MCP tool: a "question" event + broadcast). `token`
     /// is an opaque correlation id stored on the question so the plugin can
@@ -2933,6 +2940,18 @@ pub(crate) fn prepare_exec(
             EXEC_ALLOWLIST.join(", ")
         ));
     }
+    // Privilege escalation can never work inside the agent sandbox (the
+    // Landlock domain sets no_new_privs), so say so instead of letting sudo
+    // fail with a confusing "no new privileges" / askpass error.
+    if crate::sandbox::status().enforced
+        && matches!(command, "sudo" | "su" | "doas" | "pkexec" | "run0")
+    {
+        return Err(format!(
+            "'{command}' is unavailable: agent commands run inside Peckboard's agent sandbox, \
+             which forbids privilege escalation. Ask the user to run the root step \
+             themselves."
+        ));
+    }
     let authority_fallback = authority_root
         .filter(|_| inv.authority && inv.folder_id.is_none())
         .map(|p| p.join(PLUGIN_EXEC_DIR));
@@ -3014,8 +3033,11 @@ pub(crate) fn exec_impl(
         .clamp(1, EXEC_MAX_TIMEOUT_SECS);
     let timeout = Duration::from_secs(timeout_secs);
 
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new(command);
+    use std::process::Stdio;
+    // Agent sandbox: only this call's folder is writable; the data dir is
+    // off limits (see `crate::sandbox`). Also resets SIGINT/SIGQUIT.
+    let mut cmd =
+        crate::sandbox::SandboxedCommand::new(command, &crate::sandbox::SpawnScope::folder(&root));
     cmd.args(&req.args)
         .envs(inject_env.iter().map(|(k, v)| (k, v)))
         .current_dir(&root)
@@ -3025,10 +3047,7 @@ pub(crate) fn exec_impl(
     // Own process group, so a timeout takes down the whole tree (a `bash -c`
     // loop's `sleep` too), not just the leader.
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    // Agent-run commands are mostly shells and shell-driven tools; hand them
-    // default SIGINT/SIGQUIT even when the server inherited them ignored.
-    crate::provider::turn::reset_child_signals_std(&mut cmd);
+    std::os::unix::process::CommandExt::process_group(&mut *cmd, 0);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return error_json(format!("failed to start '{command}': {e}")),
@@ -7178,6 +7197,52 @@ mod tests {
         assert_eq!(v["exit_code"], 0, "envelope: {v}");
         assert!(v["stdout"].as_str().unwrap().contains("started"), "{v}");
         assert_eq!(v["output_detached"], true, "{v}");
+    }
+    /// The `run_command` exec path runs inside the agent sandbox: the data
+    /// dir's secrets are unreadable while the project folder works, and
+    /// privilege escalation is refused up front with a clear message.
+    #[tokio::test]
+    async fn exec_runs_inside_the_agent_sandbox() {
+        if !crate::sandbox::supported() {
+            eprintln!("skipping: Landlock unavailable on this kernel");
+            return;
+        }
+        let (db, dir) = exec_fixture().await;
+        let data = tempfile::tempdir().unwrap();
+        let secret = data.path().join("jwt_secret");
+        std::fs::write(&secret, "SANDBOX-TEST-SECRET").unwrap();
+        std::fs::write(dir.path().join("note.txt"), "project-ok\n").unwrap();
+        let cfg = crate::sandbox::SandboxConfig {
+            data_dir: data.path().to_path_buf(),
+            mode: crate::sandbox::Mode::Enforce,
+            extra_rw: vec![],
+        };
+        let (read, sudo) = tokio::task::spawn_blocking(move || {
+            crate::sandbox::with_test_config(cfg, || {
+                let script = format!("cat note.txt; cat '{}'", secret.display());
+                let req = serde_json::json!({ "command": "sh", "args": ["-c", script] });
+                let read = exec_impl(&db, &req.to_string(), &exec_inv(), false, None);
+                let sudo = exec_impl(
+                    &db,
+                    r#"{"command":"sudo","args":["true"]}"#,
+                    &exec_inv(),
+                    false,
+                    None,
+                );
+                (read, sudo)
+            })
+        })
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&read).unwrap();
+        assert_ne!(v["exit_code"], 0, "{v}");
+        assert!(v["stdout"].as_str().unwrap().contains("project-ok"), "{v}");
+        assert!(!read.contains("SANDBOX-TEST-SECRET"), "{v}");
+        assert!(
+            v["stderr"].as_str().unwrap().contains("Permission denied"),
+            "{v}"
+        );
+        assert!(sudo.contains("agent sandbox"), "{sudo}");
     }
 
     /// A timeout takes down the whole process group, so a shell loop's

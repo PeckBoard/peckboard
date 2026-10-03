@@ -1,8 +1,8 @@
 // PeckBoard browser capture sidecar.
 //
 // Spawned by `service/browser.rs` as:
-//   npx -y -p better-playwright-mcp3@<pinned> node <this file>
-// (env: PORT, HEADLESS=true, NO_USER_PROFILE=true)
+//   npx -y -p better-playwright-mcp3@<pinned> node --input-type=module --eval <this source>
+// (env: PORT, HEADLESS=true, NO_USER_PROFILE=true, PECKBOARD_SIDECAR_TOKEN)
 //
 // It runs the UNMODIFIED upstream PlaywrightServer (same routes, same
 // behavior the `browser_*` tools already rely on) and adds the one thing
@@ -11,12 +11,16 @@
 // at `GET /api/pages/:pageId/events?since=<seq>` — which PeckBoard core
 // polls after each recorded step (masking happens core-side, before disk).
 //
-// If locating or patching the upstream package fails, it falls back to
-// exec'ing the plain upstream server binary: browsing keeps working,
-// capture is simply absent.
+// Every request must carry the per-launch `x-peckboard-sidecar-token`
+// header core generated, so another local process (an agent) can't drive
+// the browser directly. Navigation is limited to http(s)/about/data URLs:
+// `file://` would read local files (Peckboard's own secrets included).
+//
+// If locating or patching the upstream package fails, the sidecar exits:
+// the plain upstream server has no auth, so it must never be the fallback.
 
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
@@ -24,6 +28,45 @@ import { pathToFileURL } from "node:url";
 
 const PKG = "better-playwright-mcp3";
 const PORT = parseInt(process.env.PORT || "3111", 10);
+const AUTH_TOKEN = process.env.PECKBOARD_SIDECAR_TOKEN || "";
+// Chrome and anything else this process starts must not inherit it.
+delete process.env.PECKBOARD_SIDECAR_TOKEN;
+if (!AUTH_TOKEN) {
+  console.error("[peckboard-sidecar] PECKBOARD_SIDECAR_TOKEN is required");
+  process.exit(1);
+}
+
+/** Constant-time check of the per-launch token header. */
+function authorized(req) {
+  const got = Buffer.from(
+    String(req.headers["x-peckboard-sidecar-token"] || ""),
+  );
+  const want = Buffer.from(AUTH_TOKEN);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+/** Only web URLs may be opened — never file://, view-source:, chrome:. */
+function isAllowedUrl(url) {
+  try {
+    const u = new URL(String(url));
+    return ["http:", "https:", "about:", "data:"].includes(u.protocol);
+  } catch {
+    return false;
+  }
+}
+
+/** Refuse non-web navigations on `page`, whoever asks for them. */
+function guardNavigation(page) {
+  const origGoto = page.goto.bind(page);
+  page.goto = async (url, ...rest) => {
+    if (!isAllowedUrl(url)) {
+      throw new Error(
+        `refused to open ${String(url).slice(0, 200)}: only http(s) URLs are allowed`,
+      );
+    }
+    return origGoto(url, ...rest);
+  };
+}
 
 // Upstream ignores NO_USER_PROFILE and defaults every instance to ONE
 // shared Chrome profile (~/.better-playwright-mcp/user-data) — a second
@@ -303,40 +346,17 @@ function findPackageDir() {
   return null;
 }
 
-/** Plain upstream server as a child — capture off, browsing alive. */
+/**
+ * Capture could not be wired. The plain upstream server would run with no
+ * auth on the port, so exit instead; core surfaces this stderr line.
+ */
 function fallbackToUpstream(reason) {
   console.error(
-    `[peckboard-sidecar] capture unavailable (${reason}); running plain ${PKG}`,
+    `[peckboard-sidecar] capture unavailable (${reason}); refusing to run the ` +
+      `unauthenticated upstream ${PKG} server`,
   );
-  const child = spawn(
-    PKG,
-    ["server", "--headless", "--no-user-profile", "--port", String(PORT)],
-    { stdio: "inherit" },
-  );
-  child.on("error", (err) => {
-    console.error(`[peckboard-sidecar] fallback spawn failed: ${err}`);
-    process.exit(1);
-  });
-  child.on("exit", (code) => process.exit(code || 0));
-  // Never orphan the fallback: it owns the port, and an orphaned instance
-  // makes every future capture sidecar die EADDRINUSE while still looking
-  // healthy to core's poll.
-  const reap = () => {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  };
-  process.on("exit", reap);
-  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-    process.on(sig, () => {
-      reap();
-      process.exit(0);
-    });
-  }
+  process.exit(1);
 }
-
 const pkgDir = findPackageDir();
 if (!pkgDir) {
   fallbackToUpstream("package not found on PATH");
@@ -376,6 +396,7 @@ if (!pkgDir) {
           const origNewPage = ctx.newPage.bind(ctx);
           ctx.newPage = async (...pa) => {
             const page = await origNewPage(...pa);
+            guardNavigation(page);
             await installPointer(page);
             return page;
           };
@@ -412,6 +433,11 @@ if (!pkgDir) {
     // app is itself a (req, res) handler) instead of calling
     // server.start() — immune to upstream middleware ordering.
     const srv = createServer((req, res) => {
+      if (!authorized(req)) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "missing or wrong sidecar token" }));
+        return;
+      }
       // Ownership marker: core health-checks this header to distinguish a
       // live capture sidecar from a foreign/orphaned server on the port.
       res.setHeader("x-peckboard-capture", "1");
@@ -430,8 +456,7 @@ if (!pkgDir) {
       console.error(`[peckboard-sidecar] listen failed: ${err}`);
       process.exit(1);
     });
-    // Loopback only: the sidecar has no auth and opens any URL (file://
-    // included), so it must never be reachable from the network.
+    // Loopback only, and every request needs the per-launch token.
     srv.listen(PORT, "127.0.0.1", () => {
       console.log(`[peckboard-sidecar] capturing on http://127.0.0.1:${PORT}`);
     });

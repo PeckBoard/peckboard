@@ -249,6 +249,9 @@ fn replace_exe_at(exe: &Path, bytes: &[u8]) -> Result<()> {
 /// replaced, that resolves to `"<path> (deleted)"` on Linux, and exec()ing the
 /// bogus path fails — the process then keeps running the old image, which is the
 /// exact bug this signature now prevents.
+// The server re-execs its own (just verified) binary: not an agent process,
+// and it must keep full authority to run the server.
+#[allow(clippy::disallowed_methods)]
 pub fn restart(exe: &Path) -> Result<()> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     #[cfg(unix)]

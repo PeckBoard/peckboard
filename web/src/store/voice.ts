@@ -13,6 +13,7 @@ import {
   isRelayText,
   looksUnfinished,
   speechWords,
+  spokenDecision,
   stripForSpeech,
   stripInterruptMarker,
   takeSpeakable,
@@ -116,6 +117,16 @@ interface VoiceSessionInfo {
   model: string
 }
 
+/** A gated tool call parked server-side until the user confirms it. */
+export interface VoiceAction {
+  id: string
+  session_id: string
+  tool: string
+  summary: string
+  created_at: string
+  expires_at: string
+}
+
 interface VoiceState {
   prefs: VoicePrefs
   setPrefs: (patch: Partial<VoicePrefs>) => void
@@ -157,6 +168,13 @@ interface VoiceState {
   /** Speak a sample sentence with the current prefs. */
   testVoice: () => void
   clearError: () => void
+  /** Gated tool calls the assistant parked for this user's confirmation
+   *  (`/api/voice/actions`), oldest first. */
+  actions: VoiceAction[]
+  refreshActions: () => Promise<void>
+  /** Press Confirm / Cancel; resolves to an error message, or `null`. */
+  confirmAction: (id: string) => Promise<string | null>
+  cancelAction: (id: string) => Promise<string | null>
   /** Call from a user gesture: lets browsers that gate audio play replies. */
   unlockSpeech: () => void
 }
@@ -581,7 +599,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     heldLone = null
     set({ heard: '', turnUnfinished: false })
     userOverSpeech = false
-    if (text) {
+    if (text && !pressBySpeech(text)) {
       voiceLog('end of speech; sending utterance:', JSON.stringify(text))
       void get().sendText(text, 'voice-mic')
     }
@@ -939,6 +957,44 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     const { panelOpen, prefs } = get()
     if (panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
   })
+  // ── Pending actions (gated tool calls waiting on the user) ──
+  const onActionEvent = () => {
+    void get().refreshActions()
+  }
+
+  /** Press Confirm / Cancel on the server. `null` on success, else the
+   *  message to show on the card. */
+  const resolveAction = async (id: string, verb: 'confirm' | 'cancel'): Promise<string | null> => {
+    try {
+      const res = await authedFetch(`/api/voice/actions/${encodeURIComponent(id)}/${verb}`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const err = (await res.json().catch(() => null)) as { error?: string } | null
+        void get().refreshActions()
+        return err?.error ?? `Couldn't ${verb} that (${res.status}).`
+      }
+      set((s) => ({ actions: s.actions.filter((a) => a.id !== id) }))
+      return null
+    } catch {
+      return "Couldn't reach the server."
+    }
+  }
+
+  /** A spoken "yes" / "no" while exactly one action waits presses its
+   *  button — the recognizer is the user's own voice in this browser, unlike
+   *  anything the model writes. `true` when the utterance was used up. */
+  const pressBySpeech = (text: string): boolean => {
+    const { actions } = get()
+    if (actions.length !== 1) return false
+    const decision = spokenDecision(text)
+    if (!decision) return false
+    voiceLog(`spoken ${decision} presses action ${actions[0].id}`)
+    void resolveAction(actions[0].id, decision === 'yes' ? 'confirm' : 'cancel').then((err) => {
+      if (err) set({ error: err })
+    })
+    return true
+  }
 
   return {
     prefs: loadPrefs(),
@@ -960,6 +1016,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     events: [],
     pending: [],
     error: null,
+    actions: [],
 
     ensureSession: async (model) => {
       try {
@@ -1011,6 +1068,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         ws.addEventListener(liveListener)
       }
       ws.subscribe(info.session_id)
+      window.removeEventListener('peckboard:voice-action', onActionEvent)
+      window.addEventListener('peckboard:voice-action', onActionEvent)
+      void get().refreshActions()
       await loadHistory(info.session_id)
     },
 
@@ -1026,6 +1086,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         ws.removeEventListener(liveListener)
         liveListener = null
       }
+      window.removeEventListener('peckboard:voice-action', onActionEvent)
       if (sessionId) ws.unsubscribe(sessionId)
       set({ panelOpen: false, micOn: false, status: 'idle', interim: '' })
     },
@@ -1114,6 +1175,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         onEnd: () => {},
       })
     },
+
+    refreshActions: async () => {
+      try {
+        const res = await authedFetch('/api/voice/actions')
+        if (!res.ok) return
+        const body = (await res.json()) as { actions: VoiceAction[] }
+        const { sessionId } = get()
+        set({ actions: body.actions.filter((a) => !sessionId || a.session_id === sessionId) })
+      } catch {
+        /* best-effort; the next voice-action event refetches */
+      }
+    },
+
+    confirmAction: (id) => resolveAction(id, 'confirm'),
+
+    cancelAction: (id) => resolveAction(id, 'cancel'),
 
     clearError: () => set({ error: null }),
 

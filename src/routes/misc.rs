@@ -165,6 +165,9 @@ struct KeepAwakeRequest {
 }
 
 /// PUT /api/keep-awake — toggle keep-awake
+// Server-internal: spawns macOS `caffeinate` for the server itself, never an
+// agent-chosen program.
+#[allow(clippy::disallowed_methods)]
 async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse {
     let supported = cfg!(target_os = "macos");
 

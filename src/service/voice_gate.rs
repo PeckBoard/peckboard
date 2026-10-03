@@ -493,7 +493,20 @@ pub async fn tick_at(
             .collect::<Vec<_>>()
             .join("\n\n");
         let ids = items.iter().map(|h| h.id.clone()).collect();
-        crate::service::voice_relay::deliver(db, broadcaster, dispatcher, &voice_id, &text).await;
+        let delivered =
+            crate::service::voice_relay::deliver(db, broadcaster, dispatcher, &voice_id, &text)
+                .await;
+        if !delivered {
+            // Keep the rows and put the relays back at the head of the
+            // queue: a failed append must not lose a held question.
+            with_gate(&voice_id, now, |g| {
+                g.busy_since = None;
+                let mut back = items;
+                back.append(&mut g.queue);
+                g.queue = back;
+            });
+            continue;
+        }
         if let Err(e) = db.delete_voice_relays(ids).await {
             tracing::warn!(voice_session = %voice_id, "voice gate: deleting delivered relays failed: {e}");
         }

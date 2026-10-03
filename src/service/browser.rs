@@ -38,17 +38,11 @@ const PINNED_PLAYWRIGHT: &str = "playwright@1.55.0";
 /// The capture sidecar source, embedded so the binary is self-contained.
 const SIDECAR_SRC: &str = include_str!("browser_sidecar.mjs");
 
-/// Materialize the sidecar into the temp dir (idempotent overwrite — cheap,
-/// and keeps upgrades in sync with the binary).
-fn write_sidecar() -> anyhow::Result<std::path::PathBuf> {
-    let path = std::env::temp_dir().join("peckboard-browser-sidecar.mjs");
-    std::fs::write(&path, SIDECAR_SRC)
-        .map_err(|e| anyhow::anyhow!("failed to write browser sidecar to {path:?}: {e}"))?;
-    Ok(path)
-}
 struct Managed {
     child: tokio::process::Child,
     base: String,
+    /// Per-launch shared secret the sidecar requires on every request.
+    token: String,
     last_used: Instant,
 }
 
@@ -79,25 +73,26 @@ pub(crate) fn set_test_base_url(url: &str) {
 /// Marker header the capture sidecar stamps on every response — how core
 /// tells "our live sidecar" from an orphaned/foreign server that happens
 /// to answer on the port (the classic failure: a crashed predecessor's
-/// fallback child squats the port, every new sidecar dies EADDRINUSE, and
-/// a naive health check silently adopts the capture-less orphan — runs
-/// then record no network/console at all).
+/// child squats the port, every new sidecar dies EADDRINUSE, and a naive
+/// health check silently adopts the orphan).
 const SIDECAR_MARKER_HEADER: &str = "x-peckboard-capture";
+/// Header carrying the per-launch shared secret (see `browser_sidecar.mjs`).
+const SIDECAR_TOKEN_HEADER: &str = "x-peckboard-sidecar-token";
 /// How many consecutive ports to try when squatted.
 const MAX_PORT_HOPS: u16 = 10;
 
-/// Resolve the browser server's base URL, spawning the managed child if
-/// needed. An explicit `PECKBOARD_BROWSER_URL` wins and disables the
-/// managed lifecycle entirely.
-async fn base_url() -> anyhow::Result<String> {
+/// Resolve the browser server's base URL (plus the per-launch token every
+/// request must carry), spawning the managed child if needed. An explicit
+/// `PECKBOARD_BROWSER_URL` wins and disables the managed lifecycle entirely.
+async fn base_url() -> anyhow::Result<(String, Option<String>)> {
     #[cfg(test)]
     if let Some(u) = TEST_BASE.get() {
-        return Ok(u.clone());
+        return Ok((u.clone(), None));
     }
     if let Ok(url) = std::env::var("PECKBOARD_BROWSER_URL")
         && !url.trim().is_empty()
     {
-        return Ok(url.trim().trim_end_matches('/').to_string());
+        return Ok((url.trim().trim_end_matches('/').to_string(), None));
     }
 
     let mut guard = managed().lock().await;
@@ -107,7 +102,7 @@ async fn base_url() -> anyhow::Result<String> {
         match m.child.try_wait() {
             Ok(None) => {
                 m.last_used = Instant::now();
-                return Ok(m.base.clone());
+                return Ok((m.base.clone(), Some(m.token.clone())));
             }
             _ => {
                 // Exited behind our back — clear and respawn below.
@@ -120,29 +115,30 @@ async fn base_url() -> anyhow::Result<String> {
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
-    let sidecar = write_sidecar()?;
+    // Fresh shared secret per launch: only core knows it, so no other local
+    // process (an agent) can drive the browser through the loopback port.
+    let token = {
+        use rand::Rng;
+        let mut raw = [0u8; 24];
+        rand::thread_rng().fill(&mut raw);
+        hex::encode(raw)
+    };
 
     for hop in 0..MAX_PORT_HOPS {
         let Some(port) = first_port.checked_add(hop) else {
             break;
         };
-        match spawn_on_port(&sidecar, port).await? {
-            SpawnOutcome::Ready { child, capture } => {
-                if !capture {
-                    tracing::warn!(
-                        port,
-                        "browser sidecar is running WITHOUT capture (fallback mode); \
-                         recorded runs will have no network/console data"
-                    );
-                }
+        match spawn_on_port(port, &token).await? {
+            SpawnOutcome::Ready { child } => {
                 let base = format!("http://127.0.0.1:{port}");
                 *guard = Some(Managed {
                     child,
                     base: base.clone(),
+                    token: token.clone(),
                     last_used: Instant::now(),
                 });
                 spawn_idle_reaper_once();
-                return Ok(base);
+                return Ok((base, Some(token)));
             }
             SpawnOutcome::PortSquatted => {
                 tracing::warn!(
@@ -162,36 +158,45 @@ async fn base_url() -> anyhow::Result<String> {
 }
 
 enum SpawnOutcome {
-    /// The child came up: with the sidecar marker (capture on), or as our
-    /// own declared no-capture fallback (browsing works, recording data
-    /// won't be captured).
-    Ready {
-        child: tokio::process::Child,
-        capture: bool,
-    },
+    /// The child came up and answered our token with the sidecar marker.
+    Ready { child: tokio::process::Child },
     /// The port belongs to some other process — our child died EADDRINUSE
     /// behind a server that answers without the marker. Hop to the next.
     PortSquatted,
 }
 
 /// Spawn the sidecar on `port` and poll until it is verifiably OURS (marker
-/// header or declared fallback), the port turns out squatted, or startup
-/// fails/times out.
-async fn spawn_on_port(sidecar: &std::path::Path, port: u16) -> anyhow::Result<SpawnOutcome> {
+/// header on a token-authorised answer), the port turns out squatted, or
+/// startup fails/times out.
+async fn spawn_on_port(port: u16, token: &str) -> anyhow::Result<SpawnOutcome> {
     let base = format!("http://127.0.0.1:{port}");
     tracing::info!(port, "Spawning browser server (sidecar + {UPSTREAM_PKG})");
-    let mut cmd = tokio::process::Command::new("npx");
-    cmd.args(["-y", "-p", UPSTREAM_PKG, "-p", PINNED_PLAYWRIGHT, "node"])
-        .arg(sidecar)
-        .env("PORT", port.to_string())
-        .env("HEADLESS", "true")
-        .env("NO_USER_PROFILE", "true")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+    // The sidecar source goes in argv (`--eval`), not a temp file: a file in
+    // the shared temp dir could be swapped by an agent before node reads it.
+    // The browser tree runs under the agent sandbox (it opens agent-chosen
+    // URLs), with no writable folder beyond the temp/cache defaults.
+    let mut cmd =
+        crate::sandbox::SandboxedTokioCommand::new("npx", &crate::sandbox::SpawnScope::none());
+    cmd.args([
+        "-y",
+        "-p",
+        UPSTREAM_PKG,
+        "-p",
+        PINNED_PLAYWRIGHT,
+        "--",
+        "node",
+    ])
+    .args(["--input-type=module", "--eval", SIDECAR_SRC])
+    .env("PORT", port.to_string())
+    .env("HEADLESS", "true")
+    .env("NO_USER_PROFILE", "true")
+    .env("PECKBOARD_SIDECAR_TOKEN", token)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped());
     // Own process group so reaping kills the whole npx → node → chrome tree
-    // — killing only the wrapper is exactly how capture-less orphans got
-    // left behind to squat the port.
+    // — killing only the wrapper is exactly how orphans got left behind to
+    // squat the port.
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = cmd.spawn().map_err(|e| {
@@ -227,8 +232,10 @@ async fn spawn_on_port(sidecar: &std::path::Path, port: u16) -> anyhow::Result<S
     };
 
     // Health-poll until the API answers AS OURS (or the child dies / times
-    // out). A success response without the marker proves nothing yet: it
-    // may be a foreign server racing our child's boot.
+    // out). Our marker on a token-authorised answer proves it; anything else
+    // (a foreign server, or a stale sidecar rejecting our token) keeps
+    // polling until the child crashes (EADDRINUSE → squatted) or the
+    // deadline calls it.
     let deadline = Instant::now() + Duration::from_secs(SPAWN_TIMEOUT_SECS);
     loop {
         if let Ok(Some(status)) = child.try_wait() {
@@ -238,24 +245,15 @@ async fn spawn_on_port(sidecar: &std::path::Path, port: u16) -> anyhow::Result<S
             }
             anyhow::bail!("browser server exited during startup ({status}). stderr tail:\n{tail}");
         }
-        if let Ok(resp) = http().get(format!("{base}/api/pages")).send().await
+        if let Ok(resp) = http()
+            .get(format!("{base}/api/pages"))
+            .header(SIDECAR_TOKEN_HEADER, token)
+            .send()
+            .await
             && resp.status().is_success()
+            && resp.headers().contains_key(SIDECAR_MARKER_HEADER)
         {
-            if resp.headers().contains_key(SIDECAR_MARKER_HEADER) {
-                return Ok(SpawnOutcome::Ready {
-                    child,
-                    capture: true,
-                });
-            }
-            // Marker-less answer: our own no-capture fallback announces
-            // itself on stderr; anything else keeps polling until the child
-            // crashes (EADDRINUSE → squatted) or the deadline calls it.
-            if tail_now().contains("capture unavailable") {
-                return Ok(SpawnOutcome::Ready {
-                    child,
-                    capture: false,
-                });
-            }
+            return Ok(SpawnOutcome::Ready { child });
         }
         if Instant::now() > deadline {
             kill_group(&mut child);
@@ -268,7 +266,6 @@ async fn spawn_on_port(sidecar: &std::path::Path, port: u16) -> anyhow::Result<S
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
 }
-
 /// Kill the managed child and (on unix) its whole process group — the tree
 /// is npx → node sidecar → chrome/fallback children.
 fn kill_group(child: &mut tokio::process::Child) {
@@ -325,8 +322,11 @@ async fn request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> anyhow::Result<serde_json::Value> {
-    let base = base_url().await?;
+    let (base, token) = base_url().await?;
     let mut req = http().request(method, format!("{base}{path}"));
+    if let Some(t) = token {
+        req = req.header(SIDECAR_TOKEN_HEADER, t);
+    }
     if let Some(b) = body {
         req = req.json(&b);
     }

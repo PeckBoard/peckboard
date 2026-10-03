@@ -1,6 +1,7 @@
 //! `/api/voice/lexicon*` — custom TTS pronunciations (see
-//! `service::tts::lexicon`). Reads need a login; writes are admin-only, like
-//! the voice session itself. Every write applies to the next sentence.
+//! `service::tts::lexicon`). Reads need a login, except the unknown-word
+//! log, which is admin-only like every write. Every write applies to the
+//! next sentence.
 //!
 //! - `GET    /api/voice/lexicon` → `[{word, display, respelling, phonemes, source, updated_at}]`
 //! - `PUT    /api/voice/lexicon/{word} {display?, respelling?|phonemes?}` → entry, 400 `{error}`
@@ -46,15 +47,17 @@ struct PreviewBody {
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reads = Router::new()
         .route("/api/voice/lexicon", get(list))
-        .route("/api/voice/lexicon/unknown", get(list_unknown))
         .route("/api/voice/lexicon/preview", post(preview))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
-    let writes = Router::new()
+    // The unknown-word log is made of words from the admin's spoken
+    // replies (names, project terms): admin-only like the writes.
+    let admin = Router::new()
+        .route("/api/voice/lexicon/unknown", get(list_unknown))
         .route("/api/voice/lexicon/{word}", put(upsert).delete(remove))
         .route("/api/voice/lexicon/unknown/{word}", delete(dismiss))
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth));
-    reads.merge(writes)
+    reads.merge(admin)
 }
 
 fn err(status: StatusCode, msg: impl ToString) -> Response {

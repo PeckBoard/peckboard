@@ -36,6 +36,7 @@ import {
 import ClaudeAccountsSection from './ClaudeAccountsSection'
 import GrokAccountsSection from './GrokAccountsSection'
 import KimiAccountsSection from './KimiAccountsSection'
+import AgentSandboxSection from './AgentSandboxSection'
 import ApprovedCommandsSection from './ApprovedCommandsSection'
 import CodexAccountsSection from './CodexAccountsSection'
 import SoftwareUpdate from './SoftwareUpdate'
@@ -453,6 +454,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'Software Update',
     anchor: 'software-update',
     keywords: 'upgrade release restart version',
+  },
+  {
+    page: 'security',
+    section: 'Agent Sandbox',
+    anchor: 'agent-sandbox',
+    keywords: 'landlock sandbox secrets data directory isolation sudo',
   },
   {
     page: 'security',
@@ -1556,6 +1563,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
         {activeSubPage === 'security' && (
           <>
+            <AgentSandboxSection />
             <section
               className="settings-section"
               data-testid="tool-permissions-section"

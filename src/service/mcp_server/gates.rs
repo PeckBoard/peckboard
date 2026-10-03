@@ -110,8 +110,10 @@ impl ToolGate {
         ) {
             return self.voice;
         }
-        if self.voice && is_browser_tool(name) {
-            return false;
+        if self.voice {
+            // An allowlist: only the voice session's free and gated tools
+            // (`voice_actions::policy`); no browser, shell, or file tools.
+            return crate::service::voice_actions::tool_allowed(name);
         }
         if self.is_worker && self.worker_denied_plugin_tools.contains(name) {
             return false;
@@ -124,40 +126,12 @@ impl ToolGate {
         !hidden.contains(&name)
     }
 
-    /// The `inputSchema` to advertise for `name`. For the voice session a
-    /// destructive tool gains a required `confirmed` boolean — the argument
-    /// `voice_relay::require_voice_confirmation` enforces at dispatch.
-    /// Every other case returns the schema unchanged.
-    pub fn input_schema(&self, name: &str, schema: &serde_json::Value) -> serde_json::Value {
-        use crate::service::voice_relay::{CONFIRMED_ARG, is_destructive_tool};
-        let mut schema = schema.clone();
-        if !self.voice || !is_destructive_tool(name) {
-            return schema;
-        }
-        let Some(obj) = schema.as_object_mut() else {
-            return schema;
-        };
-        if let Some(props) = obj
-            .entry("properties")
-            .or_insert_with(|| serde_json::json!({}))
-            .as_object_mut()
-        {
-            props.insert(
-                CONFIRMED_ARG.into(),
-                serde_json::json!({
-                    "type": "boolean",
-                    "description": "Voice assistant: true only after the user explicitly said yes out loud to this exact action."
-                }),
-            );
-        }
-        if let Some(required) = obj
-            .entry("required")
-            .or_insert_with(|| serde_json::json!([]))
-            .as_array_mut()
-        {
-            required.push(CONFIRMED_ARG.into());
-        }
-        schema
+    /// The `inputSchema` to advertise for `name`. Unchanged for every
+    /// session: the voice session's gated tools are confirmed by the user on
+    /// screen (`service::voice_actions`), never by an argument the model
+    /// passes.
+    pub fn input_schema(&self, _name: &str, schema: &serde_json::Value) -> serde_json::Value {
+        schema.clone()
     }
 
     /// Hard gate: `Some(reason)` refuses the call outright, whatever the
@@ -191,6 +165,12 @@ impl ToolGate {
             return Some(format!(
                 "tool '{name}' is blocked: the voice assistant has no browser. \
                  Route browser work to another session with send_message."
+            ));
+        }
+        if self.voice && !crate::service::voice_actions::tool_allowed(name) {
+            return Some(format!(
+                "tool '{name}' is not available to the voice assistant. \
+                 Route that work to another session with send_message."
             ));
         }
         if matches!(name, "get_model_guidance" | "switch_session_model") && !self.autoswitch_on {
@@ -375,6 +355,14 @@ mod tests {
         assert!(voice.advertised("list_sessions"));
         assert!(voice.blocked("browser_open").is_some());
         assert!(!voice.advertised("browser_act"));
+        // An allowlist: gated tools stay callable (the dispatch gate parks
+        // them for confirmation); anything unlisted is refused outright.
+        assert!(voice.blocked("delete_project").is_none());
+        assert!(voice.advertised("run_command"));
+        for tool in ["read_file", "spawn_subagent", "fetch_url", "git"] {
+            assert!(voice.blocked(tool).is_some(), "{tool}");
+            assert!(!voice.advertised(tool), "{tool}");
+        }
         let chat = ToolGate::from_session(&session(false, None, None));
         assert!(chat.blocked("browser_open").is_none());
         // An orchestrating chat may answer (the handler scopes the target).

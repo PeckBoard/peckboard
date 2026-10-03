@@ -155,6 +155,9 @@ if [[ "$CHANGED" -eq 1 ]]; then
     fi
   fi
   run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
+  # The browser sidecar is embedded JS outside the web lint scope and no e2e
+  # spec runs it: syntax-check it here so a broken edit can't ship.
+  run_step "embedded JS syntax" node --check "$ROOT/src/service/browser_sidecar.mjs"
   if [[ "$WEB_CHANGED" -eq 1 && -n "$WEB_FILES" ]]; then
     read -ra wf <<<"$WEB_FILES"
     cd "$ROOT/web"
@@ -177,6 +180,7 @@ else
   run_step "cargo test" cargo test
   run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
 
+  run_step "embedded JS syntax" node --check "$ROOT/src/service/browser_sidecar.mjs"
   cd "$ROOT/web"
   run_step "web lint" npm run lint
   run_step "web format:check" npm run format:check

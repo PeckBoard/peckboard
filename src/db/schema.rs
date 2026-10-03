@@ -510,6 +510,23 @@ diesel::table! {
     }
 }
 diesel::table! {
+    pending_actions (id) {
+        id -> Text,
+        user_id -> Text,
+        session_id -> Text,
+        channel -> Text,
+        tool -> Text,
+        args_json -> Text,
+        summary -> Text,
+        status -> Text,
+        created_at -> Text,
+        expires_at -> Text,
+        resolved_at -> Nullable<Text>,
+        resolved_by -> Nullable<Text>,
+        result_json -> Nullable<Text>,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -741,6 +758,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     tts_lexicon,
     tts_lexicon_seeded,
     tts_unknown_words,
+    pending_actions,
     voice_prompt_versions,
     session_view_nodes,
 );

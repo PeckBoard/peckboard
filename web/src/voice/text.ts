@@ -8,8 +8,54 @@ export function isRelayText(text: string): boolean {
   return text.startsWith(RELAY_PREFIX)
 }
 
+/** A relay line as shown: no prefix, and no `<untrusted …>` fence the
+ *  backend wraps other sessions' words in for the model. */
 export function stripRelayPrefix(text: string): string {
-  return isRelayText(text) ? text.slice(RELAY_PREFIX.length) : text
+  if (!isRelayText(text)) return text
+  return text.slice(RELAY_PREFIX.length).replace(/<\/?untrusted[^>]*>/g, '')
+}
+
+const SPOKEN_YES = new Set([
+  'yes',
+  'yeah',
+  'yep',
+  'yup',
+  'sure',
+  'confirm',
+  'confirmed',
+  'do it',
+  'go ahead',
+  'yes please',
+  'yes do it',
+  'yes go ahead',
+  'yes confirm',
+])
+const SPOKEN_NO = new Set([
+  'no',
+  'nope',
+  'cancel',
+  'cancel it',
+  'dont',
+  'dont do it',
+  'no thanks',
+  'no cancel',
+  'never mind',
+  'nevermind',
+])
+
+/** A whole utterance that is just a clear yes or no (to a waiting action
+ *  card), else `null` — anything longer is conversation for the model. */
+export function spokenDecision(text: string): 'yes' | 'no' | null {
+  const norm = text
+    .toLowerCase()
+    .replace(/[’']/g, '')
+    .replace(/[^a-z ]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ')
+  if (SPOKEN_YES.has(norm)) return 'yes'
+  if (SPOKEN_NO.has(norm)) return 'no'
+  return null
 }
 /** Prefix on an utterance that talked over the assistant: the model must
  *  not restate the part of its reply the user never heard. */

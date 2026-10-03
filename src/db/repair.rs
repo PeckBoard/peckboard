@@ -73,6 +73,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_voice_relay_queue_table(conn)?;
     ensure_tts_lexicon_tables(conn)?;
     ensure_voice_prompt_versions_table(conn)?;
+    ensure_pending_actions_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -332,6 +333,36 @@ fn ensure_voice_prompt_versions_table(conn: &mut SqliteConnection) -> anyhow::Re
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_voice_prompt_versions_created \
          ON voice_prompt_versions (created_at)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+/// Heal DBs that predate `1790994974_pending_actions`. `CREATE TABLE IF NOT
+/// EXISTS` is idempotent so this is safe on a fully-migrated DB and only does
+/// work on one that lacks the table. DDL mirrors the migration.
+fn ensure_pending_actions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "pending_actions")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS pending_actions (
+            id           TEXT PRIMARY KEY NOT NULL,
+            user_id      TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            channel      TEXT NOT NULL,
+            tool         TEXT NOT NULL,
+            args_json    TEXT NOT NULL,
+            summary      TEXT NOT NULL,
+            status       TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'cancelled', 'expired')),
+            created_at   TEXT NOT NULL,
+            expires_at   TEXT NOT NULL,
+            resolved_at  TEXT,
+            resolved_by  TEXT,
+            result_json  TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_pending_actions_user_status \
+         ON pending_actions (user_id, status)",
     )
     .execute(conn)?;
     Ok(())

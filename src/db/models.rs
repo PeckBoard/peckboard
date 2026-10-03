@@ -1283,6 +1283,28 @@ pub struct VoicePromptVersion {
     pub created_by: Option<String>,
 }
 
+// ── Pending Actions ──────────────────────────────
+
+/// One gated tool call parked for a human confirmation
+/// (`service::voice_actions`). `status` is `pending`, `confirmed`,
+/// `cancelled` or `expired`; rows are kept as the audit log.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = pending_actions)]
+pub struct PendingAction {
+    pub id: String,
+    pub user_id: String,
+    pub session_id: String,
+    pub channel: String,
+    pub tool: String,
+    pub args_json: String,
+    pub summary: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub resolved_at: Option<String>,
+    pub resolved_by: Option<String>,
+    pub result_json: Option<String>,
+}
 // ── Agent Vars ───────────────────────────────────
 
 /// A user-defined agent variable: plain name/value state agents read AND

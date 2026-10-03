@@ -20,6 +20,7 @@ mod folders;
 mod grok_accounts;
 mod kimi_accounts;
 mod mfa;
+mod pending_actions;
 mod plans;
 mod plugin_approvals;
 mod plugin_data;

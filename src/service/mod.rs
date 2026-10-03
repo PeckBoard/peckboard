@@ -24,6 +24,7 @@ pub mod tls;
 pub mod tool_images;
 pub mod tts;
 pub mod update;
+pub mod voice_actions;
 pub mod voice_gate;
 pub mod voice_prompt;
 pub mod voice_relay;

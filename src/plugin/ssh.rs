@@ -1299,6 +1299,8 @@ mod tests {
     /// and SFTP. Skips cleanly (does not fail) when OpenSSH is not installed, so
     /// CI without `sshd` stays green.
     #[test]
+    // Test fixture: spawns ssh-keygen/sshd itself, never an agent program.
+    #[allow(clippy::disallowed_methods)]
     fn end_to_end_against_local_sshd() {
         use base64::Engine as _;
         use serde_json::{Value, json};

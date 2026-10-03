@@ -43,17 +43,20 @@ pub fn branch_name(id8: &str) -> String {
 /// If `isolation_on` is false, or the folder is not a git repo root (no
 /// `.git`), or any git command fails, returns `folder_path` unchanged and
 /// appends a `worktree-downgrade` session event on failure.
-/// A `git` invocation with any inherited repo-pointing environment stripped.
+/// A hardened `git` invocation (see [`crate::sandbox::git_command`]).
 ///
-/// Every call here names its repo with `-C`, but a stray `GIT_DIR` /
-/// `GIT_WORK_TREE` / `GIT_INDEX_FILE` in the environment (git sets these for
-/// hook subprocesses) silently retargets the command at a different repo.
+/// Every call here names its repo with `-C <folder>` first. The folder runs
+/// agent-written code, so git gets hooks/fsmonitor/pager disabled and runs
+/// under the agent sandbox scoped to that folder; inherited `GIT_DIR` /
+/// `GIT_WORK_TREE` / `GIT_INDEX_FILE` (git sets these for hook subprocesses)
+/// are stripped so nothing retargets the command at a different repo.
 fn git_command(args: &[&str]) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE");
+    let repo = match args {
+        ["-C", repo, ..] => *repo,
+        _ => ".",
+    };
+    let mut cmd = crate::sandbox::git_command_tokio(repo);
+    cmd.args(args);
     cmd
 }
 
@@ -556,13 +559,10 @@ mod tests {
     /// Same env scrubbing as [`git_command`] — `cargo test` under a git hook
     /// inherits a `GIT_DIR` that would point these at the wrong repo.
     fn git(dir: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = crate::sandbox::git_command(dir)
             .arg("-C")
             .arg(dir)
             .args(args)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
             .output()
             .expect("git");
         assert!(

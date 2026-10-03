@@ -118,6 +118,11 @@ pub fn run(payload: &Value) -> Result<(), String> {
             .get("base_prompt_overridden")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        voice_lockdown: cfg
+            .get("metadata")
+            .and_then(|m| m.get("voice_lockdown"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         subagent_context_path: Some(subagent_path),
     };
     let args = argv::build_cli_args(&spec);

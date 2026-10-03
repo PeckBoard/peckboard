@@ -17,7 +17,6 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 
 use crate::provider::login_stash::CredentialStash;
@@ -73,7 +72,12 @@ impl GrokLoginManager {
         // broken) credentials: move them aside for the duration.
         let stash = CredentialStash::stash(config_dir, "auth.json");
 
-        let mut cmd = Command::new("grok");
+        // Sandboxed like an agent spawn: only the account dir is writable
+        // inside the data dir. Also resets SIGINT/SIGQUIT.
+        let mut cmd = crate::sandbox::SandboxedTokioCommand::new(
+            "grok",
+            &crate::sandbox::SpawnScope::none().account_dir(config_dir),
+        );
         cmd.args(["login", "--device-auth"])
             .env("GROK_HOME", config_dir)
             .stdin(Stdio::null())
@@ -82,7 +86,6 @@ impl GrokLoginManager {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        crate::provider::turn::reset_child_signals(&mut cmd);
 
         let mut child = match cmd.spawn() {
             Ok(child) => child,

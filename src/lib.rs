@@ -16,6 +16,7 @@ pub mod provider;
 pub mod repeating;
 pub mod restart_resume;
 pub mod routes;
+pub mod sandbox;
 pub mod security;
 pub mod server;
 pub mod service;

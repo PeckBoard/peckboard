@@ -75,7 +75,19 @@ pub struct CliSpec {
     /// The user replaced this provider's base prompt; `system_prompt` already
     /// starts with it, so `PECKBOARD_SYSTEM_PROMPT` must not be prepended.
     pub base_prompt_overridden: bool,
+    /// The voice assistant session: a router that never does the work
+    /// itself, driven by speech and fed other sessions' text. Every native
+    /// shell / file / agent / web tool is denied and project / local
+    /// settings files are not loaded (they could pre-approve tools or add
+    /// hooks); its peckboard MCP tools stay gated server-side.
+    pub voice_lockdown: bool,
 }
+
+/// Native CLI tools denied to the voice session (see
+/// `CliSpec::voice_lockdown`).
+pub const VOICE_DISALLOWED_TOOLS: &str = "AskUserQuestion,Read,Write,Edit,MultiEdit,NotebookEdit,\
+     Bash,BashOutput,KillShell,Glob,Grep,Task,Agent,WebFetch,WebSearch,Skill,SlashCommand,\
+     EnterWorktree,ExitWorktree";
 
 pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
     let combined_system_prompt = {
@@ -101,6 +113,8 @@ pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
          Glob,Grep,Task,Agent,WebFetch,WebSearch,Skill,SlashCommand,ExitPlanMode,\
          EnterWorktree,ExitWorktree,TodoWrite"
             .to_string()
+    } else if spec.voice_lockdown {
+        VOICE_DISALLOWED_TOOLS.to_string()
     } else if has_file_tools {
         "AskUserQuestion,Read,Write,Edit,MultiEdit".to_string()
     } else {
@@ -196,6 +210,11 @@ pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
             serde_json::Value::Object(settings)
         ));
     }
+    if spec.voice_lockdown {
+        // Only the user's own settings: a project's `.claude/settings*.json`
+        // must not pre-approve tools or add hooks for the voice session.
+        args.push("--setting-sources=user".to_string());
+    }
     match spec.permission_mode.as_deref() {
         Some("bypass") => args.push("--dangerously-skip-permissions".to_string()),
         _ => args.push("--permission-prompt-tool=stdio".to_string()),
@@ -246,9 +265,8 @@ pub fn build_user_message_frame(message: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn append_prompt(overridden: bool) -> String {
-        let spec = CliSpec {
+    fn spec(overridden: bool, voice: bool) -> CliSpec {
+        CliSpec {
             model: "default".into(),
             effort: None,
             conversation_id: None,
@@ -256,15 +274,19 @@ mod tests {
             permission_mode: None,
             is_worker: false,
             is_pre_hatcher: false,
-            extra_allowed_tools: Vec::new(),
+            extra_allowed_tools: vec!["read_file".into(), "edit_file".into()],
             extra_disallowed_tools: Vec::new(),
             system_prompt: "BASE".into(),
             core_tools: Vec::new(),
             pre_hatcher_tools: Vec::new(),
             subagent_context_path: None,
             base_prompt_overridden: overridden,
-        };
-        build_cli_args(&spec)
+            voice_lockdown: voice,
+        }
+    }
+
+    fn append_prompt(overridden: bool) -> String {
+        build_cli_args(&spec(overridden, false))
             .into_iter()
             .find_map(|a| {
                 a.strip_prefix("--append-system-prompt=")
@@ -280,5 +302,28 @@ mod tests {
             format!("{PECKBOARD_SYSTEM_PROMPT}BASE")
         );
         assert_eq!(append_prompt(true), "BASE");
+    }
+
+    #[test]
+    fn voice_lockdown_denies_native_tools_and_project_settings() {
+        let voice = build_cli_args(&spec(false, true));
+        let denied = voice
+            .iter()
+            .find_map(|a| a.strip_prefix("--disallowedTools="))
+            .unwrap();
+        for t in ["Bash", "Write", "Edit", "NotebookEdit", "Task", "WebFetch"] {
+            assert!(denied.split(',').any(|d| d == t), "{t} in {denied}");
+        }
+        assert!(voice.contains(&"--setting-sources=user".to_string()));
+        assert!(!voice.contains(&"--dangerously-skip-permissions".to_string()));
+
+        // Non-voice sessions are unchanged.
+        let chat = build_cli_args(&spec(false, false));
+        assert!(
+            chat.contains(
+                &"--disallowedTools=AskUserQuestion,Read,Write,Edit,MultiEdit".to_string()
+            )
+        );
+        assert!(!chat.iter().any(|a| a.starts_with("--setting-sources")));
     }
 }

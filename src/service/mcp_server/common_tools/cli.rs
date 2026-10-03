@@ -50,6 +50,14 @@ const APPROVE_ONCE: &str = "Approve once";
 const APPROVE_ALWAYS: &str = "Approve always";
 const DENY: &str = "Deny";
 
+/// Programs that need the user's approval on EVERY run: no "Approve
+/// always", no worker auto-approval (only the admin's host-wide bypass
+/// skips the prompt). `tailscale` can reconfigure the host's network and
+/// tailnet identity through tailscaled's local API, which the agent sandbox
+/// cannot fence off (a unix-socket connect isn't a filesystem access
+/// Landlock checks).
+pub const ALWAYS_ASK: &[&str] = &["tailscale", "tailscaled"];
+
 /// The outcome of a single `decide` call, mapped to an MCP response by the
 /// handler. `Ran` carries the (decorated) exec result; `NeedsPrompt` asks the
 /// handler to emit the interactive question; `StillWaiting`/`Denied` are the
@@ -150,12 +158,16 @@ pub fn decide_approval(
 ) -> Result<Approval, String> {
     // Never a path to Peckboard's own DB, whoever approved it.
     refuse_own_db(db, command, argv)?;
-    // 0. Auto-approval — no prompt.
-    if let Some(via) = auto_approve {
+    let ask_every_time = ALWAYS_ASK.contains(&command);
+    // 0. Auto-approval — no prompt. A worker never auto-runs an
+    // ask-every-time program; only the admin's host-wide bypass does.
+    if let Some(via) = auto_approve
+        && (!ask_every_time || matches!(via, AutoApprove::Bypass))
+    {
         return Ok(Approval::Approved(via.label()));
     }
-    // 1. Persisted "always" approval.
-    if always_approved(db, command)? {
+    // 1. Persisted "always" approval (never honoured for ask-every-time).
+    if !ask_every_time && always_approved(db, command)? {
         return Ok(Approval::Approved("always"));
     }
 
@@ -170,10 +182,15 @@ pub fn decide_approval(
                 key,
                 serde_json::json!({ "token": token, "command": command, "args": argv }),
             )?;
+            let options = if ask_every_time {
+                vec![APPROVE_ONCE.into(), DENY.into()]
+            } else {
+                vec![APPROVE_ONCE.into(), APPROVE_ALWAYS.into(), DENY.into()]
+            };
             Ok(Approval::NeedsPrompt {
                 token,
                 display: display(command, argv),
-                options: vec![APPROVE_ONCE.into(), APPROVE_ALWAYS.into(), DENY.into()],
+                options,
             })
         }
         Some(token) => {
@@ -201,7 +218,7 @@ pub fn decide_approval(
                     display(command, argv)
                 )));
             }
-            if answer.starts_with(APPROVE_ALWAYS) {
+            if answer.starts_with(APPROVE_ALWAYS) && !ask_every_time {
                 store_put(
                     db,
                     ALWAYS_COLLECTION,
@@ -209,7 +226,7 @@ pub fn decide_approval(
                     serde_json::json!({ "approved": true }),
                 )?;
                 Ok(Approval::Approved("approved_always"))
-            } else if answer.starts_with(APPROVE_ONCE) {
+            } else if answer.starts_with(APPROVE_ONCE) || answer.starts_with(APPROVE_ALWAYS) {
                 Ok(Approval::Approved("approved_once"))
             } else {
                 Ok(Approval::Denied(format!(
@@ -478,6 +495,33 @@ mod tests {
             None,
             "sqlite3",
             &["/srv/pb/peckboard.db".to_string()]
+        ));
+    }
+
+    #[test]
+    fn tailscale_asks_every_time_even_for_workers() {
+        let db = Db::in_memory().unwrap();
+        let inv = InvocationContext::default();
+        let ask = |cmd: &str, via| {
+            let key = pending_key("s1", cmd, &[]);
+            decide_approval(&db, &inv, &key, cmd, &[], via).unwrap()
+        };
+        // A worker auto-runs ordinary programs ...
+        assert!(matches!(
+            ask("rg", Some(AutoApprove::Worker)),
+            Approval::Approved(_)
+        ));
+        // ... but tailscale prompts, and offers no "Approve always".
+        match ask("tailscale", Some(AutoApprove::Worker)) {
+            Approval::NeedsPrompt { options, .. } => {
+                assert!(!options.iter().any(|o| o == APPROVE_ALWAYS), "{options:?}");
+            }
+            _ => panic!("tailscale must prompt"),
+        }
+        // The admin's host-wide bypass still skips the prompt.
+        assert!(matches!(
+            ask("tailscaled", Some(AutoApprove::Bypass)),
+            Approval::Approved(_)
         ));
     }
 }

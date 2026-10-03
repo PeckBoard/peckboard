@@ -56,6 +56,20 @@ pub async fn run_server(
     let addr = format!("{}:{}", config.host, config.port);
 
     let db = Db::open(&config.data_dir)?;
+    // Bind the agent sandbox before anything can spawn an agent-side process
+    // (plugin load may already probe provider CLIs).
+    {
+        let db = db.clone();
+        let setting =
+            tokio::task::spawn_blocking(move || crate::sandbox::settings::load_blocking(&db))
+                .await
+                .unwrap_or_default();
+        crate::sandbox::init(crate::sandbox::SandboxConfig {
+            data_dir: config.data_dir.clone(),
+            mode: setting.mode,
+            extra_rw: setting.extra_paths(),
+        });
+    }
     tracing::info!("Database opened at {}", config.data_dir.display());
     // Seed the built-in named system prompts the cost-aware auto-switch
     // picks from. Per-name create-if-missing: backfills builtins added
@@ -108,6 +122,10 @@ pub async fn run_server(
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
     let ssh_vault_key = load_or_create_vault_key(&config.data_dir)?;
     let mfa_vault_key = load_or_create_mfa_vault_key(&config.data_dir)?;
+    // Data dir 0700, secrets + DB 0600 (idempotent), and drop every MCP
+    // config left by a previous run — its tokens died with that process.
+    crate::sandbox::perms::harden_data_dir(&config.data_dir);
+    crate::service::mcp_server::sweep_mcp_configs(&config.data_dir);
     // The server's own keys never reach an agent's env, but an agent that
     // reads the files must not get them into transcripts either: mask their
     // text encodings in command output.
@@ -150,18 +168,27 @@ pub async fn run_server(
     .await;
     // interactive sessions can run `sudo -A` with the password typed in the
     // web UI (service::askpass). A write failure only disables sudo support.
+    // Under the enforced agent sandbox sudo can never work (the Landlock
+    // domain sets no_new_privs, which blocks setuid), so the bridge is off.
     let askpass_registry = crate::service::askpass::AskpassRegistry::new();
-    let askpass_env = match crate::service::askpass::write_askpass_script(&config.data_dir) {
-        Ok(script) => Some(crate::service::askpass::AskpassEnv {
-            registry: askpass_registry,
-            script_path: script.to_string_lossy().to_string(),
-            // The CLI child runs on this host, so loopback + the plain HTTP
-            // port is always right regardless of how the UI is reached.
-            url: format!("http://127.0.0.1:{}/api/askpass", config.port),
-        }),
-        Err(e) => {
-            tracing::warn!("askpass helper not written: {e} — sudo -A disabled in sessions");
-            None
+    let askpass_env = if crate::sandbox::status().enforced {
+        tracing::info!(
+            "sudo -A disabled in sessions: the agent sandbox forbids privilege escalation"
+        );
+        None
+    } else {
+        match crate::service::askpass::write_askpass_script(&config.data_dir) {
+            Ok(script) => Some(crate::service::askpass::AskpassEnv {
+                registry: askpass_registry,
+                script_path: script.to_string_lossy().to_string(),
+                // The CLI child runs on this host, so loopback + the plain HTTP
+                // port is always right regardless of how the UI is reached.
+                url: format!("http://127.0.0.1:{}/api/askpass", config.port),
+            }),
+            Err(e) => {
+                tracing::warn!("askpass helper not written: {e} — sudo -A disabled in sessions");
+                None
+            }
         }
     };
     let env_unlock = Arc::new(crate::service::env_vars::EnvUnlockRegistry::new());

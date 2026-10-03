@@ -229,6 +229,28 @@
   text-decoration: underline;
 }
 
+/* A gated tool call the assistant parked for the user: the confirm-dialog
+   title / message / actions, inline in the panel so it never blocks the
+   conversation. */
+.voice-action {
+  margin: 0 12px 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--surface2);
+}
+.voice-action .confirm-dialog-title {
+  margin: 0 0 4px;
+  font-size: var(--text-sm);
+}
+.voice-action .confirm-dialog-message {
+  margin: 0 0 8px;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.voice-action .confirm-dialog-actions {
+  margin-top: 0;
+}
 .voice-tts-status {
   margin: 0 12px;
   padding: 6px 10px;

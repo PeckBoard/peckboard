@@ -127,7 +127,23 @@ pub fn git_tool(args: serde_json::Value, ctx: &HostCtx) -> Result<serde_json::Va
         }
     }
 
-    let mut req = serde_json::json!({ "command": "git", "args": argv });
+    // The repo is agent-writable: an agent could plant `core.fsmonitor`,
+    // `core.hooksPath`, `diff.external` or a textconv driver in .git/config
+    // and have this "read-only" tool run it. Override them, and keep diff
+    // output to git's own differ.
+    let mut full: Vec<String> = crate::sandbox::GIT_HARDENING_ARGS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    full.push(subcommand.clone());
+    if matches!(subcommand.as_str(), "diff" | "show" | "log" | "whatchanged") {
+        full.push("--no-ext-diff".into());
+        full.push("--no-textconv".into());
+    } else if subcommand == "blame" {
+        full.push("--no-textconv".into());
+    }
+    full.extend(argv.iter().skip(1).cloned());
+    let mut req = serde_json::json!({ "command": "git", "args": full });
     if let Some(t) = args.get("timeout_secs").and_then(|v| v.as_u64()) {
         req["timeout_secs"] = serde_json::json!(t);
     }
