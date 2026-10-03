@@ -19,7 +19,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<!-- Standard crypto only (TLS 1.3 / QUIC); confirm before App Store submission. -->
+	<!-- Standard crypto only (TLS 1.3 / QUIC via the OS and rustls): exempt, so
+	     TestFlight uploads skip the export-compliance prompt. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

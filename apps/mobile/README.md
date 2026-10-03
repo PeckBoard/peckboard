@@ -7,7 +7,7 @@ each box's own web UI through a direct, end-to-end encrypted tunnel. Design:
 - Bundle id / package: `com.peckboard.app`; display name **PeckBoard**.
 - Android: sideloaded APK. iOS: TestFlight (later). Desktop builds exist
   only for `cargo check` / UI iteration — never shipped.
-- Releases will use their own `mobile-X.Y.Z` tags (CI not wired yet).
+- Releases use their own `mobile-X.Y.Z` tags (see Releasing the Mobile App).
 
 ## Architecture
 
@@ -117,9 +117,7 @@ by Gradle, and `Info.ios.plist` is merged by the Tauri CLI, so the generated
 on `allowBackup`/`networkSecurityConfig`, remove that attribute from
 `gen/android/app/src/main/AndroidManifest.xml`.
 
-For release (later): Android signing per design §7a (one keystore, v2+v3,
-versionCode from semver, `applicationIdSuffix ".dev"` for debug builds);
-iOS via TestFlight from the macOS workflow. No signing secrets exist yet.
+Release builds, signing and publishing: see Releasing the Mobile App.
 
 ## Pair a Phone
 
@@ -160,3 +158,45 @@ allow-list, event → status mapping, and pause/resume releasing and
 rebinding the port. Device smoke tests (pair against
 `peckboard-relay/examples/box_forward`, load `/`, WS connects) are manual
 for now.
+
+## Releasing the Mobile App
+
+`.github/workflows/mobile-release.yml` ships the app on its own
+`mobile-X.Y.Z` tags, independent of server releases.
+
+1. Bump `version` in `src-tauri/tauri.conf.json` (keeps local builds in
+   step; CI versions from the tag anyway), commit, push `main`.
+2. `git tag -a mobile-0.1.0 -m "mobile-0.1.0" && git push origin mobile-0.1.0`.
+
+CI stamps the version into `tauri.conf.json` on the runner: Android
+`versionCode` = `X*1000000 + Y*1000 + Z` (must only ever grow), iOS build
+number `<versionCode>.<run number>`. A manual run (Actions → Mobile Release →
+Run workflow) picks `ios` / `android` / `both`; `upload: false` is a dry run
+that only builds, signs and keeps the files as run artifacts.
+
+**Secrets** (repo secrets, or the `ios-release` / `android-release`
+environments):
+
+- iOS: `APPLE_API_KEY_P8_B64` (App Store Connect API `.p8`, base64; Admin
+  role so Xcode can create the cloud-managed distribution cert and profile),
+  `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, `APPLE_TEAM_ID`. The app record
+  `com.peckboard.app` must already exist in App Store Connect.
+- Android: `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`,
+  `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, plus the repo **variable**
+  `ANDROID_CERT_SHA256` (the release cert's SHA-256). Without the secrets
+  the Android job is skipped with a notice; with a missing or different
+  fingerprint it fails after printing the actual one. That key is the app's
+  identity for sideloaded updates — never rotate it casually.
+
+**iOS** goes to TestFlight (`xcrun altool --upload-app`). After App Store
+Connect finishes processing, add the build to an internal testing group;
+testers install it with the TestFlight app.
+
+**Android** builds land on a GitHub release named after the tag (created as
+not-latest, so server self-update is unaffected):
+`peckboard-android-X.Y.Z.apk` + `.sha256`. On the phone, open the APK link,
+allow the browser to install unknown apps when Android asks, and install.
+To verify first: `sha256sum -c peckboard-android-X.Y.Z.apk.sha256` and
+`apksigner verify --print-certs peckboard-android-X.Y.Z.apk` — the cert
+SHA-256 must match the one in the release notes. Updates install over the
+old app only when signed with the same key.

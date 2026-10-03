@@ -1,0 +1,467 @@
+name: Mobile Release
+
+# Builds and ships the PeckBoard phone app (Tauri 2, apps/mobile/). Mobile
+# releases are versioned separately from the server: a `mobile-X.Y.Z` tag
+# builds
+#
+#   ios       signed IPA → TestFlight (App Store Connect API key, automatic
+#             signing). Info.plist carries ITSAppUsesNonExemptEncryption=false.
+#   android   arm64 APK signed with the sideload release key, checked against
+#             the pinned cert fingerprint → peckboard-android-X.Y.Z.apk +
+#             .sha256 on a GitHub release named after the tag. The release
+#             is created with --latest=false so `releases/latest` (what
+#             server self-update reads) keeps pointing at the server release.
+#
+# Version: mobile-X.Y.Z → app version X.Y.Z, Android versionCode
+# X*1000000 + Y*1000 + Z (Tauri's default scheme, design §7a), iOS build
+# number "<versionCode>.<run_number>" so a re-run of the same tag can still
+# be uploaded. Written into tauri.conf.json on the runner only.
+#
+# workflow_dispatch builds from any ref: against a mobile-* tag it versions
+# from the tag; otherwise from tauri.conf.json. `upload: false` is a dry run
+# (build + sign + verify, keep artifacts, no TestFlight, no release).
+#
+# Secrets (repo or environment `ios-release` / `android-release`):
+#   APPLE_API_KEY_P8_B64, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID, APPLE_TEAM_ID
+#   ANDROID_KEYSTORE_B64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
+#   ANDROID_KEY_PASSWORD
+# Variable: ANDROID_CERT_SHA256 — expected signing-cert SHA-256 (hex, colons
+# optional). The Android job fails if the signed APK carries any other cert.
+on:
+  push:
+    tags: ["mobile-*"]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which app to build
+        type: choice
+        options: [both, ios, android]
+        default: both
+      upload:
+        description: Upload to TestFlight / attach to the GitHub release (false = dry run)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_HTTP_TIMEOUT: 60
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      version_code: ${{ steps.v.outputs.version_code }}
+      build_number: ${{ steps.v.outputs.build_number }}
+      is_tag: ${{ steps.v.outputs.is_tag }}
+      ios: ${{ steps.v.outputs.ios }}
+      android: ${{ steps.v.outputs.android }}
+      upload: ${{ steps.v.outputs.upload }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Derive version and build numbers
+        id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          PLATFORM: ${{ inputs.platform }}
+          UPLOAD: ${{ inputs.upload }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/mobile-* ]]; then
+            ver="${GITHUB_REF_NAME#mobile-}"
+            is_tag=true
+          else
+            ver=$(python3 -c 'import json; print(json.load(open("apps/mobile/src-tauri/tauri.conf.json"))["version"])')
+            is_tag=false
+          fi
+          if ! [[ "$ver" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Version '$ver' is not X.Y.Z (tag must be mobile-X.Y.Z)."
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+          if (( 10#$minor > 999 || 10#$patch > 999 )); then
+            echo "::error::minor/patch must be < 1000 for the versionCode scheme."
+            exit 1
+          fi
+          code=$(( 10#$major * 1000000 + 10#$minor * 1000 + 10#$patch ))
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            platform="$PLATFORM"; upload="$UPLOAD"
+          else
+            platform=both; upload=true
+          fi
+          {
+            echo "version=$ver"
+            echo "version_code=$code"
+            echo "build_number=$code.$GITHUB_RUN_NUMBER"
+            echo "is_tag=$is_tag"
+            echo "ios=$([[ $platform == both || $platform == ios ]] && echo true || echo false)"
+            echo "android=$([[ $platform == both || $platform == android ]] && echo true || echo false)"
+            echo "upload=$upload"
+          } >> "$GITHUB_OUTPUT"
+          echo "Mobile $ver (versionCode $code, iOS build $code.$GITHUB_RUN_NUMBER), platform=$platform upload=$upload tag=$is_tag"
+
+  ios:
+    name: iOS → TestFlight
+    needs: version
+    if: needs.version.outputs.ios == 'true'
+    # Newest hosted macOS image; Tauri's iOS build needs a current Xcode and
+    # App Store Connect only accepts builds made with the current iOS SDK.
+    runs-on: macos-26
+    environment: ios-release
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
+      UPLOAD: ${{ needs.version.outputs.upload }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Select newest Xcode
+        run: |
+          set -euo pipefail
+          xc=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xc/Contents/Developer"
+          xcodebuild -version
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: mobile-ios
+          workspaces: apps/mobile/src-tauri -> target
+
+      # @tauri-apps/cli is pinned by apps/mobile/package-lock.json (npm ci).
+      - name: Install JS dependencies
+        working-directory: apps/mobile
+        run: npm ci
+
+      - name: Stamp version into tauri.conf.json
+        working-directory: apps/mobile/src-tauri
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          p = "tauri.conf.json"
+          c = json.load(open(p))
+          c["version"] = os.environ["VERSION"]
+          ios = c["bundle"].setdefault("iOS", {})
+          ios["bundleVersion"] = os.environ["BUILD_NUMBER"]
+          ios["developmentTeam"] = os.environ["APPLE_TEAM_ID"]
+          json.dump(c, open(p, "w"), indent=2)
+          EOF
+
+      - name: Generate Xcode project
+        working-directory: apps/mobile
+        run: npx tauri ios init --ci
+
+      # gen/apple is not committed. Put the designed icons into the asset
+      # catalog whether or not init already did (file names match
+      # `tauri icon`'s Contents.json).
+      - name: Install app icons
+        working-directory: apps/mobile/src-tauri
+        run: |
+          set -euo pipefail
+          dest=gen/apple/Assets.xcassets/AppIcon.appiconset
+          test -d "$dest" || { echo "::error::$dest missing after ios init"; exit 1; }
+          cp icons/ios/*.png "$dest/"
+
+      - name: Install App Store Connect API key
+        env:
+          APPLE_API_KEY_P8_B64: ${{ secrets.APPLE_API_KEY_P8_B64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_ID.p8"
+          printf '%s' "$APPLE_API_KEY_P8_B64" | base64 --decode > "$key"
+          # altool looks the key up by id here.
+          mkdir -p ~/.appstoreconnect/private_keys
+          cp "$key" ~/.appstoreconnect/private_keys/
+          echo "APPLE_API_KEY_PATH=$key" >> "$GITHUB_ENV"
+
+      # Tauri archives and exports with automatic signing; with these env
+      # vars it passes -allowProvisioningUpdates and the
+      # -authenticationKey{Path,ID,IssuerID} flags to xcodebuild, so the
+      # distribution cert and profile are cloud-managed by App Store Connect.
+      - name: Build and export IPA
+        working-directory: apps/mobile
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx tauri ios build --target aarch64 --export-method app-store-connect --ci
+
+      - name: Stage IPA
+        id: ipa
+        run: |
+          set -euo pipefail
+          ipa=$(find apps/mobile/src-tauri/gen/apple/build -name '*.ipa' -print -quit)
+          test -n "$ipa" || { echo "::error::no IPA produced"; exit 1; }
+          cp "$ipa" "peckboard-ios-$VERSION.ipa"
+          shasum -a 256 "peckboard-ios-$VERSION.ipa" | tee "peckboard-ios-$VERSION.ipa.sha256"
+          echo "file=peckboard-ios-$VERSION.ipa" >> "$GITHUB_OUTPUT"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: peckboard-ios-${{ env.VERSION }}
+          path: peckboard-ios-*.ipa*
+          if-no-files-found: error
+
+      - name: Upload to TestFlight
+        if: env.UPLOAD == 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          IPA: ${{ steps.ipa.outputs.file }}
+        run: |
+          xcrun altool --upload-app --type ios --file "$IPA" \
+            --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER_ID"
+
+      - name: Remove API key
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+          rm -rf ~/.appstoreconnect/private_keys
+
+  android:
+    name: Android APK
+    needs: version
+    if: needs.version.outputs.android == 'true'
+    runs-on: ubuntu-24.04
+    environment: android-release
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      VERSION_CODE: ${{ needs.version.outputs.version_code }}
+      NDK_VERSION: 27.2.12479018
+      BUILD_TOOLS: 35.0.0
+    outputs:
+      built: ${{ steps.gate.outputs.ok }}
+      cert: ${{ steps.verify.outputs.cert }}
+    steps:
+      # Signing secrets are not configured yet; skip (green, with a notice)
+      # rather than ship an APK signed with anything but the release key.
+      - name: Check signing secrets
+        id: gate
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: |
+          if [ -n "$KS" ] && [ -n "$KS_PASS" ] && [ -n "$ALIAS" ] && [ -n "$KEY_PASS" ]; then
+            if [ -z "$EXPECTED" ]; then
+              echo "::warning::Repo variable ANDROID_CERT_SHA256 is not set — the build will sign, print the cert fingerprint, and fail at verification. Set the variable to that fingerprint once confirmed."
+            fi
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Android signing secrets (ANDROID_KEYSTORE_B64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD) are not configured — skipping the Android release."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.ok == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up JDK 17
+        if: steps.gate.outputs.ok == 'true'
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The runner image ships the SDK; pin the pieces the build needs
+      # (compileSdk 36 — see the plugin's build.gradle.kts — NDK, build-tools).
+      - name: Install Android SDK packages
+        if: steps.gate.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          sdkm="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkm" --licenses > /dev/null || true
+          "$sdkm" --install "platforms;android-36" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION" "platform-tools" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Set up Node.js
+        if: steps.gate.outputs.ok == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Install Rust toolchain
+        if: steps.gate.outputs.ok == 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry and build
+        if: steps.gate.outputs.ok == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: mobile-android
+          workspaces: apps/mobile/src-tauri -> target
+
+      - name: Install JS dependencies
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: apps/mobile
+        run: npm ci
+
+      - name: Stamp version into tauri.conf.json
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: apps/mobile/src-tauri
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          p = "tauri.conf.json"
+          c = json.load(open(p))
+          c["version"] = os.environ["VERSION"]
+          c["bundle"].setdefault("android", {})["versionCode"] = int(os.environ["VERSION_CODE"])
+          json.dump(c, open(p, "w"), indent=2)
+          EOF
+
+      - name: Generate Gradle project
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: apps/mobile
+        run: npx tauri android init --ci
+
+      # Unsigned release APK with arm64-v8a libs only; signed below with
+      # apksigner so the keystore never touches Gradle.
+      - name: Build release APK
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: apps/mobile
+        run: npx tauri android build --apk --target aarch64 --ci
+
+      - name: Sign APK
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          bt="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          unsigned=$(find apps/mobile/src-tauri/gen/android/app/build/outputs/apk -name '*release-unsigned.apk' -print -quit)
+          test -n "$unsigned" || { echo "::error::no unsigned release APK produced"; exit 1; }
+          umask 077
+          ks="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$KS" | base64 --decode > "$ks"
+          # -P 16: 16 KB page alignment for the native libs (Android 15+).
+          "$bt/zipalign" -P 16 -f 4 "$unsigned" "$RUNNER_TEMP/aligned.apk"
+          "$bt/apksigner" sign --ks "$ks" --ks-key-alias "$ALIAS" \
+            --ks-pass env:KS_PASS --key-pass env:KEY_PASS \
+            --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
+            --out "peckboard-android-$VERSION.apk" "$RUNNER_TEMP/aligned.apk"
+
+      - name: Verify signing cert
+        id: verify
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          EXPECTED: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          bt="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          apk="peckboard-android-$VERSION.apk"
+          out=$("$bt/apksigner" verify --min-sdk-version 24 --print-certs "$apk")
+          echo "$out"
+          signers=$(awk '/certificate SHA-256 digest:/ {print $NF}' <<<"$out" | sort -u)
+          if [ "$(wc -l <<<"$signers")" != 1 ] || [ -z "$signers" ]; then
+            echo "::error::Expected exactly one signing cert, got: $signers"
+            exit 1
+          fi
+          want=$(tr -d ':[:space:]' <<<"$EXPECTED" | tr 'A-F' 'a-f')
+          echo "Signing cert SHA-256: $signers"
+          if [ "$signers" != "$want" ]; then
+            echo "::error::APK signing cert $signers does not match ANDROID_CERT_SHA256 (${want:-unset}). Refusing to publish."
+            exit 1
+          fi
+          echo "cert=$signers" >> "$GITHUB_OUTPUT"
+
+      - name: Checksum
+        if: steps.gate.outputs.ok == 'true'
+        run: sha256sum "peckboard-android-$VERSION.apk" | tee "peckboard-android-$VERSION.apk.sha256"
+
+      - name: Upload APK artifact
+        if: steps.gate.outputs.ok == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: peckboard-android-${{ env.VERSION }}
+          path: peckboard-android-*.apk*
+          if-no-files-found: error
+
+      - name: Remove keystore
+        if: always()
+        run: |
+          [ -f "$RUNNER_TEMP/release.keystore" ] && shred -u "$RUNNER_TEMP/release.keystore" || true
+          rm -f "$RUNNER_TEMP/aligned.apk"
+
+  release:
+    name: Attach APK to GitHub release
+    needs: [version, android]
+    if: >-
+      needs.android.outputs.built == 'true' &&
+      needs.version.outputs.is_tag == 'true' &&
+      needs.version.outputs.upload == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
+      CERT: ${{ needs.android.outputs.cert }}
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: peckboard-android-${{ needs.version.outputs.version }}
+          path: assets
+
+      # --latest=false: server self-update reads releases/latest, which must
+      # keep pointing at the server release. Not a prerelease, so the
+      # in-app update check (newest non-prerelease mobile-* tag) sees it.
+      - name: Create release and upload assets
+        run: |
+          set -euo pipefail
+          apk="assets/peckboard-android-$VERSION.apk"
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            {
+              echo "PeckBoard mobile app $VERSION."
+              echo
+              echo "Android: install \`peckboard-android-$VERSION.apk\` (sideload). iOS: TestFlight."
+              echo
+              echo "APK SHA-256: \`$(cut -d' ' -f1 "$apk.sha256")\`"
+              echo
+              echo "Signing cert SHA-256: \`$CERT\` (check with \`apksigner verify --print-certs\`)."
+            } > notes.md
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "PeckBoard Mobile $VERSION" --notes-file notes.md --latest=false
+          fi
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "$apk" "$apk.sha256"

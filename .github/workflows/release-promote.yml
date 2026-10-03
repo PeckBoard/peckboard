@@ -30,9 +30,12 @@ name: Publish Release
 #
 # A tag containing '-' (0.0.191-rc1) publishes as a prerelease, which
 # `releases/latest` (what self-update reads) ignores.
+#
+# `mobile-*` tags belong to the mobile app (mobile-release.yml) and never
+# publish a server release.
 on:
   push:
-    tags: ["*"]
+    tags: ["*", "!mobile-*"]
 
 permissions:
   contents: write
