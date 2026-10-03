@@ -12,6 +12,14 @@
 # Installs /opt/peckboard-relay/peckboard-relay (previous binary kept as
 # peckboard-relay.prev) and the systemd unit. Runtime flags such as
 # --acme-staging go in /etc/peckboard-relay.env as PECKRELAY_ARGS=...
+#
+# Relay fallback (protocol v2) is on by default. Its limits are flags and
+# can also be set in the same env file: PECKRELAY_RELAY_RATE_PER_ID
+# (512 KiB/s), PECKRELAY_RELAY_BURST_PER_ID (2 MiB), _RATE_PER_IP (1 MiB/s),
+# _BURST_PER_IP (4 MiB), _RATE_GLOBAL (50 MiB/s), _BURST_GLOBAL (100 MiB),
+# _MAX_PAIRS (1000), _IDLE_SECS (60); PECKRELAY_NO_RELAY_DATA=true turns it
+# off (clients then see a v1 relay and fail hard NATs as before). Open no
+# new ports: relayed data rides the existing 443/tcp sessions.
 set -euo pipefail
 
 HOST="${1:?usage: deploy.sh user@host [--no-restart | --rollback]}"

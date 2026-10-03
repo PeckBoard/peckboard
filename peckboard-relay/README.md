@@ -1,8 +1,10 @@
 # peckboard-relay
 
-Handshake-only rendezvous server. It introduces a user's device to their
-Peckboard box; after that, all traffic flows **directly** between the two
-over UDP hole punching. The relay never carries user traffic.
+Rendezvous server. It introduces a user's device to their Peckboard box;
+after that, traffic flows **directly** between the two over UDP hole
+punching. Only when no direct path can be punched does the relay forward
+the tunnel's end-to-end encrypted QUIC datagrams (see Relay Fallback); it
+never sees plaintext.
 
 Production: `relay.peckboard.com` — 443/tcp (TLS 1.3 signaling + ACME
 TLS-ALPN-01) and 3478/udp (authenticated STUN).
@@ -49,8 +51,9 @@ compile rustls-acme, clap or tracing-subscriber.
 
 ## Tunnel API
 
-Feature `tunnel` (implies `client`; `src/tunnel.rs`) adds the direct data
-path. The relay is not involved after the punch and needs no change.
+Feature `tunnel` (implies `client`; `src/tunnel.rs`) adds the data path:
+direct after a punch (the relay is not involved), relayed when punching
+fails (`src/tunnel/relayed.rs`).
 
 ```rust
 use peckboard_relay::tunnel::*;
@@ -60,9 +63,12 @@ pub async fn relay_config(host: &str) -> anyhow::Result<ClientConfig>;
 
 // Rendezvous + hole punch. Box: waits for its device indefinitely (drop to
 // cancel). Device: TunnelError::PeerOffline if the box isn't seen in 30 s.
-// Both: TunnelError::PunchFailed { rounds } after 4 failed rounds (both NATs
-// hard). Downcast the anyhow::Error to tell them apart. Re-STUNs + pings the
-// relay every 20 s while waiting; drops the relay session on return.
+// Punch rounds keep failing (both NATs hard): with a v2 relay and v2 peer,
+// both switch to a relayed path (see Relay Fallback); otherwise
+// TunnelError::PunchFailed { rounds } after 4 rounds. Downcast the
+// anyhow::Error to tell them apart. Re-STUNs + pings the relay every 20 s
+// while waiting; a direct path drops the relay session on return, a
+// relayed one keeps it.
 pub async fn establish(cfg: &ClientConfig, secret: &PairingSecret, role: Role)
     -> anyhow::Result<PunchedPath>;
 
@@ -80,13 +86,16 @@ pub struct EstablishOptions {
     pub advertise: Vec<Advertise>,            // Addr(SocketAddr) | Port(u16)
     pub public_ip_hint: Option<IpAddr>,
     pub on_registered: Option<OnRegistered>,  // Fn(&Registration{local_port, public, candidates})
+    pub fallback: RelayFallback,  // { enabled: true, after_failures: 2, upgrade_every: Some(30 s) }
 }
 
 pub struct PunchedPath {
-    pub socket: tokio::net::UdpSocket, // the exact socket the punch used
-    pub peer: SocketAddr,              // peer address as seen from it
+    pub socket: PathSocket,  // Direct(UdpSocket: the one the punch used) | Relayed(RelayedPath)
+    pub peer: SocketAddr,    // direct: as seen from the socket; relayed: its STUN endpoint
     pub role: Role,
 }
+impl PunchedPath { fn kind(&self) -> PathKind; fn path_watch(&self) -> watch::Receiver<PathKind>; }
+pub enum PathKind { Direct, Relayed }  // as_str(): "direct" | "relayed"
 
 // Box: accept one QUIC connection (15 s window) from the paired device and
 // forward every stream to `target`. Ok(()) when an established connection
@@ -103,7 +112,8 @@ pub async fn connect_device(path: PunchedPath, secret: &PairingSecret,
 
 #[derive(Clone, Debug)]
 pub enum TunnelEvent {
-    Connected { peer: SocketAddr, rtt_ms: u32 },
+    Connected { peer: SocketAddr, rtt_ms: u32, path: PathKind },
+    PathChanged { path: PathKind },  // relayed tunnel upgraded to direct (or back)
     Disconnected { reason: String },
     Error(String),
 }
@@ -154,7 +164,8 @@ pub async fn run_device(opts: DeviceOptions, listener: TcpListener,
 #[derive(Clone, Debug)]
 pub enum DeviceEvent {     // per attempt: Connecting, then Connected..Disconnected
     Connecting,            //   or a failure, then Retrying
-    Connected { peer: SocketAddr, rtt_ms: u32 },
+    Connected { peer: SocketAddr, rtt_ms: u32, path: PathKind },
+    PathChanged { path: PathKind },      // relayed → direct upgrade (or back)
     Disconnected { reason: String },     // "stopped" after cancel
     PeerOffline,                         // box not at the relay (offline / revoked)
     PunchFailed { rounds: u32 },         // both NATs hard: no direct path
@@ -232,6 +243,63 @@ cargo run --manifest-path peckboard-connect/Cargo.toml -- - < link.txt
 PECKBOARD_LINK='<link>' cargo run --manifest-path peckboard-connect/Cargo.toml
 # --save stores it (0600) so later runs need no link at all.
 ```
+
+## Relay Fallback
+
+When no punch round gets through (typically symmetric NAT × mobile CGNAT),
+the tunnel runs **through the relay** instead (Tailscale-DERP style). The
+relay still cannot read it: the payload is the same pairing-pinned QUIC,
+and the relay only forwards its ciphertext.
+
+- **Versioning**: protocol v2 = v1 + two frames, `ClientMsg::Data` (`0x10`)
+  and `ServerMsg::Data` (`0x90`), each the type byte + one raw datagram
+  (≤ 2048 B). Negotiated by ALPN at the TLS handshake: v2 clients offer
+  `[peckrelay/2, peckrelay/1]`, the relay prefers `peckrelay/2`. An old
+  relay picks v1, an old client never offers v2; v2 frames only ever flow
+  on v2 sessions, so every old/new combination keeps working direct-only.
+- **Transport**: the existing authenticated TLS session (no second
+  connection): auth and slot ownership are already proven, a re-registering
+  peer still replaces the old session (and with it the old relayed path),
+  and each peer keeps one TCP connection (per-IP connection caps unchanged).
+  Signaling and data have separate queues; signaling always goes first and
+  a full data queue drops datagrams instead of blocking (UDP semantics —
+  QUIC's congestion control backs off).
+- **Switch**: once both peers are online, each v2 peer sends the other a
+  sealed `RELAY_CAP` message. After `RelayFallback::after_failures` (2)
+  failed rounds, a side whose peer is capable sends a sealed `RELAY_GO` and
+  both return `PunchedPath { socket: PathSocket::Relayed(..) }`. The relay
+  session stays open (it carries the data); QUIC runs over a quinn
+  `AsyncUdpSocket` on the data channel, `serve_box` / `connect_device` /
+  `run_device` unchanged.
+- **Upgrade**: while relayed, the box asks for another punch round after
+  30 s, doubling to 10 min (`RelayFallback::upgrade_every`; within the
+  relay's 8-round budget per registration). Both sides punch from the
+  socket `establish` used; on success that socket also sends directly. A
+  path counts as direct while direct packets keep arriving (12 s); until
+  the first one, datagrams go both ways at once; when they stop, back to
+  the relay. QUIC never notices (its peer address is a fixed placeholder).
+- **Status**: `PunchedPath::kind()`, `TunnelEvent`/`DeviceEvent::Connected
+{ path }` and `::PathChanged { path }` with `PathKind::{Direct, Relayed}`.
+  The box shows `path: direct|relayed` in device status; the app shows
+  "Relayed … end-to-end encrypted" on its connect screen.
+- **Relay side**: no disk state and no content logging — only aggregate
+  counters (`Relay::relay_stats`, logged every 30 s when they change).
+  Limits (flags; env `PECKRELAY_*` in `/etc/peckboard-relay.env`):
+
+  | Flag                   | Default   | What                                       |
+  | ---------------------- | --------- | ------------------------------------------ |
+  | `--relay-rate-per-id`  | 512 KiB/s | bytes/s per rendezvous id, both directions |
+  | `--relay-burst-per-id` | 2 MiB     | burst per id                               |
+  | `--relay-rate-per-ip`  | 1 MiB/s   | bytes/s per sending IP (v6 /64)            |
+  | `--relay-burst-per-ip` | 4 MiB     | burst per IP                               |
+  | `--relay-rate-global`  | 50 MiB/s  | bytes/s across the relay                   |
+  | `--relay-burst-global` | 100 MiB   | global burst                               |
+  | `--relay-max-pairs`    | 1000      | ids relaying at once (more: dropped)       |
+  | `--relay-idle-secs`    | 60        | idle id frees its pair slot                |
+  | `--no-relay-data`      | off       | disable; the relay stops offering v2       |
+
+  Over-limit datagrams are dropped silently. The protocol version a relay
+  offers is visible in its ALPN list (no other new surface).
 
 ## Non-Discoverability
 

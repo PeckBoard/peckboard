@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use peckboard_relay::tunnel::{
-    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink,
+    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink, PathKind,
     bind_listener, run_device,
 };
 use serde::Serialize;
@@ -19,7 +19,7 @@ use tauri::async_runtime::{self, JoinHandle};
 
 use crate::nav;
 
-pub const HARD_NAT: &str = "Couldn't reach your PeckBoard directly from this network. Try Wi-Fi instead of mobile data (or the other way round), or forward one UDP port on the box's router.";
+pub const HARD_NAT: &str = "Couldn't reach your PeckBoard from this network right now. Retrying…";
 pub const BOX_OFFLINE: &str = "Your PeckBoard isn't reachable right now — it may be offline, or this phone's pairing was revoked.";
 /// How long a paused tunnel may take to wind down before we rebind anyway.
 const STOP_WAIT: Duration = Duration::from_secs(5);
@@ -50,6 +50,9 @@ pub struct TunnelStatus {
     /// Gate boot URL to navigate the WebView to once `Connected`.
     pub url: String,
     pub ever_connected: bool,
+    /// Connected through the relay (no direct path from this network);
+    /// the tunnel is still end-to-end encrypted.
+    pub relayed: bool,
 }
 
 impl TunnelStatus {
@@ -63,6 +66,7 @@ impl TunnelStatus {
             port,
             url,
             ever_connected: false,
+            relayed: false,
         }
     }
 
@@ -81,13 +85,15 @@ impl TunnelStatus {
                     };
                 }
             }
-            DeviceEvent::Connected { rtt_ms, .. } => {
+            DeviceEvent::Connected { rtt_ms, path, .. } => {
                 self.state = Connected;
                 self.rtt_ms = Some(rtt_ms);
+                self.relayed = path == PathKind::Relayed;
                 self.message = None;
                 self.retry_in_secs = None;
                 self.ever_connected = true;
             }
+            DeviceEvent::PathChanged { path } => self.relayed = path == PathKind::Relayed,
             DeviceEvent::Disconnected { reason } => {
                 if reason != "stopped" {
                     self.state = Reconnecting;
@@ -347,11 +353,16 @@ mod tests {
         s.apply(DeviceEvent::Connected {
             peer: "1.2.3.4:5".parse().unwrap(),
             rtt_ms: 30,
+            path: PathKind::Relayed,
         });
         assert_eq!(
-            (s.state, s.rtt_ms, s.message.clone()),
-            (TunnelState::Connected, Some(30), None)
+            (s.state, s.rtt_ms, s.message.clone(), s.relayed),
+            (TunnelState::Connected, Some(30), None, true)
         );
+        s.apply(DeviceEvent::PathChanged {
+            path: PathKind::Direct,
+        });
+        assert!(!s.relayed);
         s.apply(DeviceEvent::Disconnected {
             reason: "box went away".into(),
         });

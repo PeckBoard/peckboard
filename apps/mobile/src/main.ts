@@ -25,6 +25,8 @@ interface TunnelStatus {
   port: number;
   url: string;
   everConnected: boolean;
+  /** Connected through the relay (no direct path from this network). */
+  relayed: boolean;
 }
 
 interface BoxView {
@@ -104,7 +106,7 @@ const STATE_LABEL: Record<TunnelState, string> = {
   connected: "Connected",
   reconnecting: "Reconnecting…",
   boxOffline: "Box offline",
-  hardNat: "No direct path",
+  hardNat: "Can't connect",
   error: "Connection failed",
   paused: "Paused",
   stopped: "Disconnected",
@@ -156,7 +158,8 @@ function onStatus(st: TunnelStatus) {
   if (screen.kind === "connect" && screen.box.id === st.boxId) {
     if (st.state === "connected") {
       // Gate boot URL: sets the loopback cookie, then loads the box UI.
-      window.location.href = st.url;
+      // `shell` lets the box UI offer "Switch box" back to this page.
+      window.location.href = `${st.url}&shell=${encodeURIComponent(location.origin)}`;
       return;
     }
     screen = { ...screen, status: st, error: undefined };
@@ -366,7 +369,13 @@ function connectScreen(s: Extract<Screen, { kind: "connect" }>): HTMLElement {
         h("p", { class: "message" }, s.error ?? st?.message ?? ""),
       st?.retryInSecs != null &&
         h("p", { class: "hint" }, `Trying again in ${st.retryInSecs} s…`),
-      h("p", { class: "hint" }, `via ${s.box.relay}`),
+      h(
+        "p",
+        { class: "hint" },
+        st?.relayed
+          ? `Relayed via ${s.box.relay} · end-to-end encrypted`
+          : `via ${s.box.relay}`,
+      ),
       h(
         "div",
         { class: "actions" },
@@ -552,9 +561,30 @@ async function takePairLink() {
   }
 }
 
+/** The shell is showing again (Switch box, Back, a deep link): any tunnel
+ *  still up belongs to a box UI the user just left — stop it. */
+async function leaveBox() {
+  const st = await invoke<TunnelStatus | null>("tunnel_status").catch(
+    () => null,
+  );
+  if (st && st.state !== "stopped") {
+    await invoke("disconnect_box").catch(() => {});
+  }
+}
+
+/** Android system Back on the shell (called by the native plugin): true if
+ *  handled here, false to let the app go to the background. */
+(window as unknown as { __pbmBack?: () => boolean }).__pbmBack = () => {
+  if (screen.kind === "list") return false;
+  if (screen.kind === "connect") void leaveBox();
+  go({ kind: "list" });
+  return true;
+};
+
 async function main() {
   await listen<TunnelStatus>("tunnel-status", (e) => onStatus(e.payload));
   await listen("pair-link", () => void takePairLink());
+  await leaveBox();
   try {
     await refresh();
   } catch (e) {
@@ -564,5 +594,14 @@ async function main() {
   render();
   await takePairLink();
 }
+
+// Restored from the back-forward cache (iOS edge swipe back from a box):
+// main() doesn't run again, and the page may still show "connecting".
+window.addEventListener("pageshow", (ev) => {
+  if (!ev.persisted) return;
+  void leaveBox()
+    .then(refresh)
+    .then(() => go({ kind: "list" }));
+});
 
 void main();

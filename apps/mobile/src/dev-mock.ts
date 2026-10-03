@@ -49,6 +49,7 @@ mockIPC(
           port: 41000,
           url: "about:blank",
           everConnected: false,
+          relayed: false,
         };
         // Office demonstrates the hard-NAT failure.
         if (a.id === "b2") {
@@ -58,7 +59,7 @@ mockIPC(
                 ...st,
                 state: "hardNat",
                 message:
-                  "Couldn't reach your PeckBoard directly from this network. Try Wi-Fi instead of mobile data (or the other way round), or forward one UDP port on the box's router.",
+                  "Couldn't reach your PeckBoard from this network right now. Retrying…",
                 retryInSecs: 4,
               }),
             600,

@@ -19,7 +19,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    HEADER_TIMEOUT, PairingLink, TunnelError, TunnelEvent, device_session, establish, relay_config,
+    HEADER_TIMEOUT, PairingLink, PathKind, TunnelError, TunnelEvent, device_session, establish,
+    relay_config,
 };
 use crate::client::ClientConfig;
 use crate::proto::Role;
@@ -114,13 +115,21 @@ impl fmt::Debug for DeviceOptions {
 pub enum DeviceEvent {
     /// Starting rendezvous with the relay.
     Connecting,
-    /// Tunnel up; the listener now serves the box.
-    Connected { peer: SocketAddr, rtt_ms: u32 },
+    /// Tunnel up; the listener now serves the box. `path`: direct, or
+    /// relayed through the rendezvous server (punching failed).
+    Connected {
+        peer: SocketAddr,
+        rtt_ms: u32,
+        path: PathKind,
+    },
+    /// A relayed tunnel upgraded to a direct path (or fell back).
+    PathChanged { path: PathKind },
     /// Tunnel ended (`reason` is `"stopped"` after cancellation).
     Disconnected { reason: String },
     /// The box wasn't seen at the relay (offline, or the pairing revoked).
     PeerOffline,
-    /// No direct path — both NATs hard; see [`TunnelError::PunchFailed`].
+    /// No direct path — both NATs hard — and no relay fallback (old relay
+    /// or box); see [`TunnelError::PunchFailed`].
     PunchFailed { rounds: u32 },
     /// Any other failure (relay unreachable, handshake failed, local
     /// accept error).
@@ -165,10 +174,11 @@ pub async fn run_device(
             Ok(path) => {
                 let (ev, at) = (on_event.clone(), connected_at.clone());
                 let tunnel_ev = move |e: TunnelEvent| match e {
-                    TunnelEvent::Connected { peer, rtt_ms } => {
+                    TunnelEvent::Connected { peer, rtt_ms, path } => {
                         *at.lock().unwrap() = Some(Instant::now());
-                        ev(DeviceEvent::Connected { peer, rtt_ms });
+                        ev(DeviceEvent::Connected { peer, rtt_ms, path });
                     }
+                    TunnelEvent::PathChanged { path } => ev(DeviceEvent::PathChanged { path }),
                     TunnelEvent::Disconnected { reason } => {
                         ev(DeviceEvent::Disconnected { reason })
                     }
@@ -226,9 +236,14 @@ const MAX_HEAD: usize = 16 * 1024;
 /// `Set-Cookie: __pbm=<key>; HttpOnly; SameSite=Strict; Path=/` and a page
 /// that replaces itself with `/` (a same-origin navigation, so the Strict
 /// cookie is sent; an HTTP redirect would inherit the cross-site initiator
-/// of the boot load). Every other connection must carry the cookie on its
 /// first request (HTTP or WebSocket upgrade), compared in constant time, or
 /// it is dropped unanswered.
+///
+/// The app shell may append `&shell=<its origin, percent-encoded>` to the
+/// boot path; a known Tauri shell origin (`tauri://localhost`,
+/// `http(s)://tauri.localhost`, `http://localhost:<port>` in dev) is stored
+/// in the readable [`SHELL_COOKIE`](Self::SHELL_COOKIE), anything else is
+/// ignored.
 ///
 /// Cookies are scoped by host, not port: create **one** gate per app launch
 /// and share it (it's a cheap clone) across every paired box, or the boxes'
@@ -255,6 +270,10 @@ impl CookieGate {
     pub const COOKIE: &'static str = "__pbm";
     /// Path the device answers locally.
     pub const BOOT_PATH: &'static str = "/__pbm/boot";
+    /// Non-HttpOnly cookie holding the app shell's origin, so the box UI can
+    /// offer a way back to the box list. Set only from a validated `shell=`
+    /// boot parameter (see [`boot_response`](Self::boot_response)).
+    pub const SHELL_COOKIE: &'static str = "__pbm_shell";
 
     /// A gate with a fresh random 256-bit key (hex).
     pub fn new() -> Self {
@@ -295,9 +314,15 @@ impl CookieGate {
             if !self.matches(k) {
                 return None;
             }
+            let shell = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("shell="))
+                .and_then(Self::shell_origin);
             let mut consumed = vec![0u8; head.len()];
             tcp.read_exact(&mut consumed).await.ok()?;
-            let _ = tcp.write_all(self.boot_response().as_bytes()).await;
+            let _ = tcp
+                .write_all(self.boot_response(shell.as_deref()).as_bytes())
+                .await;
             let _ = tcp.shutdown().await;
             return None;
         }
@@ -314,12 +339,21 @@ impl CookieGate {
         candidate.as_bytes().ct_eq(self.key.as_bytes()).into()
     }
 
-    fn boot_response(&self) -> String {
+    fn boot_response(&self, shell: Option<&str>) -> String {
         let body = "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/\">\
                     <script>location.replace(\"/\")</script>";
+        let shell_cookie = shell
+            .map(|s| {
+                format!(
+                    "Set-Cookie: {}={s}; SameSite=Strict; Path=/\r\n",
+                    Self::SHELL_COOKIE
+                )
+            })
+            .unwrap_or_default();
         format!(
             "HTTP/1.1 200 OK\r\n\
              Set-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/\r\n\
+             {shell_cookie}\
              Cache-Control: no-store\r\n\
              Referrer-Policy: no-referrer\r\n\
              Content-Type: text/html; charset=utf-8\r\n\
@@ -330,6 +364,37 @@ impl CookieGate {
             body.len()
         )
     }
+
+    /// `shell=` boot parameter (percent-encoded) → the app shell's origin,
+    /// only if it is one the app can actually be served from.
+    fn shell_origin(raw: &str) -> Option<String> {
+        let s = percent_decode(raw)?;
+        let dev_port = s
+            .strip_prefix("http://localhost:")
+            .is_some_and(|p| (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()));
+        let known = matches!(
+            s.as_str(),
+            "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+        );
+        (known || dev_port).then_some(s)
+    }
+}
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The first request head (through `\r\n\r\n`) without consuming it.

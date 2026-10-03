@@ -1,20 +1,29 @@
-//! Signaling wire protocol, spoken inside TLS 1.3 under ALPN [`ALPN`].
+//! Signaling wire protocol, spoken inside TLS 1.3 under ALPN [`ALPN`] (or
+//! [`ALPN_V2`], which adds the relay data channel).
 //!
 //! Frames are `u32` big-endian length + payload, payload = type byte +
-//! fixed fields. Variable-length blobs carry a `u16` length prefix. The
-//! codec is hand-rolled (a dozen messages) to keep the attack surface and
-//! dependency list small; every decode is bounds-checked and rejects
-//! trailing bytes.
+//! fixed fields. Variable-length blobs carry a `u16` length prefix; a v2
+//! datagram frame is the type byte followed by the raw packet. The codec is
+//! hand-rolled (a dozen messages) to keep the attack surface and dependency
+//! list small; every decode is bounds-checked and rejects trailing bytes.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const ALPN: &[u8] = b"peckrelay/1";
+/// Protocol v2 = v1 + the relay data channel ([`ClientMsg::Data`] /
+/// [`ServerMsg::Data`]). Negotiated by ALPN: a v2 client offers
+/// `[ALPN_V2, ALPN]`, a v2 relay prefers [`ALPN_V2`]; an old relay only knows
+/// [`ALPN`] and picks it, an old client never offers v2. v2 frames are only
+/// ever sent on a v2 session.
+pub const ALPN_V2: &[u8] = b"peckrelay/2";
 /// Hard cap on one frame's payload.
 pub const MAX_FRAME: usize = 8 * 1024;
 /// Hard cap on an opaque peer blob (E2E-sealed message or candidate list).
 pub const MAX_BLOB: usize = 4 * 1024;
+/// Hard cap on one relayed datagram (QUIC packets are ≤ 1452 bytes).
+pub const MAX_PACKET: usize = 2048;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -66,6 +75,11 @@ pub enum ClientMsg {
     PunchRequest,
     /// Ask for a fresh STUN credential.
     RefreshStun,
+    /// v2: one opaque datagram for the other peer, forwarded verbatim. In
+    /// practice a QUIC packet — already encrypted end to end.
+    Data {
+        packet: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +108,10 @@ pub enum ServerMsg {
         attempt: u8,
         /// Peer's E2E-sealed candidate blob (may be empty).
         peer_candidates: Vec<u8>,
+    },
+    /// v2: a datagram the other peer sent with [`ClientMsg::Data`].
+    Data {
+        packet: Vec<u8>,
     },
 }
 
@@ -161,6 +179,14 @@ impl<'a> Reader<'a> {
     fn blob(&mut self) -> Result<Vec<u8>, ProtoError> {
         let n = self.u16()? as usize;
         if n > MAX_BLOB {
+            return Err(ProtoError::Malformed);
+        }
+        Ok(self.take(n)?.to_vec())
+    }
+    /// The rest of the frame as one datagram (1..=[`MAX_PACKET`] bytes).
+    fn packet(&mut self) -> Result<Vec<u8>, ProtoError> {
+        let n = self.buf.len();
+        if n == 0 || n > MAX_PACKET {
             return Err(ProtoError::Malformed);
         }
         Ok(self.take(n)?.to_vec())
@@ -256,6 +282,10 @@ impl ClientMsg {
             }
             ClientMsg::PunchRequest => o.push(0x06),
             ClientMsg::RefreshStun => o.push(0x07),
+            ClientMsg::Data { packet } => {
+                o.push(0x10);
+                o.extend_from_slice(packet);
+            }
         }
         o
     }
@@ -276,6 +306,9 @@ impl ClientMsg {
             0x05 => ClientMsg::SetCandidates { blob: r.blob()? },
             0x06 => ClientMsg::PunchRequest,
             0x07 => ClientMsg::RefreshStun,
+            0x10 => ClientMsg::Data {
+                packet: r.packet()?,
+            },
             _ => return Err(ProtoError::Malformed),
         };
         r.finish()?;
@@ -324,6 +357,10 @@ impl ServerMsg {
                 o.push(*attempt);
                 put_blob(&mut o, peer_candidates);
             }
+            ServerMsg::Data { packet } => {
+                o.push(0x90);
+                o.extend_from_slice(packet);
+            }
         }
         o
     }
@@ -348,6 +385,9 @@ impl ServerMsg {
                 nonce: r.arr()?,
                 attempt: r.u8()?,
                 peer_candidates: r.blob()?,
+            },
+            0x90 => ServerMsg::Data {
+                packet: r.packet()?,
             },
             _ => return Err(ProtoError::Malformed),
         };
@@ -378,5 +418,22 @@ mod tests {
         assert!(ClientMsg::decode(&[0x01, 9]).is_err());
         let addrs: Vec<SocketAddr> = vec!["10.0.0.2:5".parse().unwrap()];
         assert_eq!(decode_addrs(&encode_addrs(&addrs)).unwrap(), addrs);
+    }
+
+    #[test]
+    fn data_frames_roundtrip_and_cap() {
+        let c = ClientMsg::Data {
+            packet: vec![0xc3; 1200],
+        };
+        assert_eq!(ClientMsg::decode(&c.encode()).unwrap(), c);
+        let s = ServerMsg::Data {
+            packet: vec![0x41; 40],
+        };
+        assert_eq!(ServerMsg::decode(&s.encode()).unwrap(), s);
+        // Empty and oversize datagrams are malformed.
+        assert!(ClientMsg::decode(&[0x10]).is_err());
+        let mut big = vec![0x10];
+        big.resize(MAX_PACKET + 2, 0);
+        assert!(ClientMsg::decode(&big).is_err());
     }
 }

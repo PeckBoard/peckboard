@@ -128,10 +128,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Select newest Xcode
+      # Newest Xcode 26.x, never 27+: Swift 6.4 (Xcode 27) makes Tauri/swift-rs
+      # `@_cdecl` symbols local in release builds and the app fails to link
+      # (`_register_plugin` undefined). Lift this once Tauri/swift-rs ship a fix.
+      - name: Select Xcode 26
         run: |
           set -euo pipefail
-          xc=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          xc=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          test -n "$xc" || { echo "::error::no Xcode 26 on this runner"; ls -d /Applications/Xcode_*.app; exit 1; }
           sudo xcode-select -s "$xc/Contents/Developer"
           xcodebuild -version
 

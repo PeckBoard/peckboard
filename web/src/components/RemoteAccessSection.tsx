@@ -15,6 +15,8 @@ interface DeviceStatus {
   error: string | null
   local_port: number | null
   candidates: string[]
+  /** While connected: hole-punched, or through the relay. */
+  path: 'direct' | 'relayed' | null
 }
 
 interface RemoteDevice {
@@ -436,11 +438,10 @@ export default function RemoteAccessSection() {
         <FieldError message={relayError} testId="remote-relay-error" />
       </div>
       <div className="settings-subsection" data-testid="remote-direct">
-        <h4>Direct Connection</h4>
+        <h4>Direct Connection (Optional)</h4>
         <p className="form-hint" style={{ marginTop: 0 }}>
-          Forward this UDP port range on your router to this machine so phones on any network can
-          connect. Each paired device uses one port of the range. Leave the port blank for random
-          ports.
+          Nothing to set up here — phones connect directly when the network allows and through the
+          encrypted relay otherwise. Only change these if you already pin UDP ports on this machine.
         </p>
         <div className="form-field">
           <label className="form-label" htmlFor="remote-udp-base">
@@ -542,6 +543,15 @@ export default function RemoteAccessSection() {
                   data-testid={`remote-device-port-${d.name}`}
                 >
                   UDP {d.status.local_port}
+                </span>
+              )}
+              {enabled && d.status.state === 'connected' && d.status.path === 'relayed' && (
+                <span
+                  className="list-view-tag"
+                  title="No direct path to this device; traffic goes through the relay, still end-to-end encrypted"
+                  data-testid={`remote-device-path-${d.name}`}
+                >
+                  Relayed
                 </span>
               )}
               <span>{formatWhen(d.last_connected_at)}</span>

@@ -57,6 +57,7 @@ fn kind(m: &ServerMsg) -> &'static str {
         ServerMsg::PeerOnline => "peer-online",
         ServerMsg::PeerOffline => "peer-offline",
         ServerMsg::Forwarded { .. } => "forwarded",
+        ServerMsg::Data { .. } => "data",
         ServerMsg::PunchNow { .. } => "punch",
     }
 }

@@ -20,6 +20,8 @@ import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -60,6 +62,8 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
     override fun load(webView: WebView) {
         webView.settings.mediaPlaybackRequiresUserGesture = false
         webView.settings.allowFileAccess = false
+        appUserAgent(webView)
+        installBack(webView)
         webView.settings.allowContentAccess = false
         // Posted so it runs after wry has installed its own chrome client,
         // which we wrap rather than replace (file chooser, JS dialogs, its
@@ -71,6 +75,54 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
                     webView.webChromeClient = LoopbackChromeClient(activity, inner)
                 }
             }
+        }
+    }
+    /**
+     * System Back: within a box UI, WebView history (whose first entry is the
+     * shell, so it leads back to the box list); on a box page with no history,
+     * the shell itself. On the shell, its own screens (`window.__pbmBack`),
+     * then the app goes to the background.
+     */
+    private fun installBack(webView: WebView) {
+        val owner = activity as? ComponentActivity ?: return
+        owner.onBackPressedDispatcher.addCallback(owner, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val url = webView.url?.let(Uri::parse)
+                val onBox = url?.scheme == "http" && url.host == "127.0.0.1"
+                when {
+                    onBox && webView.canGoBack() -> webView.goBack()
+                    onBox -> webView.loadUrl(shellUrl(webView))
+                    else -> webView.evaluateJavascript(
+                        "!!(window.__pbmBack && window.__pbmBack())"
+                    ) { handled ->
+                        if (handled != "true") owner.moveTaskToBack(true)
+                    }
+                }
+            }
+        })
+    }
+
+    /** The shell's URL: the origin of the first history entry (index.html). */
+    private fun shellUrl(webView: WebView): String {
+        val first = webView.copyBackForwardList().takeIf { it.size > 0 }
+            ?.getItemAtIndex(0)?.url?.let(Uri::parse)
+        return if (first != null && first.host == "tauri.localhost") {
+            "${first.scheme}://tauri.localhost/"
+        } else {
+            "http://tauri.localhost/"
+        }
+    }
+
+    /** ` PeckBoardApp/<version>`: lets the box UI offer "Switch box". */
+    private fun appUserAgent(webView: WebView) {
+        val version = try {
+            activity.packageManager.getPackageInfo(activity.packageName, 0).versionName
+        } catch (e: Exception) {
+            null
+        } ?: "0"
+        val ua = webView.settings.userAgentString
+        if (!ua.contains("PeckBoardApp/")) {
+            webView.settings.userAgentString = "$ua PeckBoardApp/$version"
         }
     }
 

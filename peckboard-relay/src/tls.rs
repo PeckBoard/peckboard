@@ -13,7 +13,7 @@ use rustls_acme::caches::DirCache;
 use rustls_acme::{AcmeConfig, is_tls_alpn_challenge};
 use tracing::{info, warn};
 
-use crate::proto::ALPN;
+use crate::proto::{ALPN, ALPN_V2};
 
 pub const ACME_TLS_ALPN: &[u8] = b"acme-tls/1";
 
@@ -25,15 +25,24 @@ fn builder() -> anyhow::Result<rustls::ConfigBuilder<ServerConfig, rustls::Wants
     Ok(ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])?)
 }
-
 fn finish(mut cfg: ServerConfig, with_acme: bool) -> Arc<ServerConfig> {
-    cfg.alpn_protocols = vec![ALPN.to_vec()];
+    // Most preferred first: rustls picks the first of ours the client offers,
+    // so a v2 client gets v2 and a v1 client v1.
+    cfg.alpn_protocols = vec![ALPN_V2.to_vec(), ALPN.to_vec()];
     if with_acme {
         cfg.alpn_protocols.push(ACME_TLS_ALPN.to_vec());
     }
     // No session tickets/resumption: sessions are long-lived and few.
     cfg.send_tls13_tickets = 0;
     Arc::new(cfg)
+}
+
+/// `cfg` without protocol v2 (no relay data channel): what a relay that
+/// predates the relay fallback negotiates. For `--no-relay-data` and tests.
+pub fn v1_only(cfg: &Arc<ServerConfig>) -> Arc<ServerConfig> {
+    let mut c = (**cfg).clone();
+    c.alpn_protocols.retain(|p| p != ALPN_V2);
+    Arc::new(c)
 }
 
 /// Self-signed cert for `names`. Returns the config and the cert DER so a

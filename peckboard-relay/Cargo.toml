@@ -54,6 +54,10 @@ required-features = ["tunnel", "server"]
 name = "rendezvous"
 required-features = ["client", "server"]
 
+[[test]]
+name = "relay_fallback"
+required-features = ["tunnel", "server"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }

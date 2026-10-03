@@ -1,11 +1,14 @@
-//! Direct box↔device data path (`tunnel` feature).
+//! Box↔device data path (`tunnel` feature).
 //!
 //! After rendezvous + hole punch ([`establish`]) the two peers share one UDP
 //! 5-tuple. QUIC (quinn) runs over that very socket — reusing it keeps the
 //! NAT mapping the punch opened. The box is the QUIC server, the device the
 //! client; TLS 1.3 inside QUIC is mutually authenticated against Ed25519
 //! keys derived from the pairing secret `S` (labels distinct from the relay
-//! auth and E2E keys), with no CA involved. ALPN [`TUNNEL_ALPN`].
+//! auth and E2E keys), with no CA involved. ALPN [`TUNNEL_ALPN`]. When no
+//! direct path can be punched, the same QUIC runs over the relay instead
+//! ([`RelayedPath`], [`PathKind::Relayed`]); the relay only forwards its
+//! ciphertext.
 //!
 //! Every bidirectional stream is one forwarded TCP connection: a 1-byte
 //! type header ([`STREAM_TCP`]) followed by raw bytes. The box pipes it to
@@ -43,17 +46,19 @@ use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use sha2::Sha256;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::client::{ClientConfig, Event, RelayClient};
 use crate::keys::{PairingSecret, SECRET_LEN};
 use crate::proto::Role;
 
 mod device;
+mod relayed;
 pub use device::{
     AcceptFilter, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, bind_listener, run_device,
 };
 pub use quinn;
+pub use relayed::RelayedPath;
 /// Stops [`run_device`]; re-exported so callers need no `tokio-util` dep.
 pub use tokio_util::sync::CancellationToken;
 
@@ -107,19 +112,104 @@ pub enum TunnelError {
     PeerOffline,
 }
 
-/// The punched path, ready for [`serve_box`] / [`connect_device`].
+/// The punched (or relayed) path, ready for [`serve_box`] /
+/// [`connect_device`].
 pub struct PunchedPath {
-    /// The exact socket the punch used (same local port ⇒ same NAT mapping).
-    pub socket: UdpSocket,
-    /// The peer's address as seen from `socket`.
+    pub socket: PathSocket,
+    /// The peer's address as seen from `socket` (direct), or its
+    /// STUN-observed endpoint (relayed).
     pub peer: SocketAddr,
     pub role: Role,
 }
 
+impl PunchedPath {
+    /// Which path the tunnel starts on.
+    pub fn kind(&self) -> PathKind {
+        self.socket.kind()
+    }
+
+    /// The path in use and its changes (a relayed path that upgrades to
+    /// direct, or falls back). A direct path never changes.
+    pub fn path_watch(&self) -> watch::Receiver<PathKind> {
+        match &self.socket {
+            PathSocket::Direct(_) => watch::channel(PathKind::Direct).1,
+            PathSocket::Relayed(r) => r.path_watch(),
+        }
+    }
+}
+
+/// What carries the tunnel's QUIC datagrams.
+#[derive(Debug)]
+pub enum PathSocket {
+    /// The exact socket the punch used (same local port ⇒ same NAT mapping).
+    Direct(UdpSocket),
+    /// The relay session's data channel (punching failed).
+    Relayed(RelayedPath),
+}
+
+impl PathSocket {
+    pub fn kind(&self) -> PathKind {
+        match self {
+            PathSocket::Direct(_) => PathKind::Direct,
+            PathSocket::Relayed(_) => PathKind::Relayed,
+        }
+    }
+
+    /// Local address of the UDP socket the punch used.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            PathSocket::Direct(s) => s.local_addr(),
+            PathSocket::Relayed(r) => r.local_addr(),
+        }
+    }
+}
+
+impl From<UdpSocket> for PathSocket {
+    fn from(s: UdpSocket) -> Self {
+        PathSocket::Direct(s)
+    }
+}
+
+/// How the tunnel's packets travel, for status displays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PathKind {
+    /// Peer to peer over the hole-punched UDP path.
+    Direct,
+    /// Through the rendezvous server (end-to-end encrypted QUIC; the relay
+    /// only forwards ciphertext).
+    Relayed,
+}
+
+impl PathKind {
+    /// `"direct"` / `"relayed"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PathKind::Direct => "direct",
+            PathKind::Relayed => "relayed",
+        }
+    }
+}
+
+impl fmt::Display for PathKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TunnelEvent {
-    Connected { peer: SocketAddr, rtt_ms: u32 },
-    Disconnected { reason: String },
+    Connected {
+        peer: SocketAddr,
+        rtt_ms: u32,
+        path: PathKind,
+    },
+    /// A relayed tunnel switched to a direct path or back.
+    PathChanged {
+        path: PathKind,
+    },
+    Disconnected {
+        reason: String,
+    },
     Error(String),
 }
 
@@ -246,6 +336,12 @@ pub struct EstablishOptions {
     /// may get one punch round without it.
     pub public_ip_hint: Option<IpAddr>,
     pub on_registered: Option<OnRegistered>,
+    /// Relaying through the rendezvous server when punching fails.
+    pub fallback: RelayFallback,
+    /// Don't offer the LAN candidate (tests: on loopback it would always
+    /// punch).
+    #[doc(hidden)]
+    pub no_lan_candidate: bool,
 }
 
 impl fmt::Debug for EstablishOptions {
@@ -254,7 +350,33 @@ impl fmt::Debug for EstablishOptions {
             .field("bind_port", &self.bind_port)
             .field("advertise", &self.advertise)
             .field("public_ip_hint", &self.public_ip_hint)
+            .field("fallback", &self.fallback)
             .finish_non_exhaustive()
+    }
+}
+
+/// Relay fallback policy. Takes effect only when the relay and both peers
+/// speak protocol v2; with an older relay or peer, a failed punch is
+/// [`TunnelError::PunchFailed`] as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayFallback {
+    /// Relay when punching fails (default on).
+    pub enabled: bool,
+    /// Failed punch rounds before relaying (default 2).
+    pub after_failures: u32,
+    /// Box side, while relayed: ask for a punch round to upgrade to a
+    /// direct path after this long, doubling up to 10 min (default 30 s;
+    /// `None`: stay relayed). The device always joins rounds it is sent.
+    pub upgrade_every: Option<Duration>,
+}
+
+impl Default for RelayFallback {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            after_failures: 2,
+            upgrade_every: Some(Duration::from_secs(30)),
+        }
     }
 }
 
@@ -291,9 +413,12 @@ fn candidates(
 ///
 /// The box side waits indefinitely for its device (drop the future to
 /// cancel); the device side gives up with [`TunnelError::PeerOffline`] if
-/// the box isn't seen within 30 s. Either side returns
-/// [`TunnelError::PunchFailed`] when punch rounds keep failing. The relay
-/// session is closed on return — a reconnect is a fresh `establish`.
+/// the box isn't seen within 30 s. When punch rounds keep failing and both
+/// peers and the relay support it (protocol v2), both switch to a
+/// [`PathKind::Relayed`] path through the relay instead (see
+/// [`RelayFallback`]); otherwise either side returns
+/// [`TunnelError::PunchFailed`]. A direct path closes the relay session on
+/// return — a reconnect is a fresh `establish`; a relayed one keeps it.
 pub async fn establish(
     cfg: &ClientConfig,
     secret: &PairingSecret,
@@ -324,7 +449,9 @@ pub async fn establish_with(
         .await
         .with_context(|| format!("bind UDP {bind}"))?;
     let port = sock.local_addr()?.port();
-    let lan = local_ip_toward(cfg.relay).map(|ip| SocketAddr::new(ip, port));
+    let lan = (!opts.no_lan_candidate)
+        .then(|| local_ip_toward(cfg.relay).map(|ip| SocketAddr::new(ip, port)))
+        .flatten();
     let (mut cands, pending) = candidates(lan, &opts.advertise, opts.public_ip_hint, v4);
     if !cands.is_empty() {
         relay.set_candidates(&cands).await?;
@@ -354,7 +481,11 @@ pub async fn establish_with(
             candidates: cands.clone(),
         });
     }
-
+    // Relay fallback needs protocol v2 on both sessions: we know ours, the
+    // peer tells us with a sealed RELAY_CAP once both are online.
+    let relay_ok = opts.fallback.enabled && relay.protocol_version() >= 2;
+    let mut peer_relay = false;
+    let mut peer_public: Option<SocketAddr> = None;
     let mut failures = 0u32;
     let mut deadline =
         (role == Role::Device).then(|| tokio::time::Instant::now() + DEVICE_PEER_WAIT);
@@ -371,6 +502,9 @@ pub async fn establish_with(
         tokio::select! {
             _ = timeout => {
                 if failures > 0 {
+                    if relay_ok && peer_relay {
+                        return go_relayed(relay, sock, peer_public, cfg, role, opts, true).await;
+                    }
                     return Err(TunnelError::PunchFailed { rounds: failures }.into());
                 }
                 return Err(TunnelError::PeerOffline.into());
@@ -396,23 +530,88 @@ pub async fn establish_with(
                     refreshing = false;
                     let _ = relay.stun_binding(&sock).await;
                 }
-                Some(Event::Punch(p)) => match relay.punch(&sock, &p, PUNCH_TIMEOUT).await {
-                    Ok(peer) => {
-                        return Ok(PunchedPath { socket: sock, peer, role });
+                Some(Event::PeerOnline) if relay_ok => {
+                    relay.send(RELAY_CAP).await?;
+                }
+                Some(Event::Message { plaintext, .. }) if relay_ok => {
+                    if plaintext == RELAY_CAP {
+                        peer_relay = true;
+                    } else if plaintext == RELAY_GO {
+                        // The peer gave up punching and is relaying now.
+                        return go_relayed(relay, sock, peer_public, cfg, role, opts, false).await;
                     }
-                    Err(_) => {
-                        failures += 1;
-                        if failures >= MAX_PUNCH_FAILURES {
-                            return Err(TunnelError::PunchFailed { rounds: failures }.into());
+                }
+                Some(Event::Punch(p)) => {
+                    peer_public = Some(p.peer_public);
+                    match relay.punch(&sock, &p, PUNCH_TIMEOUT).await {
+                        Ok(peer) => {
+                            return Ok(PunchedPath { socket: sock.into(), peer, role });
                         }
-                        deadline = Some(tokio::time::Instant::now() + RETRY_WAIT);
-                        let _ = relay.request_punch().await;
+                        Err(_) => {
+                            failures += 1;
+                            if relay_ok && peer_relay && failures >= opts.fallback.after_failures {
+                                return go_relayed(relay, sock, peer_public, cfg, role, opts, true)
+                                    .await;
+                            }
+                            if failures >= MAX_PUNCH_FAILURES {
+                                return Err(TunnelError::PunchFailed { rounds: failures }.into());
+                            }
+                            deadline = Some(tokio::time::Instant::now() + RETRY_WAIT);
+                            let _ = relay.request_punch().await;
+                        }
                     }
-                },
+                }
                 Some(_) => {}
             }
         }
     }
+}
+
+/// Sealed peer message: "I can relay" (protocol v2 session, fallback on).
+const RELAY_CAP: &[u8] = b"pb/relay-cap/1";
+/// Sealed peer message: "punching failed, I'm switching to the relay".
+const RELAY_GO: &[u8] = b"pb/relay-go/1";
+
+/// Switch to the relayed path, keeping the relay session (it carries the
+/// data) and the punch socket (for upgrades). `announce`: tell the peer to
+/// switch too (not needed when it told us).
+#[allow(clippy::too_many_arguments)]
+async fn go_relayed(
+    mut relay: RelayClient,
+    sock: UdpSocket,
+    peer_public: Option<SocketAddr>,
+    cfg: &ClientConfig,
+    role: Role,
+    opts: &EstablishOptions,
+    announce: bool,
+) -> anyhow::Result<PunchedPath> {
+    if announce {
+        relay.send(RELAY_GO).await?;
+    }
+    let data = relay
+        .take_data()
+        .ok_or_else(|| anyhow!("relay session has no data channel"))?;
+    tracing::info!(
+        ?role,
+        "tunnel: no direct path, relaying through the rendezvous server"
+    );
+    Ok(PunchedPath {
+        socket: PathSocket::Relayed(RelayedPath::new(
+            relay,
+            data,
+            sock,
+            opts.fallback.upgrade_every,
+        )),
+        // QUIC's name for the peer; the relay path ignores it. Its observed
+        // endpoint is the most useful thing to show (and to rate-limit by).
+        // A dual-stack relay reports v4 peers v4-mapped, which quinn rejects
+        // on a v4 socket.
+        peer: {
+            let a = peer_public.unwrap_or(cfg.relay);
+            SocketAddr::new(a.ip().to_canonical(), a.port())
+        },
+        role,
+    })
 }
 
 /// Round trip to the relay. It handles a session's frames in order, so the
@@ -642,13 +841,18 @@ fn client_config(secret: &PairingSecret) -> anyhow::Result<quinn::ClientConfig> 
 }
 
 fn endpoint(path: PunchedPath, server: Option<quinn::ServerConfig>) -> anyhow::Result<Endpoint> {
-    let sock = path.socket.into_std()?;
-    Ok(Endpoint::new(
-        EndpointConfig::default(),
-        server,
-        sock,
-        Arc::new(quinn::TokioRuntime),
-    )?)
+    let runtime = Arc::new(quinn::TokioRuntime);
+    Ok(match path.socket {
+        PathSocket::Direct(sock) => {
+            Endpoint::new(EndpointConfig::default(), server, sock.into_std()?, runtime)?
+        }
+        PathSocket::Relayed(r) => Endpoint::new_with_abstract_socket(
+            EndpointConfig::default(),
+            server,
+            r.into_socket(path.peer),
+            runtime,
+        )?,
+    })
 }
 
 fn rtt_ms(c: &Connection) -> u32 {
@@ -667,7 +871,8 @@ pub async fn serve_box(
     target: SocketAddr,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    tracing::debug!(peer = %path.peer, "tunnel: awaiting device QUIC");
+    tracing::debug!(peer = %path.peer, path = %path.kind(), "tunnel: awaiting device QUIC");
+    let mut path_rx = path.path_watch();
     let ep = endpoint(path, Some(server_config(secret)?))?;
     let conn = match tokio::time::timeout(HANDSHAKE_TIMEOUT, accept_one(&ep)).await {
         Ok(Ok(c)) => c,
@@ -684,11 +889,15 @@ pub async fn serve_box(
     on_event(TunnelEvent::Connected {
         peer: conn.remote_address(),
         rtt_ms: rtt_ms(&conn),
+        path: *path_rx.borrow_and_update(),
     });
     // A ping stream that goes quiet reports here (see `box_pong`).
     let (dead_tx, mut dead_rx) = mpsc::channel::<()>(1);
     let reason = loop {
         tokio::select! {
+            Ok(()) = path_rx.changed() => {
+                on_event(TunnelEvent::PathChanged { path: *path_rx.borrow_and_update() });
+            }
             s = conn.accept_bi() => match s {
                 Ok((send, recv)) => {
                     tokio::spawn(box_stream(send, recv, target, dead_tx.clone()));
@@ -798,6 +1007,7 @@ async fn device_session(
     cancel: &CancellationToken,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
+    let mut path_rx = path.path_watch();
     let handshake = tokio::select! {
         r = connect_raw(path, secret) => r,
         _ = cancel.cancelled() => return Ok(()),
@@ -812,6 +1022,7 @@ async fn device_session(
     on_event(TunnelEvent::Connected {
         peer: conn.remote_address(),
         rtt_ms: rtt_ms(&conn),
+        path: *path_rx.borrow_and_update(),
     });
     let alive = device_liveness(conn.clone());
     tokio::pin!(alive);
@@ -819,6 +1030,9 @@ async fn device_session(
         tokio::select! {
             e = conn.closed() => break e.to_string(),
             r = &mut alive => break r,
+            Ok(()) = path_rx.changed() => {
+                on_event(TunnelEvent::PathChanged { path: *path_rx.borrow_and_update() });
+            }
             _ = cancel.cancelled() => break "stopped".to_string(),
             a = listen.accept() => match a {
                 Ok((tcp, _)) => {

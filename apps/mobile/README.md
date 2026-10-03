@@ -129,9 +129,9 @@ Release builds, signing and publishing: see Releasing the Mobile App.
    login is remembered for that box.
 
 Connection states shown: _Finding your box…_, _Reconnecting…_, _Box offline_
-(box not at the relay, or the pairing was revoked), _No direct path_ (both
-NATs block hole punching — try another network or forward one UDP port on
-the box's router), _Connection failed_. The app keeps retrying with backoff
+(box not at the relay, or the pairing was revoked), _Can't connect_ (neither
+a direct path nor the encrypted relay fallback worked; no router setup is
+ever required), _Connection failed_. The app keeps retrying with backoff
 while the screen is open.
 
 **Deep links.** The app registers `peckboard://` (Tauri deep-link plugin).

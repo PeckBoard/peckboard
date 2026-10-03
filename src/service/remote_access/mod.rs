@@ -211,6 +211,9 @@ pub struct DeviceStatus {
     pub local_port: Option<u16>,
     /// Candidates advertised to the device (LAN + forwarded address).
     pub candidates: Vec<String>,
+    /// While connected: `direct` (hole-punched) | `relayed` (through the
+    /// relay — end-to-end encrypted; punching failed).
+    pub path: Option<&'static str>,
 }
 
 impl DeviceStatus {
@@ -221,6 +224,7 @@ impl DeviceStatus {
             rtt_ms: None,
             error: None,
             local_port: None,
+            path: None,
             candidates: Vec::new(),
         }
     }
@@ -333,6 +337,16 @@ impl RemoteAccess {
         // A revoked/stopped device's loop may race one last update in.
         if inner.tasks.contains_key(device_id) {
             inner.status.insert(device_id.to_string(), s);
+        }
+    }
+
+    /// A connected tunnel moved between the direct and relayed path.
+    fn set_path(&self, device_id: &str, path: &'static str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(s) = inner.status.get_mut(device_id)
+            && s.state == "connected"
+        {
+            s.path = Some(path);
         }
     }
 
@@ -480,34 +494,46 @@ impl RemoteAccess {
             };
             backoff = BACKOFF_MIN;
             let peer = punched.peer().to_string();
-            let _ = self
-                .db
-                .touch_remote_device(&id, &chrono::Utc::now().to_rfc3339())
-                .await;
-            self.set_status(
-                &id,
-                DeviceStatus {
-                    state: "connected",
-                    peer: Some(peer.clone()),
-                    ..DeviceStatus::offline()
-                },
+            // Punched (or relayed) only: the device isn't connected until
+            // its QUIC handshake completes (`TunnelUpdate::Connected`).
+            tracing::debug!(
+                device_id = %id,
+                path = punched.path(),
+                "remote access: path established, awaiting device handshake"
             );
-            tracing::info!(device_id = %id, "remote access: device connected");
             let events = {
                 let this = Arc::downgrade(&self);
                 let id = id.clone();
                 Arc::new(move |u: TunnelUpdate| {
                     let Some(this) = this.upgrade() else { return };
                     match u {
-                        TunnelUpdate::Connected { rtt_ms } => this.set_status(
-                            &id,
-                            DeviceStatus {
-                                state: "connected",
-                                peer: Some(peer.clone()),
-                                rtt_ms: Some(rtt_ms),
-                                ..DeviceStatus::offline()
-                            },
-                        ),
+                        TunnelUpdate::Connected { rtt_ms, path } => {
+                            tracing::info!(
+                                device_id = %id,
+                                path,
+                                rtt_ms,
+                                "remote access: device connected"
+                            );
+                            let (db, did) = (this.db.clone(), id.clone());
+                            tokio::spawn(async move {
+                                let now = chrono::Utc::now().to_rfc3339();
+                                let _ = db.touch_remote_device(&did, &now).await;
+                            });
+                            this.set_status(
+                                &id,
+                                DeviceStatus {
+                                    state: "connected",
+                                    peer: Some(peer.clone()),
+                                    rtt_ms: Some(rtt_ms),
+                                    path: Some(path),
+                                    ..DeviceStatus::offline()
+                                },
+                            )
+                        }
+                        TunnelUpdate::PathChanged { path } => {
+                            tracing::info!(device_id = %id, path, "remote access: tunnel path changed");
+                            this.set_path(&id, path);
+                        }
                         TunnelUpdate::Disconnected { .. } => {
                             this.set_status(&id, DeviceStatus::waiting())
                         }
@@ -617,8 +643,12 @@ mod tests {
             self: Box<Self>,
             _secret: &DeviceSecret,
             _target: SocketAddr,
-            _events: TunnelEvents,
+            events: TunnelEvents,
         ) -> anyhow::Result<()> {
+            events(TunnelUpdate::Connected {
+                rtt_ms: 1,
+                path: "direct",
+            });
             std::future::pending().await
         }
     }

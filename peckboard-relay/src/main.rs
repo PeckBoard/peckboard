@@ -53,6 +53,34 @@ struct Args {
     /// Log full client IPs (default: salted 4-byte hash).
     #[arg(long)]
     log_full_ips: bool,
+    /// Disable the relay fallback data channel (protocol v2): peers that
+    /// cannot hole-punch then fail as before instead of relaying.
+    #[arg(long, env = "PECKRELAY_NO_RELAY_DATA")]
+    no_relay_data: bool,
+    /// Relayed bytes/s per rendezvous id (both directions together).
+    #[arg(long, env = "PECKRELAY_RELAY_RATE_PER_ID", default_value_t = 512 * 1024)]
+    relay_rate_per_id: u64,
+    /// Burst bytes per rendezvous id.
+    #[arg(long, env = "PECKRELAY_RELAY_BURST_PER_ID", default_value_t = 2 * 1024 * 1024)]
+    relay_burst_per_id: u64,
+    /// Relayed bytes/s per sending IP (IPv6: per /64).
+    #[arg(long, env = "PECKRELAY_RELAY_RATE_PER_IP", default_value_t = 1024 * 1024)]
+    relay_rate_per_ip: u64,
+    /// Burst bytes per sending IP.
+    #[arg(long, env = "PECKRELAY_RELAY_BURST_PER_IP", default_value_t = 4 * 1024 * 1024)]
+    relay_burst_per_ip: u64,
+    /// Relayed bytes/s across the whole relay.
+    #[arg(long, env = "PECKRELAY_RELAY_RATE_GLOBAL", default_value_t = 50 * 1024 * 1024)]
+    relay_rate_global: u64,
+    /// Global burst bytes.
+    #[arg(long, env = "PECKRELAY_RELAY_BURST_GLOBAL", default_value_t = 100 * 1024 * 1024)]
+    relay_burst_global: u64,
+    /// Rendezvous ids that may relay at the same time.
+    #[arg(long, env = "PECKRELAY_RELAY_MAX_PAIRS", default_value_t = 1000)]
+    relay_max_pairs: usize,
+    /// Seconds without a relayed datagram before an id frees its pair slot.
+    #[arg(long, env = "PECKRELAY_RELAY_IDLE_SECS", default_value_t = 60)]
+    relay_idle_secs: u64,
     /// Initial log filter (also RUST_LOG).
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     log: String,
@@ -111,10 +139,26 @@ async fn run(
         max_connections_per_ip: args.max_connections_per_ip,
         max_ids: args.max_ids,
         log_full_ips: args.log_full_ips,
+        relay_enabled: !args.no_relay_data,
+        relay_rate_per_id: args.relay_rate_per_id as f64,
+        relay_burst_per_id: args.relay_burst_per_id as f64,
+        relay_rate_per_ip: args.relay_rate_per_ip as f64,
+        relay_burst_per_ip: args.relay_burst_per_ip as f64,
+        relay_rate_global: args.relay_rate_global as f64,
+        relay_burst_global: args.relay_burst_global as f64,
+        relay_max_pairs: args.relay_max_pairs,
+        relay_idle_timeout: Duration::from_secs(args.relay_idle_secs),
         ..RelayConfig::default()
     };
+    // Without the data channel, stop offering protocol v2 so clients don't
+    // fall back to a relay path that would drop everything.
+    let server_cfg = if args.no_relay_data {
+        tls::v1_only(&server_cfg)
+    } else {
+        server_cfg
+    };
     let relay = Relay::new(cfg, stun_port);
-    info!(tcp = %args.listen, udp = %args.stun_listen, "relay listening");
+    info!(tcp = %args.listen, udp = %args.stun_listen, relay_data = !args.no_relay_data, "relay listening");
 
     let r1 = relay.clone();
     let acceptor = TlsAcceptor::from(server_cfg);

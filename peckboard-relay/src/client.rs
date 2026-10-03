@@ -35,7 +35,8 @@ use crate::keys::{
     DerivedKeys, EXPORTER_LABEL, EXPORTER_LEN, MsgCounter, PairingSecret, ReplayGuard,
 };
 use crate::proto::{
-    ALPN, ClientMsg, MAX_BLOB, Role, ServerMsg, decode_addrs, encode_addrs, read_frame, write_frame,
+    ALPN, ALPN_V2, ClientMsg, MAX_BLOB, Role, ServerMsg, decode_addrs, encode_addrs, read_frame,
+    write_frame,
 };
 use crate::stun;
 
@@ -51,6 +52,9 @@ pub struct ClientConfig {
     pub roots: Arc<RootCertStore>,
     /// STUN host; defaults to the relay's IP.
     pub stun_host: Option<IpAddr>,
+    /// Speak protocol v1 only (no relay fallback) — behave like a client
+    /// that predates it. Tests / troubleshooting.
+    pub v1_only: bool,
 }
 
 impl ClientConfig {
@@ -61,6 +65,7 @@ impl ClientConfig {
             server_name: server_name.to_string(),
             roots: Arc::new(roots),
             stun_host: None,
+            v1_only: false,
         }
     }
 
@@ -77,6 +82,7 @@ impl ClientConfig {
             server_name: server_name.to_string(),
             roots: Arc::new(roots),
             stun_host: None,
+            v1_only: false,
         })
     }
 }
@@ -121,15 +127,33 @@ pub struct RelayClient {
     events: mpsc::Receiver<Event>,
     cred: Arc<Mutex<StunCredential>>,
     send_ctr: MsgCounter,
+    version: u8,
+    data: Option<RelayData>,
 }
 
-fn tls_config(roots: Arc<RootCertStore>) -> anyhow::Result<Arc<TlsClientConfig>> {
+/// Datagrams queued per direction on the v2 relay data channel.
+const DATA_QUEUE: usize = 128;
+
+/// The v2 relay data channel ([`RelayClient::take_data`]): opaque datagrams
+/// to (`tx`) and from (`rx`) the peer, forwarded by the relay over this
+/// session. Lives as long as the [`RelayClient`] it came from.
+pub struct RelayData {
+    pub tx: mpsc::Sender<Vec<u8>>,
+    pub rx: mpsc::Receiver<Vec<u8>>,
+}
+
+fn tls_config(roots: Arc<RootCertStore>, v1_only: bool) -> anyhow::Result<Arc<TlsClientConfig>> {
     let mut cfg =
         TlsClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_root_certificates(roots)
             .with_no_client_auth();
-    cfg.alpn_protocols = vec![ALPN.to_vec()];
+    // An old relay only knows v1 and picks it; a current one prefers v2.
+    cfg.alpn_protocols = if v1_only {
+        vec![ALPN.to_vec()]
+    } else {
+        vec![ALPN_V2.to_vec(), ALPN.to_vec()]
+    };
     Ok(Arc::new(cfg))
 }
 
@@ -157,7 +181,7 @@ impl RelayClient {
         role: Role,
     ) -> anyhow::Result<Self> {
         let keys = Arc::new(secret.derive());
-        let connector = TlsConnector::from(tls_config(cfg.roots.clone())?);
+        let connector = TlsConnector::from(tls_config(cfg.roots.clone(), cfg.v1_only)?);
         let name = ServerName::try_from(cfg.server_name.clone()).context("server name")?;
         let stun_host = cfg.stun_host.unwrap_or(cfg.relay.ip());
 
@@ -166,16 +190,19 @@ impl RelayClient {
             let _ = tcp.set_nodelay(true);
             let tls = connector.connect(name, tcp).await?;
             let mut exporter = [0u8; EXPORTER_LEN];
-            {
+            let version = {
                 let conn = tls.get_ref().1;
-                if conn.alpn_protocol() != Some(ALPN) {
-                    bail!(
+                let version = match conn.alpn_protocol() {
+                    Some(p) if p == ALPN_V2 && !cfg.v1_only => 2u8,
+                    Some(p) if p == ALPN => 1,
+                    _ => bail!(
                         "relay did not negotiate {:?}",
                         String::from_utf8_lossy(ALPN)
-                    );
-                }
+                    ),
+                };
                 conn.export_keying_material(&mut exporter, EXPORTER_LABEL, None)?;
-            }
+                version
+            };
             let (mut rd, mut wr) = tokio::io::split(tls);
             let hello = ClientMsg::Hello {
                 role,
@@ -191,18 +218,30 @@ impl RelayClient {
             write_frame(&mut wr, &ClientMsg::Auth { signature }.encode()).await?;
             let reg = ServerMsg::decode(&read_frame(&mut rd).await?)?;
             let cred = credential(stun_host, reg).ok_or_else(|| anyhow!("expected registered"))?;
-            Ok((rd, wr, cred))
+            Ok((rd, wr, cred, version))
         };
-        let (mut rd, mut wr, cred) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs)
+        let (mut rd, mut wr, cred, version) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs)
             .await
             .context("relay handshake timed out")??;
 
         let cred = Arc::new(Mutex::new(cred));
         let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(64);
         let (ev_tx, ev_rx) = mpsc::channel::<Event>(256);
+        // v2 data channel: separate queues so datagrams never hold up (or
+        // get held up by) signaling, and drop instead of blocking when full.
+        let (data_out_tx, mut data_out_rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
+        let (data_in_tx, data_in_rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
 
         tokio::spawn(async move {
-            while let Some(m) = out_rx.recv().await {
+            loop {
+                let m = tokio::select! {
+                    biased;
+                    m = out_rx.recv() => match m {
+                        Some(m) => m,
+                        None => break,
+                    },
+                    Some(packet) = data_out_rx.recv() => ClientMsg::Data { packet },
+                };
                 if write_frame(&mut wr, &m.encode()).await.is_err() {
                     break;
                 }
@@ -219,6 +258,10 @@ impl RelayClient {
                     break;
                 };
                 let ev = match m {
+                    ServerMsg::Data { packet } => {
+                        let _ = data_in_tx.try_send(packet);
+                        continue;
+                    }
                     ServerMsg::Pong => Event::Pong,
                     ServerMsg::PeerOnline => Event::PeerOnline,
                     ServerMsg::PeerOffline => Event::PeerOffline,
@@ -278,6 +321,11 @@ impl RelayClient {
             events: ev_rx,
             cred,
             send_ctr: MsgCounter::default(),
+            version,
+            data: (version >= 2).then_some(RelayData {
+                tx: data_out_tx,
+                rx: data_in_rx,
+            }),
         })
     }
 
@@ -340,6 +388,20 @@ impl RelayClient {
         self.cred.lock().unwrap().clone()
     }
 
+    /// Negotiated protocol version: 2 when the relay offers the relay data
+    /// channel (see [`crate::proto::ALPN_V2`]), 1 for an older relay (or
+    /// [`ClientConfig::v1_only`]).
+    pub fn protocol_version(&self) -> u8 {
+        self.version
+    }
+
+    /// The v2 relay data channel, once (`None` on a v1 session or when
+    /// already taken). Datagrams sent on `tx` reach the peer's `rx` verbatim
+    /// through the relay; both queues drop when full, like UDP.
+    pub fn take_data(&mut self) -> Option<RelayData> {
+        self.data.take()
+    }
+
     /// Authenticated STUN Binding from `sock`; returns our public endpoint
     /// as the relay sees it (and lets the relay record it for punching).
     pub async fn stun_binding(&self, sock: &UdpSocket) -> anyhow::Result<SocketAddr> {
@@ -379,9 +441,11 @@ impl RelayClient {
     }
 }
 
-/// Probe payload (sealed). A pre-ack peer accepts any valid seal as a probe,
-/// so our acks still count as probes for it.
-const PROBE: &[u8] = b"probe";
+/// Probe payload (sealed). Peers that predate acks send `b"probe"` and
+/// accept any valid seal as a probe (so our acks count as probes for them);
+/// this one also says "I ack". Earlier ack-capable peers treat any non-ACK
+/// seal as a probe, so it is wire-compatible both ways.
+const PROBE_ACKS: &[u8] = b"probe+ack";
 /// "Your probe reached me here" — sent to every address a probe came from.
 const ACK: &[u8] = b"ack";
 /// How long a heard-but-unacked probe path waits before it's used anyway
@@ -418,33 +482,42 @@ async fn punch_with(
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut buf = [0u8; 512];
     let mut foreign = 0u32;
-    // Addresses a valid peer probe arrived from, and when. The peer reaches
-    // us from there, but that alone doesn't prove the way back (a
-    // multi-homed host may route its replies out another interface).
-    let mut heard: Vec<(SocketAddr, tokio::time::Instant)> = Vec::new();
+    // Addresses a valid peer probe arrived from, when, and whether that peer
+    // acks. The peer reaches us from there, but that alone doesn't prove the
+    // way back (a multi-homed host may route its replies out another
+    // interface; a symmetric NAT may let probes in but not our answers out).
+    let mut heard: Vec<(SocketAddr, tokio::time::Instant, bool)> = Vec::new();
+    // Only a peer that never acks gets the unproven-path fallback: from one
+    // that does, silence means our side of the path is dead.
+    let legacy = |heard: &[(SocketAddr, tokio::time::Instant, bool)]| {
+        heard
+            .iter()
+            .find(|(_, _, acks)| !acks)
+            .map(|&(a, at, _)| (a, at))
+    };
     tracing::debug!(?role, attempt = p.attempt, ?targets, "punch: probing");
     let chosen = loop {
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => {
-                if let Some(&(from, _)) = heard.first() {
+                if let Some((from, _)) = legacy(&heard) {
                     break from;
                 }
-                tracing::debug!(?role, foreign, "punch: timed out");
+                tracing::debug!(?role, foreign, heard = heard.len(), "punch: timed out");
                 bail!("hole punch timed out")
             }
             _ = tick.tick() => {
-                if let Some(&(from, at)) = heard.first()
+                if let Some((from, at)) = legacy(&heard)
                     && at.elapsed() >= ACK_GRACE
                 {
                     tracing::debug!(?role, %from, "punch: no ack, using first probe path");
                     break from;
                 }
-                let probe = keys.e2e.seal(role, &ctx, PROBE);
+                let probe = keys.e2e.seal(role, &ctx, PROBE_ACKS);
                 for t in &targets {
                     let _ = sock.send_to(&probe, t).await;
                 }
                 let ack = keys.e2e.seal(role, &ctx, ACK);
-                for (h, _) in &heard {
+                for (h, _, _) in &heard {
                     let _ = sock.send_to(&ack, h).await;
                 }
             }
@@ -459,9 +532,9 @@ async fn punch_with(
                     tracing::debug!(?role, %from, "punch: peer ack received");
                     break from;
                 }
-                if !heard.iter().any(|(h, _)| *h == from) && heard.len() < MAX_HEARD {
+                if !heard.iter().any(|(h, _, _)| *h == from) && heard.len() < MAX_HEARD {
                     tracing::debug!(?role, %from, "punch: peer probe received");
-                    heard.push((from, tokio::time::Instant::now()));
+                    heard.push((from, tokio::time::Instant::now(), msg == PROBE_ACKS));
                     let ack = keys.e2e.seal(role, &ctx, ACK);
                     let _ = sock.send_to(&ack, from).await;
                 }
@@ -600,6 +673,45 @@ mod tests {
         .await;
         assert_eq!(rb.unwrap(), d);
         assert_eq!(legacy.await.unwrap(), b);
+    }
+
+    /// Only device→box works (box symmetric NAT × carrier CGNAT): the box
+    /// hears the device's probes but nothing it sends gets back. A current
+    /// peer acks, so its silence means one-way — the box must fail the round
+    /// instead of taking the grace fallback, or it reports "connected" and
+    /// sits out the next rounds waiting 15 s for a QUIC handshake that
+    /// cannot arrive.
+    #[tokio::test]
+    async fn punch_rejects_one_way_only_path() {
+        let keys = PairingSecret::generate().derive();
+        let ub = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ud = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fwd = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // Where the box thinks the device is; nothing ever comes back out.
+        let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (b, d, f) = (
+            ub.local_addr().unwrap(),
+            ud.local_addr().unwrap(),
+            fwd.local_addr().unwrap(),
+        );
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = fwd.recv_from(&mut buf).await {
+                if from == d {
+                    let _ = fwd.send_to(&buf[..n], b).await;
+                }
+            }
+        });
+        let pb = punch_to(sink.local_addr().unwrap(), now_ms());
+        let pd = punch_to(f, now_ms());
+        let t = Duration::from_secs(3);
+        let (rb, rd) = tokio::join!(
+            punch_with(&keys, Role::Box, &ub, &pb, t),
+            punch_with(&keys, Role::Device, &ud, &pd, t),
+        );
+        assert!(rb.is_err(), "box took a one-way path: {rb:?}");
+        assert!(rd.is_err(), "{rd:?}");
+        drop(sink);
     }
 
     /// Test NAT in front of one host socket. The host reaches an outside

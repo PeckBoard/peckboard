@@ -207,12 +207,12 @@ async fn paths() -> (PunchedPath, PunchedPath) {
     let (aa, ba) = (a.local_addr().unwrap(), b.local_addr().unwrap());
     (
         PunchedPath {
-            socket: a,
+            socket: a.into(),
             peer: ba,
             role: Role::Box,
         },
         PunchedPath {
-            socket: b,
+            socket: b.into(),
             peer: aa,
             role: Role::Device,
         },
@@ -326,12 +326,12 @@ async fn proxied_paths() -> (PunchedPath, PunchedPath, tokio::task::JoinHandle<(
     });
     (
         PunchedPath {
-            socket: a,
+            socket: a.into(),
             peer: pa,
             role: Role::Box,
         },
         PunchedPath {
-            socket: b,
+            socket: b.into(),
             peer: pa,
             role: Role::Device,
         },
@@ -544,6 +544,31 @@ async fn cookie_gate_admits_only_the_booted_webview() {
         r.contains("location.replace(\"/\")") && !r.contains("echo"),
         "{r}"
     );
+    assert!(!r.contains("__pbm_shell"), "{r}");
+
+    // App shell origin: a known Tauri origin lands in a readable cookie;
+    // anything else (or a header-injection attempt) is ignored.
+    let boot = |shell: &str| get(&format!("{}&shell={shell}", gate.boot_path()), "");
+    let r = raw(d.port, &boot("tauri%3A%2F%2Flocalhost")).await;
+    assert!(
+        r.contains("\r\nSet-Cookie: __pbm_shell=tauri://localhost; SameSite=Strict; Path=/\r\n"),
+        "{r}"
+    );
+    let r = raw(d.port, &boot("http%3A%2F%2Ftauri.localhost")).await;
+    assert!(r.contains("__pbm_shell=http://tauri.localhost;"), "{r}");
+    for bad in [
+        "https%3A%2F%2Fevil.example",
+        "http%3A%2F%2Ftauri.localhost.evil.example",
+        "http%3A%2F%2Flocalhost%3A1420%0D%0AX-Bad%3A%201",
+        "%ZZ",
+    ] {
+        let r = raw(d.port, &boot(bad)).await;
+        assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
+        assert!(
+            !r.contains("__pbm_shell") && !r.contains("X-Bad"),
+            "{bad}: {r}"
+        );
+    }
 
     // With the cookie (among others, any header case): forwarded.
     let ok = format!("cookie: a=b; __pbm={key}; c=d\r\n");

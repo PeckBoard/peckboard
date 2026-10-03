@@ -85,12 +85,18 @@ impl RateLimiter {
     }
 
     pub fn allow(&self, ip: IpAddr) -> bool {
+        self.allow_cost(ip, 1.0)
+    }
+
+    /// [`allow`](Self::allow) for an event that costs `cost` tokens (e.g.
+    /// bytes); nothing is charged when it is refused.
+    pub fn allow_cost(&self, ip: IpAddr, cost: f64) -> bool {
         let now = Instant::now();
         let key = ip_key(ip);
         let mut g = self.inner.lock().unwrap();
         let (map, global) = &mut *g;
         Self::refill(global, self.global_rate, self.global_burst, now);
-        if global.tokens < 1.0 {
+        if global.tokens < cost {
             return false;
         }
         if !map.contains_key(&key) && map.len() >= self.max_entries {
@@ -102,20 +108,23 @@ impl RateLimiter {
         }
         if let Some(b) = map.get_mut(&key) {
             Self::refill(b, self.per_ip_rate, self.per_ip_burst, now);
-            if b.tokens < 1.0 {
+            if b.tokens < cost {
                 return false;
             }
-            b.tokens -= 1.0;
+            b.tokens -= cost;
         } else if map.len() < self.max_entries {
+            if self.per_ip_burst < cost {
+                return false;
+            }
             map.insert(
                 key,
                 Bucket {
-                    tokens: self.per_ip_burst - 1.0,
+                    tokens: self.per_ip_burst - cost,
                     last: now,
                 },
             );
         }
-        global.tokens -= 1.0;
+        global.tokens -= cost;
         true
     }
 
@@ -128,6 +137,34 @@ impl RateLimiter {
             Self::refill(b, rate, burst, now);
             b.tokens < burst
         });
+    }
+}
+
+/// One token bucket (e.g. the bytes one rendezvous id may relay).
+#[derive(Clone, Copy)]
+pub struct TokenBucket {
+    b: Bucket,
+}
+
+impl TokenBucket {
+    /// Starts full.
+    pub fn new(burst: f64) -> Self {
+        Self {
+            b: Bucket {
+                tokens: burst,
+                last: Instant::now(),
+            },
+        }
+    }
+
+    /// Take `cost` tokens if available.
+    pub fn take(&mut self, rate: f64, burst: f64, cost: f64) -> bool {
+        RateLimiter::refill(&mut self.b, rate, burst, Instant::now());
+        if self.b.tokens < cost {
+            return false;
+        }
+        self.b.tokens -= cost;
+        true
     }
 }
 

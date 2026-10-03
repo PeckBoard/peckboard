@@ -246,6 +246,19 @@
   .kanban-board-header {
     gap: 8px;
   }
+  /* The fixed 200px filter left the name ~one character on a 390px
+     phone: the name keeps a readable floor (capped at half the strip),
+     the filter takes whatever remains. */
+  .kanban-board-header .chat-toolbar-name {
+    flex: 0 1 auto;
+    min-width: 80px;
+    max-width: 50%;
+  }
+  .kanban-board-header .kanban-filter {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 72px;
+  }
 
   /* Add card form */
   .kanban-add-row {

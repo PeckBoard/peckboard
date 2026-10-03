@@ -11,11 +11,20 @@
 //! working STUN credential) released at the same fixed delay after Auth,
 //! Pong for Ping — and nothing else, ever. Only framing violations (an
 //! oversize length prefix, EOF) close early, identically in both modes.
+//!
+//! Relay fallback (protocol v2, see [`crate::proto::ALPN_V2`]): when the
+//! two peers of an id cannot punch a direct path, they send their (already
+//! end-to-end encrypted QUIC) datagrams as [`ClientMsg::Data`] over this
+//! same authenticated session and the relay forwards them verbatim to the
+//! other peer's session. Nothing about them is stored or logged — only
+//! aggregate counters ([`Relay::relay_stats`]). Bandwidth is capped per id,
+//! per source IP and globally; over-limit datagrams are dropped (QUIC
+//! congestion control backs off, exactly as on a lossy path).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rand::RngCore;
@@ -29,9 +38,9 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
 
 use crate::keys::{EXPORTER_LABEL, EXPORTER_LEN, SEALED_OVERHEAD, verify_auth};
-use crate::limits::{ConnCounter, RateLimiter, ip_tag};
+use crate::limits::{ConnCounter, RateLimiter, TokenBucket, ip_tag};
 use crate::proto::{
-    ALPN, ClientMsg, MAX_BLOB, ProtoError, Role, ServerMsg, read_frame, write_frame,
+    ALPN, ALPN_V2, ClientMsg, MAX_BLOB, ProtoError, Role, ServerMsg, read_frame, write_frame,
 };
 use crate::stun;
 
@@ -70,6 +79,27 @@ pub struct RelayConfig {
     pub punch_min_interval: Duration,
     /// Write full client IPs in logs (default: salted 4-byte hash).
     pub log_full_ips: bool,
+    /// Forward v2 `Data` datagrams between the peers of an id (relay
+    /// fallback). Off: data frames are dropped; the binary also stops
+    /// offering protocol v2 then, so clients don't try.
+    pub relay_enabled: bool,
+    /// Relayed bytes per second per rendezvous id (both directions) and
+    /// burst.
+    pub relay_rate_per_id: f64,
+    pub relay_burst_per_id: f64,
+    /// Relayed bytes per second per sending IP (v6 /64) and burst.
+    pub relay_rate_per_ip: f64,
+    pub relay_burst_per_ip: f64,
+    /// Relayed bytes per second across all ids and burst.
+    pub relay_rate_global: f64,
+    pub relay_burst_global: f64,
+    /// Ids allowed to relay at the same time; further pairs are refused
+    /// (their datagrams dropped) until one goes idle.
+    pub relay_max_pairs: usize,
+    /// A relaying id that sent nothing for this long frees its pair slot.
+    pub relay_idle_timeout: Duration,
+    /// Datagrams queued per session towards a slow peer before dropping.
+    pub relay_queue: usize,
 }
 
 impl Default for RelayConfig {
@@ -97,13 +127,51 @@ impl Default for RelayConfig {
             max_punch_rounds: 8,
             punch_min_interval: Duration::from_secs(1),
             log_full_ips: false,
+            relay_enabled: true,
+            relay_rate_per_id: 512.0 * 1024.0,
+            relay_burst_per_id: 2.0 * 1024.0 * 1024.0,
+            relay_rate_per_ip: 1024.0 * 1024.0,
+            relay_burst_per_ip: 4.0 * 1024.0 * 1024.0,
+            relay_rate_global: 50.0 * 1024.0 * 1024.0,
+            relay_burst_global: 100.0 * 1024.0 * 1024.0,
+            relay_max_pairs: 1000,
+            relay_idle_timeout: Duration::from_secs(60),
+            relay_queue: 128,
         }
     }
 }
 
+/// Aggregate relay-data counters since start (no per-id data, ever).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RelayStats {
+    pub packets: u64,
+    pub bytes: u64,
+    /// Dropped by a per-id / per-IP / global bandwidth cap or the pair cap.
+    pub dropped_limit: u64,
+    /// Dropped because the peer's queue was full.
+    pub dropped_queue: u64,
+    /// Dropped because the peer was offline or speaks only v1.
+    pub dropped_no_peer: u64,
+    pub active_pairs: usize,
+}
+
+#[derive(Default)]
+struct StatCounters {
+    packets: AtomicU64,
+    bytes: AtomicU64,
+    dropped_limit: AtomicU64,
+    dropped_queue: AtomicU64,
+    dropped_no_peer: AtomicU64,
+}
+
+type DataTap = Box<dyn Fn(&[u8]) + Send + Sync>;
+
 struct Slot {
     conn_id: u64,
     tx: mpsc::Sender<ServerMsg>,
+    /// v2 sessions only: datagrams for this peer (separate from `tx` so a
+    /// full data queue never delays signaling).
+    data_tx: Option<mpsc::Sender<Vec<u8>>>,
     kick: CancellationToken,
     public: Option<SocketAddr>,
     candidates: Vec<u8>,
@@ -115,6 +183,9 @@ struct IdEntry {
     idle_since: Instant,
     punch_rounds: u8,
     last_punch: Option<Instant>,
+    relay_bucket: TokenBucket,
+    /// Last datagram relayed for this id; `Some` = holds a pair slot.
+    relay_last: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -138,6 +209,11 @@ struct Shared {
     creds: Mutex<HashMap<String, Cred>>,
     conn_limiter: RateLimiter,
     stun_limiter: RateLimiter,
+    /// Relayed bytes per sending IP + global.
+    relay_limiter: RateLimiter,
+    relay_pairs: AtomicUsize,
+    stats: StatCounters,
+    tap: OnceLock<DataTap>,
     per_ip: ConnCounter,
     active: AtomicUsize,
     next_conn: AtomicU64,
@@ -185,6 +261,15 @@ impl Relay {
                 cfg.stun_rate_global,
                 cfg.stun_burst_global,
             ),
+            relay_limiter: RateLimiter::new(
+                cfg.relay_rate_per_ip,
+                cfg.relay_burst_per_ip,
+                cfg.relay_rate_global,
+                cfg.relay_burst_global,
+            ),
+            relay_pairs: AtomicUsize::new(0),
+            stats: StatCounters::default(),
+            tap: OnceLock::new(),
             cfg,
             stun_port,
             ids: Mutex::new(HashMap::new()),
@@ -216,10 +301,32 @@ impl Relay {
         self.shared.ids.lock().unwrap().len()
     }
 
+    /// Aggregate relay-data counters (tests / local logs only — never
+    /// exposed over the network).
+    pub fn relay_stats(&self) -> RelayStats {
+        let c = &self.shared.stats;
+        RelayStats {
+            packets: c.packets.load(Ordering::Relaxed),
+            bytes: c.bytes.load(Ordering::Relaxed),
+            dropped_limit: c.dropped_limit.load(Ordering::Relaxed),
+            dropped_queue: c.dropped_queue.load(Ordering::Relaxed),
+            dropped_no_peer: c.dropped_no_peer.load(Ordering::Relaxed),
+            active_pairs: self.shared.relay_pairs.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Test hook: see every datagram the relay forwards, exactly as
+    /// forwarded (to assert it is ciphertext). Set at most once.
+    #[doc(hidden)]
+    pub fn set_data_tap(&self, f: impl Fn(&[u8]) + Send + Sync + 'static) {
+        let _ = self.shared.tap.set(Box::new(f));
+    }
+
     fn spawn_housekeeping(&self) {
         let shared = self.shared.clone();
         self.shared.tasks.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
+            let mut logged = RelayStats::default();
             loop {
                 tokio::select! {
                     _ = shared.shutdown.cancelled() => break,
@@ -227,13 +334,44 @@ impl Relay {
                 }
                 shared.conn_limiter.prune();
                 shared.stun_limiter.prune();
+                shared.relay_limiter.prune();
                 let now = Instant::now();
                 shared.creds.lock().unwrap().retain(|_, c| c.expires > now);
                 let ttl = shared.cfg.id_ttl;
-                shared.ids.lock().unwrap().retain(|_, e| {
-                    e.slots.iter().any(Option::is_some)
-                        || now.saturating_duration_since(e.idle_since) < ttl
-                });
+                {
+                    let mut ids = shared.ids.lock().unwrap();
+                    for e in ids.values_mut() {
+                        if e.relay_last.is_some_and(|t| {
+                            now.saturating_duration_since(t) >= shared.cfg.relay_idle_timeout
+                        }) {
+                            end_relay(&shared, e);
+                        }
+                    }
+                    ids.retain(|_, e| {
+                        let keep = e.slots.iter().any(Option::is_some)
+                            || now.saturating_duration_since(e.idle_since) < ttl;
+                        if !keep {
+                            end_relay(&shared, e);
+                        }
+                        keep
+                    });
+                }
+                let stats = Relay {
+                    shared: shared.clone(),
+                }
+                .relay_stats();
+                if stats != logged {
+                    info!(
+                        packets = stats.packets,
+                        bytes = stats.bytes,
+                        dropped_limit = stats.dropped_limit,
+                        dropped_queue = stats.dropped_queue,
+                        dropped_no_peer = stats.dropped_no_peer,
+                        active_pairs = stats.active_pairs,
+                        "relay data totals"
+                    );
+                    logged = stats;
+                }
             }
         });
     }
@@ -293,37 +431,57 @@ impl Relay {
             Ok(Ok(t)) => t,
             _ => return,
         };
-        let (alpn_ok, exporter) = {
+        let (version, exporter) = {
             let conn = tls.get_ref().1;
-            let ok = conn.alpn_protocol() == Some(ALPN);
+            let version = match conn.alpn_protocol() {
+                Some(p) if p == ALPN => Some(1u8),
+                Some(p) if p == ALPN_V2 => Some(2u8),
+                _ => None,
+            };
             let mut ex = [0u8; EXPORTER_LEN];
             let ex_ok = conn
                 .export_keying_material(&mut ex, EXPORTER_LABEL, None)
                 .is_ok();
-            (ok && ex_ok, ex)
+            (version.filter(|_| ex_ok), ex)
         };
-        if !alpn_ok {
+        let Some(version) = version else {
             // Wrong / missing ALPN (incl. completed acme-tls/1 validations):
             // close without sending application data.
             let mut tls = tls;
             let _ = tls.shutdown().await;
             return;
-        }
-        debug!(peer = %self.tag(ip), "session open");
-        self.session(tls, deadline, exporter).await;
+        };
+        debug!(peer = %self.tag(ip), version, "session open");
+        self.session(tls, ip, version, deadline, exporter).await;
         debug!(peer = %self.tag(ip), "session closed");
     }
 
-    async fn session<S>(&self, stream: S, deadline: Instant, exporter: [u8; EXPORTER_LEN])
-    where
+    async fn session<S>(
+        &self,
+        stream: S,
+        ip: IpAddr,
+        version: u8,
+        deadline: Instant,
+        exporter: [u8; EXPORTER_LEN],
+    ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let s = &self.shared;
         let (mut rd, mut wr) = tokio::io::split(stream);
         let (tx, mut rx) = mpsc::channel::<ServerMsg>(64);
+        let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(s.cfg.relay_queue.max(1));
+        let data_tx = (version >= 2).then_some(data_tx);
         let writer = tokio::spawn(async move {
-            while let Some(m) = rx.recv().await {
-                let bytes = m.encode();
+            loop {
+                // Signaling first; datagrams only when nothing else waits.
+                let bytes = tokio::select! {
+                    biased;
+                    m = rx.recv() => match m {
+                        Some(m) => m.encode(),
+                        None => break,
+                    },
+                    Some(packet) = data_rx.recv() => ServerMsg::Data { packet }.encode(),
+                };
                 let w = write_frame(&mut wr, &bytes);
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(10), w).await,
@@ -381,8 +539,9 @@ impl Relay {
         let conn_id = s.next_conn.fetch_add(1, Ordering::Relaxed);
         let kick = s.shutdown.child_token();
         let binding = claim.and_then(|(role, rid, pk, sig_ok)| {
-            self.register(role, rid, pk, sig_ok, conn_id, &tx, &kick)
+            self.register(role, rid, pk, sig_ok, conn_id, &tx, data_tx.clone(), &kick)
         });
+        drop(data_tx);
         let mut cred_user = self.issue_credential(binding, &tx, None);
         if let Some(b) = binding {
             self.announce_online(&b);
@@ -396,6 +555,16 @@ impl Relay {
                 r = tokio::time::timeout(s.cfg.idle_timeout, read_frame(&mut rd)) => r,
             };
             let Ok(Ok(frame)) = frame else { break };
+            // Datagrams have their own (byte) limits, not the message rate.
+            if version >= 2 && frame.first() == Some(&0x10) {
+                let Ok(ClientMsg::Data { packet }) = ClientMsg::decode(&frame) else {
+                    break;
+                };
+                if let Some(b) = binding {
+                    self.relay_data(&b, ip, packet);
+                }
+                continue;
+            }
             let now = Instant::now();
             bucket.0 = (bucket.0 + now.duration_since(bucket.1).as_secs_f64() * s.cfg.msg_rate)
                 .min(s.cfg.msg_burst);
@@ -434,7 +603,8 @@ impl Relay {
                         }
                     }
                 }
-                ClientMsg::Hello { .. } | ClientMsg::Auth { .. } => break,
+                // A v1 session sending v2 frames, or a second handshake.
+                ClientMsg::Data { .. } | ClientMsg::Hello { .. } | ClientMsg::Auth { .. } => break,
             }
         }
 
@@ -457,6 +627,7 @@ impl Relay {
         sig_ok: bool,
         conn_id: u64,
         tx: &mpsc::Sender<ServerMsg>,
+        data_tx: Option<mpsc::Sender<Vec<u8>>>,
         kick: &CancellationToken,
     ) -> Option<Binding> {
         let s = &self.shared;
@@ -469,8 +640,12 @@ impl Relay {
                     let now = Instant::now();
                     let ttl = s.cfg.id_ttl;
                     ids.retain(|_, e| {
-                        e.slots.iter().any(Option::is_some)
-                            || now.saturating_duration_since(e.idle_since) < ttl
+                        let keep = e.slots.iter().any(Option::is_some)
+                            || now.saturating_duration_since(e.idle_since) < ttl;
+                        if !keep {
+                            end_relay(s, e);
+                        }
+                        keep
                     });
                 }
                 sig_ok && ids.len() < s.cfg.max_ids
@@ -485,10 +660,13 @@ impl Relay {
             idle_since: Instant::now(),
             punch_rounds: 0,
             last_punch: None,
+            relay_bucket: TokenBucket::new(s.cfg.relay_burst_per_id),
+            relay_last: None,
         });
         let slot = Slot {
             conn_id,
             tx: tx.clone(),
+            data_tx,
             kick: kick.clone(),
             public: None,
             candidates: Vec::new(),
@@ -568,6 +746,70 @@ impl Relay {
         }
     }
 
+    /// Forward one v2 datagram to the other peer, within the bandwidth caps.
+    /// Opaque: never inspected, stored or logged.
+    fn relay_data(&self, b: &Binding, ip: IpAddr, packet: Vec<u8>) {
+        let s = &self.shared;
+        let st = &s.stats;
+        if !s.cfg.relay_enabled {
+            st.dropped_no_peer.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let len = packet.len();
+        let peer_tx = {
+            let mut ids = s.ids.lock().unwrap();
+            let Some(e) = ids.get_mut(&b.rendezvous_id) else {
+                return;
+            };
+            if !owns(e, b) {
+                return;
+            }
+            let Some(peer_tx) = e.slots[b.role.other().index()]
+                .as_ref()
+                .and_then(|p| p.data_tx.clone())
+            else {
+                st.dropped_no_peer.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            if e.relay_last.is_none() {
+                // A new relaying pair: within the global pair cap?
+                let pairs = &s.relay_pairs;
+                if pairs.fetch_add(1, Ordering::SeqCst) >= s.cfg.relay_max_pairs {
+                    pairs.fetch_sub(1, Ordering::SeqCst);
+                    st.dropped_limit.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                debug!("relay pair started");
+            }
+            e.relay_last = Some(Instant::now());
+            if !e.relay_bucket.take(
+                s.cfg.relay_rate_per_id,
+                s.cfg.relay_burst_per_id,
+                len as f64,
+            ) {
+                st.dropped_limit.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            peer_tx
+        };
+        if !s.relay_limiter.allow_cost(ip, len as f64) {
+            st.dropped_limit.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if let Some(tap) = s.tap.get() {
+            tap(&packet);
+        }
+        match peer_tx.try_send(packet) {
+            Ok(()) => {
+                st.packets.fetch_add(1, Ordering::Relaxed);
+                st.bytes.fetch_add(len as u64, Ordering::Relaxed);
+            }
+            Err(_) => {
+                st.dropped_queue.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     fn set_candidates(&self, b: &Binding, blob: Vec<u8>) {
         if blob.len() > MAX_BLOB || (!blob.is_empty() && blob.len() < SEALED_OVERHEAD) {
             return;
@@ -595,6 +837,7 @@ impl Relay {
         }
         e.slots[b.role.index()] = None;
         e.idle_since = Instant::now();
+        end_relay(&self.shared, e);
         if let Some(peer) = &e.slots[b.role.other().index()] {
             let _ = peer.tx.try_send(ServerMsg::PeerOffline);
         }
@@ -647,6 +890,14 @@ impl Relay {
                 debug!("stun send: {e}");
             }
         }
+    }
+}
+
+/// Free the id's relay pair slot, if it holds one.
+fn end_relay(s: &Shared, e: &mut IdEntry) {
+    if e.relay_last.take().is_some() {
+        s.relay_pairs.fetch_sub(1, Ordering::SeqCst);
+        debug!("relay pair ended");
     }
 }
 

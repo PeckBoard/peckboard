@@ -14,7 +14,7 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use peckboard_relay::client::ClientConfig;
 use peckboard_relay::tunnel::{
-    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink,
+    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink, PathKind,
     TunnelError, bind_listener, relay_config, run_device,
 };
 use tokio::io::AsyncReadExt;
@@ -219,14 +219,20 @@ fn report(url: String) -> impl Fn(DeviceEvent) + Send + Sync + 'static {
     let ever_connected = AtomicBool::new(false);
     move |ev| match ev {
         DeviceEvent::Connecting => {}
-        DeviceEvent::Connected { peer, rtt_ms } => {
+        DeviceEvent::Connected { peer, rtt_ms, path } => {
             if ever_connected.swap(true, Ordering::Relaxed) {
                 eprintln!("Reconnected — Peckboard available at {url}");
             } else {
                 println!("Peckboard available at {url}");
             }
-            eprintln!("  direct path to {peer}, rtt {rtt_ms} ms");
+            match path {
+                PathKind::Direct => eprintln!("  direct path to {peer}, rtt {rtt_ms} ms"),
+                PathKind::Relayed => eprintln!(
+                    "  relayed through the rendezvous server (no direct path; still end-to-end encrypted), rtt {rtt_ms} ms"
+                ),
+            }
         }
+        DeviceEvent::PathChanged { path } => eprintln!("  now using the {path} path"),
         DeviceEvent::Disconnected { reason } => eprintln!("Connection lost: {reason}"),
         DeviceEvent::PunchFailed { .. } => eprintln!("{HARD_NAT}"),
         DeviceEvent::PeerOffline => eprintln!(

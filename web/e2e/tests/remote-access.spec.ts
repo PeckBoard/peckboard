@@ -102,7 +102,8 @@ test('direct connection: UDP port range and public address are validated and sav
   const settings = page.getByTestId('settings-page')
   await settings.getByTestId('settings-nav-remote-access').click()
   const direct = settings.getByTestId('remote-direct')
-  await expect(direct).toContainText('Forward this UDP port range on your router')
+  await expect(direct).toContainText('Nothing to set up here')
+  await expect(direct).not.toContainText('router')
   // Defaults: random ports, range of 10, address auto-detected.
   const base = direct.getByTestId('remote-udp-base')
   const count = direct.getByTestId('remote-udp-count')

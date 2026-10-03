@@ -32,7 +32,22 @@ class PeckboardNativePlugin: Plugin {
     // WKWebView is created, so they can't be changed here; wry creates it
     // with `allowsInlineMediaPlayback` on iOS and autoplay enabled. What can
     // be changed live is set here.
+    // Edge swipe = Back: box UI history leads back to the shell (its first
+    // entry), which then stops the tunnel.
     webview.allowsBackForwardNavigationGestures = true
+    // ` PeckBoardApp/<version>` lets the box UI offer "Switch box". The
+    // shell loads first, so this lands before any box page is requested.
+    if webview.customUserAgent == nil {
+      webview.evaluateJavaScript("navigator.userAgent") { [weak webview] ua, _ in
+        guard let webview = webview, let ua = ua as? String,
+          !ua.contains("PeckBoardApp/")
+        else { return }
+        let version =
+          Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+          ?? "0"
+        webview.customUserAgent = "\(ua) PeckBoardApp/\(version)"
+      }
+    }
     // Wrap (not replace) wry's UI delegate: it implements alert/confirm/
     // prompt; we only take over media-capture decisions.
     let proxy = LoopbackUIDelegate(inner: webview.uiDelegate)

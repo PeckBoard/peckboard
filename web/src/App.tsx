@@ -58,6 +58,7 @@ import ConnectionBanner from './components/ConnectionBanner'
 import RestartPendingBanner from './components/RestartPendingBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import { parseVoiceNavigate, useVoiceNavStore, VOICE_PAGE_VIEWS } from './voice/navigation'
+import { mobileShellUrl } from './utils/mobileApp'
 import './App.css'
 
 type View =
@@ -394,6 +395,8 @@ function App() {
   const [renameTarget, setRenameTarget] = useState<{ type: TabType; id: string } | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
+  // Inside the PeckBoard mobile app: where "Switch box" returns to.
+  const [mobileShell] = useState(mobileShellUrl)
   const [showChangePassword, setShowChangePassword] = useState(false)
   // Which Settings sub-page to open on mount, parsed from the URL
   // (`/settings/<sub>` or a legacy deep link like `/plugins`); null lands
@@ -1678,6 +1681,21 @@ function App() {
                   >
                     Change password
                   </button>
+                  {mobileShell && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-testid="user-menu-switch-box"
+                      onClick={() => {
+                        setUserMenuOpen(false)
+                        // Replace, so Back from the box list can't land on
+                        // this box after its tunnel is gone.
+                        window.location.replace(mobileShell)
+                      }}
+                    >
+                      Switch box
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="menuitem"

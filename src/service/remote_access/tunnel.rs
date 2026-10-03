@@ -34,8 +34,18 @@ pub struct Tunnelled;
 /// Live tunnel state reported by the relay library.
 #[derive(Debug, Clone)]
 pub enum TunnelUpdate {
-    Connected { rtt_ms: u32 },
-    Disconnected { reason: String },
+    /// `path`: `"direct"` (hole-punched) or `"relayed"` (through the relay).
+    Connected {
+        rtt_ms: u32,
+        path: &'static str,
+    },
+    /// A relayed tunnel upgraded to direct, or fell back to the relay.
+    PathChanged {
+        path: &'static str,
+    },
+    Disconnected {
+        reason: String,
+    },
     Error(String),
 }
 
@@ -84,8 +94,14 @@ pub trait TunnelBackend: Send + Sync + 'static {
 /// A punched path to one device, not yet serving.
 #[async_trait::async_trait]
 pub trait PunchedTunnel: Send {
-    /// The device's address as seen on the punched path.
+    /// The device's address as seen on the punched path (its observed
+    /// public endpoint when relayed).
     fn peer(&self) -> SocketAddr;
+    /// `"direct"` or `"relayed"` (punching failed; the relay forwards the
+    /// end-to-end encrypted tunnel).
+    fn path(&self) -> &'static str {
+        "direct"
+    }
     /// Accept the device's QUIC connection and forward every stream to
     /// `target`. Returns when the connection ends.
     async fn serve(

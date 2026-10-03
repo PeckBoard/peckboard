@@ -65,6 +65,7 @@ impl TunnelBackend for RelayBackend {
                     candidates: r.candidates.clone(),
                 })
             })),
+            ..EstablishOptions::default()
         };
         let path = tunnel::establish_with(&cfg, &relay_secret(secret), Role::Box, &opts).await?;
         Ok(Box::new(RelayPunched(path)))
@@ -79,6 +80,10 @@ impl PunchedTunnel for RelayPunched {
         self.0.peer
     }
 
+    fn path(&self) -> &'static str {
+        self.0.kind().as_str()
+    }
+
     async fn serve(
         self: Box<Self>,
         secret: &DeviceSecret,
@@ -87,7 +92,13 @@ impl PunchedTunnel for RelayPunched {
     ) -> anyhow::Result<()> {
         tunnel::serve_box(self.0, &relay_secret(secret), target, move |ev| {
             events(match ev {
-                TunnelEvent::Connected { rtt_ms, .. } => TunnelUpdate::Connected { rtt_ms },
+                TunnelEvent::Connected { rtt_ms, path, .. } => TunnelUpdate::Connected {
+                    rtt_ms,
+                    path: path.as_str(),
+                },
+                TunnelEvent::PathChanged { path } => TunnelUpdate::PathChanged {
+                    path: path.as_str(),
+                },
                 TunnelEvent::Disconnected { reason } => TunnelUpdate::Disconnected { reason },
                 TunnelEvent::Error(e) => TunnelUpdate::Error(e),
             })
