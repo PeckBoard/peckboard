@@ -1,19 +1,47 @@
 //! Production [`TunnelBackend`]: the `peckboard-relay` tunnel API
-//! (`establish` as the box, then `serve_box`).
+//! (`establish_with` as the box, then `serve_box`).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use peckboard_relay::keys::PairingSecret;
 use peckboard_relay::proto::Role;
-use peckboard_relay::tunnel::{self, PunchedPath, TunnelEvent};
+use peckboard_relay::tunnel::{self, Advertise, EstablishOptions, PunchedPath, TunnelEvent};
 
 use super::secret::DeviceSecret;
-use super::tunnel::{PunchedTunnel, TunnelBackend, TunnelEvents, TunnelUpdate};
+use super::tunnel::{
+    DirectOptions, OnRegistered, PunchedTunnel, Registered, TunnelBackend, TunnelEvents,
+    TunnelUpdate,
+};
 
 pub struct RelayBackend;
 
 fn relay_secret(s: &DeviceSecret) -> PairingSecret {
     PairingSecret::from_bytes(*s.as_bytes())
+}
+
+/// The fixed port on the configured public host, or on the STUN-observed
+/// IP when there is none (or it doesn't resolve right now).
+async fn advertise(direct: &DirectOptions) -> Vec<Advertise> {
+    let Some(port) = direct.bind_port else {
+        return Vec::new();
+    };
+    let Some(host) = &direct.public_host else {
+        return vec![Advertise::Port(port)];
+    };
+    match tokio::net::lookup_host((host.as_str(), port)).await {
+        Ok(addrs) => {
+            let addrs: Vec<SocketAddr> = addrs.collect();
+            match addrs.iter().find(|a| a.is_ipv4()).or(addrs.first()) {
+                Some(a) => vec![Advertise::Addr(*a)],
+                None => vec![Advertise::Port(port)],
+            }
+        }
+        Err(e) => {
+            tracing::warn!("remote access: resolving public address {host} failed: {e}");
+            vec![Advertise::Port(port)]
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -22,9 +50,23 @@ impl TunnelBackend for RelayBackend {
         &self,
         relay_host: &str,
         secret: &DeviceSecret,
+        direct: &DirectOptions,
+        on_registered: OnRegistered,
     ) -> anyhow::Result<Box<dyn PunchedTunnel>> {
         let cfg = tunnel::relay_config(relay_host).await?;
-        let path = tunnel::establish(&cfg, &relay_secret(secret), Role::Box).await?;
+        let opts = EstablishOptions {
+            bind_port: direct.bind_port,
+            advertise: advertise(direct).await,
+            public_ip_hint: direct.public_ip_hint,
+            on_registered: Some(Arc::new(move |r: &tunnel::Registration| {
+                on_registered(Registered {
+                    local_port: r.local_port,
+                    public: r.public,
+                    candidates: r.candidates.clone(),
+                })
+            })),
+        };
+        let path = tunnel::establish_with(&cfg, &relay_secret(secret), Role::Box, &opts).await?;
         Ok(Box::new(RelayPunched(path)))
     }
 }

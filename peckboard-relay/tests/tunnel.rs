@@ -624,3 +624,71 @@ async fn punch_carries_candidates_despite_slow_uplink() {
         "punch sent before the device's candidates arrived"
     );
 }
+
+/// `establish_with`: the box binds the fixed port, and its advertised
+/// candidates — an explicit address and a port on the STUN-observed IP —
+/// reach the device in `PunchNow` next to the LAN candidate.
+#[tokio::test]
+async fn box_fixed_port_and_advertised_candidates() {
+    use peckboard_relay::client::{Event, RelayClient};
+    use peckboard_relay::tunnel::{Advertise, EstablishOptions, Registration, establish_with};
+    use std::sync::{Arc, Mutex};
+
+    let cfg = relay().await;
+    let s = PairingSecret::generate();
+    let fixed = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let explicit: SocketAddr = "198.51.100.9:4000".parse().unwrap();
+    let seen: Arc<Mutex<Option<Registration>>> = Arc::default();
+    let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
+    let opts = EstablishOptions {
+        bind_port: Some(fixed),
+        advertise: vec![Advertise::Port(fixed), Advertise::Addr(explicit)],
+        on_registered: Some({
+            let seen = seen.clone();
+            Arc::new(move |r: &Registration| {
+                *seen.lock().unwrap() = Some(r.clone());
+                let _ = reg_tx.send(());
+            })
+        }),
+        ..Default::default()
+    };
+    let (bcfg, bs) = (cfg.clone(), s.clone());
+    let boxed = tokio::spawn(async move { establish_with(&bcfg, &bs, Role::Box, &opts).await });
+    tokio::time::timeout(T, reg_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let reg = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(reg.local_port, fixed);
+    let forwarded = SocketAddr::new(reg.public.ip(), fixed);
+    assert!(reg.candidates.contains(&forwarded), "{reg:?}");
+    assert!(reg.candidates.contains(&explicit), "{reg:?}");
+
+    let mut dev = RelayClient::connect(&cfg, &s, Role::Device).await.unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    dev.stun_binding(&udp).await.unwrap();
+    let punch = tokio::time::timeout(T, async {
+        loop {
+            if let Some(Event::Punch(p)) = dev.next_event().await {
+                return p;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    for want in [forwarded, explicit] {
+        assert!(punch.peer_candidates.contains(&want), "{punch:?}");
+    }
+    dev.punch(&udp, &punch, T).await.unwrap();
+    let path = tokio::time::timeout(T, boxed)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(path.socket.local_addr().unwrap().port(), fixed);
+}

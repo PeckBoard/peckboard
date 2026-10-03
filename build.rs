@@ -68,8 +68,10 @@ fn resolve_version() -> String {
 // Build script: runs at compile time, not in the server; no agent sandbox.
 #[allow(clippy::disallowed_methods)]
 fn git_described_version() -> Option<String> {
+    // Only server release tags (`0.1.58`) count: `mobile-*` tags version the
+    // phone app and would stamp a non-semver server version.
     let out = Command::new("git")
-        .args(["describe", "--tags", "--exact-match"])
+        .args(["describe", "--tags", "--exact-match", "--match", "[0-9]*"])
         .output()
         .ok()?;
     if !out.status.success() {

@@ -66,6 +66,22 @@ pub async fn relay_config(host: &str) -> anyhow::Result<ClientConfig>;
 pub async fn establish(cfg: &ClientConfig, secret: &PairingSecret, role: Role)
     -> anyhow::Result<PunchedPath>;
 
+// Same, with a fixed local UDP port and extra advertised candidates (sent
+// sealed next to the LAN candidate; the punch probes them like any other).
+// For a box behind a symmetric NAT: forward the port on the router and
+// advertise it. Advertise::Port(p) = p on the STUN-observed public IP
+// (public_ip_hint until STUN answers). Default options = `establish`.
+pub async fn establish_with(cfg: &ClientConfig, secret: &PairingSecret, role: Role,
+    opts: &EstablishOptions) -> anyhow::Result<PunchedPath>;
+
+#[derive(Clone, Default)]
+pub struct EstablishOptions {
+    pub bind_port: Option<u16>,               // None: ephemeral
+    pub advertise: Vec<Advertise>,            // Addr(SocketAddr) | Port(u16)
+    pub public_ip_hint: Option<IpAddr>,
+    pub on_registered: Option<OnRegistered>,  // Fn(&Registration{local_port, public, candidates})
+}
+
 pub struct PunchedPath {
     pub socket: tokio::net::UdpSocket, // the exact socket the punch used
     pub peer: SocketAddr,              // peer address as seen from it

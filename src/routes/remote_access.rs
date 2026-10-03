@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::middleware::{AuthUser, require_admin, require_auth};
 use crate::db::models::{NewRemoteDevice, RemoteDevice};
 use crate::service::remote_access::{
-    DeviceStatus, RemoteAccess, RemoteAccessSettings, secret, validate_relay_host,
+    DeviceStatus, RemoteAccess, RemoteAccessSettings, secret, validate_direct, validate_relay_host,
 };
 use crate::state::AppState;
 
@@ -76,20 +76,30 @@ impl DeviceView {
         }
     }
 }
+fn settings_json(s: &RemoteAccessSettings) -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(m) = serde_json::json!({
+        "enabled": s.enabled,
+        "relay_host": s.relay_host,
+        "udp_port_base": s.udp_port_base,
+        "udp_port_count": s.udp_port_count,
+        "public_address": s.public_address,
+    }) else {
+        unreachable!()
+    };
+    m
+}
 
-/// GET /api/remote-access — `{enabled, relay_host, devices}`.
+/// GET /api/remote-access — the settings (`enabled`, `relay_host`,
+/// `udp_port_base`, `udp_port_count`, `public_address`) + `devices`.
 async fn overview(State(state): State<Arc<AppState>>) -> Response {
     let ra = &state.remote_access;
     let settings = ra.settings().await;
     match state.db.list_remote_devices().await {
         Ok(devices) => {
             let views: Vec<DeviceView> = devices.iter().map(|d| DeviceView::of(d, ra)).collect();
-            Json(serde_json::json!({
-                "enabled": settings.enabled,
-                "relay_host": settings.relay_host,
-                "devices": views,
-            }))
-            .into_response()
+            let mut body = settings_json(&settings);
+            body.insert("devices".into(), serde_json::json!(views));
+            Json(body).into_response()
         }
         Err(e) => internal_err(e),
     }
@@ -99,10 +109,22 @@ async fn overview(State(state): State<Arc<AppState>>) -> Response {
 struct SettingsBody {
     enabled: Option<bool>,
     relay_host: Option<String>,
+    /// Direct-connection fields, always sent together (a `null` port base
+    /// means ephemeral ports).
+    direct: Option<DirectBody>,
 }
 
-/// PUT /api/remote-access — `{enabled?, relay_host?}` → the new settings.
-/// Restarts every device loop under the new values.
+#[derive(Deserialize)]
+struct DirectBody {
+    udp_port_base: Option<i64>,
+    udp_port_count: i64,
+    #[serde(default)]
+    public_address: String,
+}
+
+/// PUT /api/remote-access — `{enabled?, relay_host?, direct?}` → the new
+/// settings. Restarts every device loop under the new values. A rejected
+/// direct field answers 400 `{error, field}`.
 async fn put_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SettingsBody>,
@@ -118,11 +140,27 @@ async fn put_settings(
         }
         s.relay_host = host;
     }
+    if let Some(d) = body.direct {
+        match validate_direct(d.udp_port_base, d.udp_port_count, &d.public_address) {
+            Ok(v) => {
+                s.udp_port_base = v.udp_port_base;
+                s.udp_port_count = v.udp_port_count;
+                s.public_address = v.public_address;
+            }
+            Err((field, msg)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": msg, "field": field })),
+                )
+                    .into_response();
+            }
+        }
+    }
     if let Err(e) = state.remote_access.put_settings(&s).await {
         return internal_err(e);
     }
     tracing::info!(enabled = s.enabled, "remote access setting changed");
-    Json(serde_json::json!({ "enabled": s.enabled, "relay_host": s.relay_host })).into_response()
+    Json(settings_json(&s)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -405,5 +443,66 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["enabled"], true);
         assert_eq!(body["relay_host"], "127.0.0.1:24430");
+    }
+
+    #[tokio::test]
+    async fn direct_connection_settings_are_admin_only_and_validated() {
+        let direct = |base: serde_json::Value, count: i64, public: &str| {
+            Some(serde_json::json!({ "direct": {
+                "udp_port_base": base, "udp_port_count": count, "public_address": public,
+            }}))
+        };
+        let user_dir = tempfile::tempdir().unwrap();
+        let user_state = test_state(user_dir.path());
+        let user = seed_authenticated_user(&user_state, "user").await;
+        let (status, _) = call(
+            &user_state,
+            &user,
+            "PUT",
+            "/api/remote-access",
+            direct(40000.into(), 10, ""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let admin = seed_authenticated_user(&state, "admin").await;
+
+        for (body, field) in [
+            (direct(80.into(), 10, ""), "udp_port_base"),
+            (direct(65530.into(), 10, ""), "udp_port_count"),
+            (direct(40000.into(), 10, "1.2.3.4:80"), "public_address"),
+            (
+                direct(serde_json::Value::Null, 10, "1.2.3.4"),
+                "public_address",
+            ),
+        ] {
+            let (status, resp) = call(&state, &admin, "PUT", "/api/remote-access", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(resp["field"], field, "{resp}");
+        }
+        let (_, body) = call(&state, &admin, "GET", "/api/remote-access", None).await;
+        assert_eq!(
+            body["udp_port_base"],
+            serde_json::Value::Null,
+            "nothing saved"
+        );
+        assert_eq!(body["udp_port_count"], 10);
+
+        let (status, _) = call(
+            &state,
+            &admin,
+            "PUT",
+            "/api/remote-access",
+            direct(40000.into(), 4, " home.example.com "),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = call(&state, &admin, "GET", "/api/remote-access", None).await;
+        assert_eq!(body["udp_port_base"], 40000);
+        assert_eq!(body["udp_port_count"], 4);
+        assert_eq!(body["public_address"], "home.example.com");
+        assert_eq!(body["enabled"], false, "other settings untouched");
     }
 }

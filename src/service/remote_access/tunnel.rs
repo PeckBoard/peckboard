@@ -41,17 +41,43 @@ pub enum TunnelUpdate {
 
 pub type TunnelEvents = Arc<dyn Fn(TunnelUpdate) + Send + Sync>;
 
+/// Direct-connection knobs for one registration: a fixed local UDP port
+/// (router port-forward) and the public address to advertise it on.
+#[derive(Debug, Clone, Default)]
+pub struct DirectOptions {
+    /// `None`: ephemeral port, nothing advertised.
+    pub bind_port: Option<u16>,
+    /// Host/IP to advertise `bind_port` on; `None`: the STUN-observed IP.
+    pub public_host: Option<String>,
+    /// Last observed public IP, so `bind_port` is advertised before STUN.
+    pub public_ip_hint: Option<IpAddr>,
+}
+
+/// What a registration bound and advertised, for the status display.
+#[derive(Debug, Clone)]
+pub struct Registered {
+    pub local_port: u16,
+    pub public: SocketAddr,
+    /// Every candidate sent to the device (LAN + advertised).
+    pub candidates: Vec<SocketAddr>,
+}
+
+pub type OnRegistered = Arc<dyn Fn(Registered) + Send + Sync>;
+
 /// The relay side of remote access: rendezvous + hole punch for one
 /// pairing. A trait so the device loop is testable without the network;
 /// production uses [`super::relay::RelayBackend`].
 #[async_trait::async_trait]
 pub trait TunnelBackend: Send + Sync + 'static {
     /// Register as the box for this pairing and return once the device
-    /// has shown up and the punch succeeded.
+    /// has shown up and the punch succeeded. `on_registered` fires once
+    /// the relay knows our endpoint.
     async fn establish(
         &self,
         relay_host: &str,
         secret: &DeviceSecret,
+        direct: &DirectOptions,
+        on_registered: OnRegistered,
     ) -> anyhow::Result<Box<dyn PunchedTunnel>>;
 }
 

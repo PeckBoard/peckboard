@@ -88,3 +88,81 @@ test('pair a device, see its link once, then revoke it', async ({ request, page 
   await expect(section.getByTestId('remote-device-row-e2e-laptop')).toHaveCount(0)
   await expect(section.getByTestId('remote-devices-empty')).toBeVisible()
 })
+
+test('direct connection: UDP port range and public address are validated and saved', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const auth = { Authorization: `Bearer ${token}` }
+  await loadApp(page, token)
+
+  await page.locator('.rail-avatar').click()
+  await page.locator('.user-menu-dropdown').getByRole('menuitem', { name: 'Settings' }).click()
+  const settings = page.getByTestId('settings-page')
+  await settings.getByTestId('settings-nav-remote-access').click()
+  const direct = settings.getByTestId('remote-direct')
+  await expect(direct).toContainText('Forward this UDP port range on your router')
+  // Defaults: random ports, range of 10, address auto-detected.
+  const base = direct.getByTestId('remote-udp-base')
+  const count = direct.getByTestId('remote-udp-count')
+  const pub = direct.getByTestId('remote-public-address')
+  const save = direct.getByTestId('remote-direct-save')
+  await expect(base).toHaveValue('')
+  await expect(count).toHaveValue('10')
+  await expect(pub).toHaveValue('')
+  await expect(save).toBeDisabled()
+
+  // ── Inline validation, per field ───────────────────────────────────
+  await base.fill('80')
+  await expect(direct.getByTestId('remote-udp-base-error')).toHaveText(
+    'UDP port must be 1024–65535',
+  )
+  await expect(save).toBeDisabled()
+  await expect(direct.locator('.form-actions-reason')).toBeVisible()
+  await base.fill('')
+  await pub.fill('203.0.113.7')
+  await expect(direct.getByTestId('remote-public-address-error')).toContainText(
+    'Set a UDP port first',
+  )
+  await base.fill('41000')
+  await count.fill('0')
+  await expect(direct.getByTestId('remote-udp-count-error')).toHaveText('Range size must be 1–256')
+  await expect(direct.getByTestId('remote-udp-base-error')).toHaveCount(0)
+  await expect(direct.getByTestId('remote-public-address-error')).toHaveCount(0)
+
+  // ── Save a valid range; it persists ────────────────────────────────
+  await count.fill('4')
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect(save).toBeDisabled()
+  const res = await request.get('/api/remote-access', { headers: auth })
+  const body = (await res.json()) as Record<string, unknown>
+  expect(body).toMatchObject({
+    enabled: false,
+    udp_port_base: 41000,
+    udp_port_count: 4,
+    public_address: '203.0.113.7',
+  })
+  await page.reload()
+  await page.locator('.rail-avatar').click()
+  await page.locator('.user-menu-dropdown').getByRole('menuitem', { name: 'Settings' }).click()
+  await settings.getByTestId('settings-nav-remote-access').click()
+  await expect(direct.getByTestId('remote-udp-base')).toHaveValue('41000')
+  await expect(direct.getByTestId('remote-public-address')).toHaveValue('203.0.113.7')
+
+  // The server enforces the same rules and names the field.
+  const bad = await request.put('/api/remote-access', {
+    headers: auth,
+    data: { direct: { udp_port_base: 65530, udp_port_count: 10, public_address: '' } },
+  })
+  expect(bad.status()).toBe(400)
+  expect(((await bad.json()) as { field: string }).field).toBe('udp_port_count')
+
+  // Back to defaults for the next spec.
+  const reset = await request.put('/api/remote-access', {
+    headers: auth,
+    data: { direct: { udp_port_base: null, udp_port_count: 10, public_address: '' } },
+  })
+  expect(reset.ok()).toBeTruthy()
+})

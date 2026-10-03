@@ -601,4 +601,175 @@ mod tests {
         assert_eq!(rb.unwrap(), d);
         assert_eq!(legacy.await.unwrap(), b);
     }
+
+    /// Test NAT in front of one host socket. The host reaches an outside
+    /// address `o` through an inside alias socket ([`Nat::alias`]); the NAT
+    /// sends it on from an outside mapping — one per destination when
+    /// `symmetric` (endpoint-dependent mapping), else one shared mapping.
+    /// Filtering is address-and-port dependent either way: a mapping only
+    /// lets in what comes from an address it has sent to. `forward` is a
+    /// router port-forward: anyone may send to it, and replies to such a
+    /// sender leave from it (like a conntrack entry for the inbound flow).
+    struct Nat {
+        host: SocketAddr,
+        symmetric: bool,
+        st: tokio::sync::Mutex<NatState>,
+    }
+
+    #[derive(Default)]
+    struct NatState {
+        aliases: std::collections::HashMap<SocketAddr, Arc<UdpSocket>>,
+        mappings: std::collections::HashMap<Option<SocketAddr>, Arc<NatMapping>>,
+        forward: Option<Arc<UdpSocket>>,
+        via_forward: std::collections::HashSet<SocketAddr>,
+    }
+
+    struct NatMapping {
+        sock: UdpSocket,
+        sent_to: Mutex<std::collections::HashSet<SocketAddr>>,
+    }
+
+    impl Nat {
+        async fn new(host: SocketAddr, symmetric: bool, forward: bool) -> Arc<Self> {
+            let nat = Arc::new(Self {
+                host,
+                symmetric,
+                st: Default::default(),
+            });
+            if forward {
+                let f = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                nat.st.lock().await.forward = Some(f.clone());
+                let n = nat.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    while let Ok((len, src)) = f.recv_from(&mut buf).await {
+                        n.st.lock().await.via_forward.insert(src);
+                        n.deliver(src, &buf[..len]).await;
+                    }
+                });
+            }
+            nat
+        }
+
+        async fn forward_addr(&self) -> SocketAddr {
+            let st = self.st.lock().await;
+            st.forward.as_ref().unwrap().local_addr().unwrap()
+        }
+
+        /// The inside address the host uses to reach outside address `o`.
+        async fn alias(self: &Arc<Self>, o: SocketAddr) -> SocketAddr {
+            let mut st = self.st.lock().await;
+            if let Some(a) = st.aliases.get(&o) {
+                return a.local_addr().unwrap();
+            }
+            let a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            st.aliases.insert(o, a.clone());
+            let n = self.clone();
+            let sock = a.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                while let Ok((len, src)) = sock.recv_from(&mut buf).await {
+                    if src == n.host {
+                        n.outbound(o, &buf[..len]).await;
+                    }
+                }
+            });
+            a.local_addr().unwrap()
+        }
+
+        async fn outbound(self: &Arc<Self>, o: SocketAddr, data: &[u8]) {
+            let mut st = self.st.lock().await;
+            if st.via_forward.contains(&o) {
+                let f = st.forward.clone().unwrap();
+                drop(st);
+                let _ = f.send_to(data, o).await;
+                return;
+            }
+            let key = self.symmetric.then_some(o);
+            let m = match st.mappings.get(&key) {
+                Some(m) => m.clone(),
+                None => {
+                    let m = Arc::new(NatMapping {
+                        sock: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+                        sent_to: Mutex::default(),
+                    });
+                    st.mappings.insert(key, m.clone());
+                    let (n, mm) = (self.clone(), m.clone());
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 2048];
+                        while let Ok((len, src)) = mm.sock.recv_from(&mut buf).await {
+                            if mm.sent_to.lock().unwrap().contains(&src) {
+                                n.deliver(src, &buf[..len]).await;
+                            }
+                        }
+                    });
+                    m
+                }
+            };
+            drop(st);
+            m.sent_to.lock().unwrap().insert(o);
+            let _ = m.sock.send_to(data, o).await;
+        }
+
+        /// Inbound from outside `src`: hand it to the host from `src`'s alias.
+        /// Boxed: `alias` → `outbound` → `deliver` → `alias` is a cycle.
+        fn deliver<'a>(
+            self: &'a Arc<Self>,
+            src: SocketAddr,
+            data: &'a [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                self.alias(src).await;
+                let a = self.st.lock().await.aliases.get(&src).cloned().unwrap();
+                let _ = a.send_to(data, self.host).await;
+            })
+        }
+    }
+
+    /// Our public endpoint behind `nat`, as a STUN server at `stun` sees it.
+    async fn observed(nat: &Arc<Nat>, host: &UdpSocket, stun: &UdpSocket) -> SocketAddr {
+        host.send_to(b"stun", nat.alias(stun.local_addr().unwrap()).await)
+            .await
+            .unwrap();
+        let mut buf = [0u8; 16];
+        let (_, from) = tokio::time::timeout(Duration::from_secs(2), stun.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        from
+    }
+
+    /// A box behind a symmetric NAT (new public port per destination) and a
+    /// device behind a port-restricted cone can't punch: each side's probes
+    /// come from a port the other's NAT never opened. A port-forward on the
+    /// box's router, advertised as a candidate, gets through — the device
+    /// probes it like any other candidate and the box's acks leave from it.
+    #[tokio::test]
+    async fn advertised_forward_beats_symmetric_nat() {
+        async fn run(advertise: bool) -> (anyhow::Result<SocketAddr>, anyhow::Result<SocketAddr>) {
+            let keys = PairingSecret::generate().derive();
+            let ub = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let ud = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let box_nat = Nat::new(ub.local_addr().unwrap(), true, true).await;
+            let dev_nat = Nat::new(ud.local_addr().unwrap(), false, false).await;
+            let box_public = observed(&box_nat, &ub, &stun).await;
+            let dev_public = observed(&dev_nat, &ud, &stun).await;
+            let mut pd = punch_to(dev_nat.alias(box_public).await, now_ms());
+            if advertise {
+                let fwd = box_nat.forward_addr().await;
+                pd.peer_candidates = vec![dev_nat.alias(fwd).await];
+            }
+            let pb = punch_to(box_nat.alias(dev_public).await, now_ms());
+            let t = Duration::from_secs(2);
+            tokio::join!(
+                punch_with(&keys, Role::Box, &ub, &pb, t),
+                punch_with(&keys, Role::Device, &ud, &pd, t),
+            )
+        }
+        let (rb, rd) = run(false).await;
+        assert!(rb.is_err() && rd.is_err(), "{rb:?} {rd:?}");
+        let (rb, rd) = run(true).await;
+        assert!(rb.is_ok() && rd.is_ok(), "{rb:?} {rd:?}");
+    }
 }

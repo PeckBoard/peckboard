@@ -1,0 +1,62 @@
+# Peckboard App Review demo box. Mock AI provider only, no real data or
+# credentials; reachable only through Remote Access (relay.peckboard.com),
+# which dials OUT and forwards each tunnel to its own loopback listener.
+# Install: see deploy/demo/README.md.
+[Unit]
+Description=Peckboard demo (App Review, mock provider only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peckboard
+Group=peckboard
+WorkingDirectory=/opt/peckboard-demo
+Environment=HOME=/opt/peckboard-demo
+# Only the mock provider is installed. Seeded on the FIRST boot of an empty
+# data dir and persisted; changing it later needs a wipe (README).
+Environment=PECKBOARD_PREINSTALL_PLUGINS=mock
+Environment=PECKBOARD_SHOW_MOCK_PROVIDER=1
+# No agent auto-starts: no worker orchestrator, repeating tasks, restart
+# resume, or login keep-alive. Keeps the seeded board exactly as seeded.
+Environment=PECKBOARD_NO_RESUME=1
+Environment=PECKBOARD_KEEPALIVE_HOURS=0
+# Voice (Kokoro) off: ~300 MB model download, not needed for review.
+Environment=PECKBOARD_TTS_DOWNLOAD=0
+Environment=PECKBOARD_CLAUDE_MODEL_DISCOVERY=0
+# Loopback only — no LAN/WAN exposure. HTTPS port also loopback.
+ExecStart=/opt/peckboard-demo/bin/peckboard \
+    --host 127.0.0.1 --port 3344 --https-port 3345 \
+    --data-dir /opt/peckboard-demo/data
+Restart=on-failure
+RestartSec=5
+
+# Hardening. Landlock (agent sandbox, mode=enforce, set by seed_demo.py)
+# works under NoNewPrivileges. No MemoryDenyWriteExecute: the wasm plugin
+# runtime JITs.
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Whole home writable (data dir, workspaces, provider/cache dirs under
+# HOME); the binary itself is not.
+ReadWritePaths=/opt/peckboard-demo
+ReadOnlyPaths=/opt/peckboard-demo/bin
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -206,6 +206,87 @@ pub async fn relay_config(host: &str) -> anyhow::Result<ClientConfig> {
 
 // ---- rendezvous + punch -------------------------------------------------
 
+/// An extra address to advertise to the peer as a punch candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Advertise {
+    /// A known public endpoint, e.g. a router port-forward to this host.
+    Addr(SocketAddr),
+    /// This port on the public IP the relay's STUN observes (or
+    /// [`EstablishOptions::public_ip_hint`] until it has) — for a
+    /// port-forward when the public IP isn't configured.
+    Port(u16),
+}
+
+/// What [`establish_with`] registered, for status displays.
+#[derive(Clone, Debug)]
+pub struct Registration {
+    pub local_port: u16,
+    /// Our endpoint as the relay's STUN sees it.
+    pub public: SocketAddr,
+    /// Every candidate sent to the peer (LAN + advertised).
+    pub candidates: Vec<SocketAddr>,
+}
+
+pub type OnRegistered = Arc<dyn Fn(&Registration) + Send + Sync>;
+
+/// Knobs for [`establish_with`]; the default is what [`establish`] does.
+#[derive(Clone, Default)]
+pub struct EstablishOptions {
+    /// Bind the punch socket to this local UDP port (`None`: ephemeral).
+    /// With a router port-forward to it, a box behind a symmetric NAT is
+    /// still reachable: the peer probes the forwarded [`Advertise`] address.
+    pub bind_port: Option<u16>,
+    /// Sent to the peer next to the LAN candidate; the punch probes them
+    /// like any other candidate. Addresses of the other IP family than the
+    /// relay are skipped.
+    pub advertise: Vec<Advertise>,
+    /// Public IP to resolve [`Advertise::Port`] with before STUN answers
+    /// (e.g. the last [`Registration::public`]). Without it the port
+    /// candidate is sent after the STUN Binding, so a peer already waiting
+    /// may get one punch round without it.
+    pub public_ip_hint: Option<IpAddr>,
+    pub on_registered: Option<OnRegistered>,
+}
+
+impl fmt::Debug for EstablishOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EstablishOptions")
+            .field("bind_port", &self.bind_port)
+            .field("advertise", &self.advertise)
+            .field("public_ip_hint", &self.public_ip_hint)
+            .finish_non_exhaustive()
+    }
+}
+
+/// LAN candidate plus advertised addresses (same family as the relay),
+/// deduplicated. `Port` entries resolve against `public_ip`, and are left
+/// out while it is unknown; returns whether any were left out.
+fn candidates(
+    lan: Option<SocketAddr>,
+    advertise: &[Advertise],
+    public_ip: Option<IpAddr>,
+    v4: bool,
+) -> (Vec<SocketAddr>, bool) {
+    let mut out: Vec<SocketAddr> = lan.into_iter().collect();
+    let mut pending = false;
+    for a in advertise {
+        let addr = match *a {
+            Advertise::Addr(a) => a,
+            Advertise::Port(p) => match public_ip {
+                Some(ip) => SocketAddr::new(ip, p),
+                None => {
+                    pending = true;
+                    continue;
+                }
+            },
+        };
+        if addr.is_ipv4() == v4 && !out.contains(&addr) {
+            out.push(addr);
+        }
+    }
+    (out, pending)
+}
+
 /// Run rendezvous + hole punch for one pairing and return the punched path.
 ///
 /// The box side waits indefinitely for its device (drop the future to
@@ -218,19 +299,35 @@ pub async fn establish(
     secret: &PairingSecret,
     role: Role,
 ) -> anyhow::Result<PunchedPath> {
+    establish_with(cfg, secret, role, &EstablishOptions::default()).await
+}
+
+/// [`establish`] with a fixed local port and/or extra advertised
+/// candidates (see [`EstablishOptions`]).
+pub async fn establish_with(
+    cfg: &ClientConfig,
+    secret: &PairingSecret,
+    role: Role,
+    opts: &EstablishOptions,
+) -> anyhow::Result<PunchedPath> {
     let mut relay = RelayClient::connect(cfg, secret, role)
         .await
         .context("connect to relay")?;
-    let bind: SocketAddr = if cfg.relay.is_ipv4() {
+    let v4 = cfg.relay.is_ipv4();
+    let bind: SocketAddr = if v4 {
         "0.0.0.0:0".parse()?
     } else {
         "[::]:0".parse()?
     };
-    let sock = UdpSocket::bind(bind).await?;
+    let bind = SocketAddr::new(bind.ip(), opts.bind_port.unwrap_or(0));
+    let sock = UdpSocket::bind(bind)
+        .await
+        .with_context(|| format!("bind UDP {bind}"))?;
     let port = sock.local_addr()?.port();
     let lan = local_ip_toward(cfg.relay).map(|ip| SocketAddr::new(ip, port));
-    if let Some(lan) = lan {
-        relay.set_candidates(&[lan]).await?;
+    let (mut cands, pending) = candidates(lan, &opts.advertise, opts.public_ip_hint, v4);
+    if !cands.is_empty() {
+        relay.set_candidates(&cands).await?;
         // The STUN Binding below (UDP) is what lets the relay coordinate the
         // punch; it can overtake the candidates frame (TLS). Then the peer
         // is told to punch without our LAN address and, where the LAN path
@@ -239,7 +336,24 @@ pub async fn establish(
         relay_sync(&mut relay).await?;
     }
     let public = relay.stun_binding(&sock).await.context("relay STUN")?;
-    tracing::debug!(?role, ?lan, %public, "establish: registered");
+    let (resolved, _) = candidates(lan, &opts.advertise, Some(public.ip()), v4);
+    let mut backlog = std::collections::VecDeque::new();
+    if pending || resolved != cands {
+        // `Port` candidates needed the STUN-observed IP (no hint, or a
+        // stale one). Same barrier as above before the next punch round;
+        // a round the STUN Binding already triggered is kept, not lost.
+        cands = resolved;
+        relay.set_candidates(&cands).await?;
+        backlog.extend(relay_sync(&mut relay).await?);
+    }
+    tracing::debug!(?role, ?cands, %public, "establish: registered");
+    if let Some(cb) = &opts.on_registered {
+        cb(&Registration {
+            local_port: port,
+            public,
+            candidates: cands.clone(),
+        });
+    }
 
     let mut failures = 0u32;
     let mut deadline =
@@ -271,7 +385,12 @@ pub async fn establish(
                     let _ = relay.stun_binding(&sock).await;
                 }
             }
-            ev = relay.next_event() => match ev {
+            ev = async {
+                match backlog.pop_front() {
+                    Some(ev) => Some(ev),
+                    None => relay.next_event().await,
+                }
+            } => match ev {
                 None => bail!("relay connection lost"),
                 Some(Event::CredentialRefreshed) if refreshing => {
                     refreshing = false;
@@ -298,13 +417,15 @@ pub async fn establish(
 
 /// Round trip to the relay. It handles a session's frames in order, so the
 /// `Pong` proves every frame sent before the `Ping` has been applied.
-async fn relay_sync(relay: &mut RelayClient) -> anyhow::Result<()> {
+/// Returns the other events that arrived meanwhile (e.g. a `Punch`).
+async fn relay_sync(relay: &mut RelayClient) -> anyhow::Result<Vec<Event>> {
     relay.ping().await?;
     let pong = async {
+        let mut other = Vec::new();
         loop {
             match relay.next_event().await {
-                Some(Event::Pong) => return Ok(()),
-                Some(_) => {}
+                Some(Event::Pong) => return Ok(other),
+                Some(ev) => other.push(ev),
                 None => bail!("relay connection lost"),
             }
         }
@@ -313,7 +434,6 @@ async fn relay_sync(relay: &mut RelayClient) -> anyhow::Result<()> {
         .await
         .map_err(|_| anyhow!("relay did not answer"))?
 }
-
 /// Local address the OS would use to reach `dest` (no packets sent) — our
 /// LAN candidate for peers behind the same NAT.
 fn local_ip_toward(dest: SocketAddr) -> Option<IpAddr> {

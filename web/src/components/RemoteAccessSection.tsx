@@ -13,6 +13,8 @@ interface DeviceStatus {
   peer: string | null
   rtt_ms: number | null
   error: string | null
+  local_port: number | null
+  candidates: string[]
 }
 
 interface RemoteDevice {
@@ -26,6 +28,9 @@ interface RemoteDevice {
 interface Overview {
   enabled: boolean
   relay_host: string
+  udp_port_base: number | null
+  udp_port_count: number
+  public_address: string
   devices: RemoteDevice[]
 }
 
@@ -44,16 +49,76 @@ const STATE_LABEL: Record<DeviceStatus['state'], string> = {
   error: 'error — retrying',
 }
 
+/** A failed request; `field` names the rejected input when the server says. */
+class ApiError extends Error {
+  field?: string
+  constructor(message: string, field?: string) {
+    super(message)
+    this.field = field
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await authedFetch(path, {
     ...init,
     headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
   })
   if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null
-    throw new Error(body?.error || `Request failed (${res.status})`)
+    const body = (await res.json().catch(() => null)) as { error?: string; field?: string } | null
+    throw new ApiError(body?.error || `Request failed (${res.status})`, body?.field)
   }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T)
+}
+
+type DirectField = 'udp_port_base' | 'udp_port_count' | 'public_address'
+type DirectErrors = Partial<Record<DirectField, string>>
+
+interface DirectForm {
+  base: string
+  count: string
+  publicAddress: string
+}
+
+const DIRECT_FIELDS: readonly string[] = ['udp_port_base', 'udp_port_count', 'public_address']
+
+function isDirectField(f: string): f is DirectField {
+  return DIRECT_FIELDS.includes(f)
+}
+
+function directForm(o: Overview): DirectForm {
+  return {
+    base: o.udp_port_base?.toString() ?? '',
+    count: o.udp_port_count.toString(),
+    publicAddress: o.public_address,
+  }
+}
+
+/** Mirrors the server's `validate_direct`, so errors show while typing. */
+function validateDirect(f: DirectForm): DirectErrors {
+  const errs: DirectErrors = {}
+  const base = f.base.trim()
+  const count = f.count.trim()
+  const pub = f.publicAddress.trim()
+  const b = Number(base)
+  const c = Number(count)
+  if (base && (!/^\d+$/.test(base) || b < 1024 || b > 65535)) {
+    errs.udp_port_base = 'UDP port must be 1024–65535'
+  }
+  if (!/^\d+$/.test(count) || c < 1 || c > 256) {
+    errs.udp_port_count = 'Range size must be 1–256'
+  } else if (base && !errs.udp_port_base && b + c - 1 > 65535) {
+    errs.udp_port_count = 'Range runs past port 65535'
+  }
+  if (pub) {
+    const ipv6 = /^[0-9a-fA-F:.]+$/.test(pub) && (pub.match(/:/g)?.length ?? 0) >= 2
+    const host = /^[A-Za-z0-9.-]+$/.test(pub) && !/^[.-]|[.-]$/.test(pub) && pub.length <= 253
+    if (!ipv6 && !host) {
+      errs.public_address = 'Public address must be a hostname or IP address, without a port'
+    } else if (!base) {
+      errs.public_address = 'Set a UDP port first — the public address advertises it'
+    }
+  }
+  return errs
 }
 
 function formatWhen(iso: string | null): string {
@@ -212,6 +277,8 @@ export default function RemoteAccessSection() {
   const [revoking, setRevoking] = useState<RemoteDevice | null>(null)
   const [revokeBusy, setRevokeBusy] = useState(false)
   const [revokeError, setRevokeError] = useState<string | null>(null)
+  const [direct, setDirect] = useState<DirectForm>({ base: '', count: '10', publicAddress: '' })
+  const [directServerErrors, setDirectServerErrors] = useState<DirectErrors>({})
 
   const load = useCallback(
     () =>
@@ -230,12 +297,20 @@ export default function RemoteAccessSection() {
   )
 
   useEffect(() => {
-    void load().then((o) => o && setRelayHost(o.relay_host))
+    void load().then((o) => {
+      if (!o) return
+      setRelayHost(o.relay_host)
+      setDirect(directForm(o))
+    })
     const t = setInterval(() => void load(), POLL_MS)
     return () => clearInterval(t)
   }, [load])
 
-  const putSettings = async (body: { enabled?: boolean; relay_host?: string }) => {
+  const putSettings = async (body: {
+    enabled?: boolean
+    relay_host?: string
+    direct?: { udp_port_base: number | null; udp_port_count: number; public_address: string }
+  }) => {
     setSaving(true)
     try {
       await api('/api/remote-access', { method: 'PUT', body: JSON.stringify(body) })
@@ -243,12 +318,25 @@ export default function RemoteAccessSection() {
       return true
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to save'
-      if (body.relay_host !== undefined) setRelayError(msg)
+      const field = e instanceof ApiError ? e.field : undefined
+      if (field && isDirectField(field)) setDirectServerErrors({ [field]: msg })
+      else if (body.relay_host !== undefined) setRelayError(msg)
       else setError(msg)
       return false
     } finally {
       setSaving(false)
     }
+  }
+
+  const saveDirect = () => {
+    const base = direct.base.trim()
+    void putSettings({
+      direct: {
+        udp_port_base: base ? Number(base) : null,
+        udp_port_count: Number(direct.count.trim()),
+        public_address: direct.publicAddress.trim(),
+      },
+    })
   }
 
   const buildMenu = (d: RemoteDevice): MenuItem[] => [
@@ -267,6 +355,17 @@ export default function RemoteAccessSection() {
 
   const enabled = data?.enabled ?? false
   const relayDirty = data !== null && relayHost.trim() !== data.relay_host
+  const directErrors = { ...validateDirect(direct), ...directServerErrors }
+  const directInvalid = Object.keys(validateDirect(direct)).length > 0
+  const directDirty =
+    data !== null &&
+    (direct.base.trim() !== (data.udp_port_base?.toString() ?? '') ||
+      direct.count.trim() !== data.udp_port_count.toString() ||
+      direct.publicAddress.trim() !== data.public_address)
+  const editDirect = (patch: Partial<DirectForm>) => {
+    setDirect((d) => ({ ...d, ...patch }))
+    setDirectServerErrors({})
+  }
 
   return (
     <section className="settings-section" data-testid="remote-access-section">
@@ -336,6 +435,77 @@ export default function RemoteAccessSection() {
         </div>
         <FieldError message={relayError} testId="remote-relay-error" />
       </div>
+      <div className="settings-subsection" data-testid="remote-direct">
+        <h4>Direct Connection</h4>
+        <p className="form-hint" style={{ marginTop: 0 }}>
+          Forward this UDP port range on your router to this machine so phones on any network can
+          connect. Each paired device uses one port of the range. Leave the port blank for random
+          ports.
+        </p>
+        <div className="form-field">
+          <label className="form-label" htmlFor="remote-udp-base">
+            UDP port
+          </label>
+          <input
+            id="remote-udp-base"
+            className="form-input"
+            type="text"
+            inputMode="numeric"
+            placeholder="random"
+            value={direct.base}
+            autoComplete="off"
+            onChange={(e) => editDirect({ base: e.target.value })}
+            data-testid="remote-udp-base"
+          />
+          <FieldError message={directErrors.udp_port_base} testId="remote-udp-base-error" />
+        </div>
+        <div className="form-field">
+          <label className="form-label" htmlFor="remote-udp-count">
+            Range size
+          </label>
+          <input
+            id="remote-udp-count"
+            className="form-input"
+            type="text"
+            inputMode="numeric"
+            value={direct.count}
+            autoComplete="off"
+            onChange={(e) => editDirect({ count: e.target.value })}
+            data-testid="remote-udp-count"
+          />
+          <FieldError message={directErrors.udp_port_count} testId="remote-udp-count-error" />
+        </div>
+        <div className="form-field">
+          <label className="form-label" htmlFor="remote-public-address">
+            Public address
+          </label>
+          <input
+            id="remote-public-address"
+            className="form-input"
+            type="text"
+            placeholder="auto (detected via the relay)"
+            value={direct.publicAddress}
+            autoComplete="off"
+            onChange={(e) => editDirect({ publicAddress: e.target.value })}
+            data-testid="remote-public-address"
+          />
+          <FieldError message={directErrors.public_address} testId="remote-public-address-error" />
+        </div>
+        <div className="form-actions">
+          {directDirty && directInvalid && (
+            <span className="form-actions-reason">Fix the fields above to save.</span>
+          )}
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            disabled={saving || !directDirty || directInvalid}
+            onClick={saveDirect}
+            data-testid="remote-direct-save"
+          >
+            Save
+          </button>
+        </div>
+      </div>
 
       {error && (
         <p className="form-error" role="alert" data-testid="remote-access-error">
@@ -362,6 +532,18 @@ export default function RemoteAccessSection() {
               >
                 {enabled ? STATE_LABEL[d.status.state] : 'off'}
               </span>
+              {enabled && d.status.local_port !== null && (
+                <span
+                  title={
+                    d.status.candidates.length
+                      ? `Advertised: ${d.status.candidates.join(', ')}`
+                      : undefined
+                  }
+                  data-testid={`remote-device-port-${d.name}`}
+                >
+                  UDP {d.status.local_port}
+                </span>
+              )}
               <span>{formatWhen(d.last_connected_at)}</span>
             </span>
           </>
