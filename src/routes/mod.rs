@@ -26,6 +26,7 @@ pub mod plugin_ui;
 pub mod plugin_ws;
 pub mod plugins;
 pub mod projects;
+pub mod remote_access;
 pub mod repeating_tasks;
 pub mod reports;
 pub mod sessions;
@@ -99,6 +100,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(agent_vars::router(state.clone()))
         .merge(ssh_keys::router(state.clone()))
         .merge(env_vars::router(state.clone()))
+        .merge(remote_access::router(state.clone()))
         .merge(devices::router(state.clone()))
         .merge(settings::router(state.clone()))
         .merge(system_prompts::router(state.clone()))

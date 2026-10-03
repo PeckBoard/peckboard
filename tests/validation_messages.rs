@@ -99,6 +99,7 @@ async fn build_fixture() -> Fixture {
         run_auditor: peckboard::repeating::RunAuditor::new(),
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
+        remote_access: peckboard::service::remote_access::RemoteAccess::inert(),
         tls: Arc::new(peckboard::state::TlsState::new()),
     });
     // The data dir has to outlive the state; the process is short-lived.

@@ -13,6 +13,7 @@ const SECRET_FILES: &[&str] = &[
     "jwt_secret",
     "mfa_vault_key",
     "ssh_vault_key",
+    "remote_access_key",
     "vapid_keys.json",
     "peckboard.db",
     "peckboard.db-wal",

@@ -74,6 +74,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_tts_lexicon_tables(conn)?;
     ensure_voice_prompt_versions_table(conn)?;
     ensure_pending_actions_table(conn)?;
+    ensure_remote_devices_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -223,6 +224,28 @@ fn ensure_devices_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     sql_query("CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id)")
         .execute(conn)?;
     sql_query("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_secret_hash ON devices(secret_hash)")
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1791002399_remote_devices`. `CREATE TABLE IF NOT
+/// EXISTS` is idempotent so this is safe on a fully-migrated DB and only
+/// does work on one that lacks the table. DDL mirrors the migration.
+fn ensure_remote_devices_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "remote_devices")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS remote_devices (
+            id                TEXT PRIMARY KEY NOT NULL,
+            user_id           TEXT NOT NULL,
+            name              TEXT NOT NULL,
+            secret_ciphertext BLOB NOT NULL,
+            secret_nonce      BLOB NOT NULL,
+            created_at        TEXT NOT NULL,
+            last_connected_at TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_remote_devices_user_id ON remote_devices(user_id)")
         .execute(conn)?;
     Ok(())
 }

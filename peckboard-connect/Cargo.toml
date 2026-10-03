@@ -1,0 +1,22 @@
+[package]
+name = "peckboard-connect"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Device-side CLI: pairs with a Peckboard box through the rendezvous relay,
+# punches a direct UDP path, and exposes the box on a local TCP port over
+# QUIC. Standalone crate (own Cargo.lock); build with
+# `--manifest-path peckboard-connect/Cargo.toml`.
+
+[dependencies]
+peckboard-relay = { path = "../peckboard-relay", features = ["tunnel"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "io-std", "io-util"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+rustls-pki-types = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

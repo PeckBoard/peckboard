@@ -43,7 +43,91 @@ id, without re-pairing the others.
 
 Wire format: `src/proto.rs`. Peer library: `src/client.rs` (`client`
 feature, on by default) — reused by the Peckboard box and `peckboard
-connect`.
+connect`. The relay server itself (`server`/`tls`/`limits` modules, ACME,
+CLI) and the `peckboard-relay` binary need feature `server`, so peers never
+compile rustls-acme, clap or tracing-subscriber.
+
+## Tunnel API
+
+Feature `tunnel` (implies `client`; `src/tunnel.rs`) adds the direct data
+path. The relay is not involved after the punch and needs no change.
+
+```rust
+use peckboard_relay::tunnel::*;
+
+// Resolve `host[:port]` (default 443, prefers IPv4) → webpki ClientConfig.
+pub async fn relay_config(host: &str) -> anyhow::Result<ClientConfig>;
+
+// Rendezvous + hole punch. Box: waits for its device indefinitely (drop to
+// cancel). Device: TunnelError::PeerOffline if the box isn't seen in 30 s.
+// Both: TunnelError::PunchFailed { rounds } after 4 failed rounds (both NATs
+// hard). Downcast the anyhow::Error to tell them apart. Re-STUNs + pings the
+// relay every 20 s while waiting; drops the relay session on return.
+pub async fn establish(cfg: &ClientConfig, secret: &PairingSecret, role: Role)
+    -> anyhow::Result<PunchedPath>;
+
+pub struct PunchedPath {
+    pub socket: tokio::net::UdpSocket, // the exact socket the punch used
+    pub peer: SocketAddr,              // peer address as seen from it
+    pub role: Role,
+}
+
+// Box: accept one QUIC connection (15 s window) from the paired device and
+// forward every stream to `target`. Ok(()) when an established connection
+// ends; Err if no authenticated device connects.
+pub async fn serve_box(path: PunchedPath, secret: &PairingSecret, target: SocketAddr,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static) -> anyhow::Result<()>;
+
+// Device: connect, then each connection accepted on `listen` becomes a
+// stream. Ok(()) when the tunnel ends (keep the listener; the next call
+// serves whatever queued meanwhile); Err if the handshake fails.
+pub async fn connect_device(path: PunchedPath, secret: &PairingSecret,
+    listen: &tokio::net::TcpListener,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static) -> anyhow::Result<()>;
+
+#[derive(Clone, Debug)]
+pub enum TunnelEvent {
+    Connected { peer: SocketAddr, rtt_ms: u32 },
+    Disconnected { reason: String },
+    Error(String),
+}
+
+// `peckboard://pair/<base64url(S)>?relay=<host[:port]>`; relay defaults to
+// DEFAULT_RELAY ("relay.peckboard.com") when absent.
+pub struct PairingLink { pub secret: PairingSecret, pub relay: String }
+impl PairingLink { fn new(secret, relay: &str); fn to_uri(&self) -> String;
+                   fn parse(link: &str) -> anyhow::Result<Self>; }
+```
+
+Box loop: `loop { let p = establish(.., Role::Box).await?; serve_box(p, ..).await; }`
+— one rendezvous id per paired device, so run one loop per device secret.
+
+Wire: QUIC (quinn 0.11) over the punched socket; box = server, device =
+client. TLS 1.3, ALPN `peckboard-tunnel/1`, mutual auth: each side presents
+a self-signed cert for an Ed25519 key HKDF'd from `S` under its own label
+(`tunnel-ed25519/box`, `tunnel-ed25519/device` — distinct from the relay
+auth and E2E keys), and the peer's custom verifier checks the TLS 1.3
+CertificateVerify signature against the expected derived key (no CA). Each
+bidi stream = one TCP connection: 1 type byte (`0x01` = forward to the
+box's target) then raw bytes, half-close propagated; any other type is
+reset and never dialled — the target is box-side config only. Liveness:
+the device opens one `0x02` stream and writes a byte every 5 s, the box
+echoes it; 15 s without a pong (device) or ping (box) drops the tunnel, so
+a box that dies without closing is noticed in ~15 s. A peer that predates
+`0x02` resets it / never opens it, and the other side falls back to the
+QUIC idle timeout (60 s; keep-alive 15 s). Reconnect = new `establish`.
+
+Try it without Peckboard:
+
+```bash
+cargo run --manifest-path peckboard-relay/Cargo.toml --features tunnel \
+  --example box_forward -- 8000          # prints a pairing link
+# Hand the link over on stdin or via the environment, not as an argument
+# (argv is visible in the process list; peckboard-connect warns if you do).
+cargo run --manifest-path peckboard-connect/Cargo.toml -- - < link.txt
+PECKBOARD_LINK='<link>' cargo run --manifest-path peckboard-connect/Cargo.toml
+# --save stores it (0600) so later runs need no link at all.
+```
 
 ## Non-Discoverability
 
@@ -68,7 +152,7 @@ with TTL eviction. Defaults in `RelayConfig::default()`.
 ## Run Locally
 
 ```bash
-cargo run --manifest-path peckboard-relay/Cargo.toml -- \
+cargo run --manifest-path peckboard-relay/Cargo.toml --features server -- \
   --dev-self-signed --state-dir "$(mktemp -d)" \
   --listen 127.0.0.1:24430 --stun-listen 127.0.0.1:24780
 ```
@@ -79,8 +163,9 @@ to pin (`ClientConfig::pinned`).
 ## Test
 
 ```bash
-cargo test  --manifest-path peckboard-relay/Cargo.toml
-cargo clippy --manifest-path peckboard-relay/Cargo.toml --all-targets
+cargo test   --manifest-path peckboard-relay/Cargo.toml --all-features
+cargo test   --manifest-path peckboard-relay/Cargo.toml   # default (client) only
+cargo clippy --manifest-path peckboard-relay/Cargo.toml --all-features --all-targets
 ```
 
 ## Deploy

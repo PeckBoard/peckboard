@@ -55,6 +55,7 @@ import RetentionSettingsSection from './RetentionSettingsSection'
 import TlsSettingsSection from './TlsSettingsSection'
 import EnvVarsSection from './EnvVarsSection'
 import SshKeysSection from './SshKeysSection'
+import RemoteAccessSection from './RemoteAccessSection'
 import AgentVarsSection from './AgentVarsSection'
 import ConfirmDialog from './ConfirmDialog'
 import ProviderBasePrompt, { type ProviderPrompt } from './ProviderBasePrompt'
@@ -110,6 +111,7 @@ type SubPage =
   | 'providers'
   | 'mcp'
   | 'ssh-keys'
+  | 'remote-access'
   | 'plugins'
   | 'registry'
   | 'server'
@@ -205,6 +207,12 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
         id: 'ssh-keys',
         title: 'SSH Keys',
         blurb: 'Keys SSH hosts and plugins authenticate with',
+      },
+      {
+        id: 'remote-access',
+        title: 'Remote Access',
+        blurb: 'Reach this server from anywhere through the relay',
+        adminOnly: true,
       },
     ],
   },
@@ -432,6 +440,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'private public key ed25519 fingerprint authorized_keys vault import generate',
   },
   {
+    page: 'remote-access',
+    section: 'Remote Access',
+    anchor: 'remote-access',
+    keywords: 'relay pairing pair device phone laptop internet tunnel connect qr',
+  },
+  {
     page: 'plugins',
     section: 'Installed Plugins',
     anchor: 'plugins',
@@ -501,6 +515,12 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
     <>
       <circle cx="5" cy="10" r="2.75" />
       <path d="M6.95 8.05 13 2m-1.5 1.5L13 5M9.5 5.5 11 7" />
+    </>
+  ),
+  'remote-access': (
+    <>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M2.5 8h11M8 2.5c1.6 1.6 2.25 3.4 2.25 5.5S9.6 11.9 8 13.5M8 2.5C6.4 4.1 5.75 5.9 5.75 8S6.4 11.9 8 13.5" />
     </>
   ),
   account: (
@@ -1678,6 +1698,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         {activeSubPage === 'ssh-keys' && (
           <div data-settings-anchor="ssh-keys">
             <SshKeysSection />
+          </div>
+        )}
+        {activeSubPage === 'remote-access' && (
+          <div data-settings-anchor="remote-access">
+            <RemoteAccessSection />
           </div>
         )}
         {activeSubPage === 'variables' && (

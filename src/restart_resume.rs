@@ -49,6 +49,19 @@ pub const MAX_CONCURRENT: usize = 3;
 /// waking it would surprise the user.
 pub const STALE_AFTER: Duration = Duration::from_secs(6 * 3600);
 
+/// Env flag that turns boot resume off (`PECKBOARD_NO_RESUME=1`). A scratch
+/// server on a copy of the live DB must never start agents in the real
+/// project folders its sessions point at.
+pub const NO_RESUME_ENV: &str = "PECKBOARD_NO_RESUME";
+
+/// Whether a [`NO_RESUME_ENV`] value disables boot resume: anything but
+/// unset, empty, `0` or `false`.
+pub fn resume_disabled(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .is_some_and(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+}
+
 /// What the parent of a subagent the restart stopped for good is told.
 pub fn cannot_resume_notice(child: &Session, reason: &str) -> String {
     let name = child
@@ -295,6 +308,26 @@ async fn claim_for_notice(db: &Db, child: &Session, reason: &str) -> Option<(Str
     Some((parent_id, cannot_resume_notice(child, reason)))
 }
 
+/// Boot entry: plan the resume and spawn its execution — unless `disabled`
+/// ([`NO_RESUME_ENV`]), in which case nothing is claimed, woken or
+/// dispatched and the interrupted turns stay closed by the boot repair.
+pub async fn start(
+    state: &Arc<AppState>,
+    interrupted: &[String],
+    lost_task_sessions: &HashSet<String>,
+    disabled: bool,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if disabled {
+        tracing::info!(
+            "{NO_RESUME_ENV} set: not resuming {} interrupted session(s)",
+            interrupted.len()
+        );
+        return None;
+    }
+    let plan = plan(&state.db, interrupted, lost_task_sessions).await;
+    Some(tokio::spawn(execute(state.clone(), plan)))
+}
+
 /// Carry out `plan`: wake parents with their notices, then resume the
 /// interrupted sessions. Every wake waits [`STAGGER`] first (the first one
 /// also gives the HTTP listener time to bind). Returns once every dispatch
@@ -535,6 +568,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn no_resume_flag_leaves_killed_sessions_alone() {
+        assert!(resume_disabled(Some("1")) && resume_disabled(Some("true")));
+        assert!(!resume_disabled(None) && !resume_disabled(Some("0")));
+        assert!(!resume_disabled(Some("")) && !resume_disabled(Some("FALSE")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = fixture(dir.path()).await;
+        seed_killed(&state, "s1", Some("conv-1"), None, None).await;
+        let interrupted = crate::security::repair_dangling_sessions(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(interrupted, ["s1"]);
+
+        assert!(
+            start(&state, &interrupted, &HashSet::new(), true)
+                .await
+                .is_none()
+        );
+        assert!(
+            !texts(&state, "s1", "user")
+                .await
+                .iter()
+                .any(|t| t == CONTINUE_TEXT)
+        );
+    }
     #[tokio::test]
     async fn a_turn_the_user_stopped_is_not_resumed() {
         let dir = tempfile::tempdir().unwrap();

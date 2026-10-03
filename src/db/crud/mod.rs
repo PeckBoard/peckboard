@@ -29,6 +29,7 @@ mod plugin_settings;
 mod projects;
 mod push;
 mod queued;
+mod remote_devices;
 mod repeating_tasks;
 mod session_views;
 mod sessions;

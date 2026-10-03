@@ -51,6 +51,10 @@ pub async fn run_server(
     window_closed: Option<tokio::sync::oneshot::Receiver<()>>,
     ready: Option<tokio::sync::oneshot::Sender<ServerReady>>,
 ) -> anyhow::Result<()> {
+    // Two rustls backends are compiled in (aws-lc-rs here, ring via the
+    // relay crate), so rustls can't pick a process default on its own:
+    // install ours before anything builds a TLS config.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mint_bootstrap_token = ready.is_some();
     let config = Config::from_args(args);
     let addr = format!("{}:{}", config.host, config.port);
@@ -122,6 +126,10 @@ pub async fn run_server(
     let jwt_secret = load_or_create_jwt_secret(&config.data_dir)?;
     let ssh_vault_key = load_or_create_vault_key(&config.data_dir)?;
     let mfa_vault_key = load_or_create_mfa_vault_key(&config.data_dir)?;
+    let remote_access_key = crate::service::ssh_keys::load_or_create_key_file(
+        &config.data_dir,
+        crate::service::remote_access::secret::KEY_FILE,
+    )?;
     // Data dir 0700, secrets + DB 0600 (idempotent), and drop every MCP
     // config left by a previous run — its tokens died with that process.
     crate::sandbox::perms::harden_data_dir(&config.data_dir);
@@ -133,6 +141,7 @@ pub async fn run_server(
         jwt_secret.as_slice(),
         ssh_vault_key.as_slice(),
         mfa_vault_key.as_slice(),
+        remote_access_key.as_slice(),
     ]);
     // 60/min is plenty for a single-tenant LAN server; the previous 5
     // was so aggressive that even a normal user with a few tabs open
@@ -214,6 +223,11 @@ pub async fn run_server(
     crate::background::set_global(background.clone());
     let mcp_tokens = McpTokenRegistry::new();
     let push_service = PushService::new(&config.data_dir);
+    let remote_access = crate::service::remote_access::RemoteAccess::new(
+        db.clone(),
+        remote_access_key,
+        Arc::new(crate::service::remote_access::relay::RelayBackend),
+    );
 
     let state = Arc::new(AppState {
         background,
@@ -236,6 +250,7 @@ pub async fn run_server(
         mcp_tokens,
         push_service,
         env_unlock,
+        remote_access,
         tls: Arc::new(crate::state::TlsState::new()),
     });
 
@@ -267,9 +282,23 @@ pub async fn run_server(
         .set_provider_registry(&state.provider_registry);
     state.plugins.sync_plugin_providers().await;
 
-    // Resume any in-flight worker sessions after startup repair
-    crate::worker::orchestrator::check_and_spawn_workers(&state).await;
-    tracing::info!("Worker orchestrator startup check complete");
+    // PECKBOARD_NO_RESUME=1 turns off everything that starts agents on its
+    // own: worker fill (startup + 5s loop), doc-review resume, lost-task
+    // wake, restart resume, the repeating-task scheduler and login
+    // keep-alive. A scratch server on a copy of the live DB must never
+    // start agents in the real project folders its sessions point at.
+    let no_resume = crate::restart_resume::resume_disabled(
+        std::env::var(crate::restart_resume::NO_RESUME_ENV)
+            .ok()
+            .as_deref(),
+    );
+    if no_resume {
+        tracing::info!("PECKBOARD_NO_RESUME set: agent auto-start at boot and schedulers are off");
+    } else {
+        // Resume any in-flight worker sessions after startup repair
+        crate::worker::orchestrator::check_and_spawn_workers(&state).await;
+        tracing::info!("Worker orchestrator startup check complete");
+    }
 
     // Same idea for document reviews: a review the DB still calls `running`
     // is a pass whose process died with the last shutdown (or the upgrade
@@ -282,7 +311,9 @@ pub async fn run_server(
     // took 120s in the wild). Awaited here that delay lands BEFORE the
     // listener binds and the whole server looks hung, so recovery runs
     // alongside startup instead of in front of it.
-    {
+    //
+    // Skipped with PECKBOARD_NO_RESUME=1 (see `no_resume` above).
+    if !no_resume {
         let review_state = state.clone();
         tokio::spawn(async move {
             crate::routes::doc_reviews::resume_running_reviews(&review_state).await;
@@ -295,7 +326,7 @@ pub async fn run_server(
         .iter()
         .map(|t| t.session_id.clone())
         .collect();
-    if !lost_background_tasks.is_empty() {
+    if !lost_background_tasks.is_empty() && !no_resume {
         let bg_state = state.clone();
         tokio::spawn(async move {
             bg_state.background.report_lost(lost_background_tasks).await;
@@ -303,7 +334,7 @@ pub async fn run_server(
     }
 
     // Run orchestrator on a 5-second interval to pick up new cards quickly
-    {
+    if !no_resume {
         let orch_state = state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -321,7 +352,7 @@ pub async fn run_server(
     // is already in the past (and has not executed). We don't tick more
     // often than the smallest practical schedule interval (1 minute),
     // so 30s gives us at most ~30s of slack between "due" and "fired".
-    {
+    if !no_resume {
         let sched_state = state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -383,7 +414,10 @@ pub async fn run_server(
 
     // Provider login keep-alive: periodically ping each auth login with a
     // throwaway "hi" so tokens don't go stale. No-op when the interval is 0.
-    crate::keepalive::spawn(state.clone(), state.config.keep_alive_hours);
+    // Skipped with PECKBOARD_NO_RESUME=1: each ping is a real agent turn.
+    if !no_resume {
+        crate::keepalive::spawn(state.clone(), state.config.keep_alive_hours);
+    }
 
     // Claude plan-usage poller: refresh the `/usage` buckets (5-hour /
     // weekly quotas) for the host login and every stored oauth account, so
@@ -409,13 +443,15 @@ pub async fn run_server(
     // with a continuation message (staggered, detached — a CLI spawn can take
     // minutes); subagents that can't resume are claimed and their parents
     // woken with a re-spawn notice. Planning (and the claims) runs here,
-    // before any provider traffic; see `restart_resume`.
-    let restart_plan =
-        crate::restart_resume::plan(&state.db, &interrupted_sessions, &lost_task_sessions).await;
-    {
-        let resume_state = state.clone();
-        tokio::spawn(crate::restart_resume::execute(resume_state, restart_plan));
-    }
+    // before any provider traffic; see `restart_resume`. Skipped entirely
+    // with PECKBOARD_NO_RESUME=1 (see `no_resume` above).
+    crate::restart_resume::start(
+        &state,
+        &interrupted_sessions,
+        &lost_task_sessions,
+        no_resume,
+    )
+    .await;
 
     // Handover reconcile: a `handover_to_model` still parked at boot has no
     // in-process listener left to ever clear it — the process that dispatched
@@ -448,6 +484,10 @@ pub async fn run_server(
 
     tracing::info!("Peckboard listening on http://{addr}");
     let listener = TcpListener::bind(&addr).await?;
+    // Remote access through the relay serves tunnels straight into this
+    // router (never via the loopback listener — see
+    // `service::remote_access::tunnel`). No-op while the setting is off.
+    state.remote_access.start(app.clone()).await;
 
     // mDNS advertisement is opt-in. Default-off avoids broadcasting
     // service presence on the LAN, which is an unnecessary discovery

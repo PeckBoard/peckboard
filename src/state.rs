@@ -164,6 +164,9 @@ pub struct AppState {
     /// `run_background`. In-memory only. See [`crate::background`].
     pub background: Arc<crate::background::BackgroundRegistry>,
     pub tls: Arc<TlsState>,
+    /// Remote access through the relay: per-device rendezvous loops and
+    /// tunnel status. See [`crate::service::remote_access`].
+    pub remote_access: Arc<crate::service::remote_access::RemoteAccess>,
 }
 
 #[cfg(test)]

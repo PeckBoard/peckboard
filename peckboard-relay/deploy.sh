@@ -42,14 +42,14 @@ RESTART=1
 TARGET="${TARGET:-x86_64-unknown-linux-musl}"
 MUSL_BIN="$(cd .. && pwd)/tmp-musl-tools/x86_64-linux-musl-cross/bin"
 if cargo zigbuild --version >/dev/null 2>&1; then
-  cargo zigbuild --release --locked --target "$TARGET"
+  cargo zigbuild --release --locked --features server --target "$TARGET"
 else
   if [[ -z "${CC_x86_64_unknown_linux_musl:-}" && -x "$MUSL_BIN/x86_64-linux-musl-gcc" ]]; then
     export CC_x86_64_unknown_linux_musl="$MUSL_BIN/x86_64-linux-musl-gcc"
     export AR_x86_64_unknown_linux_musl="$MUSL_BIN/x86_64-linux-musl-ar"
     export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$MUSL_BIN/x86_64-linux-musl-gcc"
   fi
-  cargo build --release --locked --target "$TARGET"
+  cargo build --release --locked --features server --target "$TARGET"
 fi
 BIN="target/$TARGET/release/peckboard-relay"
 

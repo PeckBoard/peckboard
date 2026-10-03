@@ -453,6 +453,17 @@ diesel::table! {
     }
 }
 diesel::table! {
+    remote_devices (id) {
+        id -> Text,
+        user_id -> Text,
+        name -> Text,
+        secret_ciphertext -> Binary,
+        secret_nonce -> Binary,
+        created_at -> Text,
+        last_connected_at -> Nullable<Text>,
+    }
+}
+diesel::table! {
     device_activity (id) {
         id -> Text,
         device_id -> Text,
@@ -761,4 +772,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     pending_actions,
     voice_prompt_versions,
     session_view_nodes,
+    remote_devices,
 );

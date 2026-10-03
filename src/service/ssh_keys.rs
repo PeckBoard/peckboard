@@ -30,9 +30,14 @@ const VAULT_KEY_LEN: usize = 32;
 /// disk, so there is no window in which the key is world-readable) and
 /// re-tightened on every load in case an older build left it `0644`.
 /// Regenerated (with a warning) if found truncated, so a partially written
-/// key can't silently brick every stored SSH key.
 pub fn load_or_create_vault_key(data_dir: &Path) -> anyhow::Result<Vec<u8>> {
-    let path = data_dir.join("ssh_vault_key");
+    load_or_create_key_file(data_dir, "ssh_vault_key")
+}
+
+/// The on-disk lifecycle of [`load_or_create_vault_key`] for any 32-byte
+/// server-held key file in the data dir (e.g. `remote_access_key`).
+pub fn load_or_create_key_file(data_dir: &Path, file_name: &str) -> anyhow::Result<Vec<u8>> {
+    let path = data_dir.join(file_name);
 
     if path.exists() {
         let key = std::fs::read(&path)?;
@@ -41,7 +46,7 @@ pub fn load_or_create_vault_key(data_dir: &Path) -> anyhow::Result<Vec<u8>> {
             return Ok(key);
         }
         tracing::warn!(
-            "SSH vault key at {} has unexpected length {}, regenerating",
+            "Key file {} has unexpected length {}, regenerating",
             path.display(),
             key.len(),
         );
@@ -52,7 +57,7 @@ pub fn load_or_create_vault_key(data_dir: &Path) -> anyhow::Result<Vec<u8>> {
     OsRng.fill_bytes(&mut key);
     write_private(&path, &key)?;
 
-    tracing::info!("Generated new SSH vault key at {}", path.display());
+    tracing::info!("Generated new key file at {}", path.display());
     Ok(key)
 }
 

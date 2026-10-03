@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Extension, State},
     http::{HeaderMap, StatusCode, header},
     routing::post,
 };
@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::service::mcp_server::{McpToolRegistry, ToolCallContext};
+use crate::service::remote_access::tunnel::Tunnelled;
 use crate::state::AppState;
 
 // ── JSON-RPC types ─────────────────────────────────────────────────
@@ -81,6 +82,7 @@ pub fn router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
 async fn mcp_handler(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    tunnelled: Option<Extension<Tunnelled>>,
     headers: HeaderMap,
     Json(body): Json<JsonRpcRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -93,9 +95,12 @@ async fn mcp_handler(
     let is_notification = body.id.is_none();
     let id = body.id.clone().unwrap_or(Value::Null);
 
-    // Loopback gating: only allow from 127.0.0.1 or ::1
+    // Loopback gating: only allow from 127.0.0.1 or ::1. Relay-tunnelled
+    // requests are already attributed to the device's real (non-loopback)
+    // address; the explicit marker check is a second guard so a remote
+    // device can never reach agent tooling.
     let ip = addr.ip();
-    if !ip.is_loopback() {
+    if !ip.is_loopback() || tunnelled.is_some() {
         return (
             StatusCode::FORBIDDEN,
             rpc_json(JsonRpcResponse::error(id, -32000, "loopback only".into())),

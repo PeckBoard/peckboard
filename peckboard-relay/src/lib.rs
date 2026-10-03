@@ -8,8 +8,13 @@
 #[cfg(feature = "client")]
 pub mod client;
 pub mod keys;
+#[cfg(feature = "server")]
 pub mod limits;
 pub mod proto;
+#[cfg(feature = "server")]
 pub mod server;
 pub mod stun;
+#[cfg(feature = "server")]
 pub mod tls;
+#[cfg(feature = "tunnel")]
+pub mod tunnel;

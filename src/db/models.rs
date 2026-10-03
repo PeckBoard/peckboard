@@ -1196,6 +1196,37 @@ pub mod device_status {
     pub const REVOKED: &str = "revoked";
 }
 
+// ── Remote-Access Devices ────────────────────────
+
+/// A device paired for remote access through the relay. The 32-byte
+/// pairing secret is stored sealed (AES-256-GCM under the server-held
+/// `remote_access_key`, AAD = `id`) and only ever opened by
+/// `service::remote_access`. Deliberately NOT `Serialize`: a row can't be
+/// fed into a response by accident — routes build their own view.
+#[derive(Queryable, Selectable, Clone)]
+#[diesel(table_name = remote_devices)]
+pub struct RemoteDevice {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub secret_ciphertext: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub created_at: String,
+    pub last_connected_at: Option<String>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = remote_devices)]
+pub struct NewRemoteDevice {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub secret_ciphertext: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub created_at: String,
+    pub last_connected_at: Option<String>,
+}
+
 /// One bridged remote-agent action against a device — the audit log the
 /// Agents panel's recent-actions drawer renders. `args_summary` is a
 /// short redacted summary of the request arguments (never the payload

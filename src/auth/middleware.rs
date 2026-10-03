@@ -183,6 +183,11 @@ pub(crate) mod tests {
         let provider_registry = Arc::new(crate::provider::registry::ProviderRegistry::new());
         let db = Db::in_memory().unwrap();
         let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let remote_access = crate::service::remote_access::RemoteAccess::new(
+            db.clone(),
+            vec![0u8; 32],
+            Arc::new(crate::service::remote_access::relay::RelayBackend),
+        );
         Arc::new(AppState {
             background: Default::default(),
             plugin_ws_tickets: Default::default(),
@@ -212,6 +217,7 @@ pub(crate) mod tests {
             mcp_tokens: crate::service::mcp_server::McpTokenRegistry::new(),
             env_unlock: Arc::new(crate::service::env_vars::EnvUnlockRegistry::new()),
             push_service: crate::service::push::PushService::new(dir),
+            remote_access,
             tls: Arc::new(crate::state::TlsState::new()),
         })
     }

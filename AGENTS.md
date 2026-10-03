@@ -129,7 +129,7 @@ the user explicitly asks you to use theirs:
 
 ```bash
 PORT=$((20000 + RANDOM % 10000))
-./target/release/peckboard \
+PECKBOARD_NO_RESUME=1 ./target/release/peckboard \
   --data-dir "$(mktemp -d)" \
   --port "$PORT" \
   --https-port "$((PORT + 1))"
@@ -146,6 +146,13 @@ ports (`3344` / `3345`). Picking a random high port avoids
 generate while testing can't accidentally reach the user's live
 session. Pair the random port with the tmp dir — never one without
 the other.
+
+**Set `PECKBOARD_NO_RESUME=1` on every scratch run** — and always when
+the data dir is a _copy_ of a real one. Otherwise boot starts agents on
+its own — resumed sessions, running doc reviews, lost-background-task
+wakes, the worker orchestrator, the repeating-task scheduler and login
+keep-alive pings — in the real project folders and accounts those copied
+rows point at. The flag turns all of them off (logged at info).
 
 **Never blanket-kill `peckboard` processes.** The user may have their
 own instance running alongside yours. If you need to stop a server
@@ -488,9 +495,16 @@ on old DBs and can never be deleted. So:
    editing an applied migration produces silent schema drift between
    fresh and existing DBs.
 
-5. **Test with a non-empty DB.** Run the binary against an existing
-   data dir before merging, not just `mktemp -d`. Most migration
-   breakage only surfaces when the table already has rows.
+5. **Test with a non-empty DEV DB — never the user's live DB or a
+   copy of it.** Build the dev DB from the _previous_ release: boot the
+   last released binary on a `mktemp -d` data dir with
+   `PECKBOARD_NO_RESUME=1`, seed realistic rows through the HTTP API
+   (folders, projects, cards, sessions with mock-provider events, queued
+   messages, env vars), stop it, then boot the new binary on the same
+   dir and compare row counts. Most migration breakage only surfaces
+   when the table already has rows. The live DB holds the user's real
+   data and plaintext provider credentials, and the agent sandbox denies
+   agents access to it anyway.
 
 ### Required Workflow When Adding a Migration
 
@@ -499,7 +513,8 @@ mkdir migrations/$(date +%s)_what_this_does
 # write up.sql + down.sql (both with IF NOT EXISTS where supported)
 cargo build                       # build.rs rejects duplicate versions
 cargo test --lib                  # in-memory migrations + schema tests
-./target/release/peckboard --data-dir ~/.peckboard-test  # against a real DB
+# then: previous-release binary seeds a dev DB in mktemp -d, new binary
+# migrates it (both with PECKBOARD_NO_RESUME=1); counts must match
 ```
 
 If `cargo build` fails with "duplicate migration version", rename the

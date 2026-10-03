@@ -65,6 +65,7 @@ async fn build_state() -> Arc<AppState> {
         mcp_tokens: McpTokenRegistry::new(),
         tls: Arc::new(peckboard::state::TlsState::new()),
         push_service: PushService::new(&std::env::temp_dir()),
+        remote_access: peckboard::service::remote_access::RemoteAccess::inert(),
     })
 }
 
