@@ -1,0 +1,51 @@
+[package]
+name = "peckboard-mobile"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "PeckBoard for iOS and Android"
+
+# Standalone Tauri 2 project with its own Cargo.lock (the repo root is a
+# package, not a workspace). Build/test with
+# `--manifest-path apps/mobile/src-tauri/Cargo.toml`.
+
+[lib]
+# `_lib` suffix: on Windows a lib and bin with the same name collide.
+name = "peckboard_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-peckboard-native = { path = "../plugins/peckboard-native" }
+peckboard-relay = { path = "../../../peckboard-relay", features = ["tunnel"] }
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rand = "0.8"
+url = "2"
+log = "0.4"
+# Debug builds only: `log` + `tracing` (relay, quinn) to a file in the app
+# data dir (`lib.rs` `init_debug_log`).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "tracing-log"] }
+tauri-plugin-deep-link = "2"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-barcode-scanner = "2"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# Cold-launch deep links (`launch_url.rs`); already in the tree via tao.
+objc2 = "0.6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+src-tauri/target/
+plugins/*/target/
+# Generated per machine by `tauri android init` / `tauri ios init`; see README.
+src-tauri/gen/schemas/

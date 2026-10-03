@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: `tauri android dev` loads the shell UI from the dev
+     machine's Vite server over plain HTTP (LAN IP / 10.0.2.2), so cleartext
+     is allowed everywhere. Release builds use src/main's loopback-only file. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

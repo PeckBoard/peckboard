@@ -485,3 +485,24 @@ export const useWsStore = create<WsState>((set, get) => ({
     listeners.delete(listener)
   },
 }))
+
+// Coming back to the page (phone app resumed, laptop woken, network back):
+// a dropped socket waiting out its backoff reconnects now instead of after
+// the remaining timer, and the backoff starts over.
+function reconnectNowIfWaiting() {
+  if (socket || intentionalClose || reconnectTimer === null) return
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+  clearReconnectTimer()
+  reconnectAttempts = 0
+  useWsStore.getState().connect()
+}
+
+// Each global is checked on its own: tests may shim `window` without a
+// `document`, and neither exists outside a browser.
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', reconnectNowIfWaiting)
+}
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('online', reconnectNowIfWaiting)
+  window.addEventListener('pageshow', reconnectNowIfWaiting)
+}

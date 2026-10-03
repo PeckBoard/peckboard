@@ -1,0 +1,20 @@
+[package]
+name = "tauri-plugin-peckboard-native"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+links = "tauri-plugin-peckboard-native"
+description = "PeckBoard mobile: secure storage, WebView config, lifecycle (Swift/Kotlin)"
+
+# First-party Tauri plugin for the PeckBoard mobile app. Native code lives in
+# `ios/` (Swift package) and `android/` (Kotlin library); the Rust side only
+# forwards calls. On desktop it falls back to a dev-only file store.
+
+[dependencies]
+tauri = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

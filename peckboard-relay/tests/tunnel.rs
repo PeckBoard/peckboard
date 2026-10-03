@@ -11,8 +11,9 @@ use peckboard_relay::proto::Role;
 use peckboard_relay::server::{Relay, RelayConfig};
 use peckboard_relay::tls;
 use peckboard_relay::tunnel::{
-    PunchedPath, STREAM_PING, STREAM_TCP, TunnelEvent, connect_device, connect_raw, establish,
-    serve_box,
+    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink,
+    PunchedPath, STREAM_PING, STREAM_TCP, TunnelEvent, bind_listener, connect_device, connect_raw,
+    establish, run_device, serve_box,
 };
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -368,4 +369,258 @@ async fn device_notices_vanished_box() {
     }
     assert!(t0.elapsed() < Duration::from_secs(20));
     assert!(dev.await.unwrap().is_ok());
+}
+
+// ---- run_device + cookie gate -------------------------------------------
+
+/// One box session (rendezvous, punch, serve until the tunnel ends) on its
+/// own runtime. Dropping it shuts that runtime down — every task and socket
+/// at once, like the box process dying (no CONNECTION_CLOSE is sent).
+struct BoxProc(Option<tokio::runtime::Runtime>);
+
+impl Drop for BoxProc {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+fn spawn_box(cfg: &ClientConfig, s: &PairingSecret, target: SocketAddr) -> BoxProc {
+    let (cfg, s) = (cfg.clone(), s.clone());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.spawn(async move {
+        let path = establish(&cfg, &s, Role::Box).await.unwrap();
+        let _ = serve_box(path, &s, target, |_| {}).await;
+    });
+    BoxProc(Some(rt))
+}
+
+struct Device {
+    port: u16,
+    ev: mpsc::UnboundedReceiver<DeviceEvent>,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+async fn start_device(cfg: &ClientConfig, s: &PairingSecret, gate: Option<&CookieGate>) -> Device {
+    let mut opts = DeviceOptions::new(PairingLink::new(s.clone(), "unused.test"));
+    opts.relay = Some(cfg.clone());
+    opts.min_backoff = Duration::from_millis(100);
+    if let Some(g) = gate {
+        opts = opts.with_gate(g);
+    }
+    let listener = bind_listener(ListenAddr::Ephemeral).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, ev) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(run_device(opts, listener, cancel.clone(), move |e| {
+        let _ = tx.send(e);
+    }));
+    Device {
+        port,
+        ev,
+        cancel,
+        task,
+    }
+}
+
+async fn wait_for(ev: &mut mpsc::UnboundedReceiver<DeviceEvent>, want: fn(&DeviceEvent) -> bool) {
+    let found = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(e) = ev.recv().await {
+            eprintln!("device event: {e:?}");
+            if want(&e) {
+                return;
+            }
+        }
+        panic!("device loop ended");
+    })
+    .await;
+    assert!(found.is_ok(), "device event did not arrive within 30 s");
+}
+
+/// Send `req` and read until the peer closes; a dropped (reset)
+/// connection yields whatever arrived, normally nothing.
+async fn raw(port: u16, req: &str) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(T, s.read_to_end(&mut out))
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// WebSocket upgrade; the response head, or "" if the connection is dropped.
+async fn ws_upgrade(port: u16, cookie: &str) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let req = format!(
+        "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{cookie}\r\n"
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    let mut b = [0u8; 1];
+    tokio::time::timeout(T, async {
+        while !buf.ends_with(b"\r\n\r\n") {
+            match s.read(&mut b).await {
+                Ok(1) => buf.push(b[0]),
+                _ => break,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[tokio::test]
+async fn device_loop_reconnects_after_box_restart_and_stops_on_cancel() {
+    let cfg = relay().await;
+    let target = echo_server().await;
+    let s = PairingSecret::generate();
+    let first = spawn_box(&cfg, &s, target);
+    let mut d = start_device(&cfg, &s, None).await;
+    wait_for(&mut d.ev, |e| matches!(e, DeviceEvent::Connected { .. })).await;
+    assert!(
+        http_get(d.port, "/one")
+            .await
+            .ends_with("echo GET /one HTTP/1.1")
+    );
+
+    // The box goes away and comes back; the loop finds it again on its own.
+    drop(first);
+    wait_for(&mut d.ev, |e| matches!(e, DeviceEvent::Disconnected { .. })).await;
+    let _second = spawn_box(&cfg, &s, target);
+    wait_for(&mut d.ev, |e| matches!(e, DeviceEvent::Connected { .. })).await;
+    assert!(
+        http_get(d.port, "/two")
+            .await
+            .ends_with("echo GET /two HTTP/1.1")
+    );
+
+    // Cancel: the loop returns and the port stops accepting.
+    d.cancel.cancel();
+    let r = tokio::time::timeout(T, d.task).await.unwrap().unwrap();
+    assert!(r.is_ok(), "{r:?}");
+    assert!(TcpStream::connect(("127.0.0.1", d.port)).await.is_err());
+}
+
+#[tokio::test]
+async fn cookie_gate_admits_only_the_booted_webview() {
+    let cfg = relay().await;
+    let target = echo_server().await;
+    let s = PairingSecret::generate();
+    let _box = spawn_box(&cfg, &s, target);
+    let gate = CookieGate::new();
+    let mut d = start_device(&cfg, &s, Some(&gate)).await;
+    wait_for(&mut d.ev, |e| matches!(e, DeviceEvent::Connected { .. })).await;
+    let key = gate.key().to_string();
+    let get = |path: &str, extra: &str| {
+        format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra}\r\n")
+    };
+
+    // No cookie, a wrong one, or a wrong boot key: dropped unanswered.
+    assert_eq!(raw(d.port, &get("/", "")).await, "");
+    assert_eq!(raw(d.port, &get("/", "Cookie: __pbm=nope\r\n")).await, "");
+    let wrong_key = format!("Cookie: __pbm={}0\r\n", &key[..key.len() - 1]);
+    assert_eq!(raw(d.port, &get("/", &wrong_key)).await, "");
+    assert_eq!(raw(d.port, &get("/__pbm/boot?k=nope", "")).await, "");
+
+    // Boot: answered on the device (the box's echo never sees it).
+    let r = raw(d.port, &get(&gate.boot_path(), "")).await;
+    assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
+    assert!(
+        r.contains(&format!(
+            "\r\nSet-Cookie: __pbm={key}; HttpOnly; SameSite=Strict; Path=/\r\n"
+        )),
+        "{r}"
+    );
+    assert!(
+        r.contains("location.replace(\"/\")") && !r.contains("echo"),
+        "{r}"
+    );
+
+    // With the cookie (among others, any header case): forwarded.
+    let ok = format!("cookie: a=b; __pbm={key}; c=d\r\n");
+    let r = raw(d.port, &get("/hello", &ok)).await;
+    assert!(r.ends_with("echo GET /hello HTTP/1.1"), "{r}");
+
+    // WebSocket upgrades: same rule.
+    assert_eq!(ws_upgrade(d.port, "").await, "");
+    let head = ws_upgrade(d.port, &format!("Cookie: __pbm={key}\r\n")).await;
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+}
+
+/// TCP proxy to `upstream` that holds every client→relay chunk for `delay`
+/// (relay→client is immediate). STUN still goes straight to the relay, so
+/// the client's UDP overtakes its TLS frames — a slow uplink.
+async fn slow_uplink(upstream: SocketAddr, delay: Duration) -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = l.accept().await {
+            let relay = TcpStream::connect(upstream).await.unwrap();
+            let (mut cr, mut cw) = client.into_split();
+            let (mut rr, mut rw) = relay.into_split();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16 * 1024];
+                while let Ok(n @ 1..) = cr.read(&mut buf).await {
+                    tokio::time::sleep(delay).await;
+                    if rw.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut rr, &mut cw).await;
+            });
+        }
+    });
+    addr
+}
+
+/// Regression: the relay coordinates the punch as soon as both STUN
+/// endpoints are known. A peer whose candidates frame (TLS) was overtaken by
+/// its STUN Binding (UDP) used to be announced without its LAN address, so
+/// the other side probed only the public one — on networks where that path
+/// doesn't work back, the punch went one-sided and the reconnect after an
+/// app resume cost ~15 s. `establish` must get its candidates applied first.
+#[tokio::test]
+async fn punch_carries_candidates_despite_slow_uplink() {
+    use peckboard_relay::client::{Event, RelayClient};
+
+    let cfg = relay().await;
+    let s = PairingSecret::generate();
+    let mut boxc = RelayClient::connect(&cfg, &s, Role::Box).await.unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    boxc.stun_binding(&sock).await.unwrap();
+
+    let dev_cfg = ClientConfig {
+        relay: slow_uplink(cfg.relay, Duration::from_millis(300)).await,
+        ..cfg.clone()
+    };
+    let ds = s.clone();
+    let dev = tokio::spawn(async move { establish(&dev_cfg, &ds, Role::Device).await });
+
+    let punch = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match boxc.next_event().await {
+                Some(Event::Punch(p)) => return p,
+                Some(_) => {}
+                None => panic!("relay closed"),
+            }
+        }
+    })
+    .await
+    .expect("no punch coordinated");
+    dev.abort();
+    assert!(
+        !punch.peer_candidates.is_empty(),
+        "punch sent before the device's candidates arrived"
+    );
 }

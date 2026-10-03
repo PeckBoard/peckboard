@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "peckboard"
-version = "0.1.56"
+version = "0.1.57"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4508,6 +4508,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
  "webpki-roots",
 ]

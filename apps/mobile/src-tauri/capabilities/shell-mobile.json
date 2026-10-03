@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "shell-mobile",
+  "description": "QR scanning for pairing, shell UI only.",
+  "platforms": ["iOS", "android"],
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "barcode-scanner:allow-scan",
+    "barcode-scanner:allow-cancel",
+    "barcode-scanner:allow-check-permissions",
+    "barcode-scanner:allow-request-permissions"
+  ]
+}

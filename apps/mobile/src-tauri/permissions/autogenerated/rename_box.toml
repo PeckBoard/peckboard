@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rename-box"
+description = "Enables the rename_box command without any pre-configured scope."
+commands.allow = ["rename_box"]
+
+[[permission]]
+identifier = "deny-rename-box"
+description = "Denies the rename_box command without any pre-configured scope."
+commands.deny = ["rename_box"]

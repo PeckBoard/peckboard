@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "shell",
+  "description": "The local shell UI (box list, pairing, connect). The tunnelled box UI is a remote URL and is deliberately granted nothing.",
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "core:default",
+    "allow-list-boxes",
+    "allow-add-box",
+    "allow-rename-box",
+    "allow-remove-box",
+    "allow-connect-box",
+    "allow-disconnect-box",
+    "allow-tunnel-status",
+    "allow-take-pair-link"
+  ]
+}

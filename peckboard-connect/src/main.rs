@@ -7,26 +7,21 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow};
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use peckboard_relay::client::ClientConfig;
-use peckboard_relay::proto::Role;
 use peckboard_relay::tunnel::{
-    PairingLink, TunnelError, TunnelEvent, connect_device, establish, relay_config,
+    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink,
+    TunnelError, bind_listener, relay_config, run_device,
 };
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
 
 /// Tried first so the local URL (and the browser state tied to its origin)
 /// stays the same across runs; falls back to any free port.
 const PREFERRED_PORT: u16 = 3399;
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// A connection that lasted this long resets the backoff.
-const STABLE_AFTER: Duration = Duration::from_secs(30);
 const HARD_NAT: &str = "couldn't reach your Peckboard directly from this network — forward one UDP port on the box's router or try another network";
 const ARGV_WARNING: &str = "warning: a pairing link given as an argument is visible in the process list; prefer `-` (stdin), $PECKBOARD_LINK or --save";
 
@@ -53,6 +48,10 @@ struct Args {
     /// Rendezvous relay `host[:port]` (overrides the link's).
     #[arg(long)]
     relay: Option<String>,
+    /// Only let the browser that opens the printed link use the local port
+    /// (cookie gate): other local programs are refused.
+    #[arg(long)]
+    gate: bool,
     /// Store the link (file mode 0600) so later runs need no argument.
     #[arg(long)]
     save: bool,
@@ -123,18 +122,6 @@ async fn read_link(arg: Option<String>) -> anyhow::Result<String> {
 fn link_on_argv(source: Option<ValueSource>, link: Option<&str>) -> bool {
     source == Some(ValueSource::CommandLine) && link != Some("-")
 }
-async fn bind(listen: Option<SocketAddr>) -> anyhow::Result<TcpListener> {
-    if let Some(a) = listen {
-        return TcpListener::bind(a)
-            .await
-            .with_context(|| format!("listen on {a}"));
-    }
-    let preferred = SocketAddr::from((Ipv4Addr::LOCALHOST, PREFERRED_PORT));
-    match TcpListener::bind(preferred).await {
-        Ok(l) => Ok(l),
-        Err(_) => Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?),
-    }
-}
 
 async fn client_config(relay: &str, cert: Option<&PathBuf>) -> anyhow::Result<ClientConfig> {
     let cfg = relay_config(relay).await?;
@@ -185,72 +172,68 @@ async fn run() -> anyhow::Result<()> {
     if let Some(r) = args.relay {
         link.relay = r;
     }
-    let listener = bind(args.listen).await?;
-    let local = url(listener.local_addr()?);
+    let listener = bind_listener(match args.listen {
+        Some(a) => ListenAddr::Exact(a),
+        None => ListenAddr::Prefer(SocketAddr::from((Ipv4Addr::LOCALHOST, PREFERRED_PORT))),
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "listen on {}",
+            args.listen.map_or("localhost".into(), |a| a.to_string())
+        )
+    })?;
+    let mut local = url(listener.local_addr()?);
 
-    tokio::select! {
-        r = connect_loop(&link, args.relay_cert.as_ref(), &listener, &local) => r,
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("Bye.");
-            Ok(())
-        }
+    let mut opts = DeviceOptions::new(link);
+    opts.give_up_on_punch_failure = true;
+    if let Some(p) = &args.relay_cert {
+        opts.relay = Some(client_config(&opts.link.relay, Some(p)).await?);
     }
+    if args.gate {
+        let gate = CookieGate::new();
+        local.push_str(&gate.boot_path());
+        opts = opts.with_gate(&gate);
+    }
+
+    eprintln!("Connecting to your Peckboard via {}…", opts.link.relay);
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            stop.cancel();
+        }
+    });
+    run_device(opts, listener, cancel, report(local))
+        .await
+        .map_err(|e| match e.downcast_ref::<TunnelError>() {
+            Some(TunnelError::PunchFailed { .. }) => anyhow!("no direct path to your Peckboard"),
+            _ => e,
+        })?;
+    eprintln!("Bye.");
+    Ok(())
 }
 
-async fn connect_loop(
-    link: &PairingLink,
-    relay_cert: Option<&PathBuf>,
-    listener: &TcpListener,
-    local: &str,
-) -> anyhow::Result<()> {
-    let connected_at: Arc<Mutex<Option<Instant>>> = Arc::default();
-    let mut ever_connected = false;
-    let mut backoff = Duration::from_secs(1);
-    eprintln!("Connecting to your Peckboard via {}…", link.relay);
-    loop {
-        *connected_at.lock().unwrap() = None;
-        let (at, url, first) = (connected_at.clone(), local.to_string(), !ever_connected);
-        let on_event = move |ev: TunnelEvent| match ev {
-            TunnelEvent::Connected { peer, rtt_ms } => {
-                *at.lock().unwrap() = Some(Instant::now());
-                if first {
-                    println!("Peckboard available at {url}");
-                } else {
-                    eprintln!("Reconnected — Peckboard available at {url}");
-                }
-                eprintln!("  direct path to {peer}, rtt {rtt_ms} ms");
+/// Print [`run_device`] progress the way this CLI always has.
+fn report(url: String) -> impl Fn(DeviceEvent) + Send + Sync + 'static {
+    let ever_connected = AtomicBool::new(false);
+    move |ev| match ev {
+        DeviceEvent::Connecting => {}
+        DeviceEvent::Connected { peer, rtt_ms } => {
+            if ever_connected.swap(true, Ordering::Relaxed) {
+                eprintln!("Reconnected — Peckboard available at {url}");
+            } else {
+                println!("Peckboard available at {url}");
             }
-            TunnelEvent::Disconnected { reason } => eprintln!("Connection lost: {reason}"),
-            TunnelEvent::Error(e) => eprintln!("Tunnel error: {e}"),
-        };
-        let attempt = async {
-            let cfg = client_config(&link.relay, relay_cert).await?;
-            let path = establish(&cfg, &link.secret, Role::Device).await?;
-            connect_device(path, &link.secret, listener, on_event).await
-        };
-        let result = attempt.await;
-        let lasted = connected_at.lock().unwrap().map(|t| t.elapsed());
-        ever_connected |= lasted.is_some();
-        if let Err(e) = result {
-            match e.downcast_ref::<TunnelError>() {
-                Some(TunnelError::PunchFailed { .. }) => {
-                    eprintln!("{HARD_NAT}");
-                    if !ever_connected {
-                        bail!("no direct path to your Peckboard");
-                    }
-                }
-                Some(TunnelError::PeerOffline) => eprintln!(
-                    "Your Peckboard isn't reachable through the relay right now (offline, or this link was revoked)."
-                ),
-                None => eprintln!("Connection failed: {e:#}"),
-            }
+            eprintln!("  direct path to {peer}, rtt {rtt_ms} ms");
         }
-        if lasted.is_some_and(|d| d >= STABLE_AFTER) {
-            backoff = Duration::from_secs(1);
-        }
-        eprintln!("Retrying in {}s…", backoff.as_secs());
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        DeviceEvent::Disconnected { reason } => eprintln!("Connection lost: {reason}"),
+        DeviceEvent::PunchFailed { .. } => eprintln!("{HARD_NAT}"),
+        DeviceEvent::PeerOffline => eprintln!(
+            "Your Peckboard isn't reachable through the relay right now (offline, or this link was revoked)."
+        ),
+        DeviceEvent::Failed(e) => eprintln!("Connection failed: {e}"),
+        DeviceEvent::Retrying { after } => eprintln!("Retrying in {}s…", after.as_secs()),
     }
 }
 

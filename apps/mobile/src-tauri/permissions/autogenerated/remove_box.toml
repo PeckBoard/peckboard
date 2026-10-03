@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remove-box"
+description = "Enables the remove_box command without any pre-configured scope."
+commands.allow = ["remove_box"]
+
+[[permission]]
+identifier = "deny-remove-box"
+description = "Denies the remove_box command without any pre-configured scope."
+commands.deny = ["remove_box"]

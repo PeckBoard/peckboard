@@ -365,8 +365,10 @@ impl RelayClient {
     }
 
     /// Simultaneous-open hole punch. Sends sealed probes to the peer's
-    /// public endpoint and candidates from `start_at_ms`, and returns the
-    /// first address a valid peer probe arrives from.
+    /// public endpoint and candidates from `start_at_ms`, acks every address
+    /// a valid peer probe arrives from, and returns the first address an ack
+    /// arrives from — a path proven to work both ways. A peer that never
+    /// acks (older version) gets its first probe address after `ACK_GRACE`.
     pub async fn punch(
         &self,
         sock: &UdpSocket,
@@ -376,6 +378,16 @@ impl RelayClient {
         punch_with(&self.keys, self.role, sock, p, timeout).await
     }
 }
+
+/// Probe payload (sealed). A pre-ack peer accepts any valid seal as a probe,
+/// so our acks still count as probes for it.
+const PROBE: &[u8] = b"probe";
+/// "Your probe reached me here" — sent to every address a probe came from.
+const ACK: &[u8] = b"ack";
+/// How long a heard-but-unacked probe path waits before it's used anyway
+/// (peers that predate acks never send one).
+const ACK_GRACE: Duration = Duration::from_millis(1500);
+const MAX_HEARD: usize = 8;
 
 fn punch_ctx(nonce: &[u8; 16]) -> Vec<u8> {
     let mut c = CTX_PUNCH.to_vec();
@@ -405,26 +417,188 @@ async fn punch_with(
     let deadline = tokio::time::Instant::now() + timeout;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut buf = [0u8; 512];
-    loop {
+    let mut foreign = 0u32;
+    // Addresses a valid peer probe arrived from, and when. The peer reaches
+    // us from there, but that alone doesn't prove the way back (a
+    // multi-homed host may route its replies out another interface).
+    let mut heard: Vec<(SocketAddr, tokio::time::Instant)> = Vec::new();
+    tracing::debug!(?role, attempt = p.attempt, ?targets, "punch: probing");
+    let chosen = loop {
         tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => bail!("hole punch timed out"),
+            _ = tokio::time::sleep_until(deadline) => {
+                if let Some(&(from, _)) = heard.first() {
+                    break from;
+                }
+                tracing::debug!(?role, foreign, "punch: timed out");
+                bail!("hole punch timed out")
+            }
             _ = tick.tick() => {
-                let probe = keys.e2e.seal(role, &ctx, b"probe");
+                if let Some(&(from, at)) = heard.first()
+                    && at.elapsed() >= ACK_GRACE
+                {
+                    tracing::debug!(?role, %from, "punch: no ack, using first probe path");
+                    break from;
+                }
+                let probe = keys.e2e.seal(role, &ctx, PROBE);
                 for t in &targets {
                     let _ = sock.send_to(&probe, t).await;
+                }
+                let ack = keys.e2e.seal(role, &ctx, ACK);
+                for (h, _) in &heard {
+                    let _ = sock.send_to(&ack, h).await;
                 }
             }
             r = sock.recv_from(&mut buf) => {
                 let Ok((n, from)) = r else { continue };
-                if keys.e2e.open(role.other(), &ctx, &buf[..n]).is_some() {
-                    // Keep the path warm so the peer sees our probes too.
-                    for _ in 0..3 {
-                        let probe = keys.e2e.seal(role, &ctx, b"probe");
-                        let _ = sock.send_to(&probe, from).await;
-                    }
-                    return Ok(from);
+                let Some(msg) = keys.e2e.open(role.other(), &ctx, &buf[..n]) else {
+                    foreign += 1;
+                    continue;
+                };
+                if msg == ACK {
+                    // Our probe got there and its answer got back: two-way.
+                    tracing::debug!(?role, %from, "punch: peer ack received");
+                    break from;
+                }
+                if !heard.iter().any(|(h, _)| *h == from) && heard.len() < MAX_HEARD {
+                    tracing::debug!(?role, %from, "punch: peer probe received");
+                    heard.push((from, tokio::time::Instant::now()));
+                    let ack = keys.e2e.seal(role, &ctx, ACK);
+                    let _ = sock.send_to(&ack, from).await;
                 }
             }
         }
+    };
+    // Let the peer finish too: it may not have our ack yet.
+    for _ in 0..3 {
+        let ack = keys.e2e.seal(role, &ctx, ACK);
+        let _ = sock.send_to(&ack, chosen).await;
+    }
+    Ok(chosen)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::PairingSecret;
+
+    fn punch_to(peer_public: SocketAddr, start_at_ms: u64) -> Punch {
+        Punch {
+            peer_public,
+            start_at_ms,
+            nonce: [7; 16],
+            attempt: 1,
+            peer_candidates: vec![],
+        }
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// A path that only carries device→box (e.g. a multi-homed box that
+    /// routes LAN replies out another interface) must not win just because
+    /// its probe arrives first: the box would then wait for QUIC on an
+    /// address the device never hears.
+    #[tokio::test]
+    async fn punch_ignores_one_way_path() {
+        let keys = PairingSecret::generate().derive();
+        let ub = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ud = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // One-way forwarder: device→box only, from its own address; what
+        // the box sends back to it is lost.
+        let fwd = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (b, d, f) = (
+            ub.local_addr().unwrap(),
+            ud.local_addr().unwrap(),
+            fwd.local_addr().unwrap(),
+        );
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = fwd.recv_from(&mut buf).await {
+                if from == d {
+                    let _ = fwd.send_to(&buf[..n], b).await;
+                }
+            }
+        });
+        // The device starts first and only knows the forwarder, so the box
+        // hears it on the one-way path first; the box probes the device's
+        // real address a little later.
+        let start = now_ms();
+        let pd = punch_to(f, start);
+        let pb = punch_to(d, start + 300);
+        let t = Duration::from_secs(3);
+        let (rb, rd) = tokio::join!(
+            punch_with(&keys, Role::Box, &ub, &pb, t),
+            punch_with(&keys, Role::Device, &ud, &pd, t),
+        );
+        assert_eq!(rb.unwrap(), d, "box must pick the two-way path");
+        assert_eq!(rd.unwrap(), b);
+    }
+
+    /// Normal path, both sides current: no extra wait over a probe RTT.
+    #[tokio::test]
+    async fn punch_two_way_is_fast() {
+        let keys = PairingSecret::generate().derive();
+        let ub = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ud = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (b, d) = (ub.local_addr().unwrap(), ud.local_addr().unwrap());
+        let (pb, pd) = (punch_to(d, now_ms()), punch_to(b, now_ms()));
+        let t0 = Instant::now();
+        let t = Duration::from_secs(3);
+        let (rb, rd) = tokio::join!(
+            punch_with(&keys, Role::Box, &ub, &pb, t),
+            punch_with(&keys, Role::Device, &ud, &pd, t),
+        );
+        assert_eq!((rb.unwrap(), rd.unwrap()), (d, b));
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// An older peer probes but never acks; we still settle on the path its
+    /// probes arrive from, after a short grace.
+    #[tokio::test]
+    async fn punch_falls_back_for_peer_without_acks() {
+        let s = PairingSecret::generate();
+        let keys = s.derive();
+        let ub = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ud = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (b, d) = (ub.local_addr().unwrap(), ud.local_addr().unwrap());
+        let ctx = punch_ctx(&[7; 16]);
+        let legacy_keys = s.derive();
+        // Pre-ack behaviour: probe every 100 ms, take the first valid
+        // packet's source, send three more probes there.
+        let legacy = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let probe = legacy_keys.e2e.seal(Role::Device, &ctx, b"probe");
+                ud.send_to(&probe, b).await.unwrap();
+                if let Ok(Ok((n, from))) =
+                    tokio::time::timeout(Duration::from_millis(100), ud.recv_from(&mut buf)).await
+                    && legacy_keys.e2e.open(Role::Box, &ctx, &buf[..n]).is_some()
+                {
+                    for _ in 0..3 {
+                        let probe = legacy_keys.e2e.seal(Role::Device, &ctx, b"probe");
+                        let _ = ud.send_to(&probe, from).await;
+                    }
+                    return from;
+                }
+            }
+        });
+        let rb = punch_with(
+            &keys,
+            Role::Box,
+            &ub,
+            &punch_to(d, now_ms()),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(rb.unwrap(), d);
+        assert_eq!(legacy.await.unwrap(), b);
     }
 }

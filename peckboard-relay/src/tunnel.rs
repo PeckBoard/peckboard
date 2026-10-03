@@ -49,7 +49,13 @@ use crate::client::{ClientConfig, Event, RelayClient};
 use crate::keys::{PairingSecret, SECRET_LEN};
 use crate::proto::Role;
 
+mod device;
+pub use device::{
+    AcceptFilter, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, bind_listener, run_device,
+};
 pub use quinn;
+/// Stops [`run_device`]; re-exported so callers need no `tokio-util` dep.
+pub use tokio_util::sync::CancellationToken;
 
 /// ALPN of the box↔device QUIC connection.
 pub const TUNNEL_ALPN: &[u8] = b"peckboard-tunnel/1";
@@ -85,6 +91,8 @@ const RETRY_WAIT: Duration = Duration::from_secs(10);
 const MAINTAIN_EVERY: Duration = Duration::from_secs(20);
 /// Refresh the STUN credential when it has less than this left.
 const CRED_MARGIN: Duration = Duration::from_secs(90);
+/// Wait this long for the relay's `Pong` in [`relay_sync`].
+const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Errors from [`establish`] a caller may want to tell apart (downcast the
 /// `anyhow::Error`).
@@ -220,10 +228,18 @@ pub async fn establish(
     };
     let sock = UdpSocket::bind(bind).await?;
     let port = sock.local_addr()?.port();
-    if let Some(ip) = local_ip_toward(cfg.relay) {
-        relay.set_candidates(&[SocketAddr::new(ip, port)]).await?;
+    let lan = local_ip_toward(cfg.relay).map(|ip| SocketAddr::new(ip, port));
+    if let Some(lan) = lan {
+        relay.set_candidates(&[lan]).await?;
+        // The STUN Binding below (UDP) is what lets the relay coordinate the
+        // punch; it can overtake the candidates frame (TLS). Then the peer
+        // is told to punch without our LAN address and, where the LAN path
+        // is the only one that works back to us, the punch is one-sided:
+        // the peer "succeeds", we time out, and the reconnect costs ~15 s.
+        relay_sync(&mut relay).await?;
     }
-    relay.stun_binding(&sock).await.context("relay STUN")?;
+    let public = relay.stun_binding(&sock).await.context("relay STUN")?;
+    tracing::debug!(?role, ?lan, %public, "establish: registered");
 
     let mut failures = 0u32;
     let mut deadline =
@@ -278,6 +294,24 @@ pub async fn establish(
             }
         }
     }
+}
+
+/// Round trip to the relay. It handles a session's frames in order, so the
+/// `Pong` proves every frame sent before the `Ping` has been applied.
+async fn relay_sync(relay: &mut RelayClient) -> anyhow::Result<()> {
+    relay.ping().await?;
+    let pong = async {
+        loop {
+            match relay.next_event().await {
+                Some(Event::Pong) => return Ok(()),
+                Some(_) => {}
+                None => bail!("relay connection lost"),
+            }
+        }
+    };
+    tokio::time::timeout(SYNC_TIMEOUT, pong)
+        .await
+        .map_err(|_| anyhow!("relay did not answer"))?
 }
 
 /// Local address the OS would use to reach `dest` (no packets sent) — our
@@ -513,6 +547,7 @@ pub async fn serve_box(
     target: SocketAddr,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
+    tracing::debug!(peer = %path.peer, "tunnel: awaiting device QUIC");
     let ep = endpoint(path, Some(server_config(secret)?))?;
     let conn = match tokio::time::timeout(HANDSHAKE_TIMEOUT, accept_one(&ep)).await {
         Ok(Ok(c)) => c,
@@ -557,6 +592,7 @@ async fn accept_one(ep: &Endpoint) -> anyhow::Result<Connection> {
         .accept()
         .await
         .ok_or_else(|| anyhow!("endpoint closed"))?;
+    tracing::debug!(from = %inc.remote_address(), "tunnel: device QUIC incoming");
     inc.await.context("device handshake failed")
 }
 
@@ -620,13 +656,33 @@ async fn box_pong(
 /// `listen`; each accepted TCP connection becomes one stream. Returns `Ok`
 /// when an established tunnel ends (connections queued on `listen` in the
 /// meantime are served by the next call), `Err` if the handshake fails.
+/// [`run_device`] wraps this in a reconnect loop with an accept filter.
 pub async fn connect_device(
     path: PunchedPath,
     secret: &PairingSecret,
     listen: &TcpListener,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    let (ep, conn) = match connect_raw(path, secret).await {
+    let never = CancellationToken::new();
+    device_session(path, secret, listen, None, &never, on_event).await
+}
+
+/// [`connect_device`] plus an optional [`AcceptFilter`] run on every
+/// accepted connection, and a `cancel` token that ends the tunnel (and
+/// every stream on it) with `Disconnected { reason: "stopped" }`.
+async fn device_session(
+    path: PunchedPath,
+    secret: &PairingSecret,
+    listen: &TcpListener,
+    filter: Option<&AcceptFilter>,
+    cancel: &CancellationToken,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    let handshake = tokio::select! {
+        r = connect_raw(path, secret) => r,
+        _ = cancel.cancelled() => return Ok(()),
+    };
+    let (ep, conn) = match handshake {
         Ok(v) => v,
         Err(e) => {
             on_event(TunnelEvent::Error(format!("{e:#}")));
@@ -643,10 +699,19 @@ pub async fn connect_device(
         tokio::select! {
             e = conn.closed() => break e.to_string(),
             r = &mut alive => break r,
+            _ = cancel.cancelled() => break "stopped".to_string(),
             a = listen.accept() => match a {
                 Ok((tcp, _)) => {
                     let conn = conn.clone();
+                    let filter = filter.cloned();
                     tokio::spawn(async move {
+                        let tcp = match filter {
+                            Some(f) => match f(tcp).await {
+                                Some(t) => t,
+                                None => return,
+                            },
+                            None => tcp,
+                        };
                         let Ok((mut send, recv)) = conn.open_bi().await else { return };
                         if send.write_all(&[STREAM_TCP]).await.is_ok() {
                             pipe(send, recv, tcp).await;
@@ -709,6 +774,7 @@ pub async fn connect_raw(
     secret: &PairingSecret,
 ) -> anyhow::Result<(Endpoint, Connection)> {
     let peer = path.peer;
+    tracing::debug!(%peer, "tunnel: QUIC connect");
     let ep = endpoint(path, None)?;
     let connecting = ep.connect_with(client_config(secret)?, peer, SERVER_NAME)?;
     let conn = tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting)

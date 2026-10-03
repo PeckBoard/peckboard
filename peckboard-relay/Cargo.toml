@@ -24,8 +24,9 @@ default = ["client"]
 # the Peckboard box and the `peckboard connect` CLI.
 client = []
 # Direct box<->device data path: QUIC over the hole-punched UDP socket,
-# mutually authenticated with keys derived from the pairing secret.
-tunnel = ["client", "dep:quinn", "dep:base64", "dep:rcgen"]
+# mutually authenticated with keys derived from the pairing secret, plus the
+# device reconnect loop (`run_device`, cancellable) and its cookie gate.
+tunnel = ["client", "dep:quinn", "dep:base64", "dep:rcgen", "dep:tokio-util"]
 # The relay server itself (`server`/`tls`/`limits` modules + the binary):
 # ACME, CLI and log-subscriber deps that peers never need.
 server = [

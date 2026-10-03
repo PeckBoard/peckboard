@@ -102,6 +102,94 @@ impl PairingLink { fn new(secret, relay: &str); fn to_uri(&self) -> String;
 Box loop: `loop { let p = establish(.., Role::Box).await?; serve_box(p, ..).await; }`
 — one rendezvous id per paired device, so run one loop per device secret.
 
+### Device Loop and Loopback Gate
+
+What `peckboard-connect` and the mobile app run. Stable names: `run_device`,
+`DeviceOptions`, `CookieGate` (all in `peckboard_relay::tunnel`).
+
+```rust
+// Bind the local port. Prefer = fixed port, free port on the same IP if taken.
+pub enum ListenAddr { Exact(SocketAddr), Prefer(SocketAddr), Ephemeral /* 127.0.0.1:0 */ }
+pub async fn bind_listener(addr: ListenAddr) -> std::io::Result<TcpListener>;
+
+#[derive(Clone)]
+pub struct DeviceOptions {
+    pub link: PairingLink,
+    pub relay: Option<ClientConfig>,         // None: relay_config(&link.relay) per attempt
+    pub accept_filter: Option<AcceptFilter>, // None: forward every local connection
+    pub min_backoff: Duration,               // 1 s, doubles per failure ...
+    pub max_backoff: Duration,               // ... up to 30 s
+    pub stable_after: Duration,              // 30 s up resets the backoff
+    pub give_up_on_punch_failure: bool,      // false: retry forever
+}
+impl DeviceOptions {
+    pub fn new(link: PairingLink) -> Self;                // the defaults above
+    pub fn with_gate(self, gate: &CookieGate) -> Self;    // accept_filter = gate.filter()
+}
+
+// Rendezvous → punch → connect → serve `listener` → back off → repeat.
+// Ok(()) once `cancel` fires: tunnel + all streams closed, listener dropped
+// (port stops accepting). Err only with give_up_on_punch_failure (punch
+// failed before any tunnel came up). To resume: bind again, new token.
+pub async fn run_device(opts: DeviceOptions, listener: TcpListener,
+    cancel: CancellationToken,  // re-exported tokio_util token
+    on_event: impl Fn(DeviceEvent) + Send + Sync + 'static) -> anyhow::Result<()>;
+
+#[derive(Clone, Debug)]
+pub enum DeviceEvent {     // per attempt: Connecting, then Connected..Disconnected
+    Connecting,            //   or a failure, then Retrying
+    Connected { peer: SocketAddr, rtt_ms: u32 },
+    Disconnected { reason: String },     // "stopped" after cancel
+    PeerOffline,                         // box not at the relay (offline / revoked)
+    PunchFailed { rounds: u32 },         // both NATs hard: no direct path
+    Failed(String),                      // relay unreachable, handshake, local accept
+    Retrying { after: Duration },
+}
+
+// Runs on each accepted local connection before it becomes a stream:
+// Some(tcp) forwards, None drops (it may answer the connection itself).
+// Inspect with TcpStream::peek — consumed bytes never reach the box.
+pub type AcceptFilter = Arc<dyn Fn(TcpStream)
+    -> Pin<Box<dyn Future<Output = Option<TcpStream>> + Send>> + Send + Sync>;
+
+#[derive(Clone)] // cheap; Debug never prints the key
+pub struct CookieGate { .. }
+impl CookieGate {
+    pub const COOKIE: &str = "__pbm";
+    pub const BOOT_PATH: &str = "/__pbm/boot";
+    pub fn new() -> Self;               // random 256-bit key, 64 hex chars
+    pub fn key(&self) -> &str;
+    pub fn boot_path(&self) -> String;  // "/__pbm/boot?k=<key>"
+    pub fn filter(&self) -> AcceptFilter;
+    pub async fn admit(&self, tcp: TcpStream) -> Option<TcpStream>;
+}
+```
+
+Cookie gate: the WebView first loads `http://127.0.0.1:<port>` +
+`boot_path()`. The device answers that itself (the box never sees it):
+`200` with `Set-Cookie: __pbm=<key>; HttpOnly; SameSite=Strict; Path=/`,
+`Cache-Control: no-store`, and a page that does `location.replace("/")`
+(meta refresh + script). That is a same-origin navigation, so the Strict
+cookie rides along — an HTTP 302 would inherit the boot load's cross-site
+initiator (Tauri origin → 127.0.0.1) and the Strict cookie could be
+withheld; `replace` also drops the key from history. Every other
+connection's first request head (HTTP or WebSocket upgrade, ≤16 KiB, 10 s)
+must carry a `Cookie` header with `__pbm=<key>` (constant-time compare) or
+the connection is dropped unanswered; a wrong boot key is dropped too. Only
+the first request of a keep-alive connection is checked. Cookies are
+scoped by host, not port: create **one** gate per app launch and share it
+across every paired box's `run_device`, or the boxes' cookies overwrite
+each other.
+
+Mobile shape: on foreground `bind_listener(Prefer(127.0.0.1:<box port>))`
+
+- `tokio::spawn(run_device(opts.clone(), l, token.clone(), ..))`; on
+  background `token.cancel()` and await the task. `peckboard-connect` runs
+  the same loop (`--gate` turns the cookie gate on; off by default) and maps
+  `DeviceEvent`s to its terminal messages.
+
+### Tunnel Wire Format
+
 Wire: QUIC (quinn 0.11) over the punched socket; box = server, device =
 client. TLS 1.3, ALPN `peckboard-tunnel/1`, mutual auth: each side presents
 a self-signed cert for an Ed25519 key HKDF'd from `S` under its own label
