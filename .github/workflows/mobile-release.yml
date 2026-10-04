@@ -570,9 +570,11 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
+      # "app" too: a dmg-only build deletes the .app afterwards, and the
+      # verify step below inspects it.
       - name: Build universal DMG
         working-directory: apps/mobile
-        run: npx tauri build --target universal-apple-darwin --bundles dmg --ci
+        run: npx tauri build --target universal-apple-darwin --bundles app,dmg --ci
 
       - name: Verify signature
         env:
