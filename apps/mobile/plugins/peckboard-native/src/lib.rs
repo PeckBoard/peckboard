@@ -2,13 +2,14 @@
 //!
 //! - **Secure storage** for pairing secrets: iOS Keychain
 //!   (`AfterFirstUnlockThisDeviceOnly`, never synced) / an Android Keystore
-//!   AES-GCM key wrapping values in app-private prefs. Desktop: a dev-only
-//!   0600 file (desktop is a `cargo check` / UI-iteration target, not shipped).
+//!   AES-GCM key wrapping values in app-private prefs / macOS Keychain and
+//!   Windows Credential Manager (`keyring`). Linux: a dev-only 0600 file
+//!   (Linux desktop is not shipped).
 //! - **WebView config**, applied natively when the WebView loads: media
 //!   autoplay without a gesture, mic capture auto-granted for the loopback
 //!   origin only, back-swipe on iOS.
 //! - **Lifecycle**: foreground/background notifications so the core can stop
-//!   the tunnel while backgrounded.
+//!   the tunnel while backgrounded; on desktop, a wake from sleep.
 //!
 //! Nothing here is callable from JavaScript (`COMMANDS` is empty in
 //! `build.rs`); only the app's Rust core uses [`PeckboardNativeExt`].

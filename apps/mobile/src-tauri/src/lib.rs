@@ -123,6 +123,17 @@ fn shell_home(app: &AppHandle) -> Option<Url> {
     home.or_else(|| Url::parse(fallback).ok())
 }
 
+/// A second launch (desktop) handed its link to this instance: bring the
+/// window up.
+#[cfg(desktop)]
+fn focus_main(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 /// The gate key was rotated (resume) and the tunnel is back: a box page
 /// still showing on `port` carries the old cookie, so re-boot it through
 /// the new key, landing on the page it was on.
@@ -145,8 +156,17 @@ fn reboot_box_page(app: &AppHandle, tunnel: &TunnelManager, port: u16) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        // Single-instance first, so a second launch exits before setup.
+        builder = builder
+            .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+                focus_main(app)
+            }))
+            .plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+    builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_peckboard_native::init())
@@ -267,10 +287,18 @@ pub fn run() {
                         }
                     });
             #[cfg(desktop)]
-            let builder = builder.title("PeckBoard").inner_size(420.0, 820.0);
+            let builder = builder
+                .title("PeckBoard")
+                .inner_size(1200.0, 800.0)
+                .min_inner_size(400.0, 600.0);
             builder.build()?;
 
-            // peckboard://pair/… links: launch URL, then any later ones.
+            // peckboard://pair/… links: launch URL, then any later ones
+            // (on Windows / Linux a later one arrives via single-instance).
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            if let Err(e) = app.deep_link().register_all() {
+                log::warn!("registering peckboard:// failed: {e}");
+            }
             if let Ok(Some(urls)) = app.deep_link().get_current() {
                 urls.iter()
                     .for_each(|u| open_pair_link(&handle, u.as_str()));

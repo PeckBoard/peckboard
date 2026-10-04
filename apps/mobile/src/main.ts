@@ -257,7 +257,9 @@ function listScreen(): HTMLElement {
           h(
             "p",
             {},
-            "On your box, open Settings → Remote Access → Add phone, then scan the pairing code here.",
+            isMobile
+              ? "On your box, open Settings → Remote Access → Add phone, then scan the pairing code here."
+              : "On your box, open Settings → Remote Access → Add phone, then open or paste the pairing link here.",
           ),
           h(
             "button",

@@ -1,16 +1,22 @@
 name: Mobile Release
 
-# Builds and ships the PeckBoard phone app (Tauri 2, apps/mobile/). Mobile
-# releases are versioned separately from the server: a `mobile-X.Y.Z` tag
-# builds
+# Builds and ships the PeckBoard app (Tauri 2, apps/mobile/) for phones and
+# desktops. App releases are versioned separately from the server: a
+# `mobile-X.Y.Z` tag builds
 #
 #   ios       signed IPA → TestFlight (App Store Connect API key, automatic
 #             signing). Info.plist carries ITSAppUsesNonExemptEncryption=false.
 #   android   arm64 APK signed with the sideload release key, checked against
-#             the pinned cert fingerprint → peckboard-android-X.Y.Z.apk +
-#             .sha256 on a GitHub release named after the tag. The release
-#             is created with --latest=false so `releases/latest` (what
-#             server self-update reads) keeps pointing at the server release.
+#             the pinned cert fingerprint → peckboard-android-X.Y.Z.apk.
+#   macos     universal DMG, Developer ID signed + notarized when the cert
+#             secrets are set (ad-hoc signed with a warning otherwise) →
+#             PeckBoard-X.Y.Z-macos-universal.dmg.
+#   windows   x64 NSIS installer (+ MSI), unsigned, WebView2 bootstrapper
+#             embedded → PeckBoard-X.Y.Z-windows-x64-setup.exe.
+#
+# Android/macOS/Windows files (+ .sha256) go on a GitHub release named after
+# the tag, created with --latest=false so `releases/latest` (what server
+# self-update reads) keeps pointing at the server release.
 #
 # Version: mobile-X.Y.Z → app version X.Y.Z, Android versionCode
 # X*1000000 + Y*1000 + Z (Tauri's default scheme, design §7a), iOS build
@@ -23,6 +29,9 @@ name: Mobile Release
 #
 # Secrets (repo or environment `ios-release` / `android-release`):
 #   APPLE_API_KEY_P8_B64, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID, APPLE_TEAM_ID
+#   APPLE_DEVELOPER_ID_P12_B64, APPLE_DEVELOPER_ID_P12_PASSWORD (macOS:
+#     Developer ID Application cert + key, base64 .p12; notarization uses
+#     the App Store Connect API key above)
 #   ANDROID_KEYSTORE_B64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
 #   ANDROID_KEY_PASSWORD
 # Variable: ANDROID_CERT_SHA256 — expected signing-cert SHA-256 (hex, colons
@@ -35,8 +44,8 @@ on:
       platform:
         description: Which app to build
         type: choice
-        options: [both, ios, android]
-        default: both
+        options: [all, mobile, desktop, ios, android, macos, windows]
+        default: all
       upload:
         description: Upload to TestFlight / attach to the GitHub release (false = dry run)
         type: boolean
@@ -67,6 +76,8 @@ jobs:
       ios: ${{ steps.v.outputs.ios }}
       android: ${{ steps.v.outputs.android }}
       upload: ${{ steps.v.outputs.upload }}
+      macos: ${{ steps.v.outputs.macos }}
+      windows: ${{ steps.v.outputs.windows }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -99,19 +110,30 @@ jobs:
           if [ "$EVENT" = "workflow_dispatch" ]; then
             platform="$PLATFORM"; upload="$UPLOAD"
           else
-            platform=both; upload=true
+            platform=all; upload=true
           fi
+          # all | mobile (ios+android) | desktop (macos+windows) | one platform
+          want() {
+            case "$platform" in
+              all) echo true ;;
+              mobile) [[ $1 == ios || $1 == android ]] && echo true || echo false ;;
+              desktop) [[ $1 == macos || $1 == windows ]] && echo true || echo false ;;
+              *) [[ $1 == "$platform" ]] && echo true || echo false ;;
+            esac
+          }
           {
             echo "version=$ver"
             echo "version_code=$code"
             echo "build_number=$code.$GITHUB_RUN_NUMBER"
             echo "is_tag=$is_tag"
-            echo "ios=$([[ $platform == both || $platform == ios ]] && echo true || echo false)"
-            echo "android=$([[ $platform == both || $platform == android ]] && echo true || echo false)"
+            echo "ios=$(want ios)"
+            echo "android=$(want android)"
+            echo "macos=$(want macos)"
+            echo "windows=$(want windows)"
             echo "upload=$upload"
           } >> "$GITHUB_OUTPUT"
+          echo "App $ver (versionCode $code, iOS build $code.$GITHUB_RUN_NUMBER), platform=$platform upload=$upload tag=$is_tag"
           echo "Mobile $ver (versionCode $code, iOS build $code.$GITHUB_RUN_NUMBER), platform=$platform upload=$upload tag=$is_tag"
-
   ios:
     name: iOS → TestFlight
     needs: version
@@ -427,13 +449,255 @@ jobs:
           [ -f "$RUNNER_TEMP/release.keystore" ] && shred -u "$RUNNER_TEMP/release.keystore" || true
           rm -f "$RUNNER_TEMP/aligned.apk"
 
+  macos:
+    name: macOS DMG
+    needs: version
+    if: needs.version.outputs.macos == 'true'
+    runs-on: macos-26
+    # Same environment as iOS: the notarization key is the App Store
+    # Connect API key.
+    environment: ios-release
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    outputs:
+      signed: ${{ steps.gate.outputs.signed }}
+      notarized: ${{ steps.gate.outputs.notarized }}
+    steps:
+      # Without the Developer ID secrets the DMG is still built and shipped,
+      # ad-hoc signed, with a warning (Gatekeeper blocks it until the user
+      # allows it in Privacy & Security).
+      - name: Check signing secrets
+        id: gate
+        env:
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12_B64 }}
+          P12_PASS: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8_B64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          signed=false notarized=false
+          if [ -n "$P12" ] && [ -n "$P12_PASS" ]; then
+            signed=true
+            if [ -n "$API_KEY_P8" ] && [ -n "$API_KEY_ID" ] && [ -n "$API_ISSUER" ]; then
+              notarized=true
+            else
+              echo "::warning::App Store Connect API key secrets (APPLE_API_KEY_P8_B64, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID) are not configured — the DMG is signed but NOT notarized."
+            fi
+          else
+            echo "::warning::Developer ID secrets (APPLE_DEVELOPER_ID_P12_B64, APPLE_DEVELOPER_ID_P12_PASSWORD) are not configured — building an ad-hoc signed, un-notarized DMG."
+          fi
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
+          echo "notarized=$notarized" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Same Xcode pin as the iOS job (current SDK; see the note there).
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          xc=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          test -n "$xc" || { echo "::error::no Xcode 26 on this runner"; ls -d /Applications/Xcode_*.app; exit 1; }
+          sudo xcode-select -s "$xc/Contents/Developer"
+          xcodebuild -version
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: mobile-macos
+          workspaces: apps/mobile/src-tauri -> target
+
+      - name: Install JS dependencies
+        working-directory: apps/mobile
+        run: npm ci
+
+      - name: Stamp version into tauri.conf.json
+        working-directory: apps/mobile/src-tauri
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          p = "tauri.conf.json"
+          c = json.load(open(p))
+          c["version"] = os.environ["VERSION"]
+          json.dump(c, open(p, "w"), indent=2)
+          EOF
+
+      # Tauri imports APPLE_CERTIFICATE into a temporary keychain and signs
+      # with the hardened runtime (Entitlements.macos.plist); with the API
+      # key variables it notarizes and staples the app before making the
+      # DMG. "-" = ad-hoc.
+      - name: Configure signing
+        env:
+          SIGNED: ${{ steps.gate.outputs.signed }}
+          NOTARIZED: ${{ steps.gate.outputs.notarized }}
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12_B64 }}
+          P12_PASS: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_API_KEY_P8_B64: ${{ secrets.APPLE_API_KEY_P8_B64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          if [ "$SIGNED" != true ]; then
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE=$(printf '%s' "$P12" | tr -d '\r\n ')"
+            echo "APPLE_CERTIFICATE_PASSWORD=$P12_PASS"
+            echo "APPLE_SIGNING_IDENTITY=Developer ID Application"
+          } >> "$GITHUB_ENV"
+          if [ "$NOTARIZED" = true ]; then
+            umask 077
+            key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_ID.p8"
+            printf '%s' "$APPLE_API_KEY_P8_B64" | base64 --decode > "$key"
+            {
+              echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_ID"
+              echo "APPLE_API_KEY_PATH=$key"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Build universal DMG
+        working-directory: apps/mobile
+        run: npx tauri build --target universal-apple-darwin --bundles dmg --ci
+
+      - name: Verify signature
+        env:
+          SIGNED: ${{ steps.gate.outputs.signed }}
+          NOTARIZED: ${{ steps.gate.outputs.notarized }}
+        run: |
+          set -euo pipefail
+          app=$(find apps/mobile/src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)
+          test -n "$app" || { echo "::error::no .app produced"; exit 1; }
+          archs=$(lipo -archs "$app/Contents/MacOS/"*)
+          echo "archs: $archs"
+          [[ $archs == *x86_64* && $archs == *arm64* ]] || { echo "::error::not a universal binary"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | awk '/^(Authority|TeamIdentifier|Runtime)/'
+          if [ "$NOTARIZED" = true ]; then
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+          fi
+
+      - name: Stage DMG
+        run: |
+          set -euo pipefail
+          dmg=$(find apps/mobile/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
+          test -n "$dmg" || { echo "::error::no DMG produced"; exit 1; }
+          cp "$dmg" "PeckBoard-$VERSION-macos-universal.dmg"
+          shasum -a 256 "PeckBoard-$VERSION-macos-universal.dmg" | tee "PeckBoard-$VERSION-macos-universal.dmg.sha256"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: peckboard-macos-${{ env.VERSION }}
+          path: PeckBoard-*-macos-universal.dmg*
+          if-no-files-found: error
+
+      - name: Remove API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+
+  windows:
+    name: Windows installer
+    needs: version
+    if: needs.version.outputs.windows == 'true'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: mobile-windows
+          workspaces: apps/mobile/src-tauri -> target
+
+      - name: Install JS dependencies
+        working-directory: apps/mobile
+        run: npm ci
+
+      - name: Stamp version into tauri.conf.json
+        working-directory: apps/mobile/src-tauri
+        run: |
+          python - <<'EOF'
+          import json, os
+          p = "tauri.conf.json"
+          c = json.load(open(p))
+          c["version"] = os.environ["VERSION"]
+          json.dump(c, open(p, "w"), indent=2)
+          EOF
+
+      # Unsigned (no code-signing cert yet): SmartScreen warns on first run.
+      # WebView2 bootstrapper embedded (tauri.windows.conf.json).
+      - name: Build installers
+        working-directory: apps/mobile
+        run: npx tauri build --bundles nsis,msi --ci
+
+      - name: Stage installers
+        run: |
+          set -euo pipefail
+          b=apps/mobile/src-tauri/target/release/bundle
+          exe=$(find "$b/nsis" -name '*-setup.exe' -print -quit)
+          msi=$(find "$b/msi" -name '*.msi' -print -quit)
+          test -n "$exe" || { echo "::error::no NSIS installer produced"; exit 1; }
+          test -n "$msi" || { echo "::error::no MSI produced"; exit 1; }
+          cp "$exe" "PeckBoard-$VERSION-windows-x64-setup.exe"
+          cp "$msi" "PeckBoard-$VERSION-windows-x64.msi"
+          for f in "PeckBoard-$VERSION-windows-x64-setup.exe" "PeckBoard-$VERSION-windows-x64.msi"; do
+            sha256sum "$f" | tee "$f.sha256"
+          done
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: peckboard-windows-${{ env.VERSION }}
+          path: PeckBoard-*-windows-x64*
+          if-no-files-found: error
+
   release:
-    name: Attach APK to GitHub release
-    needs: [version, android]
+    name: Attach to GitHub release
+    needs: [version, android, macos, windows]
+    # Attach whatever built; a failed or skipped platform doesn't hold the
+    # others back.
     if: >-
-      needs.android.outputs.built == 'true' &&
+      always() &&
+      needs.version.result == 'success' &&
       needs.version.outputs.is_tag == 'true' &&
-      needs.version.outputs.upload == 'true'
+      needs.version.outputs.upload == 'true' &&
+      ((needs.android.result == 'success' && needs.android.outputs.built == 'true') ||
+       needs.macos.result == 'success' ||
+       needs.windows.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -441,11 +705,28 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.version.outputs.version }}
       CERT: ${{ needs.android.outputs.cert }}
+      MAC_SIGNED: ${{ needs.macos.outputs.signed }}
+      MAC_NOTARIZED: ${{ needs.macos.outputs.notarized }}
     steps:
       - name: Download APK artifact
+        if: needs.android.result == 'success' && needs.android.outputs.built == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: peckboard-android-${{ needs.version.outputs.version }}
+          path: assets
+
+      - name: Download DMG artifact
+        if: needs.macos.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: peckboard-macos-${{ needs.version.outputs.version }}
+          path: assets
+
+      - name: Download Windows artifact
+        if: needs.windows.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: peckboard-windows-${{ needs.version.outputs.version }}
           path: assets
 
       # --latest=false: server self-update reads releases/latest, which must
@@ -455,17 +736,34 @@ jobs:
         run: |
           set -euo pipefail
           apk="assets/peckboard-android-$VERSION.apk"
+          dmg="assets/PeckBoard-$VERSION-macos-universal.dmg"
+          exe="assets/PeckBoard-$VERSION-windows-x64-setup.exe"
+          sum() { cut -d' ' -f1 "$1.sha256"; }
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             {
-              echo "PeckBoard mobile app $VERSION."
-              echo
-              echo "Android: install \`peckboard-android-$VERSION.apk\` (sideload). iOS: TestFlight."
-              echo
-              echo "APK SHA-256: \`$(cut -d' ' -f1 "$apk.sha256")\`"
-              echo
-              echo "Signing cert SHA-256: \`$CERT\` (check with \`apksigner verify --print-certs\`)."
+              echo "PeckBoard app $VERSION. iOS: TestFlight."
+              if [ -f "$apk" ]; then
+                echo
+                echo "**Android**: install \`peckboard-android-$VERSION.apk\` (sideload)."
+                echo "APK SHA-256: \`$(sum "$apk")\`. Signing cert SHA-256: \`$CERT\` (check with \`apksigner verify --print-certs\`)."
+              fi
+              if [ -f "$dmg" ]; then
+                if [ "$MAC_NOTARIZED" = true ]; then
+                  how="Developer ID signed and notarized."
+                elif [ "$MAC_SIGNED" = true ]; then
+                  how="Developer ID signed, not notarized: if macOS blocks it, allow it in System Settings → Privacy & Security → Open Anyway."
+                else
+                  how="Not signed: after macOS blocks the first launch, allow it in System Settings → Privacy & Security → Open Anyway."
+                fi
+                echo
+                echo "**macOS** 11+ (Apple silicon and Intel): \`$(basename "$dmg")\`. $how SHA-256: \`$(sum "$dmg")\`."
+              fi
+              if [ -f "$exe" ]; then
+                echo
+                echo "**Windows** x64: \`$(basename "$exe")\` (or the \`.msi\`). Not code-signed: SmartScreen asks first — More info → Run anyway. SHA-256: \`$(sum "$exe")\`."
+              fi
             } > notes.md
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --title "PeckBoard Mobile $VERSION" --notes-file notes.md --latest=false
+              --title "PeckBoard App $VERSION" --notes-file notes.md --latest=false
           fi
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "$apk" "$apk.sha256"
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber assets/*

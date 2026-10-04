@@ -8,13 +8,18 @@ description = "PeckBoard mobile: secure storage, WebView config, lifecycle (Swif
 
 # First-party Tauri plugin for the PeckBoard mobile app. Native code lives in
 # `ios/` (Swift package) and `android/` (Kotlin library); the Rust side only
-# forwards calls. On desktop it falls back to a dev-only file store.
+# forwards calls. On desktop secrets go to the macOS Keychain / Windows
+# Credential Manager (`keyring`); Linux (dev only) uses a 0600 file.
 
 [dependencies]
 tauri = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+log = "0.4"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }

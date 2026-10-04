@@ -26,7 +26,8 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
-    "shortDescription": "Your PeckBoard, on your phone",
+    "publisher": "PeckBoard",
+    "shortDescription": "Your PeckBoard, from anywhere",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

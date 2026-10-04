@@ -3,7 +3,7 @@ name = "peckboard-mobile"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "PeckBoard for iOS and Android"
+description = "PeckBoard for iOS, Android, macOS and Windows"
 
 # Standalone Tauri 2 project with its own Cargo.lock (the repo root is a
 # package, not a workspace). Build/test with
@@ -36,6 +36,13 @@ tauri-plugin-deep-link = "2"
 
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-barcode-scanner = "2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# Desktop: a second launch (e.g. a clicked peckboard:// link on Windows /
+# Linux) hands its args to the running app; `deep-link` routes them to
+# `on_open_url`.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-window-state = "2"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 # Cold-launch deep links (`launch_url.rs`); already in the tree via tao.

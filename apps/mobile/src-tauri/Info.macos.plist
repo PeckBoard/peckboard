@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the macOS app's Info.plist (tauri.macos.conf.json). -->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>PeckBoard uses the microphone for voice conversations with your agents.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>PeckBoard connects directly to your box when it is on the same network.</string>
+	<!-- Plain HTTP only to the in-app loopback tunnel (127.0.0.1); no arbitrary loads. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

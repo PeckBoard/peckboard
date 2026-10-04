@@ -1,13 +1,16 @@
-# PeckBoard Mobile (iOS + Android)
+# PeckBoard App (iOS, Android, macOS, Windows)
 
-Tauri 2 app that pairs a phone with one or more PeckBoard boxes and shows
-each box's own web UI through a direct, end-to-end encrypted tunnel. Design:
-`tmp-scratch/mobile-design.md`; this is Phase 1 (pair + open UI).
+Tauri 2 app that pairs a phone or computer with one or more PeckBoard boxes
+and shows each box's own web UI through a direct, end-to-end encrypted
+tunnel. Design: `tmp-scratch/mobile-design.md`; this is Phase 1 (pair + open
+UI).
 
 - Bundle id / package: `com.peckboard.app`; display name **PeckBoard**.
-- Android: sideloaded APK. iOS: TestFlight (later). Desktop builds exist
-  only for `cargo check` / UI iteration — never shipped.
-- Releases use their own `mobile-X.Y.Z` tags (see Releasing the Mobile App).
+- Android: sideloaded APK. iOS: TestFlight. macOS: universal DMG (Developer
+  ID signed + notarized). Windows: x64 NSIS installer / MSI (unsigned).
+  Linux desktop builds exist only for `cargo check` / UI iteration — not
+  shipped.
+- Releases use their own `mobile-X.Y.Z` tags (see Releasing the App).
 
 ## Architecture
 
@@ -21,8 +24,11 @@ apps/mobile/
 │   ├── src/nav.rs              loopback/gate URLs + WebView navigation allow-list
 │   ├── src/commands.rs         shell-UI commands
 │   ├── capabilities/           IPC grants (shell UI only; box UI gets nothing)
-│   └── Info.ios.plist          merged into the generated iOS Info.plist
+│   ├── Info.ios.plist          merged into the generated iOS Info.plist
+│   ├── Info.macos.plist, Entitlements.macos.plist   macOS bundle (tauri.macos.conf.json)
+│   └── tauri.windows.conf.json NSIS/MSI + WebView2 bootstrapper
 └── plugins/peckboard-native/   first-party Tauri plugin (Rust + Swift + Kotlin)
+    ├── src/desktop.rs          Keychain / Credential Manager (keyring), wake detection
     ├── ios/Sources/…swift      Keychain, WKUIDelegate mic grant, lifecycle
     └── android/src/main/…      Keystore vault, WebChromeClient mic grant,
                                 lifecycle, manifest perms, network security config
@@ -58,14 +64,22 @@ is connected the WebView re-boots through the new key and lands back on the
 page it was on (`&next=`). A key that leaked while backgrounded is dead.
 The port is released only by disconnecting or switching box.
 
+Desktop windows aren't suspended, but laptops sleep (and wake on another
+network). The plugin's desktop half watches the wall clock; a jump of 30 s+
+between 5 s ticks is reported as background + foreground, so the same
+pause/resume path drops the stale tunnel and reconnects right away instead
+of waiting out QUIC's idle timeout and the retry backoff.
+
 **Secrets.** The pairing link (the only credential) is stored via the
 native plugin: iOS Keychain generic password,
 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, non-synchronizable;
 Android: AES-256-GCM key in the Android Keystore wrapping the value in
-app-private prefs; backups and device transfer are disabled. Non-secret
-metadata (name, relay, port, a public key fingerprint for duplicate
-detection) is `boxes.json` in the app data dir. Desktop uses a dev-only
-0600 file.
+app-private prefs; backups and device transfer are disabled; macOS Keychain /
+Windows Credential Manager (`keyring` crate, service `com.peckboard.app`).
+Non-secret metadata (name, relay, port, a public key fingerprint for
+duplicate detection) is `boxes.json` in the app data dir. Linux (dev only)
+uses a 0600 `dev-secrets.json`; on macOS / Windows a `dev-secrets.json`
+left by an older dev build is imported into the keychain once and deleted.
 
 **WebView hardening.**
 
@@ -89,7 +103,11 @@ detection) is `boxes.json` in the app data dir. Desktop uses a dev-only
 ## Prerequisites
 
 - Rust (stable), Node 20+, `npm install` in `apps/mobile`.
-- Desktop (Linux): webkit2gtk-4.1 dev packages (present on the dev box).
+- Desktop: Linux needs webkit2gtk-4.1 dev packages (present on the dev box);
+  macOS needs Xcode (universal builds: `rustup target add
+aarch64-apple-darwin x86_64-apple-darwin`); Windows needs the MSVC build
+  tools (WebView2 ships with Windows 11; the installer bootstraps it
+  elsewhere).
 - Android: JDK 17, Android SDK + NDK (`ANDROID_HOME`, `NDK_HOME`),
   `rustup target add aarch64-linux-android` (plus `armv7-linux-androideabi
 x86_64-linux-android i686-linux-android` for emulators).
@@ -106,8 +124,12 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo test  --manifest-path src-tauri/Cargo.toml
 
 # Shell UI in any browser with mocked IPC: npm run dev → http://localhost:1420/mock.html
-# Desktop window for UI iteration (no secure storage, no lifecycle)
+# Desktop window (Linux: dev file store; macOS / Windows: keychain)
 npx tauri dev
+
+# Desktop release bundles, on the target OS (CI does this on tags)
+npx tauri build --target universal-apple-darwin --bundles dmg   # macOS
+npx tauri build --bundles nsis,msi                              # Windows
 
 # Android — first time only, generates src-tauri/gen/android (commit it)
 npx tauri android init
@@ -126,7 +148,7 @@ by Gradle, and `Info.ios.plist` is merged by the Tauri CLI, so the generated
 on `allowBackup`/`networkSecurityConfig`, remove that attribute from
 `gen/android/app/src/main/AndroidManifest.xml`.
 
-Release builds, signing and publishing: see Releasing the Mobile App.
+Release builds, signing and publishing: see Releasing the App.
 
 ## Pair a Phone
 
@@ -151,6 +173,14 @@ launches the app is caught by `src/launch_url.rs` (iOS: tao drops the scene's
 launch URLs). Test on the simulator with
 `xcrun simctl openurl <udid> 'peckboard://pair/…'`.
 
+On desktop the scheme is registered by the macOS bundle's Info.plist, the
+Windows installer, and at runtime on Windows / Linux (`register_all`, which
+also covers dev runs). A link clicked while the app is already running
+starts a second process; `tauri-plugin-single-instance` (with its
+`deep-link` feature) ends it and hands the link to the running window,
+which comes to the front on the same confirm screen. Window size and
+position persist across launches (`tauri-plugin-window-state`).
+
 **Debug log.** Debug builds write `log` + `tracing` output (relay punch and
 QUIC traces included) to `debug.log` in the app data dir; on the simulator:
 `$(xcrun simctl get_app_container <udid> com.peckboard.app data)/Library/Application Support/com.peckboard.app/debug.log`.
@@ -159,16 +189,18 @@ QUIC traces included) to `debug.log` in the app data dir; on the simulator:
 
 ```bash
 cargo test --manifest-path apps/mobile/src-tauri/Cargo.toml
+cargo test --manifest-path apps/mobile/plugins/peckboard-native/Cargo.toml
 ```
 
 Covers link parsing, the store round trip (secret kept out of the JSON),
 port assignment/reuse, gate boot URL construction, the navigation
 allow-list, event → status mapping, and pause/resume releasing and
-rebinding the port. Device smoke tests (pair against
+rebinding the port; the plugin test covers the desktop `dev-secrets.json` →
+keychain import. Device smoke tests (pair against
 `peckboard-relay/examples/box_forward`, load `/`, WS connects) are manual
 for now.
 
-## Releasing the Mobile App
+## Releasing the App
 
 `.github/workflows/mobile-release.yml` ships the app on its own
 `mobile-X.Y.Z` tags, independent of server releases.
@@ -180,8 +212,9 @@ for now.
 CI stamps the version into `tauri.conf.json` on the runner: Android
 `versionCode` = `X*1000000 + Y*1000 + Z` (must only ever grow), iOS build
 number `<versionCode>.<run number>`. A manual run (Actions → Mobile Release →
-Run workflow) picks `ios` / `android` / `both`; `upload: false` is a dry run
-that only builds, signs and keeps the files as run artifacts.
+Run workflow) picks `all` / `mobile` / `desktop` / one platform;
+`upload: false` is a dry run that only builds, signs and keeps the files as
+run artifacts.
 
 **Secrets** (repo secrets, or the `ios-release` / `android-release`
 environments):
@@ -196,6 +229,12 @@ environments):
   the Android job is skipped with a notice; with a missing or different
   fingerprint it fails after printing the actual one. That key is the app's
   identity for sideloaded updates — never rotate it casually.
+- macOS: `APPLE_DEVELOPER_ID_P12_B64` (Developer ID Application cert +
+  private key, `.p12`, base64) and `APPLE_DEVELOPER_ID_P12_PASSWORD` — see
+  Creating the Developer ID Certificate. Notarization reuses the iOS App
+  Store Connect API key secrets. The macOS job runs in the `ios-release`
+  environment, so put the two new secrets there or at repo level.
+- Windows: none (unsigned).
 
 **iOS** goes to TestFlight (`xcrun altool --upload-app`). After App Store
 Connect finishes processing, add the build to an internal testing group;
@@ -209,3 +248,35 @@ To verify first: `sha256sum -c peckboard-android-X.Y.Z.apk.sha256` and
 `apksigner verify --print-certs peckboard-android-X.Y.Z.apk` — the cert
 SHA-256 must match the one in the release notes. Updates install over the
 old app only when signed with the same key.
+
+**macOS** builds a universal (Apple silicon + Intel) DMG, macOS 11+:
+`PeckBoard-X.Y.Z-macos-universal.dmg` + `.sha256` on the same release.
+Signed with the Developer ID cert under the hardened runtime
+(`Entitlements.macos.plist`: microphone only — outgoing network needs no
+entitlement outside the App Sandbox), then notarized and stapled with the
+App Store Connect API key. Without the Developer ID secrets the job warns
+and ships an ad-hoc signed DMG that users must allow in System Settings →
+Privacy & Security; without the API key it ships signed but un-notarized.
+
+**Windows** builds an unsigned x64 NSIS installer
+(`PeckBoard-X.Y.Z-windows-x64-setup.exe`) and MSI, per-user install, with
+the WebView2 bootstrapper embedded. SmartScreen warns on first run (More
+info → Run anyway) until a code-signing cert is added.
+
+### Creating the Developer ID Certificate
+
+Only the Apple Developer account holder can create one:
+
+1. On a Mac, Keychain Access → Certificate Assistant → _Request a
+   Certificate From a Certificate Authority…_ → your email, _Saved to
+   disk_ → a `.certSigningRequest` file.
+2. developer.apple.com → Certificates, Identifiers & Profiles →
+   Certificates → **+** → **Developer ID Application** (G2 Sub-CA) →
+   upload the CSR → download the `.cer` and double-click it to add it to
+   the login keychain.
+3. Keychain Access → My Certificates → right-click _Developer ID
+   Application: …_ (expand it: the private key must be included) →
+   Export → `.p12` with a strong password.
+4. `base64 -i DeveloperID.p12 | pbcopy` → secret
+   `APPLE_DEVELOPER_ID_P12_B64`; the password →
+   `APPLE_DEVELOPER_ID_P12_PASSWORD`. Delete the exported `.p12` afterwards.
