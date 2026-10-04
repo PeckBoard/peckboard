@@ -210,11 +210,13 @@ async fn paths() -> (PunchedPath, PunchedPath) {
             socket: a.into(),
             peer: ba,
             role: Role::Box,
+            relay_identity: None,
         },
         PunchedPath {
             socket: b.into(),
             peer: aa,
             role: Role::Device,
+            relay_identity: None,
         },
     )
 }
@@ -304,12 +306,14 @@ async fn stranger_cannot_block_the_paired_device() {
         socket: a.into(),
         peer: ba,
         role: Role::Box,
+        relay_identity: None,
     };
     tokio::spawn(async move { serve_box(bp, &bs, target, on_box).await });
     let dev_path = |sock: UdpSocket| PunchedPath {
         socket: sock.into(),
         peer: aa,
         role: Role::Device,
+        relay_identity: None,
     };
 
     // Right secret, wrong address: refused.
@@ -382,11 +386,13 @@ async fn proxied_paths() -> (PunchedPath, PunchedPath, tokio::task::JoinHandle<(
             socket: a.into(),
             peer: pa,
             role: Role::Box,
+            relay_identity: None,
         },
         PunchedPath {
             socket: b.into(),
             peer: pa,
             role: Role::Device,
+            relay_identity: None,
         },
         fwd,
     )

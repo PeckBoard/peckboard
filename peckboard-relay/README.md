@@ -312,6 +312,41 @@ and the relay only forwards its ciphertext.
   Over-limit datagrams are dropped silently. The protocol version a relay
   offers is visible in its ALPN list (no other new surface).
 
+## Registration Gate
+
+Each box has a permanent Ed25519 identity (`identity::BoxIdentity`,
+separate from the pairing keys). Protocol v3 (ALPN `peckrelay/3`, offered
+as `[v3, v2, v1]`) lets a box answer the challenge with `IdentityAuth`:
+the pairing signature plus its identity key and a signature over
+`"peckrelay/3 box-identity" ‖ key ‖ nonce ‖ rendezvous id ‖ TLS exporter`
+(single-session, like the pairing proof). Every v3 session then gets one
+`IdentityStatus { registered, gated }` right after the first `Registered`.
+v1/v2 clients never offer v3 and never see the new frames; v3 clients on an
+older relay negotiate v2 and report no status.
+
+- `--registration-gate` (`PECKRELAY_REGISTRATION_GATE`, default **off**):
+  only an id whose box slot proved a registered identity may use the relay
+  data channel; others are dropped like a full relay (`dropped_limit`).
+  Rendezvous, forwarding, punching and STUN never consult the registry.
+  A box told `registered: false, gated: true` doesn't offer the relay
+  fallback, so a hopeless punch fails as `PunchFailed`. Old boxes (no
+  identity) count as unregistered.
+- `--registration-pow-bits` (`PECKRELAY_REGISTRATION_POW_BITS`, default 18).
+- Registry: `<state-dir>/registered-boxes.txt`, one
+  `<base64url key> <registered_at unix secs>` per line, written atomically
+  (0600). A running relay re-checks its mtime every 30 s (edits/revokes take
+  effect without a restart; a file that fails to parse keeps the last good
+  set). Admin: `peckboard-relay registry list|add <key>|revoke <key>
+[--state-dir DIR]` — run it as the service user (`sudo -u peckrelay`) so
+  the file stays readable by the relay.
+- Registration page, on the same :443 listener for TLS clients that
+  negotiate `http/1.1` or no ALPN (one request per connection, per-IP rate
+  limited): `GET /register` (static page; box key in the URL fragment,
+  proof of work `sha256("peckrelay-register:<nonce>:<key>:<n>")` solved in
+  the browser with WebCrypto), `GET /api/register/challenge`,
+  `POST /api/register` (form `key`, `nonce`, `solution`), and
+  `GET /api/registered?key=` → `{"registered":bool}`. Everything else is 404. Registration works with the gate off, so boxes can pre-register.
+
 ## Non-Discoverability
 
 - Unknown id, bad signature, wrong pubkey, malformed Hello/Auth all get the
@@ -319,8 +354,9 @@ and the relay only forwards its ciphertext.
   Registered at the same fixed delay → Pong), and nothing else.
 - STUN replies only to requests whose MESSAGE-INTEGRITY verifies against a
   credential issued over TLS; everything else is silently dropped.
-- No HTTP, no banners, no status/metrics/version endpoints. Clients offering
-  other ALPNs fail the TLS handshake; no ALPN → bare close.
+- No banners, no status/metrics/version endpoints; the only HTTP is the
+  registration page above. Clients offering other ALPNs fail the TLS
+  handshake.
 - Logs never contain ids or secrets; client IPs are a salted 4-byte hash
   unless `--log-full-ips`.
 - Admin is local only: flags, `SIGUSR1` (toggle debug logs), `SIGTERM`.

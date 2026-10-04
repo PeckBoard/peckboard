@@ -48,7 +48,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
 
+pub use crate::client::IdentityStatus;
 use crate::client::{ClientConfig, Event, RelayClient};
+pub use crate::identity::BoxIdentity;
 use crate::keys::{PairingSecret, SECRET_LEN};
 use crate::proto::Role;
 
@@ -124,6 +126,9 @@ pub struct PunchedPath {
     /// STUN-observed endpoint (relayed).
     pub peer: SocketAddr,
     pub role: Role,
+    /// What the relay said about our box identity when this path was set
+    /// up (`None`: the relay predates identities). See [`IdentityStatus`].
+    pub relay_identity: Option<IdentityStatus>,
 }
 
 impl PunchedPath {
@@ -298,6 +303,26 @@ pub async fn relay_config(host: &str) -> anyhow::Result<ClientConfig> {
     Ok(ClientConfig::webpki(addr, name))
 }
 
+/// The relay's box registration page for identity `key`:
+/// `https://<relay_host>/register#<base64url key>`. The key travels in the
+/// fragment, so it never reaches a server log.
+pub fn registration_url(relay_host: &str, key: &[u8; 32]) -> String {
+    format!(
+        "https://{}/register#{}",
+        relay_host.trim_end_matches('/'),
+        crate::identity::encode_key(key)
+    )
+}
+
+/// Is box identity `key` registered with the relay at `host[:port]`? One
+/// HTTPS request ([`crate::client::registration_status`]); poll it while
+/// the user registers, then reconnect (a session's
+/// [`PunchedPath::relay_identity`] is fixed at handshake time).
+pub async fn registration_status(relay_host: &str, key: &[u8; 32]) -> anyhow::Result<bool> {
+    let cfg = relay_config(relay_host).await?;
+    crate::client::registration_status(&cfg, key).await
+}
+
 // ---- rendezvous + punch -------------------------------------------------
 
 /// An extra address to advertise to the peer as a punch candidate.
@@ -319,6 +344,9 @@ pub struct Registration {
     pub public: SocketAddr,
     /// Every candidate sent to the peer (LAN + advertised).
     pub candidates: Vec<SocketAddr>,
+    /// The relay's verdict on our box identity (`None`: relay predates
+    /// identities).
+    pub identity: Option<IdentityStatus>,
 }
 
 pub type OnRegistered = Arc<dyn Fn(&Registration) + Send + Sync>;
@@ -341,7 +369,14 @@ pub struct EstablishOptions {
     pub public_ip_hint: Option<IpAddr>,
     pub on_registered: Option<OnRegistered>,
     /// Relaying through the rendezvous server when punching fails.
+    /// Relaying through the rendezvous server when punching fails.
     pub fallback: RelayFallback,
+    /// Box side: the box's permanent identity, proven to a v3 relay so it
+    /// may relay while the relay's registration gate is on. When the relay
+    /// reports it unregistered on a gated relay, the box doesn't offer the
+    /// relay fallback (a failed punch is [`TunnelError::PunchFailed`]).
+    /// Ignored for devices.
+    pub identity: Option<BoxIdentity>,
     /// Don't offer the LAN candidate (tests: on loopback it would always
     /// punch).
     #[doc(hidden)]
@@ -355,6 +390,7 @@ impl fmt::Debug for EstablishOptions {
             .field("advertise", &self.advertise)
             .field("public_ip_hint", &self.public_ip_hint)
             .field("fallback", &self.fallback)
+            .field("identity", &self.identity)
             .finish_non_exhaustive()
     }
 }
@@ -439,9 +475,13 @@ pub async fn establish_with(
     role: Role,
     opts: &EstablishOptions,
 ) -> anyhow::Result<PunchedPath> {
-    let mut relay = RelayClient::connect(cfg, secret, role)
+    let identity = (role == Role::Box)
+        .then_some(opts.identity.as_ref())
+        .flatten();
+    let mut relay = RelayClient::connect_with_identity(cfg, secret, role, identity)
         .await
         .context("connect to relay")?;
+    let relay_identity = relay.identity_status();
     let v4 = cfg.relay.is_ipv4();
     let bind: SocketAddr = if v4 {
         "0.0.0.0:0".parse()?
@@ -483,11 +523,19 @@ pub async fn establish_with(
             local_port: port,
             public,
             candidates: cands.clone(),
+            identity: relay_identity,
         });
     }
     // Relay fallback needs protocol v2 on both sessions: we know ours, the
-    // peer tells us with a sealed RELAY_CAP once both are online.
-    let relay_ok = opts.fallback.enabled && relay.protocol_version() >= 2;
+    // peer tells us with a sealed RELAY_CAP once both are online. A box the
+    // relay won't relay for (gated, identity unregistered) never offers it,
+    // so the device doesn't try either. (A device's own status says nothing
+    // about its box.)
+    let gate_ok = role != Role::Box || relay_identity.is_none_or(|s| s.relay_permitted());
+    if !gate_ok {
+        tracing::info!("tunnel: relay fallback unavailable, box identity not registered");
+    }
+    let relay_ok = opts.fallback.enabled && relay.protocol_version() >= 2 && gate_ok;
     let mut peer_relay = false;
     let mut peer_public: Option<SocketAddr> = None;
     let mut failures = 0u32;
@@ -549,7 +597,12 @@ pub async fn establish_with(
                     peer_public = Some(p.peer_public);
                     match relay.punch(&sock, &p, PUNCH_TIMEOUT).await {
                         Ok(peer) => {
-                            return Ok(PunchedPath { socket: sock.into(), peer, role });
+                            return Ok(PunchedPath {
+                                socket: sock.into(),
+                                peer,
+                                role,
+                                relay_identity,
+                            });
                         }
                         Err(_) => {
                             failures += 1;
@@ -599,6 +652,7 @@ async fn go_relayed(
         ?role,
         "tunnel: no direct path, relaying through the rendezvous server"
     );
+    let relay_identity = relay.identity_status();
     Ok(PunchedPath {
         socket: PathSocket::Relayed(RelayedPath::new(
             relay,
@@ -615,6 +669,7 @@ async fn go_relayed(
             SocketAddr::new(a.ip().to_canonical(), a.port())
         },
         role,
+        relay_identity,
     })
 }
 

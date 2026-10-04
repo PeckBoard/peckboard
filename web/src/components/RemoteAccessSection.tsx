@@ -27,6 +27,18 @@ interface RemoteDevice {
   status: DeviceStatus
 }
 
+/** Relay registration of this box's identity key. */
+interface Registration {
+  /** False until the relay has said anything — one that predates relay
+   *  registration never does, and then nothing is shown. */
+  supported: boolean
+  registered: boolean | null
+  /** The relay requires a registered box for the relayed fallback. */
+  gated: boolean | null
+  /** The relay's registration page for this box. */
+  url: string
+}
+
 interface Overview {
   enabled: boolean
   relay_host: string
@@ -34,6 +46,7 @@ interface Overview {
   udp_port_count: number
   public_address: string
   devices: RemoteDevice[]
+  registration: Registration
 }
 
 interface Pairing {
@@ -43,6 +56,8 @@ interface Pairing {
 }
 
 const POLL_MS = 5000
+/** Stop polling for a registration the admin never finished. */
+const REGISTRATION_WAIT_MS = 10 * 60_000
 
 const STATE_LABEL: Record<DeviceStatus['state'], string> = {
   offline: 'offline',
@@ -285,6 +300,8 @@ export default function RemoteAccessSection() {
   const [revokeError, setRevokeError] = useState<string | null>(null)
   const [direct, setDirect] = useState<DirectForm>({ base: '', count: '10', publicAddress: '' })
   const [directServerErrors, setDirectServerErrors] = useState<DirectErrors>({})
+  /** When the relay's registration page was opened; polling until registered. */
+  const [regWaitingSince, setRegWaitingSince] = useState<number | null>(null)
 
   const load = useCallback(
     () =>
@@ -311,6 +328,41 @@ export default function RemoteAccessSection() {
     const t = setInterval(() => void load(), POLL_MS)
     return () => clearInterval(t)
   }, [load])
+
+  /** One status request to the relay through the box (never from the browser). */
+  const refreshRegistration = useCallback(async () => {
+    try {
+      const r = await api<Registration>('/api/remote-access/registration/refresh', {
+        method: 'POST',
+      })
+      setData((d) => (d ? { ...d, registration: r } : d))
+      if (r.registered) setRegWaitingSince(null)
+      return r
+    } catch {
+      return null
+    }
+  }, [])
+
+  // Must run inside a click handler, or popup blockers eat the tab.
+  const openRegistration = (url: string) => {
+    window.open(url, '_blank', 'noopener')
+    setRegWaitingSince(Date.now())
+  }
+
+  const registration = data?.registration
+  const registered = registration?.registered === true
+  const regWaiting = regWaitingSince !== null && !registered
+  // While the admin registers in the other tab, poll the box (which asks
+  // the relay, rate-limited) until it says registered — or give up.
+  useEffect(() => {
+    if (!regWaiting) return
+    const since = regWaitingSince ?? 0
+    const t = setInterval(() => {
+      if (Date.now() - since > REGISTRATION_WAIT_MS) setRegWaitingSince(null)
+      else void refreshRegistration()
+    }, POLL_MS)
+    return () => clearInterval(t)
+  }, [regWaiting, regWaitingSince, refreshRegistration])
 
   const putSettings = async (body: {
     enabled?: boolean
@@ -396,7 +448,11 @@ export default function RemoteAccessSection() {
       <div className="theme-toggle">
         <button
           className={`theme-btn ${!enabled ? 'active' : ''}`}
-          onClick={() => enabled && void putSettings({ enabled: false })}
+          onClick={() => {
+            if (!enabled) return
+            setRegWaitingSince(null)
+            void putSettings({ enabled: false })
+          }}
           disabled={saving || !data}
           data-testid="remote-access-off"
         >
@@ -404,13 +460,50 @@ export default function RemoteAccessSection() {
         </button>
         <button
           className={`theme-btn ${enabled ? 'active' : ''}`}
-          onClick={() => !enabled && setConfirmEnable(true)}
+          onClick={() => {
+            if (enabled) return
+            setConfirmEnable(true)
+            // Know the registration status by the time the admin confirms,
+            // so the confirm click itself can open the relay's page.
+            void refreshRegistration()
+          }}
           disabled={saving || !data}
           data-testid="remote-access-on"
         >
           On
         </button>
       </div>
+      {enabled && registration?.supported && (
+        <div
+          className="settings-row"
+          style={{ alignItems: 'center' }}
+          data-testid="remote-registration"
+        >
+          <span
+            className="form-hint"
+            style={{ margin: 0 }}
+            data-testid="remote-registration-status"
+          >
+            {registered
+              ? `Registered with ${data?.relay_host}`
+              : regWaiting
+                ? 'Waiting for registration — complete the Register step in the opened tab.'
+                : registration.gated === false
+                  ? `Not registered with ${data?.relay_host}. Everything works today; register so the relayed fallback keeps working once the relay requires it.`
+                  : 'Not registered — relayed fallback unavailable. Direct connections still work; register to let the relay carry traffic when no direct path exists.'}
+          </span>
+          {!registered && (
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => openRegistration(registration.url)}
+              data-testid="remote-registration-open"
+            >
+              {regWaiting ? 'Open again' : 'Register'}
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="form-field">
         <label className="form-label" htmlFor="remote-relay-host">
@@ -590,13 +683,19 @@ export default function RemoteAccessSection() {
       {confirmEnable && (
         <ConfirmDialog
           title="Turn on remote access?"
-          message="This server registers with the relay for every paired device, and anyone holding a device's pairing link can then reach it from the internet (they still have to log in). Revoke devices you no longer use."
+          message="This server registers with the relay for every paired device, and anyone holding a device's pairing link can then reach it from the internet (they still have to log in). Revoke devices you no longer use. If this server isn't registered with the relay yet, its registration page opens in a new tab."
           confirmLabel="Turn on"
           cancelLabel="Keep off"
           testId="remote-access-enable-confirm"
           onConfirm={() => {
+            // Synchronously, in the click: popup blockers allow it here.
+            if (registration?.supported && registration.registered === false && registration.url) {
+              openRegistration(registration.url)
+            }
             setConfirmEnable(false)
-            void putSettings({ enabled: true })
+            void putSettings({ enabled: true }).then((ok) => {
+              if (ok) void refreshRegistration()
+            })
           }}
           onCancel={() => setConfirmEnable(false)}
         />

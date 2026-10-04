@@ -26,6 +26,11 @@ use tokio::task::JoinSet;
 
 use super::secret::DeviceSecret;
 
+/// The box's permanent identity key (relay registration), and the relay's
+/// verdict on it for one session.
+pub use peckboard_relay::identity::BoxIdentity;
+pub use peckboard_relay::tunnel::IdentityStatus;
+
 /// Request extension present on every request that came through a relay
 /// tunnel. Loopback-trusting routes must refuse requests carrying it.
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +75,9 @@ pub struct Registered {
     pub public: SocketAddr,
     /// Every candidate sent to the device (LAN + advertised).
     pub candidates: Vec<SocketAddr>,
+    /// The relay's verdict on the box identity for this session (`None`:
+    /// the relay predates relay registration).
+    pub identity: Option<IdentityStatus>,
 }
 
 pub type OnRegistered = Arc<dyn Fn(Registered) + Send + Sync>;
@@ -80,15 +88,22 @@ pub type OnRegistered = Arc<dyn Fn(Registered) + Send + Sync>;
 #[async_trait::async_trait]
 pub trait TunnelBackend: Send + Sync + 'static {
     /// Register as the box for this pairing and return once the device
-    /// has shown up and the punch succeeded. `on_registered` fires once
-    /// the relay knows our endpoint.
+    /// has shown up and the punch succeeded. `identity` is proven to the
+    /// relay so a registered box may use the relayed fallback when the
+    /// relay's registration gate is on. `on_registered` fires once the
+    /// relay knows our endpoint.
     async fn establish(
         &self,
         relay_host: &str,
         secret: &DeviceSecret,
         direct: &DirectOptions,
+        identity: Option<&BoxIdentity>,
         on_registered: OnRegistered,
     ) -> anyhow::Result<Box<dyn PunchedTunnel>>;
+
+    /// Is box identity `key` registered with the relay? One HTTPS request;
+    /// errors on relays that predate relay registration.
+    async fn registration_status(&self, relay_host: &str, key: &[u8; 32]) -> anyhow::Result<bool>;
 }
 
 /// A punched path to one device, not yet serving.
@@ -101,6 +116,10 @@ pub trait PunchedTunnel: Send {
     /// end-to-end encrypted tunnel).
     fn path(&self) -> &'static str {
         "direct"
+    }
+    /// The relay's verdict on the box identity when this path was set up.
+    fn relay_identity(&self) -> Option<IdentityStatus> {
+        None
     }
     /// Accept the device's QUIC connection and forward every stream to
     /// `target`. Returns when the connection ends.

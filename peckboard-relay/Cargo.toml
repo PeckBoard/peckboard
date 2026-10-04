@@ -26,7 +26,7 @@ client = []
 # Direct box<->device data path: QUIC over the hole-punched UDP socket,
 # mutually authenticated with keys derived from the pairing secret, plus the
 # device reconnect loop (`run_device`, cancellable) and its cookie gate.
-tunnel = ["client", "dep:quinn", "dep:base64", "dep:rcgen", "dep:tokio-util"]
+tunnel = ["client", "dep:quinn", "dep:rcgen", "dep:tokio-util"]
 # The relay server itself (`server`/`tls`/`limits` modules + the binary):
 # ACME, CLI and log-subscriber deps that peers never need.
 server = [
@@ -58,6 +58,10 @@ required-features = ["client", "server"]
 name = "relay_fallback"
 required-features = ["tunnel", "server"]
 
+[[test]]
+name = "registration"
+required-features = ["tunnel", "server"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }
@@ -87,7 +91,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
-base64 = { version = "0.22", optional = true }
+# Pairing links, box identity keys (registration URLs, registry file).
+base64 = "0.22"
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }

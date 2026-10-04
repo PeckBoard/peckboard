@@ -1,5 +1,6 @@
 //! Signaling wire protocol, spoken inside TLS 1.3 under ALPN [`ALPN`] (or
-//! [`ALPN_V2`], which adds the relay data channel).
+//! [`ALPN_V2`], which adds the relay data channel, or [`ALPN_V3`], which
+//! adds the box identity).
 //!
 //! Frames are `u32` big-endian length + payload, payload = type byte +
 //! fixed fields. Variable-length blobs carry a `u16` length prefix; a v2
@@ -18,6 +19,17 @@ pub const ALPN: &[u8] = b"peckrelay/1";
 /// [`ALPN`] and picks it, an old client never offers v2. v2 frames are only
 /// ever sent on a v2 session.
 pub const ALPN_V2: &[u8] = b"peckrelay/2";
+/// Protocol v3 = v2 + box identity: a box may answer the challenge with
+/// [`ClientMsg::IdentityAuth`] (pairing proof + proof of possession of its
+/// permanent identity key, [`crate::identity`]), and every v3 session gets
+/// one [`ServerMsg::IdentityStatus`] right after the first
+/// [`ServerMsg::Registered`]. Negotiated like v2: a v3 client offers
+/// `[ALPN_V3, ALPN_V2, ALPN]`; older relays pick v2/v1 and never see the
+/// new frames, older clients never offer v3 and never receive them.
+pub const ALPN_V3: &[u8] = b"peckrelay/3";
+/// ALPN a browser offers; the relay answers it (or no ALPN at all) with the
+/// registration page instead of the signaling protocol.
+pub const ALPN_HTTP1: &[u8] = b"http/1.1";
 /// Hard cap on one frame's payload.
 pub const MAX_FRAME: usize = 8 * 1024;
 /// Hard cap on an opaque peer blob (E2E-sealed message or candidate list).
@@ -80,6 +92,14 @@ pub enum ClientMsg {
     Data {
         packet: Vec<u8>,
     },
+    /// v3, box only, instead of [`ClientMsg::Auth`]: the pairing signature
+    /// plus the box identity key and its session-bound proof of possession
+    /// ([`crate::identity::identity_message`]).
+    IdentityAuth {
+        signature: [u8; 64],
+        identity_key: [u8; 32],
+        identity_signature: [u8; 64],
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,9 +133,17 @@ pub enum ServerMsg {
     Data {
         packet: Vec<u8>,
     },
+    /// v3: whether the identity this session proved is registered, and
+    /// whether the relay currently requires that for relayed data (the
+    /// registration gate). A session that proved no identity (devices, old
+    /// boxes, decoys) gets `registered: false`.
+    IdentityStatus {
+        registered: bool,
+        gated: bool,
+    },
 }
-
 #[derive(Debug, thiserror::Error)]
+
 pub enum ProtoError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -286,6 +314,16 @@ impl ClientMsg {
                 o.push(0x10);
                 o.extend_from_slice(packet);
             }
+            ClientMsg::IdentityAuth {
+                signature,
+                identity_key,
+                identity_signature,
+            } => {
+                o.push(0x08);
+                o.extend_from_slice(signature);
+                o.extend_from_slice(identity_key);
+                o.extend_from_slice(identity_signature);
+            }
         }
         o
     }
@@ -308,6 +346,11 @@ impl ClientMsg {
             0x07 => ClientMsg::RefreshStun,
             0x10 => ClientMsg::Data {
                 packet: r.packet()?,
+            },
+            0x08 => ClientMsg::IdentityAuth {
+                signature: r.arr()?,
+                identity_key: r.arr()?,
+                identity_signature: r.arr()?,
             },
             _ => return Err(ProtoError::Malformed),
         };
@@ -361,6 +404,10 @@ impl ServerMsg {
                 o.push(0x90);
                 o.extend_from_slice(packet);
             }
+            ServerMsg::IdentityStatus { registered, gated } => {
+                o.push(0x88);
+                o.push(u8::from(*registered) | (u8::from(*gated) << 1));
+            }
         }
         o
     }
@@ -389,6 +436,16 @@ impl ServerMsg {
             0x90 => ServerMsg::Data {
                 packet: r.packet()?,
             },
+            0x88 => {
+                let flags = r.u8()?;
+                if flags & !0b11 != 0 {
+                    return Err(ProtoError::Malformed);
+                }
+                ServerMsg::IdentityStatus {
+                    registered: flags & 1 != 0,
+                    gated: flags & 2 != 0,
+                }
+            }
             _ => return Err(ProtoError::Malformed),
         };
         r.finish()?;
@@ -435,5 +492,23 @@ mod tests {
         let mut big = vec![0x10];
         big.resize(MAX_PACKET + 2, 0);
         assert!(ClientMsg::decode(&big).is_err());
+    }
+
+    #[test]
+    fn v3_identity_frames_roundtrip() {
+        let c = ClientMsg::IdentityAuth {
+            signature: [1; 64],
+            identity_key: [2; 32],
+            identity_signature: [3; 64],
+        };
+        let mut b = c.encode();
+        assert_eq!(ClientMsg::decode(&b).unwrap(), c);
+        b.pop();
+        assert!(ClientMsg::decode(&b).is_err());
+        for (registered, gated) in [(false, false), (true, false), (false, true), (true, true)] {
+            let s = ServerMsg::IdentityStatus { registered, gated };
+            assert_eq!(ServerMsg::decode(&s.encode()).unwrap(), s);
+        }
+        assert!(ServerMsg::decode(&[0x88, 4]).is_err());
     }
 }

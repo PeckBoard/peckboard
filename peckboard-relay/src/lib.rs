@@ -7,10 +7,13 @@
 
 #[cfg(feature = "client")]
 pub mod client;
+pub mod identity;
 pub mod keys;
 #[cfg(feature = "server")]
 pub mod limits;
 pub mod proto;
+#[cfg(feature = "server")]
+pub mod registry;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod stun;

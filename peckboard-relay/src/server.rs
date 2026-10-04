@@ -1,8 +1,9 @@
 //! The rendezvous relay.
 //!
 //! State is memory-only: `rendezvous id → (public key, two peer slots)`
-//! plus the short-lived STUN credentials. Nothing touches disk; a restart
-//! forgets everything and peers simply re-register.
+//! plus the short-lived STUN credentials. The one exception is the box
+//! registry ([`crate::registry`]); a restart forgets everything else and
+//! peers simply re-register.
 //!
 //! Indistinguishability: a connection whose Hello/Auth is malformed, names
 //! an unknown id it can't prove, or carries a bad signature is put in
@@ -31,6 +32,15 @@
 //! cut off. New ids are budgeted per address; never-paired ids expire after
 //! minutes, and a full id table drops the longest-idle id. Relay pair slots
 //! are capped per address and shared max-min fairly between addresses.
+//!
+//! Registration gate (protocol v3, see [`crate::proto::ALPN_V3`]): a box may
+//! prove possession of its permanent identity key during the handshake.
+//! With [`RelayConfig::registration_gate`] on, an id may only use the relay
+//! data channel while its box slot holds an identity in the [`Registry`];
+//! otherwise its datagrams are dropped like any other refused relay pair.
+//! Rendezvous, forwarding, punching and STUN never look at the registry.
+//! Boxes register on the HTTP page served on the same listener to clients
+//! that negotiate no peckrelay ALPN (see [`http`]).
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -49,12 +59,17 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
 
+use crate::identity::verify_identity;
 use crate::keys::{EXPORTER_LABEL, EXPORTER_LEN, SEALED_OVERHEAD, verify_auth};
 use crate::limits::{ConnCounter, PrefixCaps, RateLimiter, TokenBucket, canonical_ip, ip_tag};
 use crate::proto::{
-    ALPN, ALPN_V2, ClientMsg, MAX_BLOB, ProtoError, Role, ServerMsg, read_frame, write_frame,
+    ALPN, ALPN_HTTP1, ALPN_V2, ALPN_V3, ClientMsg, MAX_BLOB, ProtoError, Role, ServerMsg,
+    read_frame, write_frame,
 };
+use crate::registry::Registry;
 use crate::stun;
+
+pub mod http;
 
 /// Default global connection cap. `LimitNOFILE` is 16384; at ~100 KiB of
 /// TLS state + bounded queues per session this stays well inside the
@@ -185,6 +200,22 @@ pub struct RelayConfig {
     pub drain_window: Duration,
     /// One frame must be written within this.
     pub write_timeout: Duration,
+    /// Only boxes with a registered identity may use the relay data channel
+    /// (rendezvous, punching and STUN stay open). Registration itself works
+    /// either way.
+    pub registration_gate: bool,
+    /// Leading zero bits the registration proof of work needs.
+    pub registration_pow_bits: u8,
+    /// How long a registration challenge stays valid (single use).
+    pub registration_challenge_ttl: Duration,
+    /// Outstanding registration challenges, relay-wide.
+    pub registration_max_challenges: usize,
+    /// Registration-page HTTP requests per second per IP (v6: /64, /56 ×2,
+    /// /48 ×4) and burst, plus the relay-wide ceiling.
+    pub http_rate_per_ip: f64,
+    pub http_burst_per_ip: f64,
+    pub http_rate_global: f64,
+    pub http_burst_global: f64,
 }
 
 impl Default for RelayConfig {
@@ -240,6 +271,14 @@ impl Default for RelayConfig {
             min_drain_rate: 4096.0,
             drain_window: Duration::from_secs(15),
             write_timeout: Duration::from_secs(10),
+            registration_gate: false,
+            registration_pow_bits: 18,
+            registration_challenge_ttl: Duration::from_secs(300),
+            registration_max_challenges: 10_000,
+            http_rate_per_ip: 0.5,
+            http_burst_per_ip: 20.0,
+            http_rate_global: 50.0,
+            http_burst_global: 500.0,
         }
     }
 }
@@ -426,6 +465,8 @@ struct Slot {
     out: Outbox,
     public: Option<SocketAddr>,
     candidates: Vec<u8>,
+    /// Box identity key this session proved possession of (v3).
+    identity: Option<[u8; 32]>,
 }
 
 /// An id's relay pair slot.
@@ -595,6 +636,12 @@ struct Shared {
     epoch: Instant,
     shutdown: CancellationToken,
     tasks: TaskTracker,
+    /// Registered box identities (the registration gate).
+    registry: Arc<Registry>,
+    /// Registration-page requests per IP + global.
+    http_limiter: RateLimiter,
+    /// Outstanding proof-of-work challenges → expiry (single use).
+    pow_challenges: Mutex<HashMap<[u8; 16], Instant>>,
 }
 
 impl Shared {
@@ -642,9 +689,23 @@ fn take_msg_token(cfg: &RelayConfig, b: &mut (f64, Instant), now: Instant) -> bo
 }
 
 impl Relay {
-    /// `stun_port` is the UDP port advertised to peers in `Registered`.
+    /// `stun_port` is the UDP port advertised to peers in `Registered`. The
+    /// box registry is in-memory only; see [`Relay::with_registry`].
     pub fn new(cfg: RelayConfig, stun_port: u16) -> Self {
+        Self::with_registry(cfg, stun_port, Arc::new(Registry::in_memory()))
+    }
+
+    /// [`Relay::new`] with a (typically file-backed) box registry.
+    pub fn with_registry(cfg: RelayConfig, stun_port: u16, registry: Arc<Registry>) -> Self {
         let shared = Shared {
+            registry,
+            http_limiter: RateLimiter::new(
+                cfg.http_rate_per_ip,
+                cfg.http_burst_per_ip,
+                cfg.http_rate_global,
+                cfg.http_burst_global,
+            ),
+            pow_challenges: Mutex::new(HashMap::new()),
             conn_limiter: RateLimiter::new(
                 cfg.conn_rate_per_ip,
                 cfg.conn_burst_per_ip,
@@ -701,6 +762,12 @@ impl Relay {
     /// never exposed over the network).
     pub fn id_count(&self) -> usize {
         self.shared.ids.lock().unwrap().map.len()
+    }
+
+    /// The box registry the registration gate consults (and the
+    /// registration page adds to).
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.shared.registry
     }
 
     /// Aggregate relay-data counters (tests / local logs only — never
@@ -760,7 +827,9 @@ impl Relay {
         s.stun_limiter.prune();
         s.new_id_limiter.prune();
         s.relay_limiter.prune();
-        s.creds.lock().unwrap().retain(|_, c| c.expires > now);
+        s.relay_limiter.prune();
+        s.http_limiter.prune();
+        s.pow_challenges.lock().unwrap().retain(|_, exp| *exp > now);
         {
             let mut guard = s.ids.lock().unwrap();
             let ids = &mut *guard;
@@ -930,22 +999,31 @@ impl Relay {
                 _ => return,
             },
         };
-        let (version, exporter) = {
+        let (version, http, exporter) = {
             let conn = tls.get_ref().1;
-            let version = match conn.alpn_protocol() {
+            let alpn = conn.alpn_protocol();
+            let version = match alpn {
                 Some(p) if p == ALPN => Some(1u8),
                 Some(p) if p == ALPN_V2 => Some(2u8),
+                Some(p) if p == ALPN_V3 => Some(3u8),
                 _ => None,
             };
+            // A browser: `http/1.1`, or no ALPN at all (peers always offer
+            // one).
+            let http = alpn.is_none_or(|p| p == ALPN_HTTP1);
             let mut ex = [0u8; EXPORTER_LEN];
             let ex_ok = conn
                 .export_keying_material(&mut ex, EXPORTER_LABEL, None)
                 .is_ok();
-            (version.filter(|_| ex_ok), ex)
+            (version.filter(|_| ex_ok), http, ex)
         };
+        if http {
+            self.serve_http(tls, ip, deadline).await;
+            return;
+        }
         let Some(version) = version else {
-            // Wrong / missing ALPN (incl. completed acme-tls/1 validations):
-            // close without sending application data.
+            // Wrong ALPN (incl. completed acme-tls/1 validations): close
+            // without sending application data.
             let mut tls = tls;
             let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, tls.shutdown()).await;
             return;
@@ -1025,20 +1103,45 @@ impl Relay {
                     rendezvous_id,
                     public_key,
                 }),
-                Some(ClientMsg::Auth { signature }),
+                Some(auth),
             ) => {
-                let sig_ok = verify_auth(
-                    &public_key,
-                    &nonce,
-                    &rendezvous_id,
-                    role,
-                    &exporter,
-                    &signature,
-                );
-                Some((role, rendezvous_id, public_key, sig_ok))
+                let (signature, identity) = match auth {
+                    ClientMsg::Auth { signature } => (Some(signature), None),
+                    // v3, and only a box has an identity.
+                    ClientMsg::IdentityAuth {
+                        signature,
+                        identity_key,
+                        identity_signature,
+                    } if version >= 3 && role == Role::Box => {
+                        (Some(signature), Some((identity_key, identity_signature)))
+                    }
+                    _ => (None, None),
+                };
+                signature.map(|signature| {
+                    let sig_ok = verify_auth(
+                        &public_key,
+                        &nonce,
+                        &rendezvous_id,
+                        role,
+                        &exporter,
+                        &signature,
+                    );
+                    // Judged on its own, never on the pairing outcome: the
+                    // status we report must not tell a decoy apart.
+                    let identity = identity
+                        .filter(|(k, sig)| {
+                            verify_identity(k, &nonce, &rendezvous_id, &exporter, sig)
+                        })
+                        .map(|(k, _)| k);
+                    (role, rendezvous_id, public_key, sig_ok, identity)
+                })
             }
             _ => None,
         };
+        // Looked up before the fixed delay, which masks its cost too.
+        let id_registered = claim
+            .and_then(|c| c.4)
+            .is_some_and(|k| s.registry.contains(&k));
 
         let kicked = tokio::select! {
             _ = kick.cancelled() => true,
@@ -1049,9 +1152,16 @@ impl Relay {
             return;
         }
 
-        let binding = claim
-            .and_then(|(role, rid, pk, sig_ok)| self.register(role, rid, pk, sig_ok, &meta, &out));
+        let binding = claim.and_then(|(role, rid, pk, sig_ok, identity)| {
+            self.register(role, rid, pk, sig_ok, identity, &meta, &out)
+        });
         let mut cred_user = self.issue_credential(binding, &out, None);
+        if version >= 3 {
+            let _ = out.send(&ServerMsg::IdentityStatus {
+                registered: id_registered,
+                gated: cfg.registration_gate,
+            });
+        }
         if let Some(b) = binding {
             self.announce_online(&b);
         }
@@ -1121,7 +1231,10 @@ impl Relay {
                     }
                 }
                 // A v1 session sending v2 frames, or a second handshake.
-                ClientMsg::Data { .. } | ClientMsg::Hello { .. } | ClientMsg::Auth { .. } => break,
+                ClientMsg::Data { .. }
+                | ClientMsg::Hello { .. }
+                | ClientMsg::Auth { .. }
+                | ClientMsg::IdentityAuth { .. } => break,
             }
         }
 
@@ -1134,12 +1247,14 @@ impl Relay {
     }
 
     /// Admit a proven peer into its slot. None ⇒ decoy.
+    #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
         role: Role,
         rid: [u8; 32],
         pk: [u8; 32],
         sig_ok: bool,
+        identity: Option<[u8; 32]>,
         meta: &Arc<SessionMeta>,
         out: &Outbox,
     ) -> Option<Binding> {
@@ -1182,6 +1297,7 @@ impl Relay {
             out: out.clone(),
             public: None,
             candidates: Vec::new(),
+            identity,
         };
         // A re-registering peer (reconnect, new device) replaces the old one.
         if let Some(old) = entry.slots[role.index()].replace(slot) {
@@ -1297,6 +1413,25 @@ impl Relay {
                 return;
             };
             let (peer_out, ips, held) = (peer.out.clone(), [my_ip, peer.ip], e.relay.is_some());
+            // The registration gate: the box end must have proven a
+            // registered identity (re-checked per datagram, so a revoke
+            // bites within the registry's reload interval). Refused like a
+            // full relay: dropped, the pair's slot freed.
+            if s.cfg.registration_gate {
+                let box_ok = e.slots[Role::Box.index()]
+                    .as_ref()
+                    .and_then(|bx| bx.identity)
+                    .is_some_and(|k| s.registry.contains(&k));
+                if !box_ok {
+                    let Ids { map, relaying, .. } = &mut *ids;
+                    if let Some(e) = map.get_mut(&b.rendezvous_id) {
+                        end_relay(s, relaying, &b.rendezvous_id, e);
+                        e.relay_denied = Some(now);
+                    }
+                    st.dropped_limit.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
             if !held && !self.acquire_relay(&mut ids, &b.rendezvous_id, ips, now) {
                 st.dropped_limit.fetch_add(1, Ordering::Relaxed);
                 return;

@@ -10,9 +10,12 @@ use peckboard_relay::tunnel::{self, Advertise, EstablishOptions, PunchedPath, Tu
 
 use super::secret::DeviceSecret;
 use super::tunnel::{
-    DirectOptions, OnRegistered, PunchedTunnel, Registered, TunnelBackend, TunnelEvents,
-    TunnelUpdate,
+    BoxIdentity, DirectOptions, IdentityStatus, OnRegistered, PunchedTunnel, Registered,
+    TunnelBackend, TunnelEvents, TunnelUpdate,
 };
+
+/// Cap on one registration-status request (TLS connect + GET).
+const STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub struct RelayBackend;
 
@@ -51,6 +54,7 @@ impl TunnelBackend for RelayBackend {
         relay_host: &str,
         secret: &DeviceSecret,
         direct: &DirectOptions,
+        identity: Option<&BoxIdentity>,
         on_registered: OnRegistered,
     ) -> anyhow::Result<Box<dyn PunchedTunnel>> {
         let cfg = tunnel::relay_config(relay_host).await?;
@@ -63,12 +67,20 @@ impl TunnelBackend for RelayBackend {
                     local_port: r.local_port,
                     public: r.public,
                     candidates: r.candidates.clone(),
+                    identity: r.identity,
                 })
             })),
+            identity: identity.cloned(),
             ..EstablishOptions::default()
         };
         let path = tunnel::establish_with(&cfg, &relay_secret(secret), Role::Box, &opts).await?;
         Ok(Box::new(RelayPunched(path)))
+    }
+
+    async fn registration_status(&self, relay_host: &str, key: &[u8; 32]) -> anyhow::Result<bool> {
+        tokio::time::timeout(STATUS_TIMEOUT, tunnel::registration_status(relay_host, key))
+            .await
+            .map_err(|_| anyhow::anyhow!("relay {relay_host}: registration status timed out"))?
     }
 }
 
@@ -82,6 +94,10 @@ impl PunchedTunnel for RelayPunched {
 
     fn path(&self) -> &'static str {
         self.0.kind().as_str()
+    }
+
+    fn relay_identity(&self) -> Option<IdentityStatus> {
+        self.0.relay_identity
     }
 
     async fn serve(

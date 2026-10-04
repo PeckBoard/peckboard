@@ -59,6 +59,7 @@ fn kind(m: &ServerMsg) -> &'static str {
         ServerMsg::Forwarded { .. } => "forwarded",
         ServerMsg::Data { .. } => "data",
         ServerMsg::PunchNow { .. } => "punch",
+        ServerMsg::IdentityStatus { .. } => "identity-status",
     }
 }
 

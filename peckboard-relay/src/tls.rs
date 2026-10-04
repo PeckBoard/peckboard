@@ -13,7 +13,7 @@ use rustls_acme::caches::DirCache;
 use rustls_acme::{AcmeConfig, is_tls_alpn_challenge};
 use tracing::{info, warn};
 
-use crate::proto::{ALPN, ALPN_V2};
+use crate::proto::{ALPN, ALPN_HTTP1, ALPN_V2, ALPN_V3};
 
 pub const ACME_TLS_ALPN: &[u8] = b"acme-tls/1";
 
@@ -27,21 +27,32 @@ fn builder() -> anyhow::Result<rustls::ConfigBuilder<ServerConfig, rustls::Wants
 }
 fn finish(mut cfg: ServerConfig, with_acme: bool) -> Arc<ServerConfig> {
     // Most preferred first: rustls picks the first of ours the client offers,
-    // so a v2 client gets v2 and a v1 client v1.
-    cfg.alpn_protocols = vec![ALPN_V2.to_vec(), ALPN.to_vec()];
+    // so a v3 client gets v3, a v2 client v2 and a v1 client v1.
+    cfg.alpn_protocols = vec![ALPN_V3.to_vec(), ALPN_V2.to_vec(), ALPN.to_vec()];
     if with_acme {
         cfg.alpn_protocols.push(ACME_TLS_ALPN.to_vec());
     }
+    // Browsers (the registration page). Last, so a peer never lands on it;
+    // without it rustls would refuse a browser's ClientHello outright.
+    cfg.alpn_protocols.push(ALPN_HTTP1.to_vec());
     // No session tickets/resumption: sessions are long-lived and few.
     cfg.send_tls13_tickets = 0;
     Arc::new(cfg)
 }
 
-/// `cfg` without protocol v2 (no relay data channel): what a relay that
+/// `cfg` without protocol v2/v3 (no relay data channel): what a relay that
 /// predates the relay fallback negotiates. For `--no-relay-data` and tests.
 pub fn v1_only(cfg: &Arc<ServerConfig>) -> Arc<ServerConfig> {
     let mut c = (**cfg).clone();
-    c.alpn_protocols.retain(|p| p != ALPN_V2);
+    c.alpn_protocols.retain(|p| p != ALPN_V2 && p != ALPN_V3);
+    Arc::new(c)
+}
+
+/// `cfg` without protocol v3 (no box identity): what a relay that predates
+/// the registration gate negotiates. Tests.
+pub fn without_v3(cfg: &Arc<ServerConfig>) -> Arc<ServerConfig> {
+    let mut c = (**cfg).clone();
+    c.alpn_protocols.retain(|p| p != ALPN_V3);
     Arc::new(c)
 }
 

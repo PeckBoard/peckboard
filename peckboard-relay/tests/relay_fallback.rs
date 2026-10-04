@@ -376,7 +376,7 @@ async fn relay_rate_limit_per_id() {
     let mut dev = RelayClient::connect(&h.cfg, &s, Role::Device)
         .await
         .unwrap();
-    assert_eq!((boxc.protocol_version(), dev.protocol_version()), (2, 2));
+    assert_eq!((boxc.protocol_version(), dev.protocol_version()), (3, 3));
     for c in [&mut boxc, &mut dev] {
         tokio::time::timeout(T, async {
             while !matches!(c.next_event().await, Some(Event::PeerOnline)) {}

@@ -1,13 +1,18 @@
 //! `peckboard-relay` binary. Administration is local only: CLI flags at
 //! start, `SIGUSR1` toggles debug logging, `SIGTERM`/`SIGINT` shut down
-//! gracefully. Nothing administrative is reachable over the network.
+//! gracefully, and `peckboard-relay registry …` edits the box registry
+//! file (a running relay picks the change up within ~30 s). Nothing
+//! administrative is reachable over the network.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use peckboard_relay::identity::{decode_key, encode_key, is_valid_public_key};
+use peckboard_relay::registry::Registry;
 use peckboard_relay::server::{
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_CONNECTIONS_PER_V6_64,
     Relay, RelayConfig,
@@ -22,6 +27,8 @@ use tracing_subscriber::prelude::*;
 #[derive(Parser, Debug)]
 #[command(version, about = "Peckboard handshake-only rendezvous relay")]
 struct Args {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
     /// TCP listen address for TLS signaling (+ ACME TLS-ALPN-01).
     #[arg(long, default_value = "[::]:443")]
     listen: SocketAddr,
@@ -40,8 +47,13 @@ struct Args {
     /// Use the Let's Encrypt staging directory.
     #[arg(long)]
     acme_staging: bool,
-    /// Where the ACME account/cert cache lives (0700).
-    #[arg(long, env = "STATE_DIRECTORY", default_value = "/var/lib/peckrelay")]
+    /// Where the ACME account/cert cache and the box registry live (0700).
+    #[arg(
+        long,
+        env = "STATE_DIRECTORY",
+        default_value = "/var/lib/peckrelay",
+        global = true
+    )]
     state_dir: PathBuf,
     /// Throwaway self-signed cert instead of ACME (tests / local runs). The
     /// cert DER is written to <state-dir>/dev-cert.der for clients to pin.
@@ -88,13 +100,73 @@ struct Args {
     /// Seconds without a relayed datagram before an id frees its pair slot.
     #[arg(long, env = "PECKRELAY_RELAY_IDLE_SECS", default_value_t = 60)]
     relay_idle_secs: u64,
+    /// Only boxes whose identity is registered (via the relay's /register
+    /// page) may use the relay data channel. Direct connections, rendezvous
+    /// and STUN stay open to all. Registration works either way.
+    #[arg(long, env = "PECKRELAY_REGISTRATION_GATE")]
+    registration_gate: bool,
+    /// Proof-of-work difficulty (leading zero bits) for registering a box.
+    #[arg(long, env = "PECKRELAY_REGISTRATION_POW_BITS", default_value_t = 18,
+          value_parser = clap::value_parser!(u8).range(8..=28))]
+    registration_pow_bits: u8,
     /// Initial log filter (also RUST_LOG).
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     log: String,
 }
 
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Inspect or edit the registered-box list under --state-dir.
+    Registry {
+        #[command(subcommand)]
+        op: RegistryOp,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RegistryOp {
+    /// Print every registered box key and when it was registered.
+    List,
+    /// Unregister a box key (base64url).
+    Revoke { key: String },
+    /// Register a box key (base64url) without the web page's proof of work.
+    Add { key: String },
+}
+
+fn registry_cmd(state_dir: &std::path::Path, op: RegistryOp) -> anyhow::Result<()> {
+    let reg = Registry::open_in(state_dir).context("open registry")?;
+    let parse = |k: &str| {
+        decode_key(k)
+            .filter(is_valid_public_key)
+            .ok_or_else(|| anyhow::anyhow!("not a base64url Ed25519 public key: {k}"))
+    };
+    match op {
+        RegistryOp::List => {
+            for e in reg.list() {
+                println!("{} {}", encode_key(&e.key), e.registered_at);
+            }
+            eprintln!("{} registered", reg.len());
+        }
+        RegistryOp::Revoke { key } => {
+            if reg.revoke(&parse(&key)?)? {
+                println!("revoked");
+            } else {
+                anyhow::bail!("not registered");
+            }
+        }
+        RegistryOp::Add { key } => {
+            let new = reg.add(parse(&key)?)?;
+            println!("{}", if new { "added" } else { "already registered" });
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if let Some(Cmd::Registry { op }) = args.cmd.take() {
+        return registry_cmd(&args.state_dir, op);
+    }
     let (filter, reload) = tracing_subscriber::reload::Layer::new(
         EnvFilter::try_new(&args.log).unwrap_or_else(|_| EnvFilter::new("info")),
     );
@@ -156,8 +228,19 @@ async fn run(
         relay_burst_global: args.relay_burst_global as f64,
         relay_max_pairs: args.relay_max_pairs,
         relay_idle_timeout: Duration::from_secs(args.relay_idle_secs),
+        registration_gate: args.registration_gate,
+        registration_pow_bits: args.registration_pow_bits,
         ..RelayConfig::default()
     };
+    let registry = Arc::new(
+        Registry::open_in(&args.state_dir)
+            .with_context(|| format!("open box registry in {}", args.state_dir.display()))?,
+    );
+    info!(
+        registered = registry.len(),
+        gate = args.registration_gate,
+        "box registry loaded"
+    );
     // Without the data channel, stop offering protocol v2 so clients don't
     // fall back to a relay path that would drop everything.
     let server_cfg = if args.no_relay_data {
@@ -165,8 +248,14 @@ async fn run(
     } else {
         server_cfg
     };
-    let relay = Relay::new(cfg, stun_port);
-    info!(tcp = %args.listen, udp = %args.stun_listen, relay_data = !args.no_relay_data, "relay listening");
+    let relay = Relay::with_registry(cfg, stun_port, registry);
+    info!(
+        tcp = %args.listen,
+        udp = %args.stun_listen,
+        relay_data = !args.no_relay_data,
+        registration_gate = args.registration_gate,
+        "relay listening"
+    );
 
     let r1 = relay.clone();
     let acceptor = TlsAcceptor::from(server_cfg);

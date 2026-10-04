@@ -33,6 +33,10 @@ const NAME_MAX_LEN: usize = 128;
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/remote-access", get(overview).put(put_settings))
+        .route(
+            "/api/remote-access/registration/refresh",
+            post(refresh_registration),
+        )
         .route("/api/remote-access/devices", post(create))
         .route(
             "/api/remote-access/devices/{id}",
@@ -90,7 +94,10 @@ fn settings_json(s: &RemoteAccessSettings) -> serde_json::Map<String, serde_json
 }
 
 /// GET /api/remote-access — the settings (`enabled`, `relay_host`,
-/// `udp_port_base`, `udp_port_count`, `public_address`) + `devices`.
+/// `udp_port_base`, `udp_port_count`, `public_address`), `devices`, and
+/// `registration` (`{supported, registered, gated, url}`: the box
+/// identity's relay registration; `supported: false` + nulls until the
+/// relay has said anything, e.g. one predating relay registration).
 async fn overview(State(state): State<Arc<AppState>>) -> Response {
     let ra = &state.remote_access;
     let settings = ra.settings().await;
@@ -99,10 +106,22 @@ async fn overview(State(state): State<Arc<AppState>>) -> Response {
             let views: Vec<DeviceView> = devices.iter().map(|d| DeviceView::of(d, ra)).collect();
             let mut body = settings_json(&settings);
             body.insert("devices".into(), serde_json::json!(views));
+            body.insert(
+                "registration".into(),
+                serde_json::json!(ra.registration(&settings.relay_host)),
+            );
             Json(body).into_response()
         }
         Err(e) => internal_err(e),
     }
+}
+
+/// POST /api/remote-access/registration/refresh — ask the relay now whether
+/// this box is registered (creating the box identity if needed; at most
+/// one request per 5 s) → the overview's `registration` object. The UI
+/// polls this while it waits for the admin to finish registering.
+async fn refresh_registration(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.remote_access.refresh_registration().await).into_response()
 }
 
 #[derive(Deserialize)]
@@ -264,11 +283,15 @@ async fn revoke(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> R
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::middleware::tests::{seed_authenticated_user, test_state};
+    use crate::auth::middleware::tests::{seed_authenticated_user, test_state, test_state_with};
+    use crate::db::Db;
+    use crate::service::remote_access::{IDENTITY_FILE, testing::FakeBackend};
     use axum::body::Body;
     use axum::http::{Request, header};
+    use std::sync::atomic::Ordering::SeqCst;
     use tower::ServiceExt;
 
     async fn call(
@@ -316,6 +339,7 @@ mod tests {
                 "/api/remote-access",
                 Some(serde_json::json!({ "enabled": true })),
             ),
+            ("POST", "/api/remote-access/registration/refresh", None),
             (
                 "POST",
                 "/api/remote-access/devices",
@@ -504,5 +528,65 @@ mod tests {
         assert_eq!(body["udp_port_count"], 4);
         assert_eq!(body["public_address"], "home.example.com");
         assert_eq!(body["enabled"], false, "other settings untouched");
+    }
+
+    /// The overview carries the box's relay registration; the refresh
+    /// endpoint creates the identity on first use, asks the relay now, and
+    /// flips to registered once the box's key is in the relay's registry.
+    #[tokio::test]
+    async fn registration_in_overview_and_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_memory().unwrap();
+        let backend = Arc::new(FakeBackend::default());
+        let ra = RemoteAccess::new(db.clone(), vec![0u8; 32], dir.path(), backend.clone());
+        let state = test_state_with(dir.path(), db, ra);
+        let token = seed_authenticated_user(&state, "admin").await;
+
+        // Never enabled: no identity, nothing to report.
+        let (_, body) = call(&state, &token, "GET", "/api/remote-access", None).await;
+        assert_eq!(
+            body["registration"],
+            serde_json::json!({ "supported": false, "registered": null, "gated": null, "url": "" })
+        );
+        assert!(!dir.path().join(IDENTITY_FILE).exists());
+
+        // Refresh: the identity exists now and the relay says unregistered
+        // (the gate is only known from a box handshake).
+        let (status, reg) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/remote-access/registration/refresh",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reg["supported"], true);
+        assert_eq!(reg["registered"], false);
+        assert_eq!(reg["gated"], serde_json::Value::Null);
+        let url = reg["url"].as_str().unwrap();
+        assert!(
+            url.starts_with("https://relay.peckboard.com/register#") && url.len() > 44,
+            "{url}"
+        );
+        assert!(dir.path().join(IDENTITY_FILE).exists());
+        let (_, body) = call(&state, &token, "GET", "/api/remote-access", None).await;
+        assert_eq!(body["registration"], reg);
+
+        // The admin registered the key on the relay.
+        backend.registered.store(true, SeqCst);
+        state.remote_access.forget_last_poll();
+        let (_, reg) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/remote-access/registration/refresh",
+            None,
+        )
+        .await;
+        assert_eq!(reg["registered"], true);
+        assert_eq!(reg["url"], url);
+        let (_, body) = call(&state, &token, "GET", "/api/remote-access", None).await;
+        assert_eq!(body["registration"]["registered"], true);
     }
 }

@@ -226,6 +226,7 @@ pub async fn run_server(
     let remote_access = crate::service::remote_access::RemoteAccess::new(
         db.clone(),
         remote_access_key,
+        &config.data_dir,
         Arc::new(crate::service::remote_access::relay::RelayBackend),
     );
 

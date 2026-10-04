@@ -31,12 +31,13 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
 
+use crate::identity::{BoxIdentity, encode_key};
 use crate::keys::{
     DerivedKeys, EXPORTER_LABEL, EXPORTER_LEN, MsgCounter, PairingSecret, ReplayGuard,
 };
 use crate::proto::{
-    ALPN, ALPN_V2, ClientMsg, MAX_BLOB, Role, ServerMsg, decode_addrs, encode_addrs, read_frame,
-    write_frame,
+    ALPN, ALPN_HTTP1, ALPN_V2, ALPN_V3, ClientMsg, MAX_BLOB, Role, ServerMsg, decode_addrs,
+    encode_addrs, read_frame, write_frame,
 };
 use crate::stun;
 
@@ -120,6 +121,25 @@ pub enum Event {
     Pong,
 }
 
+/// What a v3 relay said about this session's box identity
+/// ([`RelayClient::identity_status`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentityStatus {
+    /// The identity this session proved is in the relay's registry. Always
+    /// false for a session that presented none (devices, a box without an
+    /// identity).
+    pub registered: bool,
+    /// The relay requires a registered box for relayed data right now.
+    pub gated: bool,
+}
+
+impl IdentityStatus {
+    /// May this session's pair use the relay data channel?
+    pub fn relay_permitted(&self) -> bool {
+        self.registered || !self.gated
+    }
+}
+
 pub struct RelayClient {
     role: Role,
     keys: Arc<DerivedKeys>,
@@ -129,6 +149,7 @@ pub struct RelayClient {
     send_ctr: MsgCounter,
     version: u8,
     data: Option<RelayData>,
+    identity_status: Option<IdentityStatus>,
 }
 
 /// Datagrams queued per direction on the v2 relay data channel.
@@ -148,11 +169,12 @@ fn tls_config(roots: Arc<RootCertStore>, v1_only: bool) -> anyhow::Result<Arc<Tl
             .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_root_certificates(roots)
             .with_no_client_auth();
-    // An old relay only knows v1 and picks it; a current one prefers v2.
+    // An old relay only knows v1 (or v1+v2) and picks the best of those; a
+    // current one prefers v3.
     cfg.alpn_protocols = if v1_only {
         vec![ALPN.to_vec()]
     } else {
-        vec![ALPN_V2.to_vec(), ALPN.to_vec()]
+        vec![ALPN_V3.to_vec(), ALPN_V2.to_vec(), ALPN.to_vec()]
     };
     Ok(Arc::new(cfg))
 }
@@ -180,6 +202,18 @@ impl RelayClient {
         secret: &PairingSecret,
         role: Role,
     ) -> anyhow::Result<Self> {
+        Self::connect_with_identity(cfg, secret, role, None).await
+    }
+
+    /// [`connect`](Self::connect); a box on a v3 relay also proves its
+    /// permanent `identity` (ignored for devices and older relays). See
+    /// [`identity_status`](Self::identity_status) for the relay's answer.
+    pub async fn connect_with_identity(
+        cfg: &ClientConfig,
+        secret: &PairingSecret,
+        role: Role,
+        identity: Option<&BoxIdentity>,
+    ) -> anyhow::Result<Self> {
         let keys = Arc::new(secret.derive());
         let connector = TlsConnector::from(tls_config(cfg.roots.clone(), cfg.v1_only)?);
         let name = ServerName::try_from(cfg.server_name.clone()).context("server name")?;
@@ -193,7 +227,9 @@ impl RelayClient {
             let version = {
                 let conn = tls.get_ref().1;
                 let version = match conn.alpn_protocol() {
-                    Some(p) if p == ALPN_V2 && !cfg.v1_only => 2u8,
+                    Some(p) if p == ALPN_V3 && !cfg.v1_only => 3u8,
+                    Some(p) if p == ALPN_V2 && !cfg.v1_only => 2,
+                    Some(p) if p == ALPN => 1,
                     Some(p) if p == ALPN => 1,
                     _ => bail!(
                         "relay did not negotiate {:?}",
@@ -215,14 +251,34 @@ impl RelayClient {
                 _ => bail!("expected challenge"),
             };
             let signature = keys.sign_challenge(&nonce, role, &exporter);
-            write_frame(&mut wr, &ClientMsg::Auth { signature }.encode()).await?;
+            let auth = match identity {
+                Some(id) if role == Role::Box && version >= 3 => ClientMsg::IdentityAuth {
+                    signature,
+                    identity_key: id.public_key(),
+                    identity_signature: id.sign_session(&nonce, &keys.rendezvous_id, &exporter),
+                },
+                _ => ClientMsg::Auth { signature },
+            };
+            write_frame(&mut wr, &auth.encode()).await?;
             let reg = ServerMsg::decode(&read_frame(&mut rd).await?)?;
             let cred = credential(stun_host, reg).ok_or_else(|| anyhow!("expected registered"))?;
-            Ok((rd, wr, cred, version))
+            // v3: the identity verdict follows the first Registered.
+            let status = if version >= 3 {
+                match ServerMsg::decode(&read_frame(&mut rd).await?)? {
+                    ServerMsg::IdentityStatus { registered, gated } => {
+                        Some(IdentityStatus { registered, gated })
+                    }
+                    _ => bail!("expected identity status"),
+                }
+            } else {
+                None
+            };
+            Ok((rd, wr, cred, version, status))
         };
-        let (mut rd, mut wr, cred, version) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs)
-            .await
-            .context("relay handshake timed out")??;
+        let (mut rd, mut wr, cred, version, identity_status) =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, hs)
+                .await
+                .context("relay handshake timed out")??;
 
         let cred = Arc::new(Mutex::new(cred));
         let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(64);
@@ -307,6 +363,8 @@ impl RelayClient {
                         Event::CredentialRefreshed
                     }
                     ServerMsg::Challenge { .. } => break,
+                    // Only sent once, during the handshake.
+                    ServerMsg::IdentityStatus { .. } => continue,
                 };
                 if ev_tx.send(ev).await.is_err() {
                     break;
@@ -326,7 +384,16 @@ impl RelayClient {
                 tx: data_out_tx,
                 rx: data_in_rx,
             }),
+            identity_status,
         })
+    }
+
+    /// The v3 relay's verdict on this session's box identity, as of the
+    /// handshake; `None` on an older relay (v1/v2), which knows nothing of
+    /// identities and never gates. A box on a gated relay that reports
+    /// `registered: false` may still rendezvous and punch, but not relay.
+    pub fn identity_status(&self) -> Option<IdentityStatus> {
+        self.identity_status
     }
 
     pub fn role(&self) -> Role {
@@ -388,8 +455,9 @@ impl RelayClient {
         self.cred.lock().unwrap().clone()
     }
 
-    /// Negotiated protocol version: 2 when the relay offers the relay data
-    /// channel (see [`crate::proto::ALPN_V2`]), 1 for an older relay (or
+    /// Negotiated protocol version: 3 when the relay knows box identities
+    /// ([`crate::proto::ALPN_V3`]), 2 when it offers the relay data channel
+    /// ([`crate::proto::ALPN_V2`]), 1 for an older relay (or
     /// [`ClientConfig::v1_only`]).
     pub fn protocol_version(&self) -> u8 {
         self.version
@@ -438,6 +506,55 @@ impl RelayClient {
         timeout: Duration,
     ) -> anyhow::Result<SocketAddr> {
         punch_with(&self.keys, self.role, sock, p, timeout).await
+    }
+}
+/// Ask the relay whether box identity `key` is registered: one HTTPS
+/// `GET /api/registered?key=…` on the relay's signaling port (ALPN
+/// `http/1.1`, same certificate trust as [`RelayClient::connect`]). Cheap
+/// enough to poll every few seconds while a user is on the registration
+/// page (the relay allows ~1 request / 2 s per IP, burst 20). Errors on a
+/// relay that predates registration (it closes such connections).
+pub async fn registration_status(cfg: &ClientConfig, key: &[u8; 32]) -> anyhow::Result<bool> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut tls_cfg =
+        TlsClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_root_certificates(cfg.roots.clone())
+            .with_no_client_auth();
+    tls_cfg.alpn_protocols = vec![ALPN_HTTP1.to_vec()];
+    let connector = TlsConnector::from(Arc::new(tls_cfg));
+    let name = ServerName::try_from(cfg.server_name.clone()).context("server name")?;
+    let req = async {
+        let tcp = TcpStream::connect(cfg.relay).await?;
+        let mut tls = connector.connect(name, tcp).await?;
+        let head = format!(
+            "GET /api/registered?key={} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            encode_key(key),
+            cfg.server_name
+        );
+        tls.write_all(head.as_bytes()).await?;
+        let mut resp = Vec::new();
+        (&mut tls).take(16 * 1024).read_to_end(&mut resp).await?;
+        anyhow::Ok(resp)
+    };
+    let resp = tokio::time::timeout(HANDSHAKE_TIMEOUT, req)
+        .await
+        .context("relay registration check timed out")??;
+    let resp = String::from_utf8_lossy(&resp);
+    let (head, body) = resp
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow!("relay sent no HTTP response"))?;
+    let status = head.split(' ').nth(1).unwrap_or("");
+    if status != "200" {
+        bail!("relay registration check: HTTP {status}");
+    }
+    let body: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    if body.contains("\"registered\":true") {
+        Ok(true)
+    } else if body.contains("\"registered\":false") {
+        Ok(false)
+    } else {
+        bail!("relay registration check: unexpected body")
     }
 }
 

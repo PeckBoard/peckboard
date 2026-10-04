@@ -160,6 +160,7 @@ fn kind(m: &ServerMsg) -> &'static str {
         ServerMsg::Forwarded { .. } => "forwarded",
         ServerMsg::PunchNow { .. } => "punch",
         ServerMsg::Data { .. } => "data",
+        ServerMsg::IdentityStatus { .. } => "identity-status",
     }
 }
 
@@ -339,6 +340,8 @@ async fn per_ip_connection_rate_limit() {
     );
 }
 
+/// An ALPN the relay doesn't speak fails the handshake. (`http/1.1` is
+/// answered: that's the registration page, see `tests/registration.rs`.)
 #[tokio::test]
 async fn wrong_alpn_is_refused() {
     let h = start(RelayConfig::default()).await;
@@ -351,12 +354,12 @@ async fn wrong_alpn_is_refused() {
     .unwrap()
     .with_root_certificates(roots)
     .with_no_client_auth();
-    cc.alpn_protocols = vec![b"http/1.1".to_vec()];
+    cc.alpn_protocols = vec![b"h2".to_vec()];
     let tcp = TcpStream::connect(h.cfg.relay).await.unwrap();
     let r = TlsConnector::from(Arc::new(cc))
         .connect(ServerName::try_from(NAME).unwrap(), tcp)
         .await;
-    assert!(r.is_err(), "HTTP ALPN must fail the TLS handshake");
+    assert!(r.is_err(), "unknown ALPN must fail the TLS handshake");
 }
 
 #[tokio::test]

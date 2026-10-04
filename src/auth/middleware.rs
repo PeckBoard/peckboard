@@ -180,14 +180,25 @@ pub(crate) mod tests {
     use tower::ServiceExt;
 
     pub(crate) fn test_state(dir: &std::path::Path) -> Arc<AppState> {
-        let provider_registry = Arc::new(crate::provider::registry::ProviderRegistry::new());
         let db = Db::in_memory().unwrap();
-        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
         let remote_access = crate::service::remote_access::RemoteAccess::new(
             db.clone(),
             vec![0u8; 32],
+            dir,
             Arc::new(crate::service::remote_access::relay::RelayBackend),
         );
+        test_state_with(dir, db, remote_access)
+    }
+
+    /// [`test_state`] over a given DB and remote-access manager (one over
+    /// a fake tunnel backend, say); `remote_access` must be built on `db`.
+    pub(crate) fn test_state_with(
+        dir: &std::path::Path,
+        db: Db,
+        remote_access: Arc<crate::service::remote_access::RemoteAccess>,
+    ) -> Arc<AppState> {
+        let provider_registry = Arc::new(crate::provider::registry::ProviderRegistry::new());
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
         Arc::new(AppState {
             background: Default::default(),
             plugin_ws_tickets: Default::default(),
