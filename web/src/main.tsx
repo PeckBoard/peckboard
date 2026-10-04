@@ -21,6 +21,11 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>,
 )
 
+// Browsers refuse service workers on an untrusted cert (the self-signed
+// HTTPS port reached by IP), even after the user clicks through the
+// warning. The app works without one, so don't surface it as an error.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js')
+  navigator.serviceWorker.register('/sw.js').catch((err: unknown) => {
+    console.info('Service worker not registered:', err)
+  })
 }
