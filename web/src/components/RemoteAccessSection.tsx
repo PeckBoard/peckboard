@@ -158,7 +158,8 @@ function PairDeviceModal({ onClose, onPaired }: { onClose: () => void; onPaired:
   }
 
   if (pairing) {
-    const command = `peckboard-connect ${pairing.pairing_link}`
+    // Read from stdin: a link on the command line leaks to `ps` and history.
+    const command = 'peckboard-connect --save -'
     return (
       <Modal onClose={onClose} maxWidth={560} data-testid="remote-pair-link-modal">
         <h2>Pair {pairing.device.name}</h2>
@@ -188,7 +189,10 @@ function PairDeviceModal({ onClose, onPaired }: { onClose: () => void; onPaired:
           />
         </div>
         <p className="form-hint">
-          Connect with: <code data-testid="remote-pair-command">{command}</code>
+          Connect with: <code data-testid="remote-pair-command">{command}</code>, then paste the
+          link and press Ctrl-D (Ctrl-Z, Enter on Windows). Reading it from stdin keeps the secret
+          out of the process list and shell history; <code>--save</code> remembers it so later runs
+          need no link. A copied link sits on the clipboard, where other apps can read it.
         </p>
         <div className="form-actions">
           <button

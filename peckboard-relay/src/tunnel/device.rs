@@ -4,6 +4,7 @@
 //! restarts it on foreground), [`bind_listener`] binds the local port, and
 //! [`CookieGate`] keeps other local apps off that port.
 
+use std::borrow::Borrow;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -16,21 +17,39 @@ use rand::RngCore;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    HEADER_TIMEOUT, PairingLink, PathKind, TunnelError, TunnelEvent, device_session, establish,
-    relay_config,
+    PairingLink, PathKind, TunnelError, TunnelEvent, device_session, establish, relay_config,
 };
 use crate::client::ClientConfig;
 use crate::proto::Role;
 
 /// Runs on every accepted local connection before it becomes a tunnel
-/// stream. Return the stream to forward it, `None` to drop it (the filter
+/// stream. Return [`Admitted`] to forward it, `None` to drop it (the filter
 /// may answer the connection itself first). Inspect with
-/// [`TcpStream::peek`] — consumed bytes never reach the box.
+/// [`TcpStream::peek`]; bytes the filter consumes reach the box only as
+/// [`Admitted::head`].
 pub type AcceptFilter =
-    Arc<dyn Fn(TcpStream) -> Pin<Box<dyn Future<Output = Option<TcpStream>> + Send>> + Send + Sync>;
+    Arc<dyn Fn(TcpStream) -> Pin<Box<dyn Future<Output = Option<Admitted>> + Send>> + Send + Sync>;
+
+/// A local connection an [`AcceptFilter`] let through: `head` goes to the
+/// box first, then the rest of `tcp`.
+pub struct Admitted {
+    pub head: Vec<u8>,
+    pub tcp: TcpStream,
+}
+
+impl Admitted {
+    /// Forward `tcp` untouched.
+    pub fn new(tcp: TcpStream) -> Self {
+        Self {
+            head: Vec::new(),
+            tcp,
+        }
+    }
+}
 
 /// Where [`bind_listener`] binds.
 #[derive(Clone, Copy, Debug)]
@@ -143,15 +162,19 @@ pub enum DeviceEvent {
 /// listener while reconnecting are served once the next tunnel is up.
 ///
 /// Returns `Ok(())` once `cancel` fires — the tunnel and every stream on it
-/// are closed and `listener` is dropped (so the port stops accepting).
-/// Returns `Err` only with `give_up_on_punch_failure`. To resume, bind
-/// again and call `run_device` with a fresh token.
-pub async fn run_device(
+/// are closed. A `listener` passed by value is dropped (so the port stops
+/// accepting); pass an `Arc<TcpListener>` to keep the port bound across a
+/// stop and the next `run_device` (an app in the background), so no other
+/// local app can take it meanwhile. Returns `Err` only with
+/// `give_up_on_punch_failure`. To resume, call `run_device` again with a
+/// fresh token.
+pub async fn run_device<L: Borrow<TcpListener> + Send>(
     opts: DeviceOptions,
-    listener: TcpListener,
+    listener: L,
     cancel: CancellationToken,
     on_event: impl Fn(DeviceEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
+    let listener: &TcpListener = listener.borrow();
     let on_event = Arc::new(on_event);
     let connected_at: Arc<Mutex<Option<Instant>>> = Arc::default();
     let mut ever_connected = false;
@@ -188,7 +211,7 @@ pub async fn run_device(
                 let _ = device_session(
                     path,
                     &opts.link.secret,
-                    &listener,
+                    listener,
                     opts.accept_filter.as_ref(),
                     &cancel,
                     tunnel_ev,
@@ -225,8 +248,19 @@ pub async fn run_device(
 
 // ---- cookie gate --------------------------------------------------------
 
+// ---- cookie gate --------------------------------------------------------
+
 /// Largest request head the gate inspects; bigger ones are dropped.
 const MAX_HEAD: usize = 16 * 1024;
+/// First peek buffer; grows (doubling) to [`MAX_HEAD`] only while a head
+/// is still arriving, so a dribbling connection holds little memory.
+const FIRST_PEEK: usize = 2 * 1024;
+/// How long a local connection may take to send its first request head.
+/// Loopback from the app's own WebView is instant.
+const GATE_HEAD_TIMEOUT: Duration = Duration::from_secs(3);
+/// Local connections being gated at once; more are dropped unanswered so a
+/// local app can't exhaust the app's memory or fds.
+const MAX_GATING: usize = 64;
 
 /// Loopback gate: only the app's own WebView may use the device port.
 ///
@@ -236,21 +270,26 @@ const MAX_HEAD: usize = 16 * 1024;
 /// `Set-Cookie: __pbm=<key>; HttpOnly; SameSite=Strict; Path=/` and a page
 /// that replaces itself with `/` (a same-origin navigation, so the Strict
 /// cookie is sent; an HTTP redirect would inherit the cross-site initiator
-/// first request (HTTP or WebSocket upgrade), compared in constant time, or
-/// it is dropped unanswered.
+/// and the cookie would be withheld). Every other connection must carry the
+/// cookie on its first request (HTTP or WebSocket upgrade), compared in
+/// constant time, or it is dropped unanswered. The `__pbm` cookie is
+/// removed from that first request before it is forwarded, so the box
+/// doesn't learn the key.
 ///
-/// The app shell may append `&shell=<its origin, percent-encoded>` to the
-/// boot path; a known Tauri shell origin (`tauri://localhost`,
-/// `http(s)://tauri.localhost`, `http://localhost:<port>` in dev) is stored
-/// in the readable [`SHELL_COOKIE`](Self::SHELL_COOKIE), anything else is
-/// ignored.
+/// `&next=<path, percent-encoded>` replaces `/` as the page loaded after
+/// boot (a same-origin path only; see [`boot_path_to`](Self::boot_path_to)).
+/// Other boot parameters are ignored, e.g. the `shell=` older app builds
+/// send.
 ///
-/// Cookies are scoped by host, not port: create **one** gate per app launch
-/// and share it (it's a cheap clone) across every paired box, or the boxes'
-/// cookies overwrite each other.
+/// Cookies are scoped by host, not port, so every box shares the one
+/// `__pbm` cookie slot: give each box its own gate and boot the WebView
+/// through it whenever it switches box. Create a fresh gate whenever the
+/// listener could have been exposed (app resumed from the background) and
+/// re-boot the page, so a key that leaked stops working.
 #[derive(Clone)]
 pub struct CookieGate {
     key: Arc<str>,
+    gating: Arc<Semaphore>,
 }
 
 impl fmt::Debug for CookieGate {
@@ -270,17 +309,16 @@ impl CookieGate {
     pub const COOKIE: &'static str = "__pbm";
     /// Path the device answers locally.
     pub const BOOT_PATH: &'static str = "/__pbm/boot";
-    /// Non-HttpOnly cookie holding the app shell's origin, so the box UI can
-    /// offer a way back to the box list. Set only from a validated `shell=`
-    /// boot parameter (see [`boot_response`](Self::boot_response)).
-    pub const SHELL_COOKIE: &'static str = "__pbm_shell";
 
     /// A gate with a fresh random 256-bit key (hex).
     pub fn new() -> Self {
         let mut b = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut b);
         let key: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        Self { key: key.into() }
+        Self {
+            key: key.into(),
+            gating: Arc::new(Semaphore::new(MAX_GATING)),
+        }
     }
 
     pub fn key(&self) -> &str {
@@ -292,6 +330,13 @@ impl CookieGate {
         format!("{}?k={}", Self::BOOT_PATH, self.key)
     }
 
+    /// [`boot_path`](Self::boot_path) that lands on `next` (path, query and
+    /// fragment of the page to restore) instead of `/`. The gate ignores a
+    /// `next` that isn't a plain same-origin path.
+    pub fn boot_path_to(&self, next: &str) -> String {
+        format!("{}&next={}", self.boot_path(), percent_encode(next))
+    }
+
     /// This gate as a [`DeviceOptions::accept_filter`].
     pub fn filter(&self) -> AcceptFilter {
         let gate = self.clone();
@@ -301,10 +346,14 @@ impl CookieGate {
         })
     }
 
-    /// Admit `tcp` (returned untouched) if its first request carries the
-    /// cookie; answer a valid boot request itself; drop anything else.
-    pub async fn admit(&self, mut tcp: TcpStream) -> Option<TcpStream> {
-        let head = peek_head(&tcp).await?;
+    /// Admit `tcp` if its first request carries the cookie (that head is
+    /// consumed and returned without the `__pbm` cookie); answer a valid
+    /// boot request itself; drop anything else.
+    pub async fn admit(&self, mut tcp: TcpStream) -> Option<Admitted> {
+        let head = {
+            let _permit = self.gating.try_acquire().ok()?;
+            peek_head(&tcp).await?
+        };
         let text = std::str::from_utf8(&head).ok()?;
         let mut lines = text.split("\r\n");
         let target = lines.next()?.split(' ').nth(1)?;
@@ -314,14 +363,14 @@ impl CookieGate {
             if !self.matches(k) {
                 return None;
             }
-            let shell = query
+            let next = query
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("shell="))
-                .and_then(Self::shell_origin);
+                .find_map(|kv| kv.strip_prefix("next="))
+                .and_then(Self::next_path);
             let mut consumed = vec![0u8; head.len()];
             tcp.read_exact(&mut consumed).await.ok()?;
             let _ = tcp
-                .write_all(self.boot_response(shell.as_deref()).as_bytes())
+                .write_all(self.boot_response(next.as_deref()).as_bytes())
                 .await;
             let _ = tcp.shutdown().await;
             return None;
@@ -332,28 +381,33 @@ impl CookieGate {
             .flat_map(|(_, v)| v.split(';'))
             .filter_map(|c| c.trim().strip_prefix("__pbm="))
             .fold(false, |acc, v| acc | self.matches(v));
-        ok.then_some(tcp)
+        if !ok {
+            return None;
+        }
+        let mut consumed = vec![0u8; head.len()];
+        tcp.read_exact(&mut consumed).await.ok()?;
+        Some(Admitted {
+            head: strip_gate_cookie(text).into_bytes(),
+            tcp,
+        })
     }
 
     fn matches(&self, candidate: &str) -> bool {
         candidate.as_bytes().ct_eq(self.key.as_bytes()).into()
     }
 
-    fn boot_response(&self, shell: Option<&str>) -> String {
-        let body = "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/\">\
-                    <script>location.replace(\"/\")</script>";
-        let shell_cookie = shell
-            .map(|s| {
-                format!(
-                    "Set-Cookie: {}={s}; SameSite=Strict; Path=/\r\n",
-                    Self::SHELL_COOKIE
-                )
-            })
-            .unwrap_or_default();
+    /// `next` must be validated by [`next_path`](Self::next_path): no
+    /// quotes, `<`, `\` or whitespace, so it is inert in the HTML and JS.
+    fn boot_response(&self, next: Option<&str>) -> String {
+        let next = next.unwrap_or("/");
+        let body = format!(
+            "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url={}\">\
+             <script>location.replace(\"{next}\")</script>",
+            next.replace('&', "&amp;")
+        );
         format!(
             "HTTP/1.1 200 OK\r\n\
              Set-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/\r\n\
-             {shell_cookie}\
              Cache-Control: no-store\r\n\
              Referrer-Policy: no-referrer\r\n\
              Content-Type: text/html; charset=utf-8\r\n\
@@ -365,20 +419,44 @@ impl CookieGate {
         )
     }
 
-    /// `shell=` boot parameter (percent-encoded) → the app shell's origin,
-    /// only if it is one the app can actually be served from.
-    fn shell_origin(raw: &str) -> Option<String> {
+    /// `next=` boot parameter (percent-encoded) → a same-origin path: starts
+    /// with one `/` (never `//`, a scheme-relative URL), printable ASCII
+    /// without quotes, `<`, `>`, `\` or backticks.
+    fn next_path(raw: &str) -> Option<String> {
         let s = percent_decode(raw)?;
-        let dev_port = s
-            .strip_prefix("http://localhost:")
-            .is_some_and(|p| (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()));
-        let known = matches!(
-            s.as_str(),
-            "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
-        );
-        (known || dev_port).then_some(s)
+        let inert = s
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"\"'<>\\`".contains(&b));
+        (s.starts_with('/') && !s.starts_with("//") && s.len() <= 2048 && inert).then_some(s)
     }
 }
+
+/// `head` (a full request head) without the gate's `__pbm` cookie; a
+/// `Cookie` header left empty is dropped.
+fn strip_gate_cookie(head: &str) -> String {
+    let mut out = String::with_capacity(head.len());
+    for line in head.split_inclusive("\r\n") {
+        let Some((name, value)) = line.split_once(':') else {
+            out.push_str(line);
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("cookie") {
+            out.push_str(line);
+            continue;
+        }
+        let kept: Vec<&str> = value
+            .trim_end_matches("\r\n")
+            .split(';')
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && !c.starts_with("__pbm="))
+            .collect();
+        if !kept.is_empty() {
+            out.push_str(&format!("{name}: {}\r\n", kept.join("; ")));
+        }
+    }
+    out
+}
+
 fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -397,10 +475,22 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Percent-encode everything but unreserved characters and `/`.
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// The first request head (through `\r\n\r\n`) without consuming it.
 async fn peek_head(tcp: &TcpStream) -> Option<Vec<u8>> {
     let read = async {
-        let mut buf = vec![0u8; MAX_HEAD];
+        let mut buf = vec![0u8; FIRST_PEEK];
         let mut seen = 0;
         loop {
             let n = tcp.peek(&mut buf).await.ok()?;
@@ -411,8 +501,12 @@ async fn peek_head(tcp: &TcpStream) -> Option<Vec<u8>> {
                 buf.truncate(i + 4);
                 return Some(buf);
             }
-            if n == MAX_HEAD {
-                return None;
+            if n == buf.len() {
+                if n >= MAX_HEAD {
+                    return None;
+                }
+                buf.resize((n * 2).min(MAX_HEAD), 0);
+                continue;
             }
             // `peek` returns at once while bytes are buffered; wait for more.
             if n == seen {
@@ -421,8 +515,53 @@ async fn peek_head(tcp: &TcpStream) -> Option<Vec<u8>> {
             seen = n;
         }
     };
-    tokio::time::timeout(HEADER_TIMEOUT, read)
+    tokio::time::timeout(GATE_HEAD_TIMEOUT, read)
         .await
         .ok()
         .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_cookie_is_stripped_from_the_forwarded_head() {
+        let head = "GET / HTTP/1.1\r\nHost: x\r\nCookie: a=b; __pbm=k; __pbm_shell=s\r\n\
+                    cookie: __pbm=k\r\nX: __pbm=k\r\n\r\n";
+        assert_eq!(
+            strip_gate_cookie(head),
+            "GET / HTTP/1.1\r\nHost: x\r\nCookie: a=b; __pbm_shell=s\r\nX: __pbm=k\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn next_path_only_allows_inert_same_origin_paths() {
+        let gate = CookieGate::new();
+        let boot = gate.boot_path_to("/sessions/a b?x=1&y=2#t");
+        let raw = boot.split("&next=").nth(1).unwrap();
+        assert_eq!(
+            CookieGate::next_path(raw).as_deref(),
+            None,
+            "space is not inert"
+        );
+        let boot = gate.boot_path_to("/sessions/a?x=1&y=2#t");
+        let raw = boot.split("&next=").nth(1).unwrap();
+        assert!(!raw.contains('&') && !raw.contains('#'));
+        assert_eq!(
+            CookieGate::next_path(raw).as_deref(),
+            Some("/sessions/a?x=1&y=2#t")
+        );
+        for bad in [
+            "//evil.example/",
+            "https://evil.example/",
+            "/\\evil",
+            "/a\"onload=x",
+            "/</script>",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert_eq!(CookieGate::next_path(&percent_encode(bad)), None, "{bad}");
+        }
+    }
 }

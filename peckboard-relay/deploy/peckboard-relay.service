@@ -54,8 +54,17 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
 
+# H-01: the relay never needs private ranges. LAN boxes reach it via the
+# router's public address (Infra checked 2026-10-04: SYNs arrive from
+# 208.98.54.44 on the public NIC), and the LAN leg is SSH-only. Note this
+# filters ingress too. Loopback stays allowed (systemd-resolved).
+IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fc00::/7 fe80::/10
+
 LimitNOFILE=16384
-MemoryMax=512M
+# The relay bounds its own buffers (256 MiB of queued frames relay-wide,
+# 8192 sessions); the rest is headroom for TLS state and kernel socket
+# buffers charged to this cgroup. Host has 4 GB.
+MemoryMax=2G
 TasksMax=256
 
 [Install]

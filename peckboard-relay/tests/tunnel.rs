@@ -287,6 +287,59 @@ async fn device_cannot_choose_target() {
     );
 }
 
+/// A stranger can't take the box's one accept slot: QUIC from an address
+/// other than the punched peer is refused, and a failed or stalled handshake
+/// from the peer's own address doesn't stop the real device connecting.
+#[tokio::test]
+async fn stranger_cannot_block_the_paired_device() {
+    let target = echo_server().await;
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let aa = a.local_addr().unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let ba = b.local_addr().unwrap();
+    let s = PairingSecret::generate();
+    let bs = s.clone();
+    let (on_box, mut box_ev) = events();
+    let bp = PunchedPath {
+        socket: a.into(),
+        peer: ba,
+        role: Role::Box,
+    };
+    tokio::spawn(async move { serve_box(bp, &bs, target, on_box).await });
+    let dev_path = |sock: UdpSocket| PunchedPath {
+        socket: sock.into(),
+        peer: aa,
+        role: Role::Device,
+    };
+
+    // Right secret, wrong address: refused.
+    let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    assert!(connect_raw(dev_path(stranger), &s).await.is_err());
+    // From the peer's address but unauthenticated: fails, box keeps going.
+    let dp = dev_path(b);
+    assert!(connect_raw(dp, &PairingSecret::generate()).await.is_err());
+    // The real device, same address, still gets in.
+    let b = loop {
+        match UdpSocket::bind(ba).await {
+            Ok(b) => break b,
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    };
+    let (_ep, conn) = tokio::time::timeout(T, connect_raw(dev_path(b), &s))
+        .await
+        .unwrap()
+        .unwrap();
+    connected(&mut box_ev).await;
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    send.write_all(&[STREAM_PING, 7]).await.unwrap();
+    let mut byte = [0u8; 1];
+    tokio::time::timeout(T, recv.read_exact(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(byte, [7]);
+}
+
 #[tokio::test]
 async fn box_echoes_pings() {
     let target = echo_server().await;
@@ -527,7 +580,8 @@ async fn cookie_gate_admits_only_the_booted_webview() {
     // No cookie, a wrong one, or a wrong boot key: dropped unanswered.
     assert_eq!(raw(d.port, &get("/", "")).await, "");
     assert_eq!(raw(d.port, &get("/", "Cookie: __pbm=nope\r\n")).await, "");
-    let wrong_key = format!("Cookie: __pbm={}0\r\n", &key[..key.len() - 1]);
+    let last = if key.ends_with('0') { '1' } else { '0' };
+    let wrong_key = format!("Cookie: __pbm={}{last}\r\n", &key[..key.len() - 1]);
     assert_eq!(raw(d.port, &get("/", &wrong_key)).await, "");
     assert_eq!(raw(d.port, &get("/__pbm/boot?k=nope", "")).await, "");
 
@@ -545,29 +599,30 @@ async fn cookie_gate_admits_only_the_booted_webview() {
         "{r}"
     );
     assert!(!r.contains("__pbm_shell"), "{r}");
-
-    // App shell origin: a known Tauri origin lands in a readable cookie;
-    // anything else (or a header-injection attempt) is ignored.
-    let boot = |shell: &str| get(&format!("{}&shell={shell}", gate.boot_path()), "");
-    let r = raw(d.port, &boot("tauri%3A%2F%2Flocalhost")).await;
+    // `next`: back to the page the WebView was on (same-origin paths only).
+    let r = raw(d.port, &get(&gate.boot_path_to("/s/x?y=1&z=2"), "")).await;
+    assert!(r.contains("location.replace(\"/s/x?y=1&z=2\")"), "{r}");
+    let evil = format!("{}&next=%2F%2Fevil.example", gate.boot_path());
+    let r = raw(d.port, &get(&evil, "")).await;
     assert!(
-        r.contains("\r\nSet-Cookie: __pbm_shell=tauri://localhost; SameSite=Strict; Path=/\r\n"),
+        r.contains("location.replace(\"/\")") && !r.contains("evil"),
         "{r}"
     );
-    let r = raw(d.port, &boot("http%3A%2F%2Ftauri.localhost")).await;
-    assert!(r.contains("__pbm_shell=http://tauri.localhost;"), "{r}");
-    for bad in [
+
+    // `shell=` (older app builds): ignored, never rejected, no cookie.
+    for shell in [
+        "tauri%3A%2F%2Flocalhost",
         "https%3A%2F%2Fevil.example",
-        "http%3A%2F%2Ftauri.localhost.evil.example",
-        "http%3A%2F%2Flocalhost%3A1420%0D%0AX-Bad%3A%201",
         "%ZZ",
     ] {
-        let r = raw(d.port, &boot(bad)).await;
+        let r = raw(
+            d.port,
+            &get(&format!("{}&shell={shell}", gate.boot_path()), ""),
+        )
+        .await;
         assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
-        assert!(
-            !r.contains("__pbm_shell") && !r.contains("X-Bad"),
-            "{bad}: {r}"
-        );
+        assert!(r.contains("location.replace(\"/\")"), "{r}");
+        assert!(!r.contains("__pbm_shell"), "{shell}: {r}");
     }
 
     // With the cookie (among others, any header case): forwarded.

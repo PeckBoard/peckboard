@@ -98,8 +98,10 @@ impl PunchedPath { fn kind(&self) -> PathKind; fn path_watch(&self) -> watch::Re
 pub enum PathKind { Direct, Relayed }  // as_str(): "direct" | "relayed"
 
 // Box: accept one QUIC connection (15 s window) from the paired device and
-// forward every stream to `target`. Ok(()) when an established connection
-// ends; Err if no authenticated device connects.
+// forward every stream to `target`. Only `path.peer` may connect (others are
+// refused); handshakes run concurrently, so a failed or stalled one can't
+// shut the device out. Ok(()) when an established connection ends; Err if
+// no authenticated device connects.
 pub async fn serve_box(path: PunchedPath, secret: &PairingSecret, target: SocketAddr,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static) -> anyhow::Result<()>;
 
@@ -154,10 +156,12 @@ impl DeviceOptions {
 }
 
 // Rendezvous → punch → connect → serve `listener` → back off → repeat.
-// Ok(()) once `cancel` fires: tunnel + all streams closed, listener dropped
-// (port stops accepting). Err only with give_up_on_punch_failure (punch
-// failed before any tunnel came up). To resume: bind again, new token.
-pub async fn run_device(opts: DeviceOptions, listener: TcpListener,
+// Ok(()) once `cancel` fires: tunnel + all streams closed. A listener passed
+// by value is dropped (port stops accepting); pass Arc<TcpListener> to keep
+// the port bound across a stop/restart (mobile background). Err only with
+// give_up_on_punch_failure (punch failed before any tunnel came up). To
+// resume: call again with a new token.
+pub async fn run_device<L: Borrow<TcpListener> + Send>(opts: DeviceOptions, listener: L,
     cancel: CancellationToken,  // re-exported tokio_util token
     on_event: impl Fn(DeviceEvent) + Send + Sync + 'static) -> anyhow::Result<()>;
 
@@ -174,10 +178,12 @@ pub enum DeviceEvent {     // per attempt: Connecting, then Connected..Disconnec
 }
 
 // Runs on each accepted local connection before it becomes a stream:
-// Some(tcp) forwards, None drops (it may answer the connection itself).
-// Inspect with TcpStream::peek — consumed bytes never reach the box.
+// Some(Admitted { head, tcp }) forwards `head` then the rest of `tcp`, None
+// drops (it may answer the connection itself). Inspect with
+// TcpStream::peek; consumed bytes reach the box only as `head`.
 pub type AcceptFilter = Arc<dyn Fn(TcpStream)
-    -> Pin<Box<dyn Future<Output = Option<TcpStream>> + Send>> + Send + Sync>;
+    -> Pin<Box<dyn Future<Output = Option<Admitted>> + Send>> + Send + Sync>;
+pub struct Admitted { pub head: Vec<u8>, pub tcp: TcpStream }
 
 #[derive(Clone)] // cheap; Debug never prints the key
 pub struct CookieGate { .. }
@@ -187,8 +193,9 @@ impl CookieGate {
     pub fn new() -> Self;               // random 256-bit key, 64 hex chars
     pub fn key(&self) -> &str;
     pub fn boot_path(&self) -> String;  // "/__pbm/boot?k=<key>"
+    pub fn boot_path_to(&self, next: &str) -> String; // ... "&next=<path>"
     pub fn filter(&self) -> AcceptFilter;
-    pub async fn admit(&self, tcp: TcpStream) -> Option<TcpStream>;
+    pub async fn admit(&self, tcp: TcpStream) -> Option<Admitted>;
 }
 ```
 
@@ -196,24 +203,28 @@ Cookie gate: the WebView first loads `http://127.0.0.1:<port>` +
 `boot_path()`. The device answers that itself (the box never sees it):
 `200` with `Set-Cookie: __pbm=<key>; HttpOnly; SameSite=Strict; Path=/`,
 `Cache-Control: no-store`, and a page that does `location.replace("/")`
-(meta refresh + script). That is a same-origin navigation, so the Strict
+(meta refresh + script; `boot_path_to` lands on a validated same-origin
+path instead). That is a same-origin navigation, so the Strict
 cookie rides along — an HTTP 302 would inherit the boot load's cross-site
 initiator (Tauri origin → 127.0.0.1) and the Strict cookie could be
 withheld; `replace` also drops the key from history. Every other
-connection's first request head (HTTP or WebSocket upgrade, ≤16 KiB, 10 s)
-must carry a `Cookie` header with `__pbm=<key>` (constant-time compare) or
-the connection is dropped unanswered; a wrong boot key is dropped too. Only
-the first request of a keep-alive connection is checked. Cookies are
-scoped by host, not port: create **one** gate per app launch and share it
-across every paired box's `run_device`, or the boxes' cookies overwrite
-each other.
+connection's first request head (HTTP or WebSocket upgrade, ≤16 KiB, 3 s,
+at most 64 connections being checked at once) must carry a `Cookie` header
+with `__pbm=<key>` (constant-time compare) or the connection is dropped
+unanswered; a wrong boot key is dropped too. That head is forwarded without
+the `__pbm` cookie (the Peckboard box also drops it from every later
+request). Only the first request of a keep-alive connection is checked.
+Cookies are scoped by host, not port, so every box shares one `__pbm`
+slot: give each box its own gate, boot the WebView through it on every box
+switch, and replace it (and re-boot) whenever the port may have been
+exposed.
 
-Mobile shape: on foreground `bind_listener(Prefer(127.0.0.1:<box port>))`
-
-- `tokio::spawn(run_device(opts.clone(), l, token.clone(), ..))`; on
-  background `token.cancel()` and await the task. `peckboard-connect` runs
-  the same loop (`--gate` turns the cookie gate on; off by default) and maps
-  `DeviceEvent`s to its terminal messages.
+Mobile shape: on connect `bind_listener(Prefer(127.0.0.1:<box port>))` into
+an `Arc`, then `tokio::spawn(run_device(opts, l.clone(), token.clone(), ..))`
+with a fresh `CookieGate`; on background `token.cancel()` and await the
+task, keeping `l` bound; on foreground the same with the same `l` and a new
+gate. `peckboard-connect` runs the same loop (`--gate` turns the cookie gate
+on; off by default) and maps `DeviceEvent`s to its terminal messages.
 
 ### Tunnel Wire Format
 
@@ -290,11 +301,11 @@ and the relay only forwards its ciphertext.
   | ---------------------- | --------- | ------------------------------------------ |
   | `--relay-rate-per-id`  | 512 KiB/s | bytes/s per rendezvous id, both directions |
   | `--relay-burst-per-id` | 2 MiB     | burst per id                               |
-  | `--relay-rate-per-ip`  | 1 MiB/s   | bytes/s per sending IP (v6 /64)            |
+  | `--relay-rate-per-ip`  | 1 MiB/s   | bytes/s per sending IP (v6 /64, /56, /48)  |
   | `--relay-burst-per-ip` | 4 MiB     | burst per IP                               |
   | `--relay-rate-global`  | 50 MiB/s  | bytes/s across the relay                   |
   | `--relay-burst-global` | 100 MiB   | global burst                               |
-  | `--relay-max-pairs`    | 1000      | ids relaying at once (more: dropped)       |
+  | `--relay-max-pairs`    | 1000      | ids relaying at once (fair-share, below)   |
   | `--relay-idle-secs`    | 60        | idle id frees its pair slot                |
   | `--no-relay-data`      | off       | disable; the relay stops offering v2       |
 
@@ -316,10 +327,61 @@ and the relay only forwards its ciphertext.
 
 ## Limits
 
-Per-IP (/64 for v6) and global connection-rate and STUN-rate token buckets,
-max connections (global + per IP), 8 KiB frames / 4 KiB blobs, per-session
-message rate, handshake (10 s) and idle (90 s) timeouts, capped id table
-with TTL eviction. Defaults in `RelayConfig::default()`.
+Every per-address limit keys on the canonical client address: v4-mapped
+(`::ffff:a.b.c.d`), 6to4 (`2002::/16`) and Teredo (`2001:0::/32`)
+addresses fold to their embedded IPv4. IPv6 is limited per /64, /56 and /48
+at once; the /56 gets 2× and the /48 4× the per-/64 budget
+(`limits::V6_56_SCALE`, `V6_48_SCALE`), so a free /48 buys about as much as
+one IPv4 address. Defaults live in `RelayConfig::default()` (flag where
+listed).
+
+| Limit                                                    | Default                                  |
+| -------------------------------------------------------- | ---------------------------------------- |
+| Connections, global (`--max-connections`)                | 8192                                     |
+| Connections per IPv4 (`--max-connections-per-ip`)        | 256 (carrier NAT, see below)             |
+| Connections per IPv6 /64 (`--max-connections-per-v6-64`) | 32 (/56: 64, /48: 128)                   |
+| New connections per IP                                   | 2/s, burst 64; global 200/s, burst 1000  |
+| STUN per source IP (checked first)                       | 5 pps, burst 40                          |
+| STUN per credential                                      | 10 pps, burst 40                         |
+| STUN global (valid username only)                        | 2000 pps, burst 5000                     |
+| Signaling messages per session                           | 10/s, burst 40                           |
+| Frames / blobs / datagrams                               | 8 KiB / 4 KiB / 2 KiB                    |
+| Handshake / idle timeout                                 | 10 s / 90 s                              |
+| Unpaired session lifetime                                | 30 min + 0-10 min jitter                 |
+| Ids (`--max-ids`)                                        | 100,000; full ⇒ drop longest-idle id     |
+| Id TTL, never paired / paired                            | 10 min / 24 h after the last peer leaves |
+| New ids per IP                                           | burst 256, refill 256/h; global 100/s    |
+| Queued bytes per session, signaling / data               | 32 KiB / 96 KiB (+64 B per frame)        |
+| Queued bytes, relay-wide                                 | 256 MiB                                  |
+| Minimum drain rate while backlogged                      | 4 KiB/s over 15 s; 10 s per frame        |
+| Relay pair slots per IPv4 / per IPv6 /64                 | 32 / 8 (each pair counts once per end)   |
+
+- **Eviction, not refusal**: when the table (or one address's cap) is full,
+  a newcomer displaces the oldest handshaking or decoy session, then the
+  oldest session whose peer is offline. Paired sessions are never evicted;
+  if only those are left, the newcomer is refused. Sessions evicted but
+  still tearing down may overshoot the cap by 1/8 (at least 16).
+- **Unpaired lifetime**: a session with no peer online, decoy or not, is
+  closed after 30-40 min and the client reconnects (the box after 2 s). The
+  clock restarts whenever a peer leaves. Decoys get the identical treatment,
+  so the lifetime reveals nothing.
+- **Unpaired `Data`**: a v2 `Data` frame with no online peer costs a
+  signaling token, counts as `dropped_no_peer`, and doesn't reset the idle
+  timer. Only a paired session uses relay slots or bandwidth.
+- **Slow readers**: frames past a session's byte budget are dropped. A
+  session whose socket accepts less than the drain rate while it has a
+  backlog is closed, and so is one that can't take a frame within 10 s.
+- **Relay slots**: a pair takes a slot on its first datagram. When all
+  1000 are held, it takes the slot of a pair whose busiest address holds
+  strictly more slots than its own will, which shares slots max-min fairly
+  between addresses. Otherwise its datagrams are dropped, with a retry at
+  most once per second.
+- **Carrier NAT**: one public IPv4 address can front a few hundred mobile
+  subscribers, because carriers hand each one a block of 512-4096 ports.
+  256 sessions per address lets all of them use Peckboard at once, and
+  eviction keeps one subscriber's decoys from locking the others out.
+- Ed25519 membership signatures are verified strictly (`verify_strict`, weak
+  keys refused).
 
 ## Run Locally
 
@@ -351,12 +413,16 @@ Builds a static `x86_64-unknown-linux-musl` binary (`cargo zigbuild` if
 available, else the repo's `tmp-musl-tools/x86_64-linux-musl-cross` gcc),
 refuses anything not statically linked, uploads it plus
 `deploy/peckboard-relay.service`, creates the `peckrelay` system user if
-missing, installs to `/opt/peckboard-relay/peckboard-relay` (root:peckrelay
-0750; the previous binary is kept as `peckboard-relay.prev`), and restarts
-the service. The unit runs as `peckrelay` with only `CAP_NET_BIND_SERVICE`,
-`NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, a syscall filter,
-and a 0700 `StateDirectory=/var/lib/peckrelay` holding the ACME cache
-(files 0600). Open 443/tcp and 3478/udp in the host firewall; DNS
+missing, installs to `/opt/peckboard-relay/peckboard-relay` (directory and
+files root:peckrelay 0750, so the service user can run but never replace
+its binary; the previous binary is kept as `peckboard-relay.prev`), and
+restarts the service. The unit runs as `peckrelay` with only
+`CAP_NET_BIND_SERVICE`, `NoNewPrivileges`, `ProtectSystem=strict`,
+`PrivateTmp`, a syscall filter, `MemoryMax=2G`, and a 0700
+`StateDirectory=/var/lib/peckrelay` holding the ACME cache (files 0600; its
+only writable path). `IPAddressDeny` for private ranges is staged but
+commented out until Infra confirms the source address LAN boxes arrive
+from. Open 443/tcp and 3478/udp in the host firewall; DNS
 `relay.peckboard.com` must point at the host before first start so Let's
 Encrypt can validate via TLS-ALPN-01.
 

@@ -126,6 +126,45 @@ pub fn tunnel_client_addr(peer: SocketAddr) -> SocketAddr {
     }
 }
 
+/// The phone app's loopback gate cookie: a device-local key, never meant
+/// for the box. The app strips it from the first request on each
+/// connection; this drops it from every later (keep-alive) one too, so it
+/// never reaches handlers, logs or proxies.
+const GATE_COOKIE: &str = "__pbm";
+
+fn strip_gate_cookie(headers: &mut axum::http::HeaderMap) {
+    use axum::http::header::COOKIE;
+    let is_gate = |c: &str| {
+        c.split_once('=')
+            .is_some_and(|(n, _)| n.trim() == GATE_COOKIE)
+    };
+    let values: Vec<_> = headers.get_all(COOKIE).iter().cloned().collect();
+    let has_gate = values.iter().any(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.split(';').any(|c| is_gate(c.trim())))
+    });
+    if !has_gate {
+        return;
+    }
+    headers.remove(COOKIE);
+    for v in values {
+        let Ok(s) = v.to_str() else {
+            headers.append(COOKIE, v);
+            continue;
+        };
+        let kept: Vec<&str> = s
+            .split(';')
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && !is_gate(c))
+            .collect();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&kept.join("; "))
+            && !kept.is_empty()
+        {
+            headers.append(COOKIE, v);
+        }
+    }
+}
+
 /// Serve `app` to one tunnel until it ends. See the module docs.
 pub async fn serve_tunnel(
     app: Router,
@@ -140,6 +179,12 @@ pub async fn serve_tunnel(
     let client = tunnel_client_addr(punched.peer());
     let mut make_service = app
         .layer(axum::Extension(Tunnelled))
+        .layer(axum::middleware::map_request(
+            |mut req: axum::extract::Request| async move {
+                strip_gate_cookie(req.headers_mut());
+                req
+            },
+        ))
         .into_make_service_with_connect_info::<SocketAddr>();
 
     let serve = punched.serve(secret, target, events);
@@ -192,6 +237,26 @@ mod tests {
         }
         let a = tunnel_client_addr("[::ffff:203.0.113.9]:4000".parse().unwrap());
         assert_eq!(a, "203.0.113.9:4000".parse().unwrap());
+    }
+
+    /// SECURITY: the phone's loopback gate key never reaches the box's
+    /// handlers; other cookies (incl. the readable `__pbm_shell`) survive.
+    #[test]
+    fn gate_cookie_is_stripped() {
+        use axum::http::{HeaderMap, HeaderValue, header::COOKIE};
+        let mut h = HeaderMap::new();
+        h.append(
+            COOKIE,
+            HeaderValue::from_static("a=b; __pbm=k; __pbm_shell=s"),
+        );
+        h.append(COOKIE, HeaderValue::from_static("__pbm=k"));
+        strip_gate_cookie(&mut h);
+        let left: Vec<_> = h.get_all(COOKIE).iter().collect();
+        assert_eq!(left, ["a=b; __pbm_shell=s"]);
+        let mut h = HeaderMap::new();
+        h.append(COOKIE, HeaderValue::from_static("x=1;y=2"));
+        strip_gate_cookie(&mut h);
+        assert_eq!(h.get(COOKIE).unwrap(), "x=1;y=2");
     }
 
     /// Fake tunnel whose "device" sends one raw HTTP request to the target

@@ -278,6 +278,44 @@ async fn unauthenticated_stun_gets_no_reply() {
 }
 
 #[tokio::test]
+async fn stun_flood_from_one_source_does_not_starve_others() {
+    // A global ceiling the flood alone would exhaust many times over.
+    let h = start(RelayConfig {
+        stun_rate_global: 0.001,
+        stun_burst_global: 20.0,
+        ..RelayConfig::default()
+    })
+    .await;
+    let flood = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+    let txid = [3u8; 12];
+    let junk = stun::build_request(&txid, "deadbeefdeadbeefdeadbeefdeadbeef", b"guess");
+    for i in 0..2000 {
+        let pkt: &[u8] = if i % 2 == 0 { &junk } else { b"\x00" };
+        flood.send_to(pkt, h.stun_addr).await.unwrap();
+    }
+    // The flooder's own valid credential is capped by its source bucket.
+    let atk = RelayClient::connect(&h.cfg, &PairingSecret::generate(), Role::Box)
+        .await
+        .unwrap();
+    let cred = atk.stun_credential();
+    let valid = stun::build_request(&txid, &cred.username, cred.password.as_bytes());
+    for _ in 0..200 {
+        flood.send_to(&valid, h.stun_addr).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Another source still gets its binding.
+    let c = RelayClient::connect(&h.cfg, &PairingSecret::generate(), Role::Device)
+        .await
+        .unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mapped = c
+        .stun_binding(&sock)
+        .await
+        .expect("starved by another source");
+    assert_eq!(mapped, sock.local_addr().unwrap());
+}
+
+#[tokio::test]
 async fn per_ip_connection_rate_limit() {
     let rc = RelayConfig {
         conn_rate_per_ip: 0.0,

@@ -58,7 +58,6 @@ import ConnectionBanner from './components/ConnectionBanner'
 import RestartPendingBanner from './components/RestartPendingBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
 import { parseVoiceNavigate, useVoiceNavStore, VOICE_PAGE_VIEWS } from './voice/navigation'
-import { mobileShellUrl } from './utils/mobileApp'
 import './App.css'
 
 type View =
@@ -395,8 +394,6 @@ function App() {
   const [renameTarget, setRenameTarget] = useState<{ type: TabType; id: string } | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
-  // Inside the PeckBoard mobile app: where "Switch box" returns to.
-  const [mobileShell] = useState(mobileShellUrl)
   const [showChangePassword, setShowChangePassword] = useState(false)
   // Which Settings sub-page to open on mount, parsed from the URL
   // (`/settings/<sub>` or a legacy deep link like `/plugins`); null lands
@@ -721,8 +718,16 @@ function App() {
     // Stage Manager, so the isEditableFocused() check below is enough.
     const isTablet = () => window.matchMedia('(min-width: 768px)').matches
 
+    // Last values written, so the many events below (iOS fires a
+    // visualViewport scroll for every reveal / loupe / bar tweak) don't
+    // rewrite the root custom property — and restyle the whole document
+    // — when nothing changed.
+    let lastHeight = ''
+    let lastKeyboardOpen = false
+
     const update = () => {
       let height = `${window.innerHeight}px`
+      let keyboardOpen = false
       const focusOwned = isTablet()
         ? document.hasFocus() && isEditableFocused()
         : isEditableFocused()
@@ -733,9 +738,24 @@ function App() {
         // pixel pin. 50px is below the smallest realistic soft keyboard
         // (typical iOS/Android keyboards are 240px+) but above the
         // ~30-40px URL-bar collapse on iOS Safari.
-        if (delta > 50) height = `${vv.height}px`
+        if (delta > 50) {
+          height = `${vv.height}px`
+          keyboardOpen = true
+        }
       }
-      root.style.setProperty('--app-height', height)
+      if (height !== lastHeight) {
+        root.style.setProperty('--app-height', height)
+        lastHeight = height
+      }
+      // `html[data-keyboard-open]` top-anchors modals (auth.css). A
+      // centred modal moved by half of every keyboard-height change —
+      // the iOS QuickType / one-time-code AutoFill bar coming and going
+      // — so the login 2FA field slid under the user's finger and iOS
+      // dropped its Paste callout.
+      if (keyboardOpen !== lastKeyboardOpen) {
+        root.toggleAttribute('data-keyboard-open', keyboardOpen)
+        lastKeyboardOpen = keyboardOpen
+      }
       // iOS Safari auto-scrolls the *layout* viewport so a focused
       // input near the bottom stays in view above the keyboard. With
       // our `html { overflow: hidden }` setup that scroll has nowhere
@@ -782,6 +802,7 @@ function App() {
       document.removeEventListener('focusin', update)
       document.removeEventListener('focusout', update)
       document.removeEventListener('visibilitychange', update)
+      root.removeAttribute('data-keyboard-open')
     }
   }, [])
 
@@ -1681,21 +1702,6 @@ function App() {
                   >
                     Change password
                   </button>
-                  {mobileShell && (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      data-testid="user-menu-switch-box"
-                      onClick={() => {
-                        setUserMenuOpen(false)
-                        // Replace, so Back from the box list can't land on
-                        // this box after its tunnel is gone.
-                        window.location.replace(mobileShell)
-                      }}
-                    >
-                      Switch box
-                    </button>
-                  )}
                   <button
                     type="button"
                     role="menuitem"

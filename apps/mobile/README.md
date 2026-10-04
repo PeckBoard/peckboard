@@ -29,25 +29,34 @@ apps/mobile/
 ```
 
 **Flow.** Tap a box → `connect_box` binds `127.0.0.1:<box port>` and starts
-`run_device` (rendezvous → hole punch → QUIC), gated by a per-launch
+`run_device` (rendezvous → hole punch → QUIC), gated by that box's own
 `CookieGate`. Status events (`tunnel-status`) drive the connect screen; on
 `connected` the WebView navigates to `http://127.0.0.1:<port>/__pbm/boot?k=<key>`,
 the device-side gate sets an HttpOnly cookie and replaces itself with `/`,
 and the box UI takes over. Every other local connection without the cookie
-is dropped, so other apps on the phone can't use the port. Back (Android
-button / iOS edge swipe) returns to the shell.
+is dropped, so other apps on the phone can't use the port; the cookie is
+removed before a request is forwarded, so the box never learns the key.
+The app adds a **Boxes** button to every box page (top left, over the box
+UI's logo; evaluated after each page load, see `src-tauri/src/boxes_button.js`)
+that returns to the box list, on any box version; Back (Android button / iOS
+edge swipe) does the same. Either way the shell stops the tunnel when it
+loads. The button only navigates — box pages get no Tauri IPC.
 
 **Ports.** Each box gets a fixed port (41000, 41001, …) stored with its
 pairing, because the web UI keeps its login in per-origin localStorage — a
 changed port means signing in again. If the port is taken at connect time a
 free one is used for that session and the UI says so.
 
-**Lifecycle.** The tunnel and listener run only while the app is in the
-foreground: the native plugin reports background/foreground (iOS
+**Lifecycle.** The tunnel runs only while the app is in the foreground: the
+native plugin reports background/foreground (iOS
 `didEnterBackground`/`willEnterForeground`, Android `onStop`/`onResume`);
-background cancels `run_device` (listener dropped), foreground rebinds the
-same port with the same gate key, so the box UI page, its login and the gate
-cookie stay valid and its WebSocket reconnects on its own.
+background cancels `run_device` but keeps the listener bound (nothing is
+accepted), so another app on the phone can't take the port while the box
+page is still alive and harvest its login token or gate cookie. Foreground
+restarts the tunnel on that same listener with a **new** gate key; once it
+is connected the WebView re-boots through the new key and lands back on the
+page it was on (`&next=`). A key that leaked while backgrounded is dead.
+The port is released only by disconnecting or switching box.
 
 **Secrets.** The pairing link (the only credential) is stored via the
 native plugin: iOS Keychain generic password,

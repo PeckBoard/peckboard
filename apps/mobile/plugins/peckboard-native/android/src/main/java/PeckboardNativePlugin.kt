@@ -113,7 +113,7 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** ` PeckBoardApp/<version>`: lets the box UI offer "Switch box". */
+    /** ` PeckBoardApp/<version>`: tells the box UI it runs inside the app. */
     private fun appUserAgent(webView: WebView) {
         val version = try {
             activity.packageManager.getPackageInfo(activity.packageName, 0).versionName

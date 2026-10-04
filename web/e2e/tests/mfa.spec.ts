@@ -204,3 +204,73 @@ test.describe('two-factor auth', () => {
     expect(after.body.token).toBeTruthy()
   })
 })
+
+async function enrollTotpViaApi(
+  request: APIRequestContext,
+  username: string,
+  password: string,
+): Promise<void> {
+  const { body } = await loginAs(request, username, password)
+  const auth = { Authorization: `Bearer ${body.token as string}` }
+  const begin = await request.post('/api/auth/mfa/totp/begin', {
+    headers: auth,
+    data: { password },
+  })
+  expect(begin.ok(), await begin.text()).toBeTruthy()
+  const { secret } = (await begin.json()) as { secret: string }
+  const confirm = await request.post('/api/auth/mfa/totp/confirm', {
+    headers: auth,
+    data: { password, code: totpNow(secret) },
+  })
+  expect(confirm.ok(), await confirm.text()).toBeTruthy()
+}
+
+test.describe('two-factor auth on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+
+  test('the code field holds still while the keyboard height changes', async ({
+    request,
+    page,
+  }) => {
+    // Regression: iOS shows and hides its QuickType / one-time-code
+    // AutoFill bar while the keyboard is up. The login modal was centred
+    // in `--app-height`, so each change moved the 2FA field by half the
+    // delta — the form jumped and iOS dropped the Paste callout.
+    // Playwright has no soft keyboard, so stub `visualViewport.height`
+    // the way the keyboard shrinks it and fire its resize event.
+    const { auth: adminAuth } = await authenticateAdmin(request)
+    const u = await createThrowawayUser(request, adminAuth, 'kbd')
+    await enrollTotpViaApi(request, u.username, u.password)
+
+    await page.goto('/')
+    await page.locator('#login-username').fill(u.username)
+    await page.locator('#login-password').fill(u.password)
+    await page.getByRole('button', { name: 'Sign In' }).click()
+    const code = page.getByTestId('login-mfa-code')
+    await expect(code).toBeVisible({ timeout: 10_000 })
+    await code.click()
+
+    const keyboard = (height: number) =>
+      page.evaluate((kb) => {
+        const vv = window.visualViewport!
+        Object.defineProperty(vv, 'height', {
+          configurable: true,
+          get: () => window.innerHeight - kb,
+        })
+        vv.dispatchEvent(new Event('resize'))
+      }, height)
+
+    await keyboard(300)
+    await expect(page.locator('html')).toHaveAttribute('data-keyboard-open', '')
+    const before = await code.boundingBox()
+    // The QuickType bar appears on top of the keyboard.
+    await keyboard(344)
+    await expect
+      .poll(() =>
+        page.evaluate(() => document.documentElement.style.getPropertyValue('--app-height')),
+      )
+      .toBe('500px')
+    const after = await code.boundingBox()
+    expect(after?.y).toBe(before?.y)
+  })
+})

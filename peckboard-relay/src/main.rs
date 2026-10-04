@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use peckboard_relay::server::{Relay, RelayConfig};
+use peckboard_relay::server::{
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_CONNECTIONS_PER_V6_64,
+    Relay, RelayConfig,
+};
 use peckboard_relay::tls;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio_rustls::TlsAcceptor;
@@ -44,10 +47,14 @@ struct Args {
     /// cert DER is written to <state-dir>/dev-cert.der for clients to pin.
     #[arg(long)]
     dev_self_signed: bool,
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = DEFAULT_MAX_CONNECTIONS)]
     max_connections: usize,
-    #[arg(long, default_value_t = 16)]
+    /// Concurrent connections per IPv4 address (carrier-NAT sized).
+    #[arg(long, default_value_t = DEFAULT_MAX_CONNECTIONS_PER_IP)]
     max_connections_per_ip: usize,
+    /// Concurrent connections per IPv6 /64 (/56 x2, /48 x4).
+    #[arg(long, default_value_t = DEFAULT_MAX_CONNECTIONS_PER_V6_64)]
+    max_connections_per_v6_64: usize,
     #[arg(long, default_value_t = 100_000)]
     max_ids: usize,
     /// Log full client IPs (default: salted 4-byte hash).
@@ -137,6 +144,7 @@ async fn run(
     let cfg = RelayConfig {
         max_connections: args.max_connections,
         max_connections_per_ip: args.max_connections_per_ip,
+        max_connections_per_v6_64: args.max_connections_per_v6_64,
         max_ids: args.max_ids,
         log_full_ips: args.log_full_ips,
         relay_enabled: !args.no_relay_data,

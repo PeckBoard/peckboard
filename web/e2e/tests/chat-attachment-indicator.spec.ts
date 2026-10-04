@@ -89,9 +89,15 @@ test('a sent message with an image shows the attachment indicator on its bubble'
 
   // The user bubble carries the caption AND the attachment indicator,
   // and the indicator survives once the persisted `user` event replaces
-  // the optimistic bubble.
+  // the optimistic bubble. The filename chip upgrades to an inline
+  // thumbnail (aria-labelled with the filename) as soon as the bytes
+  // load, so accept either form.
   const indicator = page.getByTestId('message-attachments')
   await expect(indicator).toBeVisible({ timeout: 10_000 })
-  await expect(indicator).toContainText('screenshot.png')
+  await expect(
+    indicator
+      .getByText('screenshot.png')
+      .or(indicator.getByRole('button', { name: 'Open screenshot.png' })),
+  ).toBeVisible()
   await expect(page.locator('.chat-bubble-user')).toContainText('look at this')
 })

@@ -158,8 +158,8 @@ function onStatus(st: TunnelStatus) {
   if (screen.kind === "connect" && screen.box.id === st.boxId) {
     if (st.state === "connected") {
       // Gate boot URL: sets the loopback cookie, then loads the box UI.
-      // `shell` lets the box UI offer "Switch box" back to this page.
-      window.location.href = `${st.url}&shell=${encodeURIComponent(location.origin)}`;
+      // The app adds a "Boxes" button to box pages that returns here.
+      window.location.href = st.url;
       return;
     }
     screen = { ...screen, status: st, error: undefined };
@@ -561,7 +561,7 @@ async function takePairLink() {
   }
 }
 
-/** The shell is showing again (Switch box, Back, a deep link): any tunnel
+/** The shell is showing again (Boxes button, Back, a deep link): any tunnel
  *  still up belongs to a box UI the user just left — stop it. */
 async function leaveBox() {
   const st = await invoke<TunnelStatus | null>("tunnel_status").catch(

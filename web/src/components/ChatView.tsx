@@ -1880,9 +1880,13 @@ export default function ChatView({
   // working indicator may say "Thinking…". Providers without flags fall
   // back to today's Claude-shaped assumptions.
   const sessionModel = sessionDetail?.model
-  const attachDisabledReason = imagesAllowedForModel(sessionModel, availableProviders)
-    ? null
-    : `${providerForModel(sessionModel, availableProviders)?.display_name ?? 'This provider'} doesn't accept image attachments — they would be dropped`
+  // An empty list means the catalogue hasn't loaded yet (a cold `/api/models` can take
+  // seconds) — not that the provider vanished — so don't reject an attach on the
+  // conservative fallback during that window.
+  const attachDisabledReason =
+    availableProviders.length === 0 || imagesAllowedForModel(sessionModel, availableProviders)
+      ? null
+      : `${providerForModel(sessionModel, availableProviders)?.display_name ?? 'This provider'} doesn't accept image attachments — they would be dropped`
   const interruptAffordance = interruptAffordanceForModel(sessionModel, availableProviders)
   const workingLabel = modelThinks(sessionModel, availableProviders) ? 'Thinking...' : 'Working...'
 

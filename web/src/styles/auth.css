@@ -92,6 +92,24 @@
   margin: auto 0;
 }
 
+/* While the on-screen keyboard is up (App.tsx sets the attribute), pin
+   the modal to the top of the visible region instead of centring it.
+   Centred, every keyboard-height change (iOS QuickType / AutoFill bar)
+   moved the form by half the delta: the fields slid under the user's
+   finger, iOS re-scrolled to reveal the caret, and the edit callout
+   (Paste) was dismissed before it could show. */
+html[data-keyboard-open] .modal {
+  margin-top: 0;
+}
+
+/* ...and keep it clear of the notch / Dynamic Island: the page is
+   `viewport-fit=cover`, so inside the mobile app's full-screen WebView
+   the top 16px sits under the status bar. `:where` keeps this below
+   bottom-sheet backdrops, which zero their padding. */
+:where(html[data-keyboard-open]) .modal-backdrop {
+  padding-top: max(16px, env(safe-area-inset-top, 0px));
+}
+
 @keyframes modalIn {
   from {
     transform: translateY(8px) scale(0.98);

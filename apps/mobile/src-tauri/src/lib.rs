@@ -12,6 +12,7 @@ mod tunnel;
 
 use std::sync::{Arc, Mutex};
 
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, async_runtime};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
@@ -82,7 +83,8 @@ fn init_debug_log(dir: &std::path::Path) {
 }
 
 /// The shell page's URL as first loaded (scheme/host differ per platform
-/// and in dev), so a deep link can bring the WebView back from a box UI.
+/// and in dev), so a deep link or the "Boxes" button can bring the WebView
+/// back from a box UI.
 #[derive(Default)]
 struct ShellHome(Arc<Mutex<Option<Url>>>);
 
@@ -99,21 +101,45 @@ fn open_pair_link(app: &AppHandle, raw: &str) {
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
-    let on_box = win.url().is_ok_and(|u| u.host_str() == Some("127.0.0.1"));
-    if on_box {
-        let home = app.state::<ShellHome>().0.lock().unwrap().clone();
-        let fallback = if cfg!(any(
-            target_os = "ios",
-            target_os = "macos",
-            target_os = "linux"
-        )) {
-            "tauri://localhost/"
-        } else {
-            "http://tauri.localhost/"
-        };
-        if let Some(url) = home.or_else(|| Url::parse(fallback).ok()) {
-            let _ = win.navigate(url);
-        }
+    let on_box = win.url().is_ok_and(|u| u.host_str() == Some(nav::LOOPBACK));
+    if on_box && let Some(url) = shell_home(app) {
+        let _ = win.navigate(url);
+    }
+}
+
+/// The shell page to bring the WebView back to: as first loaded, else the
+/// platform's default.
+fn shell_home(app: &AppHandle) -> Option<Url> {
+    let home = app.state::<ShellHome>().0.lock().unwrap().clone();
+    let fallback = if cfg!(any(
+        target_os = "ios",
+        target_os = "macos",
+        target_os = "linux"
+    )) {
+        "tauri://localhost/"
+    } else {
+        "http://tauri.localhost/"
+    };
+    home.or_else(|| Url::parse(fallback).ok())
+}
+
+/// The gate key was rotated (resume) and the tunnel is back: a box page
+/// still showing on `port` carries the old cookie, so re-boot it through
+/// the new key, landing on the page it was on.
+fn reboot_box_page(app: &AppHandle, tunnel: &TunnelManager, port: u16) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(cur) = win.url() else { return };
+    if cur.host_str() != Some(nav::LOOPBACK) || cur.port() != Some(port) {
+        return;
+    }
+    let next = &cur[url::Position::BeforePath..];
+    let Some(boot) = tunnel.boot_url_to(next) else {
+        return;
+    };
+    if let Ok(u) = Url::parse(&boot) {
+        let _ = win.navigate(u);
     }
 }
 
@@ -139,6 +165,7 @@ pub fn run() {
             let store = Store::load(data_dir.join("boxes.json"))?;
 
             let events = handle.clone();
+            let badge_shell = shell_origins(&handle);
             let tunnel = Arc::new(TunnelManager::new(move |st: &TunnelStatus| {
                 if st.state == TunnelState::Connected
                     && let Some(s) = events.try_state::<AppState>()
@@ -148,6 +175,17 @@ pub fn run() {
                         .lock()
                         .unwrap()
                         .touch_connected(&st.box_id, now_ms());
+                    if st.rekeyed {
+                        reboot_box_page(&events, &s.tunnel, st.port);
+                    }
+                }
+                // Keep the box page's "Relayed" badge on the live path.
+                if let Some(win) = events.get_webview_window("main")
+                    && let Ok(url) = win.url()
+                    && let Some(js) =
+                        nav::relay_badge_script(&url, &badge_shell, Some(st.port), st.relay_badge())
+                {
+                    let _ = win.eval(js);
                 }
                 let _ = events.emit(STATUS_EVENT, st);
             }));
@@ -185,8 +223,31 @@ pub fn run() {
             let shell = shell_origins(&handle);
             let opener = handle.clone();
             let home = handle.state::<ShellHome>().0.clone();
+            let (page_shell, page_tunnel) = (shell.clone(), tunnel.clone());
             let builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    // Every box page load (incl. the resume re-boot) gets
+                    // the app's "Boxes" button; SPA route changes keep it.
+                    .on_page_load(move |win, page| {
+                        if page.event() != PageLoadEvent::Finished {
+                            return;
+                        }
+                        let Some(home) = shell_home(win.app_handle()) else {
+                            return;
+                        };
+                        let port = page_tunnel.active_port();
+                        if let Some(js) =
+                            nav::boxes_button_script(page.url(), &page_shell, port, &home)
+                        {
+                            let _ = win.eval(js);
+                        }
+                        let relayed = page_tunnel.status().is_some_and(|s| s.relay_badge());
+                        if let Some(js) =
+                            nav::relay_badge_script(page.url(), &page_shell, port, relayed)
+                        {
+                            let _ = win.eval(js);
+                        }
+                    })
                     .on_navigation(move |url| {
                         match nav::decide(url, &shell, tunnel.active_port()) {
                             nav::Decision::Allow => {

@@ -55,6 +55,66 @@ fn same_origin(a: &Url, b: &Url) -> bool {
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
+const BOXES_BUTTON_JS: &str = include_str!("boxes_button.js");
+
+/// Sets the Boxes button's `data-relayed` (its "Relayed" badge); args:
+/// box origin, relayed. Re-checks the origin like the button script.
+const RELAY_BADGE_JS: &str = r#"(function (o, r) {
+  if (location.origin !== o || window.top !== window) return;
+  var b = document.getElementById("__pbm_boxes");
+  if (b) b.setAttribute("data-relayed", r ? "1" : "0");
+})"#;
+
+/// A box page: the active box's loopback origin — never the shell, another
+/// port or origin, nor the gate's boot page (it navigates on at once).
+/// `localhost` never qualifies: [`decide`] only lets box pages load from
+/// 127.0.0.1.
+fn on_box_page(url: &Url, shell: &[Url], port: u16) -> bool {
+    url.scheme() == "http"
+        && url.host_str() == Some(LOOPBACK)
+        && url.port() == Some(port)
+        && !shell.iter().any(|s| same_origin(s, url))
+        && url.path() != CookieGate::BOOT_PATH
+}
+
+fn js_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_default()
+}
+
+/// The app's "Boxes" button (back to the box list) for a page that finished
+/// loading at `url`, or `None` unless it is a box page ([`on_box_page`]).
+/// The script re-checks the origin when it runs and only navigates to
+/// `home`; box pages get no IPC (the capabilities are `local`-only).
+pub fn boxes_button_script(
+    url: &Url,
+    shell: &[Url],
+    box_port: Option<u16>,
+    home: &Url,
+) -> Option<String> {
+    let port = box_port?;
+    on_box_page(url, shell, port).then(|| {
+        BOXES_BUTTON_JS
+            .replace("\"__ORIGIN__\"", &js_str(&origin(port)))
+            .replace("\"__HOME__\"", &js_str(home.as_str()))
+    })
+}
+
+/// Shows (`relayed`) or hides the Boxes button's "Relayed" badge on the box
+/// page at `url`, or `None` unless it is one. The app evaluates it after
+/// the button script and on every tunnel status, so the badge follows
+/// direct ↔ relayed path changes without a reload — pushed in, never
+/// asked for: box pages still get no IPC.
+pub fn relay_badge_script(
+    url: &Url,
+    shell: &[Url],
+    box_port: Option<u16>,
+    relayed: bool,
+) -> Option<String> {
+    let port = box_port?;
+    on_box_page(url, shell, port)
+        .then(|| format!("{RELAY_BADGE_JS}({}, {relayed});", js_str(&origin(port))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +189,40 @@ mod tests {
             decide(&u("javascript:alert(1)"), &shell, port),
             Decision::Block
         );
+    }
+
+    #[test]
+    fn boxes_button_only_on_the_active_box_page() {
+        let shell = [u("tauri://localhost"), u("http://localhost:1420")];
+        let home = u("tauri://localhost/");
+        let port = Some(41000);
+        let script = |url: &str, port| boxes_button_script(&u(url), &shell, port, &home);
+
+        for page in [
+            "http://127.0.0.1:41000/",
+            "http://127.0.0.1:41000/sessions/abc?tab=chat#x",
+        ] {
+            let js = script(page, port).unwrap_or_else(|| panic!("{page}"));
+            assert!(js.contains(r#"})("http://127.0.0.1:41000", "tauri://localhost/");"#));
+            assert!(!js.contains("__ORIGIN__") && !js.contains("__HOME__"));
+            assert!(!js.contains("__TAURI") && !js.contains("invoke"), "no IPC");
+        }
+        for page in [
+            // the shell (incl. the dev server) and the gate's boot page
+            "tauri://localhost/index.html",
+            "http://localhost:1420/",
+            "http://127.0.0.1:41000/__pbm/boot?k=x",
+            // another port, host, scheme or origin
+            "http://127.0.0.1:41001/",
+            "http://localhost:41000/",
+            "https://127.0.0.1:41000/",
+            "http://tauri.localhost/",
+            "https://example.com/",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(script(page, port), None, "{page}");
+        }
+        // No tunnel, no box page.
+        assert_eq!(script("http://127.0.0.1:41000/", None), None);
     }
 }

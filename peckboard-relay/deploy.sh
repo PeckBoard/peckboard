@@ -10,7 +10,8 @@
 # pinned UserKnownHostsFile). Firewall is managed separately.
 #
 # Installs /opt/peckboard-relay/peckboard-relay (previous binary kept as
-# peckboard-relay.prev) and the systemd unit. Runtime flags such as
+# peckboard-relay.prev; dir and files root:peckrelay, not writable by the
+# service user) and the systemd unit. Runtime flags such as
 # --acme-staging go in /etc/peckboard-relay.env as PECKRELAY_ARGS=...
 #
 # Relay fallback (protocol v2) is on by default. Its limits are flags and
@@ -78,11 +79,18 @@ if ! id peckrelay >/dev/null 2>&1; then
   useradd --system --no-create-home --home-dir /var/lib/peckrelay \
     --shell /usr/sbin/nologin peckrelay
 fi
-install -d -m 0750 -o peckrelay -g peckrelay /opt/peckboard-relay
+# Root owns the install dir and everything in it; the service user can read
+# and execute but never replace its own binary (H-02). Its only writable
+# place is the systemd-managed StateDirectory=/var/lib/peckrelay (ACME cache).
+install -d -m 0750 -o root -g peckrelay /opt/peckboard-relay
+chown root:peckrelay /opt/peckboard-relay
+chmod 0750 /opt/peckboard-relay
 cd /opt/peckboard-relay
 [[ -f peckboard-relay ]] && cp -p peckboard-relay peckboard-relay.prev
 install -m 0750 -o root -g peckrelay /tmp/peckboard-relay peckboard-relay.new
 mv -f peckboard-relay.new peckboard-relay
+chown -R root:peckrelay /opt/peckboard-relay
+chmod -R g-w,o-rwx /opt/peckboard-relay
 install -m 0644 -o root -g root /tmp/peckboard-relay.service \
   /etc/systemd/system/peckboard-relay.service
 rm -f /tmp/peckboard-relay /tmp/peckboard-relay.service

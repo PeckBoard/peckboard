@@ -55,7 +55,8 @@ use crate::proto::Role;
 mod device;
 mod relayed;
 pub use device::{
-    AcceptFilter, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, bind_listener, run_device,
+    AcceptFilter, Admitted, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, bind_listener,
+    run_device,
 };
 pub use quinn;
 pub use relayed::RelayedPath;
@@ -83,6 +84,9 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PING_EVERY: Duration = Duration::from_secs(5);
 const PING_MISSES: u32 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Concurrent box-side handshakes from the expected peer address (only a
+/// spoofer or a retrying device makes more than one).
+const MAX_HANDSHAKES: usize = 8;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Failed punch rounds before [`TunnelError::PunchFailed`].
@@ -863,8 +867,9 @@ fn rtt_ms(c: &Connection) -> u32 {
 
 /// Box side: accept QUIC from the paired device on the punched path and
 /// forward every stream to `target` (box-side config only — the device
-/// cannot choose it). Returns `Ok` when an established connection ends,
-/// `Err` if no authenticated device connects within 15 s.
+/// cannot choose it). Only `path.peer` may connect (see [`accept_device`]).
+/// Returns `Ok` when an established connection ends, `Err` if no
+/// authenticated device connects within 15 s.
 pub async fn serve_box(
     path: PunchedPath,
     secret: &PairingSecret,
@@ -873,16 +878,12 @@ pub async fn serve_box(
 ) -> anyhow::Result<()> {
     tracing::debug!(peer = %path.peer, path = %path.kind(), "tunnel: awaiting device QUIC");
     let mut path_rx = path.path_watch();
+    let peer = path.peer;
     let ep = endpoint(path, Some(server_config(secret)?))?;
-    let conn = match tokio::time::timeout(HANDSHAKE_TIMEOUT, accept_one(&ep)).await {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => {
+    let conn = match accept_device(&ep, peer).await {
+        Ok(c) => c,
+        Err(e) => {
             on_event(TunnelEvent::Error(format!("{e:#}")));
-            return Err(e);
-        }
-        Err(_) => {
-            let e = anyhow!("device did not connect");
-            on_event(TunnelEvent::Error(e.to_string()));
             return Err(e);
         }
     };
@@ -916,13 +917,45 @@ pub async fn serve_box(
     Ok(())
 }
 
-async fn accept_one(ep: &Endpoint) -> anyhow::Result<Connection> {
-    let inc = ep
-        .accept()
-        .await
-        .ok_or_else(|| anyhow!("endpoint closed"))?;
-    tracing::debug!(from = %inc.remote_address(), "tunnel: device QUIC incoming");
-    inc.await.context("device handshake failed")
+/// The first connection from `peer` that completes the pinned handshake.
+/// Initials from any other address are refused (on a relayed path every
+/// packet appears to come from `peer`), and handshakes run concurrently,
+/// so a stranger that spoofs `peer` and stalls, or fails authentication,
+/// can't keep the real device out. Gives up after [`HANDSHAKE_TIMEOUT`],
+/// reporting the last handshake error if there was one.
+async fn accept_device(ep: &Endpoint, peer: SocketAddr) -> anyhow::Result<Connection> {
+    let canonical = |a: SocketAddr| SocketAddr::new(a.ip().to_canonical(), a.port());
+    let peer = canonical(peer);
+    let deadline = tokio::time::sleep(HANDSHAKE_TIMEOUT);
+    tokio::pin!(deadline);
+    let mut handshakes = tokio::task::JoinSet::new();
+    let mut last_err: Option<anyhow::Error> = None;
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                return Err(last_err.unwrap_or_else(|| anyhow!("device did not connect")));
+            }
+            inc = ep.accept() => {
+                let inc = inc.ok_or_else(|| anyhow!("endpoint closed"))?;
+                let from = inc.remote_address();
+                if canonical(from) != peer || handshakes.len() >= MAX_HANDSHAKES {
+                    tracing::debug!(%from, "tunnel: refusing QUIC (not the punched peer, or too many handshakes)");
+                    inc.refuse();
+                    continue;
+                }
+                tracing::debug!(%from, "tunnel: device QUIC incoming");
+                handshakes.spawn(async move { inc.await });
+            }
+            Some(done) = handshakes.join_next(), if !handshakes.is_empty() => match done {
+                Ok(Ok(conn)) => return Ok(conn),
+                Ok(Err(e)) => {
+                    tracing::debug!("tunnel: device handshake failed: {e}");
+                    last_err = Some(anyhow::Error::new(e).context("device handshake failed"));
+                }
+                Err(_) => {}
+            },
+        }
+    }
 }
 
 async fn box_stream(
@@ -1039,15 +1072,17 @@ async fn device_session(
                     let conn = conn.clone();
                     let filter = filter.cloned();
                     tokio::spawn(async move {
-                        let tcp = match filter {
+                        let Admitted { head, tcp } = match filter {
                             Some(f) => match f(tcp).await {
-                                Some(t) => t,
+                                Some(a) => a,
                                 None => return,
                             },
-                            None => tcp,
+                            None => Admitted::new(tcp),
                         };
                         let Ok((mut send, recv)) = conn.open_bi().await else { return };
-                        if send.write_all(&[STREAM_TCP]).await.is_ok() {
+                        if send.write_all(&[STREAM_TCP]).await.is_ok()
+                            && send.write_all(&head).await.is_ok()
+                        {
                             pipe(send, recv, tcp).await;
                         }
                     });

@@ -1,8 +1,10 @@
 //! One tunnel at a time (the WebView shows one box). Wraps
 //! `peckboard_relay::tunnel::run_device`: binds the box's fixed loopback
-//! port, gates it with the per-launch `CookieGate`, and turns `DeviceEvent`s
+//! port, gates it with a per-box `CookieGate`, and turns `DeviceEvent`s
 //! into a `TunnelStatus` the shell UI renders. `pause`/`resume` follow the
-//! app lifecycle: no listener and no tunnel while backgrounded.
+//! app lifecycle: no tunnel while backgrounded, but the port stays bound
+//! (so another local app can't take over the box page's origin) and the
+//! gate key is rotated on resume.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,12 +18,14 @@ use peckboard_relay::tunnel::{
 };
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
+use tokio::net::TcpListener;
 
 use crate::nav;
 
 pub const HARD_NAT: &str = "Couldn't reach your PeckBoard from this network right now. Retrying…";
 pub const BOX_OFFLINE: &str = "Your PeckBoard isn't reachable right now — it may be offline, or this phone's pairing was revoked.";
-/// How long a paused tunnel may take to wind down before we rebind anyway.
+/// How long a stopped tunnel may take to wind down before its task is
+/// aborted.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -53,6 +57,11 @@ pub struct TunnelStatus {
     /// Connected through the relay (no direct path from this network);
     /// the tunnel is still end-to-end encrypted.
     pub relayed: bool,
+    /// The gate key changed since the WebView last booted (resume): once
+    /// `Connected`, a box page still showing must re-boot through `url`.
+    /// Set on the first `Connected` status only; not sent to the shell.
+    #[serde(skip)]
+    pub rekeyed: bool,
 }
 
 impl TunnelStatus {
@@ -67,6 +76,7 @@ impl TunnelStatus {
             url,
             ever_connected: false,
             relayed: false,
+            rekeyed: false,
         }
     }
 
@@ -115,6 +125,12 @@ impl TunnelStatus {
             DeviceEvent::Retrying { after } => self.retry_in_secs = Some(after.as_secs()),
         }
     }
+
+    /// The Boxes button's "Relayed" badge: up and relayed. Cleared while
+    /// reconnecting (the next path is unknown) or not running.
+    pub fn relay_badge(&self) -> bool {
+        self.state == TunnelState::Connected && self.relayed
+    }
 }
 
 type Emit = Arc<dyn Fn(&TunnelStatus) + Send + Sync>;
@@ -122,16 +138,19 @@ type Emit = Arc<dyn Fn(&TunnelStatus) + Send + Sync>;
 struct Session {
     link: PairingLink,
     generation: u64,
+    /// Bound from `start` until `stop` (or another box) — also while
+    /// paused, so no other local app can take the port the box page, its
+    /// login and its requests live on.
+    listener: Arc<TcpListener>,
+    /// This box's gate. Never shared with another box, and replaced on
+    /// every run (start / resume) so a key that leaked stops working.
+    gate: CookieGate,
     cancel: Option<CancellationToken>,
     task: Option<JoinHandle<()>>,
     status: TunnelStatus,
 }
 
 pub struct TunnelManager {
-    /// One gate per app launch, shared by every box (cookies are per host,
-    /// not per port). Kept across pause/resume so the WebView's cookie stays
-    /// valid.
-    gate: CookieGate,
     session: Arc<Mutex<Option<Session>>>,
     /// Serialises start/pause/resume/stop (lifecycle events can race UI).
     ops: tokio::sync::Mutex<()>,
@@ -142,7 +161,6 @@ pub struct TunnelManager {
 impl TunnelManager {
     pub fn new(emit: impl Fn(&TunnelStatus) + Send + Sync + 'static) -> Self {
         Self {
-            gate: CookieGate::new(),
             session: Arc::default(),
             ops: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
@@ -164,6 +182,17 @@ impl TunnelManager {
         self.session.lock().unwrap().as_ref().map(|s| s.status.port)
     }
 
+    /// The active box's boot URL (current gate key) landing on `next`.
+    pub fn boot_url_to(&self, next: &str) -> Option<String> {
+        let guard = self.session.lock().unwrap();
+        let s = guard.as_ref()?;
+        Some(format!(
+            "{}{}",
+            nav::origin(s.status.port),
+            s.gate.boot_path_to(next)
+        ))
+    }
+
     /// Connect to `box_id` on its fixed `port`; replaces any other tunnel.
     pub async fn start(
         &self,
@@ -172,20 +201,35 @@ impl TunnelManager {
         port: u16,
     ) -> anyhow::Result<TunnelStatus> {
         let _op = self.ops.lock().await;
-        {
+        let held = {
             let guard = self.session.lock().unwrap();
-            if let Some(s) = guard.as_ref()
-                && s.status.box_id == box_id
-                && s.cancel.is_some()
-            {
-                return Ok(s.status.clone());
+            match guard.as_ref() {
+                Some(s) if s.status.box_id == box_id && s.cancel.is_some() => {
+                    return Ok(s.status.clone());
+                }
+                // Same box, not running (paused): keep its port.
+                Some(s) if s.status.box_id == box_id => Some(s.listener.clone()),
+                _ => None,
             }
-        }
-        self.halt().await;
-        self.launch(box_id, link, port).await
+        };
+        let listener = match held {
+            Some(l) => l,
+            None => {
+                self.halt().await;
+                // Another box's listener goes with its session.
+                self.session.lock().unwrap().take();
+                let want = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+                let l = bind_listener(ListenAddr::Prefer(want))
+                    .await
+                    .context("Couldn't open a local port for the tunnel.")?;
+                Arc::new(l)
+            }
+        };
+        self.launch(box_id, link, listener, port, false)
     }
 
-    /// App went to the background: drop the tunnel and the listener.
+    /// App went to the background: drop the tunnel, keep the listener
+    /// bound (unaccepted) so the box's port can't be taken meanwhile.
     pub async fn pause(&self) {
         let _op = self.ops.lock().await;
         if self.halt().await {
@@ -196,24 +240,35 @@ impl TunnelManager {
         }
     }
 
-    /// App is back: reconnect the paused box on the same port (same
-    /// origin, so the WebView's page, login and gate cookie stay valid).
-    pub async fn resume(&self) -> anyhow::Result<()> {
+    /// App is back: reconnect the paused box on the port it kept (same
+    /// origin, so the WebView's page and login stay valid) with a fresh
+    /// gate key. The returned status has `rekeyed` set; once `Connected`
+    /// the WebView must re-boot through the new key ([`Self::boot_url_to`]).
+    pub async fn resume(&self) -> anyhow::Result<Option<TunnelStatus>> {
         let _op = self.ops.lock().await;
         let paused = {
             let guard = self.session.lock().unwrap();
             guard
                 .as_ref()
                 .filter(|s| s.cancel.is_none() && s.status.state == TunnelState::Paused)
-                .map(|s| (s.status.box_id.clone(), s.link.clone(), s.status.port))
+                .map(|s| {
+                    (
+                        s.status.box_id.clone(),
+                        s.link.clone(),
+                        s.listener.clone(),
+                        s.status.port,
+                    )
+                })
         };
-        if let Some((id, link, port)) = paused {
-            self.launch(&id, link, port).await?;
+        match paused {
+            Some((id, link, listener, port)) => {
+                Ok(Some(self.launch(&id, link, listener, port, true)?))
+            }
+            None => Ok(None),
         }
-        Ok(())
     }
 
-    /// Disconnect and forget the session.
+    /// Disconnect, release the port and forget the session.
     pub async fn stop(&self) {
         let _op = self.ops.lock().await;
         self.halt().await;
@@ -232,8 +287,9 @@ impl TunnelManager {
         }
     }
 
-    /// Cancel the running tunnel (if any) and wait for its listener to be
-    /// dropped. True if one was running. Caller holds `ops`.
+    /// Cancel the running tunnel (if any) and wait for it to end, so no
+    /// stale gate keeps accepting on the held listener. True if one was
+    /// running. Caller holds `ops`.
     async fn halt(&self) -> bool {
         let (cancel, task) = {
             let mut guard = self.session.lock().unwrap();
@@ -244,24 +300,27 @@ impl TunnelManager {
         };
         let Some(cancel) = cancel else { return false };
         cancel.cancel();
-        if let Some(task) = task {
-            let _ = tokio::time::timeout(STOP_WAIT, task).await;
+        if let Some(mut task) = task
+            && tokio::time::timeout(STOP_WAIT, &mut task).await.is_err()
+        {
+            task.abort();
         }
         true
     }
 
-    /// Caller holds `ops` and has halted any previous tunnel.
-    async fn launch(
+    /// Run the tunnel for `box_id` on `listener` with a fresh gate. Caller
+    /// holds `ops` and has halted any previous run. `port`: the box's
+    /// preferred port (to explain a fallback).
+    fn launch(
         &self,
         box_id: &str,
         link: PairingLink,
+        listener: Arc<TcpListener>,
         port: u16,
+        rekeyed: bool,
     ) -> anyhow::Result<TunnelStatus> {
-        let want = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        let listener = bind_listener(ListenAddr::Prefer(want))
-            .await
-            .context("Couldn't open a local port for the tunnel.")?;
         let bound = listener.local_addr()?.port();
+        let gate = CookieGate::new();
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let cancel = CancellationToken::new();
 
@@ -274,7 +333,8 @@ impl TunnelManager {
             }
         };
         status.port = bound;
-        status.url = nav::boot_url(bound, &self.gate);
+        status.url = nav::boot_url(bound, &gate);
+        status.rekeyed = rekeyed;
         status.state = if status.ever_connected {
             TunnelState::Reconnecting
         } else {
@@ -285,7 +345,7 @@ impl TunnelManager {
         });
         status.retry_in_secs = None;
 
-        let opts = DeviceOptions::new(link.clone()).with_gate(&self.gate);
+        let opts = DeviceOptions::new(link.clone()).with_gate(&gate);
         let (session, emit) = (self.session.clone(), self.emit.clone());
         let on_event = move |ev: DeviceEvent| {
             log::debug!("tunnel event (gen {generation}): {ev:?}");
@@ -294,16 +354,24 @@ impl TunnelManager {
                 match guard.as_mut() {
                     Some(s) if s.generation == generation => {
                         s.status.apply(ev);
-                        s.status.clone()
+                        let snapshot = s.status.clone();
+                        // `rekeyed` reaches the first `Connected` only.
+                        if s.status.state == TunnelState::Connected {
+                            s.status.rekeyed = false;
+                        }
+                        snapshot
                     }
                     _ => return,
                 }
             };
             emit(&snapshot);
         };
+        #[cfg(debug_assertions)]
+        debug_path_flip(on_event.clone(), cancel.clone());
         let token = cancel.clone();
+        let run_listener = listener.clone();
         let task = async_runtime::spawn(async move {
-            if let Err(e) = run_device(opts, listener, token, on_event).await {
+            if let Err(e) = run_device(opts, run_listener, token, on_event).await {
                 log::warn!("tunnel ended: {e:#}");
             }
         });
@@ -311,6 +379,8 @@ impl TunnelManager {
         *self.session.lock().unwrap() = Some(Session {
             link,
             generation,
+            listener,
+            gate,
             cancel: Some(cancel),
             task: Some(task),
             status: status.clone(),
@@ -328,6 +398,29 @@ impl TunnelManager {
         };
         (self.emit)(&snapshot);
     }
+}
+
+/// Debug builds: `PBM_DEBUG_PATH_FLIP_SECS=<n>` reports a path change
+/// (relayed, direct, …) every `n` s until `cancel`, to check the "Relayed"
+/// badge where punching always works (simulator on a LAN).
+#[cfg(debug_assertions)]
+fn debug_path_flip(on_event: impl Fn(DeviceEvent) + Send + 'static, cancel: CancellationToken) {
+    let Some(secs) = std::env::var("PBM_DEBUG_PATH_FLIP_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+    else {
+        return;
+    };
+    async_runtime::spawn(async move {
+        for path in [PathKind::Relayed, PathKind::Direct].into_iter().cycle() {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(secs)) => {}
+                _ = cancel.cancelled() => return,
+            }
+            on_event(DeviceEvent::PathChanged { path });
+        }
+    });
 }
 
 #[cfg(test)]
@@ -373,16 +466,70 @@ mod tests {
         assert_eq!(s.state, TunnelState::BoxOffline);
     }
 
-    /// pause drops the listener (port refuses connections), resume rebinds
-    /// the same port and keeps the gate URL. No relay is contacted: the
-    /// link points at an unroutable relay so `run_device` just keeps
-    /// retrying in the background.
-    #[tokio::test]
-    async fn pause_releases_port_and_resume_rebinds_it() {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+    #[test]
+    fn relay_badge_follows_the_live_path() {
+        let shell = [url::Url::parse("tauri://localhost").unwrap()];
+        let page = url::Url::parse("http://127.0.0.1:41000/sessions").unwrap();
+        let badge = |s: &TunnelStatus| {
+            nav::relay_badge_script(&page, &shell, Some(s.port), s.relay_badge()).unwrap()
+        };
+        let (on, off) = (r#"("http://127.0.0.1:41000", true);"#, ", false);");
+        let mut s = TunnelStatus::new("b", 41000, String::new());
+        assert!(badge(&s).ends_with(off));
+        s.apply(DeviceEvent::Connected {
+            peer: "1.2.3.4:5".parse().unwrap(),
+            rtt_ms: 30,
+            path: PathKind::Relayed,
+        });
+        assert!(badge(&s).ends_with(on));
+        s.apply(DeviceEvent::PathChanged {
+            path: PathKind::Direct,
+        });
+        assert!(badge(&s).ends_with(off));
+        s.apply(DeviceEvent::PathChanged {
+            path: PathKind::Relayed,
+        });
+        assert!(badge(&s).ends_with(on));
+        // No path while reconnecting: no badge until it says which.
+        s.apply(DeviceEvent::Disconnected {
+            reason: "box went away".into(),
+        });
+        assert!(badge(&s).ends_with(off));
+        let js = badge(&s);
+        assert!(js.contains(r#"setAttribute("data-relayed""#));
+        assert!(!js.contains("__TAURI") && !js.contains("invoke"), "no IPC");
+        // Never onto the shell, the boot page or another port.
+        for other in [
+            "tauri://localhost/",
+            "http://127.0.0.1:41000/__pbm/boot?k=x",
+            "http://127.0.0.1:41001/",
+        ] {
+            let u = url::Url::parse(other).unwrap();
+            assert_eq!(nav::relay_badge_script(&u, &shell, Some(41000), true), None);
+        }
+    }
 
+    fn free_port() -> u16 {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    }
+
+    fn port_is_free(port: u16) -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    }
+
+    fn key(url: &str) -> String {
+        url.split("k=").nth(1).unwrap().to_string()
+    }
+
+    /// SECURITY (port squatting): pause keeps the port bound — another
+    /// local app can't take it while the box page is still alive — and
+    /// resume reuses it with a fresh gate key, so a cookie that leaked
+    /// stops working. No relay is contacted: the link points at an
+    /// unroutable relay so `run_device` just keeps retrying.
+    #[tokio::test]
+    async fn pause_keeps_port_and_resume_rotates_gate_key() {
+        let port = free_port();
         let mgr = TunnelManager::new(|_| {});
         let link = PairingLink::new(PairingSecret::from_bytes([9; 32]), "127.0.0.1:9");
         let st = mgr.start("b1", link, port).await.unwrap();
@@ -391,23 +538,20 @@ mod tests {
             st.url
                 .starts_with(&format!("http://127.0.0.1:{port}/__pbm/boot?k="))
         );
-        assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-        );
+        assert!(!st.rekeyed);
+        assert!(!port_is_free(port));
 
         mgr.pause().await;
         assert_eq!(mgr.status().unwrap().state, TunnelState::Paused);
-        assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_err()
-        );
+        assert!(!port_is_free(port), "paused tunnel released its port");
 
-        mgr.resume().await.unwrap();
-        let st2 = mgr.status().unwrap();
-        assert_eq!((st2.port, st2.url.clone()), (port, st.url));
+        let st2 = mgr.resume().await.unwrap().unwrap();
+        assert_eq!(st2.port, port);
+        assert!(st2.rekeyed);
+        assert_ne!(key(&st2.url), key(&st.url), "gate key not rotated");
+        let reboot = mgr.boot_url_to("/sessions/x?a=1").unwrap();
+        assert!(reboot.starts_with(&st2.url), "{reboot}");
+        assert!(reboot.ends_with("&next=/sessions/x%3Fa%3D1"), "{reboot}");
         assert!(
             tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
@@ -416,5 +560,18 @@ mod tests {
 
         mgr.stop().await;
         assert!(mgr.status().is_none());
+        assert!(port_is_free(port), "stop kept the port");
+    }
+
+    /// Each box gets its own gate key, so one box never learns another's.
+    #[tokio::test]
+    async fn each_box_gets_its_own_gate_key() {
+        let mgr = TunnelManager::new(|_| {});
+        let link = PairingLink::new(PairingSecret::from_bytes([9; 32]), "127.0.0.1:9");
+        let a = mgr.start("a", link.clone(), free_port()).await.unwrap();
+        let b = mgr.start("b", link, free_port()).await.unwrap();
+        assert_ne!(key(&a.url), key(&b.url));
+        assert!(port_is_free(a.port), "switching box kept the old port");
+        mgr.stop().await;
     }
 }

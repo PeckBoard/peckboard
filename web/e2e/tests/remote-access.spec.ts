@@ -62,9 +62,11 @@ test('pair a device, see its link once, then revoke it', async ({ request, page 
   )
   const linkValue = await link.inputValue()
   await expect(linkModal.getByTestId('remote-pair-qr').locator('svg')).toBeVisible()
+  // The suggested command reads the link from stdin, never from argv.
   await expect(linkModal.getByTestId('remote-pair-command')).toHaveText(
-    `peckboard-connect ${linkValue}`,
+    'peckboard-connect --save -',
   )
+  await expect(linkModal).not.toContainText(`peckboard-connect ${linkValue}`)
   await linkModal.getByTestId('remote-pair-done').click()
   await expect(linkModal).toBeHidden()
 

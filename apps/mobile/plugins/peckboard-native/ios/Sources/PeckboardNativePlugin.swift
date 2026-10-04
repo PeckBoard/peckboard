@@ -35,7 +35,7 @@ class PeckboardNativePlugin: Plugin {
     // Edge swipe = Back: box UI history leads back to the shell (its first
     // entry), which then stops the tunnel.
     webview.allowsBackForwardNavigationGestures = true
-    // ` PeckBoardApp/<version>` lets the box UI offer "Switch box". The
+    // ` PeckBoardApp/<version>` tells the box UI it runs inside the app. The
     // shell loads first, so this lands before any box page is requested.
     if webview.customUserAgent == nil {
       webview.evaluateJavaScript("navigator.userAgent") { [weak webview] ua, _ in

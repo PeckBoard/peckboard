@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
@@ -112,9 +112,10 @@ pub fn auth_message(
     m.extend_from_slice(exporter);
     m
 }
-
 /// Relay-side check. Returns false (never panics) on any malformed key or
 /// signature, so callers can fold it into a single constant-shape decision.
+/// Strict: rejects small-order ("weak") public keys and non-canonical
+/// signatures, so the identity point can't verify every message.
 pub fn verify_auth(
     public_key: &[u8; 32],
     nonce: &[u8; 32],
@@ -126,8 +127,11 @@ pub fn verify_auth(
     let Ok(vk) = VerifyingKey::from_bytes(public_key) else {
         return false;
     };
+    if vk.is_weak() {
+        return false;
+    }
     let sig = Signature::from_bytes(signature);
-    vk.verify(&auth_message(nonce, rendezvous_id, role, exporter), &sig)
+    vk.verify_strict(&auth_message(nonce, rendezvous_id, role, exporter), &sig)
         .is_ok()
 }
 
@@ -372,5 +376,28 @@ mod tests {
         assert_eq!(a.next(50), 102);
         // A fresh sender (reconnect) seeds from the clock, past the old run.
         assert_eq!(MsgCounter::default().next(200), 200);
+    }
+
+    #[test]
+    fn identity_public_key_rejected() {
+        // pubkey = identity point, R = identity, s = 0 verifies any message
+        // under non-strict Ed25519.
+        let mut pk = [0u8; 32];
+        pk[0] = 1;
+        let mut sig = [0u8; 64];
+        sig[0] = 1;
+        let ex = [0u8; EXPORTER_LEN];
+        assert!(!verify_auth(&pk, &[0; 32], &[0; 32], Role::Box, &ex, &sig));
+        let k = PairingSecret::generate().derive();
+        let sig = k.sign_challenge(&[3; 32], Role::Device, &ex);
+        let rid = k.rendezvous_id;
+        assert!(verify_auth(
+            &k.public_key(),
+            &[3; 32],
+            &rid,
+            Role::Device,
+            &ex,
+            &sig
+        ));
     }
 }
