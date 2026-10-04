@@ -86,9 +86,13 @@ pub struct CliSpec {
 /// Native CLI tools denied to the voice session (see
 /// `CliSpec::voice_lockdown`).
 pub const VOICE_DISALLOWED_TOOLS: &str = "AskUserQuestion,Read,Write,Edit,MultiEdit,NotebookEdit,\
-     Bash,BashOutput,KillShell,Glob,Grep,Task,Agent,WebFetch,WebSearch,Skill,SlashCommand,\
-     EnterWorktree,ExitWorktree";
+     Bash,BashOutput,KillShell,Glob,Grep,Task,Agent,Workflow,WebFetch,WebSearch,Skill,\
+     SlashCommand,EnterWorktree,ExitWorktree";
 
+/// The CLI's built-in subagent tools. Denied everywhere: their child
+/// agents run invisibly inside the CLI process, so Peckboard can't track,
+/// show, or stop them. Subagents go through `spawn_subagent` instead.
+pub const NATIVE_SUBAGENT_TOOLS: &str = "Task,Agent,Workflow";
 pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
     let combined_system_prompt = {
         // A user override of the base prompt already arrived in
@@ -110,15 +114,15 @@ pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
     });
     let mut disallowed: String = if spec.is_pre_hatcher {
         "AskUserQuestion,Read,Write,Edit,MultiEdit,NotebookEdit,Bash,BashOutput,KillShell,\
-         Glob,Grep,Task,Agent,WebFetch,WebSearch,Skill,SlashCommand,ExitPlanMode,\
+         Glob,Grep,Task,Agent,Workflow,WebFetch,WebSearch,Skill,SlashCommand,ExitPlanMode,\
          EnterWorktree,ExitWorktree,TodoWrite"
             .to_string()
     } else if spec.voice_lockdown {
         VOICE_DISALLOWED_TOOLS.to_string()
     } else if has_file_tools {
-        "AskUserQuestion,Read,Write,Edit,MultiEdit".to_string()
+        format!("AskUserQuestion,Read,Write,Edit,MultiEdit,{NATIVE_SUBAGENT_TOOLS}")
     } else {
-        "AskUserQuestion".to_string()
+        format!("AskUserQuestion,{NATIVE_SUBAGENT_TOOLS}")
     };
     for t in &spec.extra_disallowed_tools {
         disallowed.push(',');
@@ -317,11 +321,13 @@ mod tests {
         assert!(voice.contains(&"--setting-sources=user".to_string()));
         assert!(!voice.contains(&"--dangerously-skip-permissions".to_string()));
 
-        // Non-voice sessions are unchanged.
+        // Non-voice sessions keep their file tools but never get the
+        // CLI's own subagents.
         let chat = build_cli_args(&spec(false, false));
         assert!(
             chat.contains(
-                &"--disallowedTools=AskUserQuestion,Read,Write,Edit,MultiEdit".to_string()
+                &"--disallowedTools=AskUserQuestion,Read,Write,Edit,MultiEdit,Task,Agent,Workflow"
+                    .to_string()
             )
         );
         assert!(!chat.iter().any(|a| a.starts_with("--setting-sources")));
