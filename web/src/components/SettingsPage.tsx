@@ -57,6 +57,7 @@ import EnvVarsSection from './EnvVarsSection'
 import SshKeysSection from './SshKeysSection'
 import RemoteAccessSection from './RemoteAccessSection'
 import AgentVarsSection from './AgentVarsSection'
+import AssistantMirrorSection from './AssistantMirrorSection'
 import ConfirmDialog from './ConfirmDialog'
 import ProviderBasePrompt, { type ProviderPrompt } from './ProviderBasePrompt'
 import VoiceSettingsSection from './VoiceSettingsSection'
@@ -103,7 +104,7 @@ type SubPage =
   | 'account'
   | 'appearance'
   | 'sounds'
-  | 'voice'
+  | 'assistant'
   | 'chat'
   | 'prompts'
   | 'workflows'
@@ -157,9 +158,9 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
         blurb: 'Clicks, errors, and chimes for questions, finished runs, limits',
       },
       {
-        id: 'voice',
-        title: 'Voice',
-        blurb: 'Voice assistant: spoken voice, rate, language, and model',
+        id: 'assistant',
+        title: 'Assistant',
+        blurb: 'Spoken voice, rate, language, model, and the conversation mirror',
       },
       {
         id: 'chat',
@@ -320,28 +321,34 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'question complete tool limit queue send start',
   },
   {
-    page: 'voice',
+    page: 'assistant',
     section: 'Speech',
     anchor: 'voice-speech',
     keywords: 'voice assistant speak listen microphone rate pitch language tts stt',
   },
   {
-    page: 'voice',
+    page: 'assistant',
     section: 'Assistant Model',
     anchor: 'voice-model',
     keywords: 'voice assistant model fast cheap',
   },
   {
-    page: 'voice',
+    page: 'assistant',
     section: 'Assistant Prompt',
     anchor: 'voice-prompt',
     keywords: 'voice assistant prompt instructions system persona behaviour behavior history',
   },
   {
-    page: 'voice',
+    page: 'assistant',
     section: 'Pronunciations',
     anchor: 'voice-pronunciations',
     keywords: 'voice pronunciation lexicon phonemes respelling kokoro words say',
+  },
+  {
+    page: 'assistant',
+    section: 'Conversation Mirror',
+    anchor: 'assistant-mirror',
+    keywords: 'voice assistant mirror slack discord email smtp webhook transcript digest',
   },
   {
     page: 'chat',
@@ -543,7 +550,7 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
       <path d="M10 6.2a2.4 2.4 0 0 1 0 3.6M11.8 4.6a4.4 4.4 0 0 1 0 6.8" />
     </>
   ),
-  voice: (
+  assistant: (
     <>
       <rect x="5.75" y="1.75" width="4.5" height="7.5" rx="2.25" />
       <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.25M5.75 14.25h4.5" />
@@ -721,9 +728,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
   useEffect(() => {
     // Legacy entry paths (`/plugins`, `/plugin-registry`, `/plugin-settings`,
-    // `/users`) keep working as bookmarks but canonicalize to
-    // `/settings/<id>` once mounted, so the address bar shows the real URL.
-    const legacy = ['/plugins', '/plugin-registry', '/plugin-settings', '/users']
+    // `/users`, `/settings/voice`) keep working as bookmarks but canonicalize
+    // to `/settings/<id>` once mounted, so the address bar shows the real URL.
+    const legacy = ['/plugins', '/plugin-registry', '/plugin-settings', '/users', '/settings/voice']
     if (legacy.includes(window.location.pathname) && activeSubPage) {
       history.replaceState(null, '', `/settings/${activeSubPage}`)
     }
@@ -1426,7 +1433,12 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           </>
         )}
 
-        {activeSubPage === 'voice' && <VoiceSettingsSection />}
+        {activeSubPage === 'assistant' && (
+          <>
+            <VoiceSettingsSection />
+            {isAdmin && <AssistantMirrorSection />}
+          </>
+        )}
 
         {activeSubPage === 'providers' && (
           <>

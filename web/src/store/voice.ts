@@ -277,6 +277,8 @@ const SPEAKING_KEEPALIVE_MS = 3000
 const SPEAKING_REPORT_MS = 1000
 /** A hypothesis with no update for this long no longer holds speech. */
 const STALE_INTERIM_MS = 8000
+/** "Panel visible" heartbeat period; the server's watched window is 75s. */
+const PRESENCE_INTERVAL_MS = 30_000
 /** A lone word held over the assistant's voice joins the utterance if more
  *  speech follows within this long; otherwise it was noise. */
 const LONE_ATTACH_MS = 4000
@@ -293,7 +295,7 @@ function mergeEvents(existing: Event[], incoming: Event[]): Event[] {
 
 function speakErrorMessage(code: string): string {
   if (code === 'not-allowed') {
-    return 'The browser blocked spoken replies. Click anywhere in the voice panel to allow sound.'
+    return 'The browser blocked spoken replies. Click anywhere in the Assistant panel to allow sound.'
   }
   if (engine().getVoices().length === 0) {
     return (
@@ -340,10 +342,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
 
   /** Tell the server's relay gate what the conversation is doing, so it
    *  never injects a relay turn while the user talks. Fire-and-forget. */
-  const reportActivity = (state: 'speaking' | 'idle' | 'sent' | 'tts_start' | 'tts_end') => {
+  const reportActivity = (
+    state: 'speaking' | 'idle' | 'sent' | 'tts_start' | 'tts_end' | 'panel_visible',
+  ) => {
     const { sessionId } = get()
     if (!sessionId) return
-    if (state !== 'speaking') voiceLog('activity ->', state)
+    if (state !== 'speaking' && state !== 'panel_visible') voiceLog('activity ->', state)
     if (state === 'tts_start') ttsReported = true
     if (state === 'tts_end') ttsReported = false
     void authedFetch('/api/voice/activity', {
@@ -351,6 +355,25 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId, state }),
     }).catch(() => undefined)
+  }
+
+  /** "Watched" heartbeat for the Assistant mirror: while the panel is open
+   *  and the tab visible, the server sends no email digest. Sent on open,
+   *  on becoming visible, and every PRESENCE_INTERVAL_MS. */
+  let presenceTimer: ReturnType<typeof setInterval> | null = null
+  const sendPresence = () => {
+    if (get().panelOpen && document.visibilityState === 'visible') reportActivity('panel_visible')
+  }
+  const startPresence = () => {
+    stopPresence()
+    sendPresence()
+    presenceTimer = setInterval(sendPresence, PRESENCE_INTERVAL_MS)
+    document.addEventListener('visibilitychange', sendPresence)
+  }
+  const stopPresence = () => {
+    if (presenceTimer) clearInterval(presenceTimer)
+    presenceTimer = null
+    document.removeEventListener('visibilitychange', sendPresence)
   }
 
   /** The user is mid-utterance: a live (non-echo) hypothesis, or finished
@@ -1027,7 +1050,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         })
         if (!res.ok) {
           const err = (await res.json().catch(() => null)) as { error?: string } | null
-          set({ error: err?.error ?? `Couldn't open the voice session (${res.status}).` })
+          set({ error: err?.error ?? `Couldn't open the Assistant (${res.status}).` })
           return null
         }
         const info = (await res.json()) as VoiceSessionInfo
@@ -1040,7 +1063,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         }))
         return info
       } catch {
-        set({ error: "Couldn't reach the server to open the voice session." })
+        set({ error: "Couldn't reach the server to open the Assistant." })
         return null
       }
     },
@@ -1070,6 +1093,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       ws.subscribe(info.session_id)
       window.removeEventListener('peckboard:voice-action', onActionEvent)
       window.addEventListener('peckboard:voice-action', onActionEvent)
+      startPresence()
       void get().refreshActions()
       await loadHistory(info.session_id)
     },
@@ -1087,6 +1111,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         liveListener = null
       }
       window.removeEventListener('peckboard:voice-action', onActionEvent)
+      stopPresence()
       if (sessionId) ws.unsubscribe(sessionId)
       set({ panelOpen: false, micOn: false, status: 'idle', interim: '' })
     },
@@ -1167,7 +1192,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       cancelSpeech('test voice')
       speakErrorShown = false
       const { prefs } = get()
-      engine().speak('Hi, this is your Peckboard voice assistant.', {
+      engine().speak('Hi, this is your Peckboard Assistant.', {
         voiceURI: prefs.voiceURI,
         rate: prefs.rate,
         pitch: prefs.pitch,

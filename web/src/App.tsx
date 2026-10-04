@@ -172,7 +172,13 @@ function parseRoute(): {
     case 'settings':
       // `/settings/<sub>` deep-links a specific sub-page; bare `/settings`
       // lands on the default page (SettingsPage validates the id).
-      return { view: 'settings', activeId: null, sub: 'chat', settingsSub: id }
+      // `/settings/voice` is the Assistant page's old URL.
+      return {
+        view: 'settings',
+        activeId: null,
+        sub: 'chat',
+        settingsSub: id === 'voice' ? 'assistant' : id,
+      }
     case 'plugins':
       return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'plugins' }
     case 'plugin-registry':

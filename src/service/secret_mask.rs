@@ -347,6 +347,7 @@ pub fn command_env_blocking(
     if let Some(forms) = SERVER_KEY_FORMS.get() {
         secrets.extend(forms.iter().cloned());
     }
+    secrets.extend(extra_secrets());
     (inject.into_iter().collect(), SecretMasker::new(secrets))
 }
 
@@ -382,6 +383,34 @@ fn key_text_forms(key: &[u8]) -> Vec<String> {
         URL_SAFE.encode(key),
         URL_SAFE_NO_PAD.encode(key),
     ]
+}
+
+/// Mask-only secrets registered at runtime, by owner (e.g. the Assistant
+/// mirror's webhook URLs and SMTP password), so configured credentials never
+/// reach agent-visible output. Never injected into any command env.
+static EXTRA_SECRETS: std::sync::LazyLock<std::sync::RwLock<BTreeMap<&'static str, Vec<String>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Replace `owner`'s registered mask-only secrets with `values` (empty
+/// values are dropped; an empty list unregisters the owner).
+pub fn set_extra_secrets(owner: &'static str, values: Vec<String>) {
+    let values: Vec<String> = values.into_iter().filter(|v| !v.is_empty()).collect();
+    let mut map = EXTRA_SECRETS.write().unwrap_or_else(|e| e.into_inner());
+    if values.is_empty() {
+        map.remove(owner);
+    } else {
+        map.insert(owner, values);
+    }
+}
+
+fn extra_secrets() -> Vec<String> {
+    EXTRA_SECRETS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .flatten()
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

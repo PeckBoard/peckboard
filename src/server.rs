@@ -535,6 +535,10 @@ pub async fn run_server(
     // Voice assistant relay: forwards linked sessions' questions and turn
     // ends into the voice session (see `service::voice_relay`).
     crate::service::voice_relay::spawn_listener(state.clone());
+    // Assistant mirror: copies the voice conversation to Slack / Discord
+    // and emails unwatched turns (see `service::assistant_mirror`). Sends
+    // messages only; it never starts an agent.
+    crate::service::assistant_mirror::AssistantMirror::of(&state).await;
     // TTS pronunciation lexicon: seed defaults, load the cache, and start
     // the unknown-word flusher (see `service::tts::lexicon`).
     if let Err(e) = crate::service::tts::lexicon::store(&state.db).await {

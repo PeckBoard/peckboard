@@ -7,11 +7,11 @@ nav_order: 8
 
 [Core Concepts]({{ "/core-concepts.html" | relative_url }}) covers the board, cards, and sessions; this page tours everything else a working install gives you, grouped by where you meet it.
 
-## Voice Assistant
+## Assistant {#voice-assistant}
 
-![The Voice Assistant panel docked over the sessions list, answering a relayed question from a worker session]({{ "/assets/screenshots/voice-assistant.png" | relative_url }})
+![The Assistant panel docked over the sessions list, answering a relayed question from a worker session]({{ "/assets/screenshots/voice-assistant.png" | relative_url }})
 
-Press **Listen** (the microphone in the navigation rail) and talk. The panel docks top-right and keeps the microphone on, so there is nothing to hold down; you can also type into it. One global voice session works across every folder:
+Press **Listen** (the microphone in the navigation rail) and talk. The panel docks top-right and keeps the microphone on, so there is nothing to hold down; you can also type into it. One global Assistant session works across every folder:
 
 - **Reads and manages your work** — sessions, cards, and projects in any folder: "what's running?", "add a card to the storefront board for the search bug".
 - **Drives the UI** — "open the storefront project" opens it; the same goes for sessions and cards by name.
@@ -22,11 +22,12 @@ Press **Listen** (the microphone in the navigation rail) and talk. The panel doc
 
 Speech comes from [Kokoro](https://github.com/hexgrad/kokoro), a natural-sounding text-to-speech model that runs on your PeckBoard server — the model downloads on first use and no audio leaves your machine for synthesis. Replies are fully phonetic: the assistant marks the pronunciation of every spoken word, so project names and identifiers come out right. When Kokoro isn't available, the browser's built-in voice takes over.
 
-Settings → Voice holds the rest:
+Settings → Assistant holds the rest (the old `/settings/voice` link still works):
 
 - **Speech** — voice picker (Kokoro voices and browser voices), speed, and recognition language.
 - **Pronunciations** — an editable list of words and how to say them. You can also add one by voice: "pronounce Kubectl like cube control".
 - **Assistant Prompt** — the assistant's system prompt, editable live, with version history, diffs, restore, and reset to default.
+- **Conversation Mirror** (admins) — posts what you say and the Assistant's replies, never its thinking or tool output, to a Slack incoming webhook and/or a Discord channel webhook as the conversation happens. When no device has the Assistant panel open, turns are also collected into an email digest sent over your SMTP server. Code blocks are redacted by default, and secrets are masked on a best-effort basis, but Slack, Discord, and your mail provider keep the transcript. Each channel has a **Send test** button and shows when it last delivered.
 
 ### Browser Support
 

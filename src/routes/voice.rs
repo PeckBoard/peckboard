@@ -31,7 +31,7 @@ struct VoiceSessionRequest {
 #[derive(Deserialize)]
 struct VoiceActivityRequest {
     session_id: String,
-    /// `speaking` | `idle` | `sent` | `tts_start` | `tts_end`.
+    /// `speaking` | `idle` | `sent` | `tts_start` | `tts_end` | `panel_visible`.
     state: String,
 }
 
@@ -46,6 +46,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// reports the user speaking / going quiet / sending an utterance, and the
 /// assistant's reply being read aloud, so the relay gate
 /// (`service::voice_gate`) never injects a relay turn over the user.
+/// `panel_visible` is the panel's "watched" heartbeat for the Assistant
+/// mirror (`service::assistant_mirror`).
 async fn voice_activity(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -53,17 +55,19 @@ async fn voice_activity(
 ) -> Result<StatusCode, ApiError> {
     use crate::service::voice_gate::{Activity, note_activity};
     if !user.is_admin() {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "the voice assistant is admin-only",
-        ));
+        return Err(err(StatusCode::FORBIDDEN, "the Assistant is admin-only"));
     }
-    let activity = Activity::parse(&body.state).ok_or_else(|| {
-        err(
-            StatusCode::BAD_REQUEST,
-            format!("unknown state '{}'", body.state),
-        )
-    })?;
+    let panel_visible = body.state == "panel_visible";
+    let activity = if panel_visible {
+        None
+    } else {
+        Some(Activity::parse(&body.state).ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown state '{}'", body.state),
+            )
+        })?)
+    };
     let is_voice = matches!(
         state.db.get_session(&body.session_id).await.map_err(internal)?,
         Some(s) if s.expert_kind.as_deref() == Some(VOICE_EXPERT_KIND)
@@ -72,7 +76,13 @@ async fn voice_activity(
         return Err(err(StatusCode::NOT_FOUND, "not a voice session"));
     }
     tracing::debug!(session_id = %body.session_id, state = %body.state, "voice activity");
-    note_activity(&body.session_id, activity);
+    match activity {
+        Some(activity) => note_activity(&body.session_id, activity),
+        // Presence for the Assistant mirror: no email digest while watched.
+        None => crate::service::assistant_mirror::AssistantMirror::of(&state)
+            .await
+            .note_panel_visible(),
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -109,7 +119,7 @@ async fn voice_session(
     if !user.is_admin() {
         return Err(err(
             StatusCode::FORBIDDEN,
-            "the voice assistant controls every session, so it is admin-only",
+            "the Assistant controls every session, so it is admin-only",
         ));
     }
     crate::routes::settings::check_model_or_400(requested.as_deref())?;
@@ -286,7 +296,7 @@ async fn pick_folder(state: &Arc<AppState>, user_id: &str) -> Result<String, Api
         .ok_or_else(|| {
             err(
                 StatusCode::CONFLICT,
-                "create a folder first: the voice assistant session needs one",
+                "create a folder first: the Assistant session needs one",
             )
         })
 }

@@ -440,8 +440,8 @@ pub async fn summarize(db: &Db, tool: &str, args: &Value) -> String {
     if tool == "voice_prompt" || tool == "voice_pronunciation" {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
         words = match (tool, action) {
-            ("voice_prompt", "update") => "Replace the voice assistant's prompt".into(),
-            ("voice_prompt", "append") => "Add to the voice assistant's prompt".into(),
+            ("voice_prompt", "update") => "Replace the Assistant's prompt".into(),
+            ("voice_prompt", "append") => "Add to the Assistant's prompt".into(),
             ("voice_pronunciation", "remove") => "Remove a saved pronunciation".into(),
             _ => words,
         };

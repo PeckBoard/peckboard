@@ -47,9 +47,9 @@ export function VoiceListenButton() {
 
   const title = supported
     ? panelOpen
-      ? 'Close voice assistant'
-      : 'Voice assistant'
-    : 'Voice assistant needs a browser with speech recognition (Chrome, Edge, or Safari).'
+      ? 'Close Assistant'
+      : 'Assistant'
+    : 'The Assistant needs a browser with speech recognition (Chrome, Edge, or Safari).'
 
   return (
     <button
@@ -74,7 +74,7 @@ export function VoiceListenButton() {
 }
 
 /**
- * Voice assistant panel: docked top-right, non-blocking, with the voice
+ * Assistant panel: docked top-right, non-blocking, with the voice
  * session's transcript, a status indicator, the mic toggle, and a typed
  * fallback. The speech loop itself lives in `store/voice.ts`; this
  * component only renders it. Opened from [`VoiceListenButton`].
@@ -135,13 +135,13 @@ export default function VoiceDock() {
       className="voice-panel"
       data-testid="voice-panel"
       data-status={status}
-      aria-label="Voice assistant"
+      aria-label="Assistant"
       // Any click in the panel counts as the user gesture some browsers
       // need before they allow speech output.
       onPointerDown={unlockSpeech}
     >
       <header className="voice-panel-header">
-        <h2 className="voice-panel-title">Voice Assistant</h2>
+        <h2 className="voice-panel-title">Assistant</h2>
         <span
           className={`voice-status voice-status-${status}`}
           data-testid="voice-status"
@@ -154,7 +154,7 @@ export default function VoiceDock() {
           type="button"
           className="voice-panel-close"
           data-testid="voice-close"
-          aria-label="Close voice assistant"
+          aria-label="Close Assistant"
           onClick={closePanel}
         >
           ×
@@ -263,7 +263,7 @@ export default function VoiceDock() {
           className="form-input voice-type-input"
           data-testid="voice-type-input"
           placeholder="Or type instead…"
-          aria-label="Type a message to the voice assistant"
+          aria-label="Type a message to the Assistant"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
         />

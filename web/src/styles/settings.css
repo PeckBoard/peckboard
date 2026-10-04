@@ -2392,3 +2392,63 @@ a.wasm-plugin-repo:hover {
 .setup-wizard-actions {
   align-items: center;
 }
+
+/* ── Settings → Assistant → Conversation Mirror ─────────────────────── */
+.mirror-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 6px;
+}
+.mirror-status {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mirror-status-ok {
+  color: var(--success, #2a8);
+}
+.mirror-status-error {
+  color: var(--danger, #c00);
+}
+.mirror-section .settings-subsection {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.mirror-section .settings-subsection > h4 {
+  margin: 0 0 8px;
+}
+.mirror-redact {
+  margin-top: 18px;
+}
+.mirror-watched {
+  flex: none;
+  font-size: var(--text-xs);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text2);
+  white-space: nowrap;
+}
+.mirror-watched.watched {
+  color: var(--success, #2a8);
+  border-color: color-mix(in srgb, var(--success, #2a8) 45%, transparent);
+}
+.form-row > .mirror-port-field {
+  flex: 0 0 110px;
+}
+.mirror-redact-hint {
+  margin-top: 2px;
+}
+@media (max-width: 600px) {
+  .mirror-section .form-row {
+    flex-direction: column;
+    gap: 0;
+  }
+  .mirror-section .form-row > .mirror-port-field {
+    flex: none;
+  }
+}

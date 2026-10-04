@@ -44,10 +44,7 @@ fn admin(user: &AuthUser) -> Result<(), ApiError> {
     if user.is_admin() {
         Ok(())
     } else {
-        Err(err(
-            StatusCode::FORBIDDEN,
-            "the voice assistant is admin-only",
-        ))
+        Err(err(StatusCode::FORBIDDEN, "the Assistant is admin-only"))
     }
 }
 

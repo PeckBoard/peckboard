@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.60"
+version = "0.1.61"
 edition = "2024"
 
 [dependencies]
@@ -90,6 +90,10 @@ reqwest = { version = "0.13.4", features = ["json", "stream"] }
 urlencoding = "2"
 tar = "0.4"
 flate2 = "1"
+# Assistant mirror email fallback (service::assistant_mirror). rustls only
+# (the platform verifier and aws-lc-rs provider reqwest already pulls in);
+# no native-tls / OpenSSL so every release target still builds.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }
 
 # SSH client for the native ssh_* host functions (pure Rust, no system libs)
 russh = "0.62"

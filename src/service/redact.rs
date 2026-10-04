@@ -150,6 +150,107 @@ pub fn mask_text(text: &str) -> String {
         })
         .into_owned()
 }
+// ── credential shapes (outbound chat mirroring) ─────────────────────────
+
+/// Well-known token prefixes: GitHub (`ghp_`, `gho_`, …, `github_pat_`),
+/// OpenAI / Anthropic (`sk-`, `sk-ant-`, `sk-proj-`), Slack (`xox[abpr]-`)
+/// and AWS access key ids.
+fn token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}\b)",
+        )
+        .expect("token regex")
+    })
+}
+
+/// A PEM private-key block; an unterminated one is masked to the end.
+fn pem_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)",
+        )
+        .expect("pem regex")
+    })
+}
+
+/// `password=…`, `api_key: …`, `SECRET_TOKEN = "…"`: the label is kept, the
+/// value (quoted, or up to whitespace / `,` / `;`) is masked.
+fn assignment_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key)[A-Za-z0-9_.-]*)(\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s,;]+)"#,
+        )
+        .expect("assignment regex")
+    })
+}
+
+fn long_run_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"[A-Za-z0-9+/_=-]{32,}").expect("run regex"))
+}
+
+fn uuid_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            .expect("uuid regex")
+    })
+}
+
+/// Shannon entropy in bits per char.
+fn entropy(s: &str) -> f64 {
+    let mut counts = [0u32; 256];
+    for b in s.bytes() {
+        counts[b as usize] += 1;
+    }
+    let n = s.len() as f64;
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = f64::from(c) / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// A 32+ char base64/hex run that looks random: it mixes letters and
+/// digits (so identifiers and words are spared), isn't a UUID, and has
+/// high entropy (hex ≥ 3.0 bits/char, anything else ≥ 4.0).
+fn looks_random(run: &str) -> bool {
+    let has_digit = run.bytes().any(|b| b.is_ascii_digit());
+    let has_alpha = run.bytes().any(|b| b.is_ascii_alphabetic());
+    if !has_digit || !has_alpha || uuid_re().is_match(run) {
+        return false;
+    }
+    let hex = run.bytes().all(|b| b.is_ascii_hexdigit());
+    entropy(run) >= if hex { 3.0 } else { 4.0 }
+}
+
+/// Mask credential-shaped values in free text that leaves the host (chat
+/// mirroring): known token prefixes, PEM private keys, `password=…`-style
+/// assignments, and long high-entropy base64/hex runs. Complements
+/// [`mask_text`]; run both.
+pub fn mask_credentials(text: &str) -> String {
+    let s = pem_re().replace_all(text, MASK);
+    let s = token_re().replace_all(&s, MASK);
+    let s = assignment_re().replace_all(&s, |c: &regex::Captures| {
+        format!("{}{}{MASK}", &c[1], &c[2])
+    });
+    long_run_re()
+        .replace_all(&s, |c: &regex::Captures| {
+            if looks_random(&c[0]) {
+                MASK.to_string()
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned()
+}
 
 // ── structured surfaces ─────────────────────────────────────────────────
 
@@ -347,5 +448,74 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&m).unwrap();
         assert_eq!(v["refresh_token"], MASK);
         assert_eq!(v["ok"], true);
+    }
+
+    #[test]
+    fn credential_shapes_are_masked() {
+        for secret in [
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "gho_ABCDEFGHIJKLMNOPQRSTUVWX12",
+            "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+            "sk-ant-api03-abcdefghijklmnopqrstuv",
+            "sk-proj-abcdefghijklmnopqrstuvwx",
+            "sk-abcdefghijklmnopqrstuvwx",
+            "xoxb-1234567890-abcdefghij",
+            "xoxp-1234567890-abcdefghij",
+            "AKIAIOSFODNN7EXAMPLE",
+        ] {
+            let t = mask_credentials(&format!("use {secret} now"));
+            assert_eq!(t, format!("use {MASK} now"), "{secret}");
+        }
+    }
+
+    #[test]
+    fn pem_private_keys_are_masked_whole() {
+        let pem =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\nabc\n-----END RSA PRIVATE KEY-----";
+        let t = mask_credentials(&format!("key:\n{pem}\ndone"));
+        assert!(!t.contains("MIIEpAIBAAKCAQEA"), "{t}");
+        assert!(t.ends_with("done"), "{t}");
+        // A truncated block (no END line) is masked to the end.
+        let t = mask_credentials("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg");
+        assert_eq!(t, MASK);
+        // Public keys are not secrets.
+        let public = "-----BEGIN PUBLIC KEY-----";
+        assert_eq!(mask_credentials(public), public);
+    }
+
+    #[test]
+    fn sensitive_assignments_keep_the_label() {
+        assert_eq!(
+            mask_credentials("DB_PASSWORD=hunter22 ok"),
+            format!("DB_PASSWORD={MASK} ok")
+        );
+        assert_eq!(
+            mask_credentials("api-key: \"abc def\""),
+            format!("api-key: {MASK}")
+        );
+        assert_eq!(
+            mask_credentials("token = 1234abcd"),
+            format!("token = {MASK}")
+        );
+        // No assignment, no mask.
+        let prose = "the password policy changed and the token expired";
+        assert_eq!(mask_credentials(prose), prose);
+    }
+
+    #[test]
+    fn high_entropy_runs_are_masked_but_words_and_uuids_are_not() {
+        let b64 = "Zm9vYmFyQmF6UXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWprbA9x";
+        assert_eq!(mask_credentials(b64), MASK);
+        let hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert_eq!(mask_credentials(hex), MASK);
+        for keep in [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "assistant_mirror_delivery_queue_capacity_limit",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+            "internationalization-and-localization-work",
+            "short1234abc",
+        ] {
+            assert_eq!(mask_credentials(keep), keep, "{keep}");
+        }
     }
 }

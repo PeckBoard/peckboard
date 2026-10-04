@@ -258,7 +258,7 @@ test('Listen opens an always-on mic; an utterance is answered, spoken, and the m
 
   const panel = page.getByTestId('voice-panel')
   await expect(panel).toBeVisible()
-  await expect(panel).toContainText('Voice Assistant')
+  await expect(panel.locator('.voice-panel-title')).toHaveText('Assistant')
   // No mic press needed: opening the panel starts continuous listening.
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect(page.getByTestId('voice-mic')).toHaveAttribute('aria-pressed', 'true')
@@ -893,14 +893,16 @@ test('a relay arriving during a mid-sentence pause is not spoken; the user still
     .toBe(true)
 })
 
-test('Settings → Voice persists the chosen voice across reloads', async ({ request, page }) => {
+test('Settings → Assistant persists the chosen voice across reloads', async ({ request, page }) => {
   const token = await authenticate(request)
   await primePage(page, token)
+  // The page's old URL still works and canonicalizes to the new one.
   await page.goto('/settings/voice')
 
   const settings = page.getByTestId('settings-page')
   await expect(settings).toBeVisible({ timeout: 10_000 })
-  await expect(settings).toHaveAttribute('data-sub', 'voice')
+  await expect(settings).toHaveAttribute('data-sub', 'assistant')
+  await expect(page).toHaveURL(/\/settings\/assistant$/)
   await expect(page.getByTestId('voice-speech-section')).toBeVisible()
 
   const select = page.getByTestId('voice-voice-select')

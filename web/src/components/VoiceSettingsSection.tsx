@@ -47,7 +47,7 @@ const RECOGNITION_LANGS: { id: string; label: string }[] = [
 ]
 
 /**
- * Settings → Voice. Per-browser speech prefs (voice, rate, pitch,
+ * Settings → Assistant. Per-browser speech prefs (voice, rate, pitch,
  * recognition language, auto-listen) live in localStorage via the voice
  * store; the assistant's model is server-side on the voice session.
  */
@@ -98,7 +98,7 @@ export default function VoiceSettingsSection() {
     try {
       await setModel(id)
       if (useVoiceStore.getState().model !== id) {
-        setModelError(useVoiceStore.getState().error ?? "Couldn't save the voice model.")
+        setModelError(useVoiceStore.getState().error ?? "Couldn't save the Assistant model.")
       }
     } finally {
       setModelBusy(false)
@@ -256,9 +256,7 @@ export default function VoiceSettingsSection() {
               checked={prefs.autoListen}
               onChange={(e) => setPrefs({ autoListen: e.target.checked })}
             />
-            <span className="settings-label">
-              Turn the microphone on when the voice panel opens
-            </span>
+            <span className="settings-label">Turn the microphone on when the Assistant opens</span>
           </label>
           <label className="settings-row settings-row-toggle">
             <input
@@ -301,14 +299,14 @@ export default function VoiceSettingsSection() {
       >
         <h3>Assistant Model</h3>
         <p className="form-hint">
-          The model behind the voice session. A small, fast model keeps replies snappy — it only
+          The model behind the Assistant. A small, fast model keeps replies snappy — it only
           converses, routes work to other sessions, and relays their questions.
         </p>
         <ModelPicker
           value={model ?? ''}
           onChange={(id) => void changeModel(id)}
           models={models}
-          ariaLabel="Voice assistant model"
+          ariaLabel="Assistant model"
           testId="voice-model"
           emptyHint="Loading models…"
           onOpen={fetchModels}

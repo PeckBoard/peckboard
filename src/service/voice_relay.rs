@@ -35,8 +35,9 @@ use crate::ws::broadcaster::Broadcaster;
 /// `expert_kind` of a voice assistant session.
 pub const VOICE_EXPERT_KIND: &str = "voice";
 
-/// Title of the global voice session.
-pub const VOICE_SESSION_TITLE: &str = "Voice assistant";
+/// Title of the global voice session (the Assistant). Only names new
+/// sessions; an existing one keeps its stored name.
+pub const VOICE_SESSION_TITLE: &str = "Assistant";
 
 /// Every relay turn's text starts with exactly this. The frontend renders
 /// such user messages as small update lines instead of user speech.

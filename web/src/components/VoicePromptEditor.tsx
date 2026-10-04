@@ -86,7 +86,7 @@ function DiffView({ diff }: { diff: string }) {
 }
 
 /**
- * Settings → Voice → Assistant Prompt: the voice assistant's system prompt,
+ * Settings → Assistant → Assistant Prompt: the Assistant's system prompt,
  * editable live. A save applies from the assistant's next turn. The history
  * lists every change (yours, the assistant's own, resets); open one to see
  * its diff and restore it.
@@ -249,8 +249,8 @@ export default function VoicePromptEditor() {
         )}
       </div>
       <p className="form-hint">
-        The voice assistant&apos;s instructions. Changes apply from its next turn — no restart. The
-        assistant can also change this itself when you ask it to behave differently.
+        The Assistant&apos;s instructions. Changes apply from its next turn — no restart. The
+        Assistant can also change this itself when you ask it to behave differently.
       </p>
       {loadError && (
         <div className="form-error" role="alert" data-testid="voice-prompt-load-error">
