@@ -23,8 +23,8 @@ use peckboard_relay::proto::Role;
 use peckboard_relay::server::{Relay, RelayConfig};
 use peckboard_relay::tls;
 use peckboard_relay::tunnel::{
-    Advertise, EstablishOptions, PathKind, PunchedPath, RelayFallback, TunnelError, TunnelEvent,
-    connect_device, establish_with, serve_box,
+    Advertise, EstablishOptions, PathKind, PunchedPath, Registration, RelayFallback, TunnelError,
+    TunnelEvent, connect_device, establish_with, serve_box,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -98,6 +98,46 @@ async fn behind_nat(h: &Harness, ip: Ipv4Addr) -> ClientConfig {
         stun_host: Some(IpAddr::V4(ip)),
         ..h.cfg.clone()
     }
+}
+
+/// TCP proxy to the relay that holds every client→relay chunk back by
+/// `delay` (order kept). Models a phone's slow uplink: frames the relay
+/// forwards to this client overtake the client's own Ping.
+async fn slow_uplink(relay: SocketAddr, delay: Duration) -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((c, _)) = l.accept().await {
+            let s = TcpStream::connect(relay).await.unwrap();
+            let (mut cr, mut cw) = c.into_split();
+            let (mut sr, mut sw) = s.into_split();
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut sr, &mut cw).await;
+            });
+            let (tx, mut rx) = mpsc::unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 16384];
+                while let Ok(n) = cr.read(&mut buf).await {
+                    if n == 0
+                        || tx
+                            .send((tokio::time::Instant::now() + delay, buf[..n].to_vec()))
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                while let Some((due, b)) = rx.recv().await {
+                    tokio::time::sleep_until(due).await;
+                    if sw.write_all(&b).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
 }
 
 fn opts(upgrade_every: Option<Duration>) -> EstablishOptions {
@@ -640,4 +680,97 @@ async fn one_way_path_falls_back_to_relay() {
             .await
             .ends_with("GET /oneway HTTP/1.1")
     );
+}
+
+/// Peers that register one after the other (the usual case: a box waits
+/// long before a phone shows up) and advertise candidates still fall back to
+/// the relay, whichever side comes first. The later side used to drop the
+/// RELAY_CAP handshake during its registration sync, so neither relayed.
+#[tokio::test]
+async fn staggered_registration_still_falls_back() {
+    for box_first in [true, false] {
+        let h = start(RelayConfig::default(), false).await;
+        let bcfg = behind_nat(&h, Ipv4Addr::new(127, 0, 0, 2)).await;
+        let dcfg = behind_nat(&h, Ipv4Addr::new(127, 0, 0, 3)).await;
+        // The later side sits on a slow uplink, so the earlier side's
+        // RELAY_CAP reaches it during its registration sync.
+        let slow = slow_uplink(h.cfg.relay, Duration::from_millis(300)).await;
+        let (bcfg, dcfg) = if box_first {
+            (
+                bcfg,
+                ClientConfig {
+                    relay: slow,
+                    ..dcfg
+                },
+            )
+        } else {
+            (
+                ClientConfig {
+                    relay: slow,
+                    ..bcfg
+                },
+                dcfg,
+            )
+        };
+        // Unreachable, but it makes the candidate list non-empty like the
+        // real LAN candidate does, so the registration sync runs.
+        let dead: SocketAddr = "192.0.2.1:9".parse().unwrap();
+        let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
+        let first = EstablishOptions {
+            advertise: vec![Advertise::Addr(dead)],
+            on_registered: Some(Arc::new(move |_: &Registration| {
+                let _ = reg_tx.send(());
+            })),
+            ..opts(None)
+        };
+        let second = EstablishOptions {
+            advertise: vec![Advertise::Addr(dead)],
+            ..opts(None)
+        };
+        let (bopts, dopts) = if box_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let (box_gate, dev_gate) = if box_first {
+            (None, Some(go_rx))
+        } else {
+            (Some(go_rx), None)
+        };
+        let s = PairingSecret::generate();
+        let (bs, ds) = (s.clone(), s.clone());
+        let boxed = tokio::spawn(async move {
+            if let Some(g) = box_gate {
+                let _ = g.await;
+            }
+            establish_with(&bcfg, &bs, Role::Box, &bopts).await
+        });
+        let dev = tokio::spawn(async move {
+            if let Some(g) = dev_gate {
+                let _ = g.await;
+            }
+            establish_with(&dcfg, &ds, Role::Device, &dopts).await
+        });
+        tokio::time::timeout(T, reg_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = go_tx.send(());
+        let bpath = tokio::time::timeout(T, boxed).await.unwrap().unwrap();
+        let dpath = tokio::time::timeout(T, dev).await.unwrap().unwrap();
+        let (bpath, dpath) = match (bpath, dpath) {
+            (Ok(b), Ok(d)) => (b, d),
+            (b, d) => panic!(
+                "box_first={box_first}: box {:?}, device {:?}",
+                b.err(),
+                d.err()
+            ),
+        };
+        assert_eq!(bpath.kind(), PathKind::Relayed, "box_first={box_first}");
+        assert_eq!(dpath.kind(), PathKind::Relayed, "box_first={box_first}");
+        let p = serve(bpath, s.clone(), dpath, s, echo_server().await).await;
+        let r = http_get(p.port, "/staggered").await;
+        assert!(r.ends_with("echo GET /staggered HTTP/1.1"), "{r}");
+    }
 }

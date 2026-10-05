@@ -110,6 +110,7 @@ esac
 SCOPE=full
 RUST_CHANGED=1
 WEB_CHANGED=1
+RELAY_CHANGED=1
 INTEGRATION_TESTS=""
 WEB_FILES=""
 if [[ "$CHANGED" -eq 1 ]]; then
@@ -141,6 +142,15 @@ run_step() {
   NAMES+=("$name")
 }
 
+# peckboard-relay is its own crate (not a workspace member): the root
+# cargo steps never format, lint or test it.
+relay_steps() {
+  local m="$ROOT/peckboard-relay/Cargo.toml"
+  run_step "relay: cargo fmt --check" cargo fmt --manifest-path "$m" --check
+  run_step "relay: cargo clippy" cargo clippy --manifest-path "$m" --all-features --all-targets --no-deps -- -D warnings
+  run_step "relay: cargo test" cargo test --manifest-path "$m" --all-features
+}
+
 cd "$ROOT"
 if [[ "$CHANGED" -eq 1 ]]; then
   echo "▶ proportional verify: scope=$SCOPE (rust=$RUST_CHANGED web=$WEB_CHANGED) vs $BASE"
@@ -154,6 +164,7 @@ if [[ "$CHANGED" -eq 1 ]]; then
         cargo test $(printf -- '--test %s ' "${its[@]}")
     fi
   fi
+  [[ "$RELAY_CHANGED" -eq 1 ]] && relay_steps
   run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
   # The browser sidecar is embedded JS outside the web lint scope and no e2e
   # spec runs it: syntax-check it here so a broken edit can't ship.
@@ -178,6 +189,7 @@ else
   run_step "cargo fmt --check" cargo fmt --check
   run_step "cargo clippy" cargo clippy --all-targets --no-deps
   run_step "cargo test" cargo test
+  relay_steps
   run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
 
   run_step "embedded JS syntax" node --check "$ROOT/src/service/browser_sidecar.mjs"

@@ -497,6 +497,10 @@ pub async fn establish_with(
         .then(|| local_ip_toward(cfg.relay).map(|ip| SocketAddr::new(ip, port)))
         .flatten();
     let (mut cands, pending) = candidates(lan, &opts.advertise, opts.public_ip_hint, v4);
+    // Events that arrive during a sync (`PeerOnline`, the peer's
+    // RELAY_CAP, a punch round) are replayed into the loop below; dropping
+    // them left the later-registering side unable to fall back to the relay.
+    let mut backlog = std::collections::VecDeque::new();
     if !cands.is_empty() {
         relay.set_candidates(&cands).await?;
         // The STUN Binding below (UDP) is what lets the relay coordinate the
@@ -504,11 +508,10 @@ pub async fn establish_with(
         // is told to punch without our LAN address and, where the LAN path
         // is the only one that works back to us, the punch is one-sided:
         // the peer "succeeds", we time out, and the reconnect costs ~15 s.
-        relay_sync(&mut relay).await?;
+        backlog.extend(relay_sync(&mut relay).await?);
     }
     let public = relay.stun_binding(&sock).await.context("relay STUN")?;
     let (resolved, _) = candidates(lan, &opts.advertise, Some(public.ip()), v4);
-    let mut backlog = std::collections::VecDeque::new();
     if pending || resolved != cands {
         // `Port` candidates needed the STUN-observed IP (no hint, or a
         // stale one). Same barrier as above before the next punch round;
@@ -537,6 +540,7 @@ pub async fn establish_with(
     }
     let relay_ok = opts.fallback.enabled && relay.protocol_version() >= 2 && gate_ok;
     let mut peer_relay = false;
+    let mut cap_sent = false;
     let mut peer_public: Option<SocketAddr> = None;
     let mut failures = 0u32;
     let mut deadline =
@@ -557,6 +561,7 @@ pub async fn establish_with(
                     if relay_ok && peer_relay {
                         return go_relayed(relay, sock, peer_public, cfg, role, opts, true).await;
                     }
+                    tracing::info!(?role, failures, relay_ok, peer_relay, "tunnel: punching failed, no relay fallback");
                     return Err(TunnelError::PunchFailed { rounds: failures }.into());
                 }
                 return Err(TunnelError::PeerOffline.into());
@@ -584,10 +589,17 @@ pub async fn establish_with(
                 }
                 Some(Event::PeerOnline) if relay_ok => {
                     relay.send(RELAY_CAP).await?;
+                    cap_sent = true;
                 }
                 Some(Event::Message { plaintext, .. }) if relay_ok => {
                     if plaintext == RELAY_CAP {
                         peer_relay = true;
+                        // Backstop: a peer that registered after us may never
+                        // have seen our announcement.
+                        if !cap_sent {
+                            relay.send(RELAY_CAP).await?;
+                            cap_sent = true;
+                        }
                     } else if plaintext == RELAY_GO {
                         // The peer gave up punching and is relaying now.
                         return go_relayed(relay, sock, peer_public, cfg, role, opts, false).await;
@@ -611,6 +623,7 @@ pub async fn establish_with(
                                     .await;
                             }
                             if failures >= MAX_PUNCH_FAILURES {
+                                tracing::info!(?role, failures, relay_ok, peer_relay, "tunnel: punching failed, no relay fallback");
                                 return Err(TunnelError::PunchFailed { rounds: failures }.into());
                             }
                             deadline = Some(tokio::time::Instant::now() + RETRY_WAIT);

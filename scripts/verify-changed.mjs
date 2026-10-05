@@ -38,6 +38,8 @@ const RELEVANT = [
   /^peck-plugins\/[^/]+\/(src\/|Cargo\.toml$|build\.rs$)/,
   /^peck-plugins-wasm\//,
   /^peckboard-agent-protocol\//,
+  // The relay/tunnel crate: its own tests + the box that links it.
+  /^peckboard-relay\/(src\/|tests\/|examples\/|Cargo\.(toml|lock)$|build\.rs$)/,
   /^web\/src\//,
   /^web\/public\//,
   /^web\/e2e\//,
@@ -65,7 +67,8 @@ const FULL = [
   /^web\/(index\.html|package(-lock)?\.json|vite\.config\.ts|tsconfig[^/]*\.json|eslint\.config\.[cm]?js)$/,
 ];
 
-const RUST = [/^src\//, /^tests\//, /^peck-plugins\//];
+const RUST = [/^src\//, /^tests\//, /^peck-plugins\//, /^peckboard-relay\//];
+const RELAY = [/^peckboard-relay\//];
 const WEB = [/^web\//];
 
 const git = (args) => {
@@ -133,6 +136,7 @@ if (!changed.length) {
 const full = changed.filter((f) => FULL.some((re) => re.test(f)));
 const rust = changed.filter((f) => RUST.some((re) => re.test(f)));
 const web = changed.filter((f) => WEB.some((re) => re.test(f)));
+const relay = changed.filter((f) => RELAY.some((re) => re.test(f)));
 
 // Integration tests: a changed tests/<name>.rs selects itself; a changed
 // source file selects every tests/*.rs whose name mentions one of its path
@@ -152,6 +156,7 @@ const GENERIC = new Set([
   "peck",
   "plugins",
   "plugin",
+  "peckboard",
 ]);
 const testsDir = path.join(repoRoot, "tests");
 const allTests = existsSync(testsDir)
@@ -185,6 +190,7 @@ console.error(
 console.log(`SCOPE=${scope}`);
 console.log(`RUST_CHANGED=${rust.length ? 1 : 0}`);
 console.log(`WEB_CHANGED=${web.length ? 1 : 0}`);
+console.log(`RELAY_CHANGED=${relay.length ? 1 : 0}`);
 console.log(`INTEGRATION_TESTS=${q([...integration].sort())}`);
 // Relative to web/, only files that still exist (deletions have nothing to
 // lint), and only what eslint / prettier understand.
