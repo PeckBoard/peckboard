@@ -231,6 +231,24 @@ pub fn run() {
                 let _ = tx.send(l);
             })?;
 
+            // Wi-Fi ↔ cellular: reconnect now instead of after the ping
+            // timeout. Only a running (foregrounded) tunnel is kicked, and
+            // bursts collapse into one (`KICK_DEBOUNCE`). Port and gate key
+            // stay, so the box page isn't rebooted.
+            let network_tunnel = tunnel.clone();
+            if let Err(e) = app.native().watch_network(move |c| {
+                if network_tunnel.network_changed() {
+                    log::info!("network changed ({}): reconnecting the tunnel", c.detail);
+                } else {
+                    log::info!(
+                        "network changed ({}): no running tunnel or debounced",
+                        c.detail
+                    );
+                }
+            }) {
+                log::warn!("network monitor unavailable: {e}");
+            }
+
             app.manage(AppState {
                 store: Mutex::new(store),
                 secrets: Arc::new(NativeSecrets(handle.clone())),

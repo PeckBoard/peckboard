@@ -5,7 +5,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::plugin::{PluginApi, PluginHandle};
 use tauri::{AppHandle, Runtime};
 
-use crate::Lifecycle;
+use crate::{Lifecycle, NetworkChange};
 
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_peckboard_native);
@@ -71,6 +71,24 @@ impl<R: Runtime> Native<R> {
         let _: serde_json::Value = self
             .0
             .run_mobile_plugin("watchLifecycle", json!({ "channel": channel }))?;
+        Ok(())
+    }
+
+    /// Calls `f` when the default network changes (not for the network at
+    /// subscription). May fire in bursts; debounce on the caller's side.
+    pub fn watch_network(
+        &self,
+        f: impl Fn(NetworkChange) + Send + Sync + 'static,
+    ) -> crate::Result<()> {
+        let channel: Channel<serde_json::Value> = Channel::new(move |body: InvokeResponseBody| {
+            if let Ok(m) = body.deserialize::<NetworkChange>() {
+                f(m);
+            }
+            Ok(())
+        });
+        let _: serde_json::Value = self
+            .0
+            .run_mobile_plugin("watchNetwork", json!({ "channel": channel }))?;
         Ok(())
     }
 }

@@ -10,6 +10,7 @@ use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use rand::RngCore;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -91,6 +92,9 @@ pub struct DeviceOptions {
     /// Return `Err(TunnelError::PunchFailed)` instead of retrying when the
     /// punch fails before any tunnel was ever established.
     pub give_up_on_punch_failure: bool,
+    /// Fire [`DeviceKick::network_changed`] (a clone of this) when the OS
+    /// reports a new default network.
+    pub kick: DeviceKick,
 }
 
 impl DeviceOptions {
@@ -105,6 +109,7 @@ impl DeviceOptions {
             max_backoff: Duration::from_secs(30),
             stable_after: Duration::from_secs(30),
             give_up_on_punch_failure: false,
+            kick: DeviceKick::new(),
         }
     }
 
@@ -125,6 +130,62 @@ impl fmt::Debug for DeviceOptions {
             .field("stable_after", &self.stable_after)
             .field("give_up_on_punch_failure", &self.give_up_on_punch_failure)
             .finish_non_exhaustive()
+    }
+}
+
+/// Kicks closer than this count once.
+pub const KICK_DEBOUNCE: Duration = Duration::from_secs(1);
+
+/// Tells a running [`run_device`] the device's network changed (Wi-Fi ↔
+/// cellular): the tunnel on the old path is closed at once and a fresh
+/// round (rendezvous, punch, relay fallback) starts without the retry
+/// delay, instead of waiting ~15 s for the pings to time out. The listener
+/// — and so the loopback port — is untouched. Kicks within
+/// [`KICK_DEBOUNCE`] of the last one are ignored; with no `run_device`
+/// running a kick does nothing.
+#[derive(Clone, Default)]
+pub struct DeviceKick(Arc<KickState>);
+
+#[derive(Default)]
+struct KickState {
+    notify: Notify,
+    /// Accepted kicks; a round compares it to see if one landed meanwhile.
+    count: AtomicU64,
+    last: Mutex<Option<Instant>>,
+}
+
+impl fmt::Debug for DeviceKick {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceKick").finish_non_exhaustive()
+    }
+}
+
+impl DeviceKick {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The network changed; false if debounced.
+    pub fn network_changed(&self) -> bool {
+        {
+            let mut last = self.0.last.lock().unwrap();
+            if last.is_some_and(|t| t.elapsed() < KICK_DEBOUNCE) {
+                return false;
+            }
+            *last = Some(Instant::now());
+        }
+        self.0.count.fetch_add(1, Ordering::SeqCst);
+        self.0.notify.notify_waiters();
+        true
+    }
+
+    fn count(&self) -> u64 {
+        self.0.count.load(Ordering::SeqCst)
+    }
+
+    /// Resolves on the next accepted kick.
+    pub(super) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.0.notify.notified()
     }
 }
 
@@ -160,6 +221,8 @@ pub enum DeviceEvent {
 /// Device reconnect loop: rendezvous + punch, serve `listener` through the
 /// tunnel until it drops, back off, repeat. Connections queued on the
 /// listener while reconnecting are served once the next tunnel is up.
+/// [`DeviceOptions::kick`] cuts a tunnel or an attempt on the old network
+/// short and skips the retry delay.
 ///
 /// Returns `Ok(())` once `cancel` fires — the tunnel and every stream on it
 /// are closed. A `listener` passed by value is dropped (so the port stops
@@ -175,12 +238,14 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
     on_event: impl Fn(DeviceEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     let listener: &TcpListener = listener.borrow();
+    let kick = &opts.kick;
     let on_event = Arc::new(on_event);
     let connected_at: Arc<Mutex<Option<Instant>>> = Arc::default();
     let mut ever_connected = false;
     let mut backoff = opts.min_backoff;
     loop {
         *connected_at.lock().unwrap() = None;
+        let kicks = kick.count();
         on_event(DeviceEvent::Connecting);
         let attempt = async {
             let cfg = match &opts.relay {
@@ -189,12 +254,16 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
             };
             establish(&cfg, &opts.link.secret, Role::Device).await
         };
+        // `None`: the network changed mid-attempt; its sockets and relay
+        // session belong to the old one, so start over.
         let path = tokio::select! {
-            r = attempt => r,
+            r = attempt => Some(r),
+            _ = kick.notified() => None,
             _ = cancel.cancelled() => return Ok(()),
         };
         match path {
-            Ok(path) => {
+            None => {}
+            Some(Ok(path)) => {
                 let (ev, at) = (on_event.clone(), connected_at.clone());
                 let tunnel_ev = move |e: TunnelEvent| match e {
                     TunnelEvent::Connected { peer, rtt_ms, path } => {
@@ -214,11 +283,12 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
                     listener,
                     opts.accept_filter.as_ref(),
                     &cancel,
+                    Some(kick),
                     tunnel_ev,
                 )
                 .await;
             }
-            Err(e) => match e.downcast_ref::<TunnelError>() {
+            Some(Err(e)) => match e.downcast_ref::<TunnelError>() {
                 Some(&TunnelError::PunchFailed { rounds }) => {
                     on_event(DeviceEvent::PunchFailed { rounds });
                     if opts.give_up_on_punch_failure && !ever_connected {
@@ -237,9 +307,21 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
         if lasted.is_some_and(|d| d >= opts.stable_after) {
             backoff = opts.min_backoff;
         }
+        // A failure on the old network says nothing about the new one.
+        if kick.count() != kicks {
+            backoff = opts.min_backoff;
+            on_event(DeviceEvent::Retrying {
+                after: Duration::ZERO,
+            });
+            continue;
+        }
         on_event(DeviceEvent::Retrying { after: backoff });
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
+            _ = kick.notified() => {
+                backoff = opts.min_backoff;
+                continue;
+            }
             _ = cancel.cancelled() => return Ok(()),
         }
         backoff = (backoff * 2).min(opts.max_backoff);
@@ -525,6 +607,17 @@ async fn peek_head(tcp: &TcpStream) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn kicks_are_debounced_and_shared_by_clones() {
+        let kick = DeviceKick::new();
+        let clone = kick.clone();
+        assert!(kick.network_changed());
+        assert!(!clone.network_changed(), "second kick within the debounce");
+        assert_eq!(kick.count(), 1);
+        *kick.0.last.lock().unwrap() = Some(Instant::now() - KICK_DEBOUNCE);
+        assert!(clone.network_changed());
+        assert_eq!(kick.count(), 2);
+    }
     #[test]
     fn gate_cookie_is_stripped_from_the_forwarded_head() {
         let head = "GET / HTTP/1.1\r\nHost: x\r\nCookie: a=b; __pbm=k; __pbm_shell=s\r\n\

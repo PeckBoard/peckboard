@@ -5,6 +5,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.os.Build
 import android.os.Message
@@ -54,9 +56,16 @@ class LifecycleArgs {
     lateinit var channel: Channel
 }
 
+@InvokeArg
+class NetworkArgs {
+    lateinit var channel: Channel
+}
+
 @TauriPlugin
 class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
     private var lifecycle: Channel? = null
+    @Volatile private var network: Channel? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val vault by lazy { SecretVault(activity) }
 
     override fun load(webView: WebView) {
@@ -143,6 +152,52 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(LifecycleArgs::class.java)
         lifecycle = args.channel
         invoke.resolve()
+    }
+
+    /**
+     * Reports a new default network (Wi-Fi <-> cellular, another Wi-Fi) and
+     * the loss of the current one, so the tunnel reconnects at once instead
+     * of waiting for its pings to time out. The first `onAvailable` is the
+     * network at registration and isn't reported. Callbacks run on the
+     * ConnectivityManager thread; the Rust side debounces.
+     */
+    @Command
+    fun watchNetwork(invoke: Invoke) {
+        val args = invoke.parseArgs(NetworkArgs::class.java)
+        network = args.channel
+        if (networkCallback == null) {
+            val cm = activity.getSystemService(ConnectivityManager::class.java)
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                private var current: Network? = null
+                private var started = false
+
+                override fun onAvailable(n: Network) {
+                    val changed = started && n != current
+                    started = true
+                    current = n
+                    if (changed) emitNetwork("available")
+                }
+
+                override fun onLost(n: Network) {
+                    if (n == current) {
+                        current = null
+                        emitNetwork("lost")
+                    }
+                }
+            }
+            try {
+                cm.registerDefaultNetworkCallback(callback)
+                networkCallback = callback
+            } catch (e: Exception) {
+                invoke.reject("network monitor failed: ${e.message}")
+                return
+            }
+        }
+        invoke.resolve()
+    }
+
+    private fun emitNetwork(detail: String) {
+        network?.send(JSObject().put("detail", detail))
     }
 
     @Command

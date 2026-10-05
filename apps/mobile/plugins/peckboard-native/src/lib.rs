@@ -10,6 +10,8 @@
 //!   origin only, back-swipe on iOS.
 //! - **Lifecycle**: foreground/background notifications so the core can stop
 //!   the tunnel while backgrounded; on desktop, a wake from sleep.
+//! - **Network**: default-network changes (Wi-Fi ↔ cellular) on iOS and
+//!   Android, so the core reconnects the tunnel at once.
 //!
 //! Nothing here is callable from JavaScript (`COMMANDS` is empty in
 //! `build.rs`); only the app's Rust core uses [`PeckboardNativeExt`].
@@ -53,6 +55,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Lifecycle {
     Foreground,
     Background,
+}
+
+/// The default network changed (iOS `NWPathMonitor`, Android default-network
+/// callback). `detail` is for logs only.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct NetworkChange {
+    #[serde(default)]
+    pub detail: String,
 }
 
 pub trait PeckboardNativeExt<R: Runtime> {

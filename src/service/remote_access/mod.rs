@@ -730,7 +730,6 @@ impl RemoteAccess {
             if let Some(s) = punched.relay_identity() {
                 self.inner.lock().unwrap().registration.note_handshake(s);
             }
-            let peer = punched.peer().to_string();
             // Punched (or relayed) only: the device isn't connected until
             // its QUIC handshake completes (`TunnelUpdate::Connected`).
             tracing::debug!(
@@ -744,7 +743,7 @@ impl RemoteAccess {
                 Arc::new(move |u: TunnelUpdate| {
                     let Some(this) = this.upgrade() else { return };
                     match u {
-                        TunnelUpdate::Connected { rtt_ms, path } => {
+                        TunnelUpdate::Connected { peer, rtt_ms, path } => {
                             tracing::info!(
                                 device_id = %id,
                                 path,
@@ -760,7 +759,7 @@ impl RemoteAccess {
                                 &id,
                                 DeviceStatus {
                                     state: "connected",
-                                    peer: Some(peer.clone()),
+                                    peer: Some(peer.to_string()),
                                     rtt_ms: Some(rtt_ms),
                                     path: Some(path),
                                     ..DeviceStatus::offline()
@@ -875,6 +874,7 @@ pub(crate) mod testing {
             events: TunnelEvents,
         ) -> anyhow::Result<()> {
             events(TunnelUpdate::Connected {
+                peer: self.peer(),
                 rtt_ms: 1,
                 path: "direct",
             });

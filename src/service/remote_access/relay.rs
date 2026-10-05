@@ -1,12 +1,15 @@
 //! Production [`TunnelBackend`]: the `peckboard-relay` tunnel API
-//! (`establish_with` as the box, then `serve_box`).
+//! (`establish_with` as the box, then `serve_box_rejoining`, which keeps a
+//! standby relay session so the device's next round reaches us at once).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use peckboard_relay::keys::PairingSecret;
 use peckboard_relay::proto::Role;
-use peckboard_relay::tunnel::{self, Advertise, EstablishOptions, PunchedPath, TunnelEvent};
+use peckboard_relay::tunnel::{
+    self, Advertise, BoxRejoin, EstablishOptions, PunchedPath, TunnelEvent,
+};
 
 use super::secret::DeviceSecret;
 use super::tunnel::{
@@ -74,7 +77,16 @@ impl TunnelBackend for RelayBackend {
             ..EstablishOptions::default()
         };
         let path = tunnel::establish_with(&cfg, &relay_secret(secret), Role::Box, &opts).await?;
-        Ok(Box::new(RelayPunched(path)))
+        // The standby session while serving re-registers with the same
+        // options; the status display keeps the main registration.
+        let rejoin = BoxRejoin {
+            cfg,
+            opts: EstablishOptions {
+                on_registered: None,
+                ..opts
+            },
+        };
+        Ok(Box::new(RelayPunched { path, rejoin }))
     }
 
     async fn registration_status(&self, relay_host: &str, key: &[u8; 32]) -> anyhow::Result<bool> {
@@ -84,20 +96,23 @@ impl TunnelBackend for RelayBackend {
     }
 }
 
-struct RelayPunched(PunchedPath);
+struct RelayPunched {
+    path: PunchedPath,
+    rejoin: BoxRejoin,
+}
 
 #[async_trait::async_trait]
 impl PunchedTunnel for RelayPunched {
     fn peer(&self) -> SocketAddr {
-        self.0.peer
+        self.path.peer
     }
 
     fn path(&self) -> &'static str {
-        self.0.kind().as_str()
+        self.path.kind().as_str()
     }
 
     fn relay_identity(&self) -> Option<IdentityStatus> {
-        self.0.relay_identity
+        self.path.relay_identity
     }
 
     async fn serve(
@@ -106,9 +121,12 @@ impl PunchedTunnel for RelayPunched {
         target: SocketAddr,
         events: TunnelEvents,
     ) -> anyhow::Result<()> {
-        tunnel::serve_box(self.0, &relay_secret(secret), target, move |ev| {
+        let RelayPunched { path, rejoin } = *self;
+        let secret = relay_secret(secret);
+        tunnel::serve_box_rejoining(path, &secret, target, &rejoin, move |ev| {
             events(match ev {
-                TunnelEvent::Connected { rtt_ms, path, .. } => TunnelUpdate::Connected {
+                TunnelEvent::Connected { peer, rtt_ms, path } => TunnelUpdate::Connected {
+                    peer,
                     rtt_ms,
                     path: path.as_str(),
                 },

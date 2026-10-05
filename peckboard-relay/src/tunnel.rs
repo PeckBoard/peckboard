@@ -57,8 +57,8 @@ use crate::proto::Role;
 mod device;
 mod relayed;
 pub use device::{
-    AcceptFilter, Admitted, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, bind_listener,
-    run_device,
+    AcceptFilter, Admitted, CookieGate, DeviceEvent, DeviceKick, DeviceOptions, KICK_DEBOUNCE,
+    ListenAddr, bind_listener, run_device,
 };
 pub use quinn;
 pub use relayed::RelayedPath;
@@ -931,45 +931,207 @@ pub async fn serve_box(
     target: SocketAddr,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
+    serve_box_inner(path, secret, target, None, on_event).await
+}
+
+/// How [`serve_box_rejoining`] stays at the relay while serving: the same
+/// relay and options the served path was established with.
+#[derive(Clone)]
+pub struct BoxRejoin {
+    pub cfg: ClientConfig,
+    /// Used as is, except the standby binds an ephemeral port and
+    /// advertises nothing: `bind_port` (and so every [`Advertise`] address
+    /// pointing at it) is held by the served path.
+    pub opts: EstablishOptions,
+}
+
+/// [`serve_box`] that stays reachable for the device's next round while it
+/// serves a direct path. A device whose network changed (Wi-Fi ↔ cellular)
+/// abandons the old path, and its CONNECTION_CLOSE leaves from the new
+/// address — which the box's NAT typically drops — so a box that only
+/// re-registers once the connection ends would keep the device waiting for
+/// the ~15 s ping timeout. Instead a standby [`establish_with`] keeps a
+/// relay session for this pairing open the whole time (relay failures are
+/// retried with backoff, without touching the served connection). When it
+/// punches a new path, the device's authenticated handshake on it
+/// (accepted only from the new punched peer) replaces the served
+/// connection: the old one is closed and `Connected` is reported again. A
+/// round that fails leaves the served connection alone; newest round wins.
+///
+/// A relayed path carries its data over the relay session itself (a second
+/// box session would replace it at the relay), so no standby runs while
+/// one is served. Returns like [`serve_box`]; when the served connection
+/// dies while a standby round is mid-handshake, that round is awaited
+/// first.
+pub async fn serve_box_rejoining(
+    path: PunchedPath,
+    secret: &PairingSecret,
+    target: SocketAddr,
+    rejoin: &BoxRejoin,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    serve_box_inner(path, secret, target, Some(rejoin), on_event).await
+}
+
+/// First standby retry delay after a relay failure, doubling up to
+/// [`STANDBY_BACKOFF_MAX`]; reset once a standby session lasted
+/// [`MAINTAIN_EVERY`].
+const STANDBY_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const STANDBY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// One authenticated device connection on its own endpoint.
+struct Served {
+    ep: Endpoint,
+    conn: Connection,
+    path_rx: watch::Receiver<PathKind>,
+    direct: bool,
+}
+
+impl Served {
+    fn connected(&mut self) -> TunnelEvent {
+        TunnelEvent::Connected {
+            peer: self.conn.remote_address(),
+            rtt_ms: rtt_ms(&self.conn),
+            path: *self.path_rx.borrow_and_update(),
+        }
+    }
+}
+
+/// Endpoint on `path` plus the device's authenticated connection from
+/// `path.peer` (see [`accept_device`]).
+async fn accept_path(path: PunchedPath, secret: &PairingSecret) -> anyhow::Result<Served> {
     tracing::debug!(peer = %path.peer, path = %path.kind(), "tunnel: awaiting device QUIC");
-    let mut path_rx = path.path_watch();
+    let path_rx = path.path_watch();
+    let direct = matches!(path.socket, PathSocket::Direct(_));
     let peer = path.peer;
     let ep = endpoint(path, Some(server_config(secret)?))?;
-    let conn = match accept_device(&ep, peer).await {
-        Ok(c) => c,
+    let conn = accept_device(&ep, peer).await?;
+    Ok(Served {
+        ep,
+        conn,
+        path_rx,
+        direct,
+    })
+}
+
+/// Standby registration for [`serve_box_rejoining`]: wait at the relay for
+/// the device's next round and accept its handshake on the new path.
+/// `accepting` is true while a punched path awaits that handshake. Never
+/// fails: relay errors are retried with backoff, a failed round starts the
+/// next.
+async fn standby(
+    rejoin: &BoxRejoin,
+    secret: &PairingSecret,
+    accepting: &watch::Sender<bool>,
+) -> Served {
+    let opts = EstablishOptions {
+        bind_port: None,
+        advertise: Vec::new(),
+        ..rejoin.opts.clone()
+    };
+    let mut backoff = STANDBY_BACKOFF_MIN;
+    loop {
+        let started = tokio::time::Instant::now();
+        match establish_with(&rejoin.cfg, secret, Role::Box, &opts).await {
+            Ok(path) => {
+                accepting.send_replace(true);
+                let r = accept_path(path, secret).await;
+                accepting.send_replace(false);
+                match r {
+                    Ok(s) => return s,
+                    Err(e) => tracing::debug!("tunnel: standby round failed: {e:#}"),
+                }
+            }
+            Err(e) => {
+                tracing::debug!("tunnel: standby relay session failed, retrying: {e:#}");
+                if started.elapsed() >= MAINTAIN_EVERY {
+                    backoff = STANDBY_BACKOFF_MIN;
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(STANDBY_BACKOFF_MAX);
+            }
+        }
+    }
+}
+
+async fn serve_box_inner(
+    path: PunchedPath,
+    secret: &PairingSecret,
+    target: SocketAddr,
+    rejoin: Option<&BoxRejoin>,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    let mut cur = match accept_path(path, secret).await {
+        Ok(s) => s,
         Err(e) => {
             on_event(TunnelEvent::Error(format!("{e:#}")));
             return Err(e);
         }
     };
-    on_event(TunnelEvent::Connected {
-        peer: conn.remote_address(),
-        rtt_ms: rtt_ms(&conn),
-        path: *path_rx.borrow_and_update(),
-    });
-    // A ping stream that goes quiet reports here (see `box_pong`).
-    let (dead_tx, mut dead_rx) = mpsc::channel::<()>(1);
-    let reason = loop {
-        tokio::select! {
-            Ok(()) = path_rx.changed() => {
-                on_event(TunnelEvent::PathChanged { path: *path_rx.borrow_and_update() });
+    on_event(cur.connected());
+    let (accepting_tx, mut accepting) = watch::channel(false);
+    loop {
+        let direct = cur.direct;
+        let next = async {
+            match rejoin {
+                Some(r) if direct => standby(r, secret, &accepting_tx).await,
+                _ => std::future::pending().await,
             }
-            s = conn.accept_bi() => match s {
-                Ok((send, recv)) => {
-                    tokio::spawn(box_stream(send, recv, target, dead_tx.clone()));
+        };
+        tokio::pin!(next);
+        // A ping stream that goes quiet reports here (see `box_pong`). One
+        // channel per connection, so a replaced connection's late timeout
+        // can't end its successor.
+        let (dead_tx, mut dead_rx) = mpsc::channel::<()>(1);
+        let ended = loop {
+            tokio::select! {
+                Ok(()) = cur.path_rx.changed() => {
+                    on_event(TunnelEvent::PathChanged { path: *cur.path_rx.borrow_and_update() });
                 }
-                Err(e) => break e.to_string(),
-            },
-            Some(()) = dead_rx.recv() => {
-                break format!("device stopped pinging ({PING_MISSES} missed)");
+                s = cur.conn.accept_bi() => match s {
+                    Ok((send, recv)) => {
+                        tokio::spawn(box_stream(send, recv, target, dead_tx.clone()));
+                    }
+                    Err(e) => break Err(e.to_string()),
+                },
+                Some(()) = dead_rx.recv() => {
+                    break Err(format!("device stopped pinging ({PING_MISSES} missed)"));
+                }
+                // One device per path: refuse anything else on it. A new
+                // path arrives through the standby round.
+                Some(inc) = cur.ep.accept() => inc.refuse(),
+                new = &mut next => break Ok(new),
             }
-            // One device per pairing: refuse anything else on this path.
-            Some(inc) = ep.accept() => inc.refuse(),
-        }
-    };
-    on_event(TunnelEvent::Disconnected { reason });
-    ep.close(VarInt::from_u32(0), b"");
-    Ok(())
+        };
+        let new = match ended {
+            Ok(new) => new,
+            Err(reason) => {
+                on_event(TunnelEvent::Disconnected { reason });
+                cur.ep.close(VarInt::from_u32(0), b"");
+                // The device may be mid-handshake on its new path already.
+                if !*accepting.borrow_and_update() {
+                    return Ok(());
+                }
+                tokio::select! {
+                    biased;
+                    new = &mut next => new,
+                    _ = accepting.wait_for(|a| !*a) => return Ok(()),
+                }
+            }
+        };
+        tracing::info!(
+            old = %cur.conn.remote_address(),
+            new = %new.conn.remote_address(),
+            "tunnel: device reconnected on a new path, replacing the old connection"
+        );
+        // Directly on the connection: the endpoint's close is queued to the
+        // connection driver, and dropping the handle first would close it
+        // without a reason.
+        cur.conn.close(VarInt::from_u32(0), b"replaced");
+        cur.ep.close(VarInt::from_u32(0), b"replaced");
+        cur = new;
+        on_event(cur.connected());
+    }
 }
 
 /// The first connection from `peer` that completes the pinned handshake.
@@ -1081,24 +1243,35 @@ pub async fn connect_device(
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     let never = CancellationToken::new();
-    device_session(path, secret, listen, None, &never, on_event).await
+    device_session(path, secret, listen, None, &never, None, on_event).await
 }
 
 /// [`connect_device`] plus an optional [`AcceptFilter`] run on every
-/// accepted connection, and a `cancel` token that ends the tunnel (and
-/// every stream on it) with `Disconnected { reason: "stopped" }`.
+/// accepted connection, a `cancel` token that ends the tunnel (and every
+/// stream on it) with `Disconnected { reason: "stopped" }`, and an
+/// optional [`DeviceKick`]: a network change closes the connection at once
+/// (`Disconnected { reason: "network changed" }`) instead of waiting for
+/// the pings to time out.
 async fn device_session(
     path: PunchedPath,
     secret: &PairingSecret,
     listen: &TcpListener,
     filter: Option<&AcceptFilter>,
     cancel: &CancellationToken,
+    kick: Option<&DeviceKick>,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
+    let kicked = || async move {
+        match kick {
+            Some(k) => k.notified().await,
+            None => std::future::pending().await,
+        }
+    };
     let mut path_rx = path.path_watch();
     let handshake = tokio::select! {
         r = connect_raw(path, secret) => r,
         _ = cancel.cancelled() => return Ok(()),
+        _ = kicked() => return Ok(()),
     };
     let (ep, conn) = match handshake {
         Ok(v) => v,
@@ -1122,6 +1295,7 @@ async fn device_session(
                 on_event(TunnelEvent::PathChanged { path: *path_rx.borrow_and_update() });
             }
             _ = cancel.cancelled() => break "stopped".to_string(),
+            _ = kicked() => break "network changed".to_string(),
             a = listen.accept() => match a {
                 Ok((tcp, _)) => {
                     let conn = conn.clone();

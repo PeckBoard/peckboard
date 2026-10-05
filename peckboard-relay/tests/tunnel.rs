@@ -11,9 +11,10 @@ use peckboard_relay::proto::Role;
 use peckboard_relay::server::{Relay, RelayConfig};
 use peckboard_relay::tls;
 use peckboard_relay::tunnel::{
-    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink,
-    PunchedPath, STREAM_PING, STREAM_TCP, TunnelEvent, bind_listener, connect_device, connect_raw,
-    establish, run_device, serve_box,
+    BoxRejoin, CancellationToken, CookieGate, DeviceEvent, DeviceKick, DeviceOptions,
+    EstablishOptions, ListenAddr, PairingLink, PunchedPath, STREAM_PING, STREAM_TCP, TunnelEvent,
+    bind_listener, connect_device, connect_raw, establish, quinn, run_device, serve_box,
+    serve_box_rejoining,
 };
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -459,11 +460,34 @@ fn spawn_box(cfg: &ClientConfig, s: &PairingSecret, target: SocketAddr) -> BoxPr
     BoxProc(Some(rt))
 }
 
+/// A box that, like the real one, re-registers at the relay whenever a
+/// tunnel ends. Same own-runtime shape as [`spawn_box`].
+fn spawn_box_loop(cfg: &ClientConfig, s: &PairingSecret, target: SocketAddr) -> BoxProc {
+    let (cfg, s) = (cfg.clone(), s.clone());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.spawn(async move {
+        loop {
+            match establish(&cfg, &s, Role::Box).await {
+                Ok(path) => {
+                    let _ = serve_box(path, &s, target, |_| {}).await;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    });
+    BoxProc(Some(rt))
+}
+
 struct Device {
     port: u16,
     ev: mpsc::UnboundedReceiver<DeviceEvent>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    kick: DeviceKick,
 }
 
 async fn start_device(cfg: &ClientConfig, s: &PairingSecret, gate: Option<&CookieGate>) -> Device {
@@ -473,6 +497,7 @@ async fn start_device(cfg: &ClientConfig, s: &PairingSecret, gate: Option<&Cooki
     if let Some(g) = gate {
         opts = opts.with_gate(g);
     }
+    let kick = opts.kick.clone();
     let listener = bind_listener(ListenAddr::Ephemeral).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, ev) = mpsc::unbounded_channel();
@@ -485,9 +510,9 @@ async fn start_device(cfg: &ClientConfig, s: &PairingSecret, gate: Option<&Cooki
         ev,
         cancel,
         task,
+        kick,
     }
 }
-
 async fn wait_for(ev: &mut mpsc::UnboundedReceiver<DeviceEvent>, want: fn(&DeviceEvent) -> bool) {
     let found = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(e) = ev.recv().await {
@@ -567,6 +592,184 @@ async fn device_loop_reconnects_after_box_restart_and_stops_on_cancel() {
     let r = tokio::time::timeout(T, d.task).await.unwrap().unwrap();
     assert!(r.is_ok(), "{r:?}");
     assert!(TcpStream::connect(("127.0.0.1", d.port)).await.is_err());
+}
+
+/// A network change (the app's OS path monitor firing [`DeviceKick`])
+/// drops the tunnel on the old path at once and the loop reconnects right
+/// away on the same local port, instead of noticing only after the ~15 s
+/// ping timeout.
+#[tokio::test]
+async fn network_kick_reconnects_without_waiting_for_the_ping_timeout() {
+    let cfg = relay().await;
+    let target = echo_server().await;
+    let s = PairingSecret::generate();
+    let _box = spawn_box_loop(&cfg, &s, target);
+    let mut d = start_device(&cfg, &s, None).await;
+    wait_for(&mut d.ev, |e| matches!(e, DeviceEvent::Connected { .. })).await;
+    assert!(
+        http_get(d.port, "/a")
+            .await
+            .ends_with("echo GET /a HTTP/1.1")
+    );
+
+    let kicked = std::time::Instant::now();
+    assert!(d.kick.network_changed());
+    assert!(!d.kick.network_changed(), "not debounced");
+    wait_for(
+        &mut d.ev,
+        |e| matches!(e, DeviceEvent::Disconnected { reason } if reason == "network changed"),
+    )
+    .await;
+    wait_for(
+        &mut d.ev,
+        |e| matches!(e, DeviceEvent::Retrying { after } if after.is_zero()),
+    )
+    .await;
+    wait_for(&mut d.ev, |e| matches!(e, DeviceEvent::Connected { .. })).await;
+    let took = kicked.elapsed();
+    eprintln!("reconnected {took:?} after the kick");
+    assert!(took < Duration::from_secs(5), "reconnect took {took:?}");
+    assert!(
+        http_get(d.port, "/b")
+            .await
+            .ends_with("echo GET /b HTTP/1.1")
+    );
+
+    d.cancel.cancel();
+    let r = tokio::time::timeout(T, d.task).await.unwrap().unwrap();
+    assert!(r.is_ok(), "{r:?}");
+}
+/// A box serving through [`serve_box_rejoining`] (like the real one),
+/// re-registering whenever its tunnel ends; its events are reported.
+fn spawn_rejoining_box(
+    cfg: &ClientConfig,
+    s: &PairingSecret,
+    target: SocketAddr,
+) -> (BoxProc, mpsc::UnboundedReceiver<TunnelEvent>) {
+    let (cfg, s) = (cfg.clone(), s.clone());
+    let (tx, rx) = mpsc::unbounded_channel();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.spawn(async move {
+        let rejoin = BoxRejoin {
+            cfg: cfg.clone(),
+            opts: EstablishOptions::default(),
+        };
+        loop {
+            match establish(&cfg, &s, Role::Box).await {
+                Ok(path) => {
+                    let tx = tx.clone();
+                    let on = move |e| {
+                        let _ = tx.send(e);
+                    };
+                    let _ = serve_box_rejoining(path, &s, target, &rejoin, on).await;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    });
+    (BoxProc(Some(rt)), rx)
+}
+
+/// One forwarded HTTP request over a raw device connection.
+async fn quic_get(conn: &quinn::Connection, path: &str) -> String {
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    send.write_all(&[STREAM_TCP]).await.unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    send.write_all(req.as_bytes()).await.unwrap();
+    let _ = send.finish();
+    let body = tokio::time::timeout(T, recv.read_to_end(4096))
+        .await
+        .unwrap()
+        .unwrap();
+    String::from_utf8(body).unwrap()
+}
+
+/// A device that changed networks starts a fresh round while the box still
+/// serves its old connection — and the old path never tells the box (its
+/// close would leave from the new address and be dropped; here the old
+/// connection simply stays up and keeps answering, so neither a close nor
+/// the ping timeout can help). The box's standby relay session takes the
+/// new round at once, swaps the new connection in, and closes the old one.
+#[tokio::test]
+async fn box_takes_the_devices_new_round_while_serving() {
+    let cfg = relay().await;
+    let target = echo_server().await;
+    let s = PairingSecret::generate();
+    let (_box, mut box_ev) = spawn_rejoining_box(&cfg, &s, target);
+    let old_path = tokio::time::timeout(T, establish(&cfg, &s, Role::Device))
+        .await
+        .unwrap()
+        .unwrap();
+    let (_old_ep, old) = connect_raw(old_path, &s).await.unwrap();
+    connected(&mut box_ev).await;
+    assert!(
+        quic_get(&old, "/old")
+            .await
+            .ends_with("echo GET /old HTTP/1.1")
+    );
+
+    // The device on its new network: a fresh loop, fresh sockets.
+    let started = std::time::Instant::now();
+    let mut d = start_device(&cfg, &s, None).await;
+    wait_for(&mut d.ev, |e| matches!(e, DeviceEvent::Connected { .. })).await;
+    assert!(
+        http_get(d.port, "/new")
+            .await
+            .ends_with("echo GET /new HTTP/1.1")
+    );
+    let took = started.elapsed();
+    eprintln!("served on the new path {took:?} after the new round started");
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+
+    // The box replaced the old connection rather than ending its tunnel.
+    connected(&mut box_ev).await;
+    match tokio::time::timeout(T, old.closed()).await.unwrap() {
+        quinn::ConnectionError::ApplicationClosed(c) => assert_eq!(&c.reason[..], b"replaced"),
+        other => panic!("old connection: {other:?}"),
+    }
+    assert!(box_ev.try_recv().is_err(), "unexpected box event");
+
+    d.cancel.cancel();
+    let r = tokio::time::timeout(T, d.task).await.unwrap().unwrap();
+    assert!(r.is_ok(), "{r:?}");
+}
+
+/// A new round whose handshake fails (wrong tunnel key) while the box is
+/// serving leaves the served connection untouched.
+#[tokio::test]
+async fn failed_new_round_leaves_the_served_connection_alone() {
+    let cfg = relay().await;
+    let target = echo_server().await;
+    let s = PairingSecret::generate();
+    let (_box, mut box_ev) = spawn_rejoining_box(&cfg, &s, target);
+    let old_path = tokio::time::timeout(T, establish(&cfg, &s, Role::Device))
+        .await
+        .unwrap()
+        .unwrap();
+    let (_old_ep, old) = connect_raw(old_path, &s).await.unwrap();
+    connected(&mut box_ev).await;
+
+    let rogue = tokio::time::timeout(T, establish(&cfg, &s, Role::Device))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        connect_raw(rogue, &PairingSecret::generate())
+            .await
+            .is_err()
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(old.close_reason().is_none(), "{:?}", old.close_reason());
+    assert!(
+        quic_get(&old, "/still")
+            .await
+            .ends_with("echo GET /still HTTP/1.1")
+    );
+    assert!(box_ev.try_recv().is_err(), "unexpected box event");
 }
 
 #[tokio::test]
@@ -717,7 +920,7 @@ async fn punch_carries_candidates_despite_slow_uplink() {
 #[tokio::test]
 async fn box_fixed_port_and_advertised_candidates() {
     use peckboard_relay::client::{Event, RelayClient};
-    use peckboard_relay::tunnel::{Advertise, EstablishOptions, Registration, establish_with};
+    use peckboard_relay::tunnel::{Advertise, Registration, establish_with};
     use std::sync::{Arc, Mutex};
 
     let cfg = relay().await;

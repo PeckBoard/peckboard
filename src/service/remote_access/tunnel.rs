@@ -40,7 +40,10 @@ pub struct Tunnelled;
 #[derive(Debug, Clone)]
 pub enum TunnelUpdate {
     /// `path`: `"direct"` (hole-punched) or `"relayed"` (through the relay).
+    /// Repeats when the device reconnected on a new path and replaced the
+    /// served connection; `peer` is then its new address.
     Connected {
+        peer: SocketAddr,
         rtt_ms: u32,
         path: &'static str,
     },
@@ -122,7 +125,8 @@ pub trait PunchedTunnel: Send {
         None
     }
     /// Accept the device's QUIC connection and forward every stream to
-    /// `target`. Returns when the connection ends.
+    /// `target`. Returns when the connection ends (a device reconnecting on
+    /// a new path meanwhile replaces it without returning).
     async fn serve(
         self: Box<Self>,
         secret: &DeviceSecret,
@@ -195,7 +199,18 @@ pub async fn serve_tunnel(
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let target = listener.local_addr()?;
-    let client = tunnel_client_addr(punched.peer());
+    // Follows the device to its new address when it reconnects on a new
+    // path within this tunnel (the listener above stays).
+    let client = Arc::new(std::sync::Mutex::new(tunnel_client_addr(punched.peer())));
+    let events: TunnelEvents = {
+        let client = client.clone();
+        Arc::new(move |u: TunnelUpdate| {
+            if let TunnelUpdate::Connected { peer, .. } = &u {
+                *client.lock().unwrap() = tunnel_client_addr(*peer);
+            }
+            events(u)
+        })
+    };
     let mut make_service = app
         .layer(axum::Extension(Tunnelled))
         .layer(axum::middleware::map_request(
@@ -226,6 +241,7 @@ pub async fn serve_tunnel(
                 if !from.ip().is_loopback() {
                     continue;
                 }
+                let client = *client.lock().unwrap();
                 let Ok(svc) = make_service.call(client).await;
                 conns.spawn(async move {
                     let io = hyper_util::rt::TokioIo::new(tcp);

@@ -9,6 +9,10 @@
 //!   sleeps. A wake (wall clock jumped well past a short tick) is reported
 //!   as `Background` then `Foreground`, so the core restarts the tunnel the
 //!   same way it does when a phone app comes back.
+//! - **Network**: not watched. Desktops change networks rarely and mostly
+//!   across a sleep (the wake check covers that); a dependency-free
+//!   portable default-route monitor doesn't exist, so a live switch falls
+//!   back to the tunnel's ping timeout.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -19,7 +23,7 @@ use serde::de::DeserializeOwned;
 use tauri::plugin::PluginApi;
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::Lifecycle;
+use crate::{Lifecycle, NetworkChange};
 
 /// Where pairing secrets live on this platform.
 trait Backend: Send + Sync {
@@ -225,6 +229,14 @@ impl<R: Runtime> Native<R> {
                     }
                 }
             })?;
+        Ok(())
+    }
+
+    /// No-op on desktop (see the module docs); `f` is never called.
+    pub fn watch_network(
+        &self,
+        _f: impl Fn(NetworkChange) + Send + Sync + 'static,
+    ) -> crate::Result<()> {
         Ok(())
     }
 }

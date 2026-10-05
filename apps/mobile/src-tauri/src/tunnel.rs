@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use peckboard_relay::tunnel::{
-    CancellationToken, CookieGate, DeviceEvent, DeviceOptions, ListenAddr, PairingLink, PathKind,
-    bind_listener, run_device,
+    CancellationToken, CookieGate, DeviceEvent, DeviceKick, DeviceOptions, ListenAddr, PairingLink,
+    PathKind, bind_listener, run_device,
 };
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
@@ -146,6 +146,8 @@ struct Session {
     /// every run (start / resume) so a key that leaked stops working.
     gate: CookieGate,
     cancel: Option<CancellationToken>,
+    /// Network-change kick for the running `run_device`.
+    kick: DeviceKick,
     task: Option<JoinHandle<()>>,
     status: TunnelStatus,
 }
@@ -180,6 +182,19 @@ impl TunnelManager {
     /// the box UI page survives backgrounding).
     pub fn active_port(&self) -> Option<u16> {
         self.session.lock().unwrap().as_ref().map(|s| s.status.port)
+    }
+
+    /// The OS reports a new default network: drop the tunnel on the old
+    /// path and reconnect at once instead of waiting for the ping timeout.
+    /// Port and gate key stay, so the box page just stalls briefly. No-op
+    /// when no tunnel is running (none, paused) and within the kick
+    /// debounce. True if a reconnect was triggered.
+    pub fn network_changed(&self) -> bool {
+        let guard = self.session.lock().unwrap();
+        match guard.as_ref() {
+            Some(s) if s.cancel.is_some() => s.kick.network_changed(),
+            _ => false,
+        }
     }
 
     /// The active box's boot URL (current gate key) landing on `next`.
@@ -346,6 +361,7 @@ impl TunnelManager {
         status.retry_in_secs = None;
 
         let opts = DeviceOptions::new(link.clone()).with_gate(&gate);
+        let kick = opts.kick.clone();
         let (session, emit) = (self.session.clone(), self.emit.clone());
         let on_event = move |ev: DeviceEvent| {
             log::debug!("tunnel event (gen {generation}): {ev:?}");
@@ -382,6 +398,7 @@ impl TunnelManager {
             listener,
             gate,
             cancel: Some(cancel),
+            kick,
             task: Some(task),
             status: status.clone(),
         });
@@ -572,6 +589,25 @@ mod tests {
         let b = mgr.start("b", link, free_port()).await.unwrap();
         assert_ne!(key(&a.url), key(&b.url));
         assert!(port_is_free(a.port), "switching box kept the old port");
+        mgr.stop().await;
+    }
+
+    /// A network change kicks only a running tunnel, and never moves its
+    /// port or rotates its gate key (the box page stays valid).
+    #[tokio::test]
+    async fn network_change_kicks_only_a_running_tunnel() {
+        let mgr = TunnelManager::new(|_| {});
+        assert!(!mgr.network_changed(), "no tunnel");
+        let link = PairingLink::new(PairingSecret::from_bytes([9; 32]), "127.0.0.1:9");
+        let st = mgr.start("b", link, free_port()).await.unwrap();
+        assert!(mgr.network_changed());
+        assert!(!mgr.network_changed(), "not debounced");
+        let now = mgr.status().unwrap();
+        assert_eq!((now.port, key(&now.url)), (st.port, key(&st.url)));
+        mgr.pause().await;
+        // Past the debounce, so only "paused" can refuse the kick.
+        tokio::time::sleep(peckboard_relay::tunnel::KICK_DEBOUNCE).await;
+        assert!(!mgr.network_changed(), "kicked a paused tunnel");
         mgr.stop().await;
     }
 }

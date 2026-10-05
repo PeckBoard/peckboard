@@ -105,6 +105,16 @@ pub enum PathKind { Direct, Relayed }  // as_str(): "direct" | "relayed"
 pub async fn serve_box(path: PunchedPath, secret: &PairingSecret, target: SocketAddr,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static) -> anyhow::Result<()>;
 
+// serve_box that keeps a standby relay session (same cfg/opts, ephemeral
+// port) while serving a direct path: the device's next round (e.g. after a
+// network change) punches a new path, and its authenticated handshake there
+// replaces the served connection (Connected again) — no wait for the old
+// connection's ping timeout. A failed round leaves the served one alone.
+pub struct BoxRejoin { pub cfg: ClientConfig, pub opts: EstablishOptions }
+pub async fn serve_box_rejoining(path: PunchedPath, secret: &PairingSecret,
+    target: SocketAddr, rejoin: &BoxRejoin,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static) -> anyhow::Result<()>;
+
 // Device: connect, then each connection accepted on `listen` becomes a
 // stream. Ok(()) when the tunnel ends (keep the listener; the next call
 // serves whatever queued meanwhile); Err if the handshake fails.
@@ -127,7 +137,7 @@ impl PairingLink { fn new(secret, relay: &str); fn to_uri(&self) -> String;
                    fn parse(link: &str) -> anyhow::Result<Self>; }
 ```
 
-Box loop: `loop { let p = establish(.., Role::Box).await?; serve_box(p, ..).await; }`
+Box loop: `loop { let p = establish_with(.., Role::Box, &opts).await?; serve_box_rejoining(p, .., &BoxRejoin { cfg, opts }, ..).await; }`
 — one rendezvous id per paired device, so run one loop per device secret.
 
 ### Device Loop and Loopback Gate
@@ -149,6 +159,8 @@ pub struct DeviceOptions {
     pub max_backoff: Duration,               // ... up to 30 s
     pub stable_after: Duration,              // 30 s up resets the backoff
     pub give_up_on_punch_failure: bool,      // false: retry forever
+    pub kick: DeviceKick,                    // clone it; kick.network_changed() on an OS
+                                             // network change: drop the tunnel, retry now
 }
 impl DeviceOptions {
     pub fn new(link: PairingLink) -> Self;                // the defaults above

@@ -1,3 +1,4 @@
+import Network
 import Security
 import Tauri
 import UIKit
@@ -22,8 +23,21 @@ struct LifecycleMessage: Encodable {
   let state: String
 }
 
+class NetworkArgs: Decodable {
+  let channel: Channel
+}
+
+struct NetworkMessage: Encodable {
+  let detail: String
+}
+
 class PeckboardNativePlugin: Plugin {
   private var lifecycle: Channel?
+  private var network: Channel?
+  private var pathMonitor: NWPathMonitor?
+  /// Interfaces + gateways of the last usable path; only touched on the
+  /// monitor's queue.
+  private var lastPath: String?
   private var uiDelegate: LoopbackUIDelegate?
   private var observers: [NSObjectProtocol] = []
 
@@ -67,6 +81,7 @@ class PeckboardNativePlugin: Plugin {
 
   deinit {
     observers.forEach { NotificationCenter.default.removeObserver($0) }
+    pathMonitor?.cancel()
   }
 
   private func emit(_ state: String) {
@@ -77,6 +92,35 @@ class PeckboardNativePlugin: Plugin {
     let args = try invoke.parseArgs(LifecycleArgs.self)
     lifecycle = args.channel
     invoke.resolve()
+  }
+
+  /// Reports a change of the default network path (Wi-Fi <-> cellular,
+  /// another Wi-Fi), so the tunnel reconnects at once instead of waiting for
+  /// its pings to time out. The Rust side debounces.
+  @objc public func watchNetwork(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NetworkArgs.self)
+    network = args.channel
+    if pathMonitor == nil {
+      let monitor = NWPathMonitor()
+      monitor.pathUpdateHandler = { [weak self] path in self?.pathUpdated(path) }
+      monitor.start(queue: DispatchQueue(label: "com.peckboard.network-monitor"))
+      pathMonitor = monitor
+    }
+    invoke.resolve()
+  }
+
+  /// Only a usable path whose interfaces or gateways differ from the last
+  /// usable one counts: the first update (the path at start), unsatisfied
+  /// interludes and flag-only updates (constrained, DNS) are ignored, so a
+  /// flapping update stream doesn't keep tearing the tunnel down.
+  private func pathUpdated(_ path: NWPath) {
+    guard path.status == .satisfied else { return }
+    let interfaces = path.availableInterfaces.map { "\($0.type):\($0.name)" }
+    let key = (interfaces + path.gateways.map { "\($0)" }).joined(separator: ",")
+    let last = lastPath
+    lastPath = key
+    guard let last = last, last != key else { return }
+    try? network?.send(NetworkMessage(detail: interfaces.joined(separator: ",")))
   }
 
   @objc public func secretGet(_ invoke: Invoke) throws {
