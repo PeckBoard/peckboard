@@ -26,7 +26,7 @@ client = []
 # Direct box<->device data path: QUIC over the hole-punched UDP socket,
 # mutually authenticated with keys derived from the pairing secret, plus the
 # device reconnect loop (`run_device`, cancellable) and its cookie gate.
-tunnel = ["client", "dep:quinn", "dep:rcgen", "dep:tokio-util"]
+tunnel = ["client", "dep:quinn", "dep:rcgen", "dep:tokio-util", "dep:async-trait"]
 # The relay server itself (`server`/`tls`/`limits` modules + the binary):
 # ACME, CLI and log-subscriber deps that peers never need.
 server = [
@@ -62,6 +62,10 @@ required-features = ["tunnel", "server"]
 name = "registration"
 required-features = ["tunnel", "server"]
 
+[[test]]
+name = "enroll"
+required-features = ["tunnel", "server"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }
@@ -82,6 +86,8 @@ chacha20poly1305 = "0.10"
 hmac = "0.12"
 sha1 = "0.10"
 subtle = "2.6"
+# `EnrollHandler` (box-side pairing v2 hook, used as `dyn`).
+async-trait = { version = "0.1", optional = true }
 rand = "0.8"
 
 clap = { version = "4", features = ["derive", "env"], optional = true }

@@ -1,0 +1,14 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["AM78645G77.com.peckboard.app"],
+        "components": [
+          { "/": "/pair", "comment": "PeckBoard pairing link; the payload is in the fragment" },
+          { "/": "/pair/", "comment": "trailing-slash variant" },
+          { "/": "/pair*", "comment": "any suffix (query, trailing characters)" }
+        ]
+      }
+    ]
+  }
+}

@@ -21,8 +21,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use super::enroll::Outcome;
 use super::{
-    PairingLink, PathKind, TunnelError, TunnelEvent, device_session, establish, relay_config,
+    DeviceCredential, EnrolledCredential, PathKind, RefuseReason, TunnelError, TunnelEvent,
+    Upgrade, device_session, enroll_session, establish, relay_config,
 };
 use crate::client::ClientConfig;
 use crate::proto::Role;
@@ -76,11 +78,19 @@ pub async fn bind_listener(addr: ListenAddr) -> io::Result<TcpListener> {
     }
 }
 
+/// Persists a fresh [`EnrolledCredential`]; runs before the box gets the
+/// ack. An `Err` means nothing is acknowledged and the next round retries
+/// (the box re-delivers the same `R` to the same key).
+pub type OnEnrolled = Arc<dyn Fn(&EnrolledCredential) -> anyhow::Result<()> + Send + Sync>;
+
 /// Configuration for [`run_device`].
 #[derive(Clone)]
 pub struct DeviceOptions {
-    pub link: PairingLink,
-    /// Relay to use instead of resolving `link.relay` (pinned cert, tests).
+    /// What to connect with; [`run_device`] moves on to the enrolled
+    /// credential by itself once an enrollment succeeds.
+    pub credential: DeviceCredential,
+    /// Relay to use instead of resolving the credential's relay host
+    /// (pinned cert, tests).
     pub relay: Option<ClientConfig>,
     /// See [`AcceptFilter`]; [`CookieGate::filter`] is the stock one.
     pub accept_filter: Option<AcceptFilter>,
@@ -95,14 +105,22 @@ pub struct DeviceOptions {
     /// Fire [`DeviceKick::network_changed`] (a clone of this) when the OS
     /// reports a new default network.
     pub kick: DeviceKick,
+    /// Shown on the box for this device (at most 64 bytes are sent).
+    pub device_name: String,
+    /// Store the credential an enrollment produced (keychain, file).
+    pub on_enrolled: Option<OnEnrolled>,
+    /// With a `Legacy` credential that has an upgrade key: try once per
+    /// `run_device` to enroll that key (default on).
+    pub try_upgrade: bool,
 }
 
 impl DeviceOptions {
     /// Defaults: backoff 1 s → 30 s, reset after 30 s up, retry forever, no
-    /// filter.
-    pub fn new(link: PairingLink) -> Self {
+    /// filter, upgrade on. A [`PairingLink`](super::PairingLink) converts
+    /// as documented on `From<PairingLink> for DeviceCredential`.
+    pub fn new(credential: impl Into<DeviceCredential>) -> Self {
         Self {
-            link,
+            credential: credential.into(),
             relay: None,
             accept_filter: None,
             min_backoff: Duration::from_secs(1),
@@ -110,6 +128,9 @@ impl DeviceOptions {
             stable_after: Duration::from_secs(30),
             give_up_on_punch_failure: false,
             kick: DeviceKick::new(),
+            device_name: String::new(),
+            on_enrolled: None,
+            try_upgrade: true,
         }
     }
 
@@ -123,12 +144,15 @@ impl DeviceOptions {
 impl fmt::Debug for DeviceOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DeviceOptions")
-            .field("link", &self.link)
+            .field("credential", &self.credential)
             .field("accept_filter", &self.accept_filter.is_some())
             .field("min_backoff", &self.min_backoff)
             .field("max_backoff", &self.max_backoff)
             .field("stable_after", &self.stable_after)
             .field("give_up_on_punch_failure", &self.give_up_on_punch_failure)
+            .field("device_name", &self.device_name)
+            .field("on_enrolled", &self.on_enrolled.is_some())
+            .field("try_upgrade", &self.try_upgrade)
             .finish_non_exhaustive()
     }
 }
@@ -191,6 +215,9 @@ impl DeviceKick {
 
 /// Progress of [`run_device`], in order per attempt: `Connecting`, then
 /// `Connected` … `Disconnected` or one of the failures, then `Retrying`.
+/// A round with a v2 link enrolls instead of connecting: `Connecting`,
+/// then `Enrolled` (or `EnrollRefused`), then `Disconnected { reason:
+/// "enrolled" }` and an immediate `Retrying` on the new credential.
 #[derive(Clone, Debug)]
 pub enum DeviceEvent {
     /// Starting rendezvous with the relay.
@@ -212,10 +239,26 @@ pub enum DeviceEvent {
     /// or box); see [`TunnelError::PunchFailed`].
     PunchFailed { rounds: u32 },
     /// Any other failure (relay unreachable, handshake failed, local
-    /// accept error).
+    /// accept error, the enrolled credential couldn't be saved).
     Failed(String),
     /// Next attempt after this delay.
     Retrying { after: Duration },
+    /// This device enrolled its own key: [`DeviceOptions::on_enrolled`]
+    /// stored the credential and the box was told. `legacy_upgrade`: an
+    /// existing pairing upgraded (its current tunnel keeps running; the
+    /// next round uses the new credential).
+    Enrolled {
+        box_fingerprint: String,
+        legacy_upgrade: bool,
+    },
+    /// The box refused to enroll this device. For a v2 link with a
+    /// [final](RefuseReason::is_final) reason, [`run_device`] then returns
+    /// [`TunnelError::EnrollRefused`].
+    EnrollRefused { reason: RefuseReason },
+    /// First tunnel up on an enrolled credential in this `run_device`: the
+    /// box has now retired the link secret; a legacy link kept for the
+    /// enrollment can be deleted.
+    Activated,
 }
 
 /// Device reconnect loop: rendezvous + punch, serve `listener` through the
@@ -224,13 +267,18 @@ pub enum DeviceEvent {
 /// [`DeviceOptions::kick`] cuts a tunnel or an attempt on the old network
 /// short and skips the retry delay.
 ///
+/// The credential evolves: a v2 link enrolls (no tunnel, see
+/// [`DeviceEvent`]) and the loop carries on with the enrolled credential; a
+/// legacy credential with an upgrade key tries the upgrade once, and the
+/// next round uses the result.
+///
 /// Returns `Ok(())` once `cancel` fires — the tunnel and every stream on it
 /// are closed. A `listener` passed by value is dropped (so the port stops
 /// accepting); pass an `Arc<TcpListener>` to keep the port bound across a
 /// stop and the next `run_device` (an app in the background), so no other
 /// local app can take it meanwhile. Returns `Err` only with
-/// `give_up_on_punch_failure`. To resume, call `run_device` again with a
-/// fresh token.
+/// `give_up_on_punch_failure`, or [`TunnelError::EnrollRefused`]. To
+/// resume, call `run_device` again with a fresh token.
 pub async fn run_device<L: Borrow<TcpListener> + Send>(
     opts: DeviceOptions,
     listener: L,
@@ -241,18 +289,23 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
     let kick = &opts.kick;
     let on_event = Arc::new(on_event);
     let connected_at: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let mut cred = opts.credential.clone();
+    let mut upgrade_tried = false;
+    let activated = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut ever_connected = false;
     let mut backoff = opts.min_backoff;
     loop {
         *connected_at.lock().unwrap() = None;
         let kicks = kick.count();
+        // Skip the retry delay (just enrolled: go straight to the new rid).
+        let mut immediate = false;
         on_event(DeviceEvent::Connecting);
         let attempt = async {
             let cfg = match &opts.relay {
                 Some(c) => c.clone(),
-                None => relay_config(&opts.link.relay).await?,
+                None => relay_config(cred.relay_host()).await?,
             };
-            establish(&cfg, &opts.link.secret, Role::Device).await
+            establish(&cfg, &cred.relay_secret(), Role::Device).await
         };
         // `None`: the network changed mid-attempt; its sockets and relay
         // session belong to the old one, so start over.
@@ -263,12 +316,53 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
         };
         match path {
             None => {}
+            Some(Ok(path)) if matches!(cred, DeviceCredential::Link { .. }) => {
+                let r = enroll_session(
+                    path,
+                    &cred,
+                    &opts.device_name,
+                    opts.on_enrolled.as_ref(),
+                    &cancel,
+                    kick,
+                )
+                .await;
+                match r {
+                    Ok(None) => {}
+                    Ok(Some(Outcome::Enrolled(c))) => {
+                        on_event(DeviceEvent::Enrolled {
+                            box_fingerprint: c.box_fingerprint(),
+                            legacy_upgrade: false,
+                        });
+                        on_event(DeviceEvent::Disconnected {
+                            reason: "enrolled".into(),
+                        });
+                        cred = DeviceCredential::Enrolled(*c);
+                        immediate = true;
+                    }
+                    Ok(Some(Outcome::Refused(reason))) => {
+                        on_event(DeviceEvent::EnrollRefused { reason });
+                        if reason.is_final() {
+                            return Err(TunnelError::EnrollRefused { reason }.into());
+                        }
+                    }
+                    Ok(Some(Outcome::Unsupported)) => on_event(DeviceEvent::Failed(
+                        "this box doesn't support this pairing link; update Peckboard on the box"
+                            .into(),
+                    )),
+                    Ok(Some(Outcome::SaveFailed(e))) => on_event(DeviceEvent::Failed(e)),
+                    Err(e) => on_event(DeviceEvent::Failed(format!("{e:#}"))),
+                }
+            }
             Some(Ok(path)) => {
-                let (ev, at) = (on_event.clone(), connected_at.clone());
+                let enrolled_now = matches!(cred, DeviceCredential::Enrolled(_));
+                let (ev, at, act) = (on_event.clone(), connected_at.clone(), activated.clone());
                 let tunnel_ev = move |e: TunnelEvent| match e {
                     TunnelEvent::Connected { peer, rtt_ms, path } => {
                         *at.lock().unwrap() = Some(Instant::now());
                         ev(DeviceEvent::Connected { peer, rtt_ms, path });
+                        if enrolled_now && !act.swap(true, Ordering::SeqCst) {
+                            ev(DeviceEvent::Activated);
+                        }
                     }
                     TunnelEvent::PathChanged { path } => ev(DeviceEvent::PathChanged { path }),
                     TunnelEvent::Disconnected { reason } => {
@@ -276,17 +370,55 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
                     }
                     TunnelEvent::Error(e) => ev(DeviceEvent::Failed(e)),
                 };
+                let upgraded: Mutex<Option<anyhow::Result<Outcome>>> = Mutex::new(None);
+                let report = |r: anyhow::Result<Outcome>| {
+                    match &r {
+                        Ok(Outcome::Enrolled(c)) => on_event(DeviceEvent::Enrolled {
+                            box_fingerprint: c.box_fingerprint(),
+                            legacy_upgrade: true,
+                        }),
+                        Ok(Outcome::Refused(reason)) => {
+                            on_event(DeviceEvent::EnrollRefused { reason: *reason })
+                        }
+                        Ok(Outcome::SaveFailed(e)) => on_event(DeviceEvent::Failed(e.clone())),
+                        Ok(Outcome::Unsupported) => {
+                            tracing::info!("tunnel: box predates pairing v2, staying legacy")
+                        }
+                        Err(e) => tracing::info!("tunnel: legacy upgrade failed: {e:#}"),
+                    }
+                    *upgraded.lock().unwrap() = Some(r);
+                };
+                let upgrade = match &cred {
+                    DeviceCredential::Legacy {
+                        upgrade_key: Some(key),
+                        ..
+                    } if opts.try_upgrade && !upgrade_tried => Some(Upgrade {
+                        key,
+                        name: &opts.device_name,
+                        on_enrolled: opts.on_enrolled.as_ref(),
+                        report: &report,
+                    }),
+                    _ => None,
+                };
                 // A handshake failure was already reported as `Failed`.
                 let _ = device_session(
                     path,
-                    &opts.link.secret,
+                    &cred,
                     listener,
                     opts.accept_filter.as_ref(),
                     &cancel,
                     Some(kick),
+                    upgrade,
                     tunnel_ev,
                 )
                 .await;
+                let upgraded = upgraded.lock().unwrap().take();
+                if let Some(r) = upgraded {
+                    upgrade_tried = true;
+                    if let Ok(Outcome::Enrolled(c)) = r {
+                        cred = DeviceCredential::Enrolled(*c);
+                    }
+                }
             }
             Some(Err(e)) => match e.downcast_ref::<TunnelError>() {
                 Some(&TunnelError::PunchFailed { rounds }) => {
@@ -296,7 +428,9 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
                     }
                 }
                 Some(TunnelError::PeerOffline) => on_event(DeviceEvent::PeerOffline),
-                None => on_event(DeviceEvent::Failed(format!("{e:#}"))),
+                Some(TunnelError::EnrollRefused { .. }) | None => {
+                    on_event(DeviceEvent::Failed(format!("{e:#}")))
+                }
             },
         }
         if cancel.is_cancelled() {
@@ -308,7 +442,7 @@ pub async fn run_device<L: Borrow<TcpListener> + Send>(
             backoff = opts.min_backoff;
         }
         // A failure on the old network says nothing about the new one.
-        if kick.count() != kicks {
+        if immediate || kick.count() != kicks {
             backoff = opts.min_backoff;
             on_event(DeviceEvent::Retrying {
                 after: Duration::ZERO,

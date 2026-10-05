@@ -10,6 +10,8 @@ const COMMANDS: &[&str] = &[
     "disconnect_box",
     "tunnel_status",
     "take_pair_link",
+    "confirm_pair",
+    "dismiss_pair",
 ];
 
 fn main() {

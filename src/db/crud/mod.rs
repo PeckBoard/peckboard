@@ -29,6 +29,7 @@ mod plugin_settings;
 mod projects;
 mod push;
 mod queued;
+mod remote_device_enrollments;
 mod remote_devices;
 mod repeating_tasks;
 mod session_views;
@@ -50,6 +51,9 @@ pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
+pub use remote_device_enrollments::{
+    ActivateAttempt, EnrollAttempt, EnrollOutcome, EnrollRefusal, rfc3339_after,
+};
 pub use session_views::{
     MAX_VIEW_DEPTH, MAX_VIEW_LEAVES, MAX_VIEW_NAME_CHARS, SplitDir, ViewLayout, validate_view_name,
 };

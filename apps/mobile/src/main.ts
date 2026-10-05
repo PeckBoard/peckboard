@@ -1,6 +1,6 @@
-// PeckBoard mobile shell: box list, pairing (QR / paste), connect screen.
-// Once a box's tunnel is up the WebView navigates to its loopback URL and
-// the box's own web UI takes over; Back returns here.
+// PeckBoard mobile shell: box list, pairing (QR / paste / deep link), connect
+// screen. Once a box's tunnel is up the WebView navigates to its loopback
+// URL and the box's own web UI takes over; Back returns here.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -39,6 +39,9 @@ interface TunnelStatus {
   relayed: boolean;
 }
 
+/** How a box authenticates this device (`store.rs` Auth). */
+type Auth = "legacy" | "enrolling" | "enrolled";
+
 interface BoxView {
   id: string;
   name: string;
@@ -49,7 +52,24 @@ interface BoxView {
   lastConnectedAt: number | null;
   /** Microphone answer for this box's UI; null until asked. */
   micAllowed: boolean | null;
+  auth: Auth;
+  /** Box key fingerprint, XXXX-XXXX-XXXX-XXXX (pairing v2). */
+  boxFp: string | null;
+  linkExpiresAt: number | null;
   status: TunnelStatus | null;
+}
+
+/** A deep-linked pairing link held by the app under `id` (`link.rs`). */
+interface PairPrompt {
+  id: string;
+  link: string;
+  relay: string | null;
+  error: string | null;
+  boxFingerprint: string | null;
+  /** Advisory expiry, unix seconds; the box enforces it. */
+  expiresAt: number | null;
+  /** A v1 link from an older box: no fingerprint to compare. */
+  legacy: boolean;
 }
 
 type Screen =
@@ -68,18 +88,14 @@ type Screen =
       error?: string;
     }
   | { kind: "manage"; box: BoxView; confirmRemove?: boolean; error?: string }
-  | { kind: "confirmPair"; link: string; relay: string };
-
-interface PairPrompt {
-  link: string;
-  relay: string | null;
-  error: string | null;
-}
+  | { kind: "confirmPair"; prompt: PairPrompt; busy?: boolean };
 
 const app = document.getElementById("app")!;
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 let screen: Screen = { kind: "list" };
 let boxes: BoxView[] = [];
+let toastText: string | null = null;
+let toastTimer: number | undefined;
 
 // ---- tiny DOM helper (textContent only — never innerHTML with data) ----
 
@@ -111,6 +127,17 @@ function errorText(e: unknown): string {
   return typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
 }
 
+/** A short, non-blocking notice at the bottom of the screen. */
+function toast(text: string) {
+  toastText = text;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toastText = null;
+    render();
+  }, 5000);
+  render();
+}
+
 // ---- status copy --------------------------------------------------------
 
 const STATE_LABEL: Record<TunnelState, string> = {
@@ -139,6 +166,20 @@ function lastSeen(ms: number | null): string {
   const hrs = Math.round(mins / 60);
   if (hrs < 48) return `Connected ${hrs} h ago`;
   return `Connected ${new Date(ms).toLocaleDateString()}`;
+}
+
+function clock(unixSecs: number): string {
+  return new Date(unixSecs * 1000).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** The box list row's subtitle. */
+function rowSubtitle(b: BoxView): string {
+  if (b.status) return STATE_LABEL[b.status.state];
+  if (b.auth === "enrolling") return "Finishing pairing… tap to retry";
+  return lastSeen(b.lastConnectedAt);
 }
 
 // ---- data ---------------------------------------------------------------
@@ -179,6 +220,8 @@ function onStatus(st: TunnelStatus) {
   render();
 }
 
+/** Manual pairing (paste / scan): the app enrolls (a v2 link) and the box
+ *  opens right away. */
 async function pair(link: string, name: string) {
   if (screen.kind !== "add") return;
   go({ ...screen, link, name, busy: true, error: undefined });
@@ -200,6 +243,28 @@ async function scanQr(name: string) {
     if (!/cancel/i.test(msg))
       go({ kind: "add", name, error: `Couldn't scan: ${msg}` });
   }
+}
+
+/** Deep-linked pairing: pairs the link the app holds for the prompt (never
+ *  a string from this page), then returns to the list — the box UI is not
+ *  opened on its own. */
+async function confirmPair(prompt: PairPrompt, name: string) {
+  if (screen.kind !== "confirmPair") return;
+  go({ kind: "confirmPair", prompt, busy: true });
+  try {
+    const box = await call<BoxView>("confirm_pair", { id: prompt.id, name });
+    await refresh();
+    go({ kind: "list" });
+    toast(`Paired “${box.name}”`);
+  } catch (e) {
+    // The prompt is released either way; the link stays editable.
+    go({ kind: "add", link: prompt.link, name, error: errorText(e) });
+  }
+}
+
+async function dismissPair(prompt: PairPrompt) {
+  await call("dismiss_pair", { id: prompt.id }).catch(() => {});
+  go({ kind: "list" });
 }
 
 // ---- screens ------------------------------------------------------------
@@ -230,11 +295,7 @@ function listScreen(): HTMLElement {
         "button",
         { class: "row-main", onClick: () => openBox(b) },
         h("span", { class: "row-title" }, b.name),
-        h(
-          "span",
-          { class: "row-sub" },
-          st ? STATE_LABEL[st.state] : lastSeen(b.lastConnectedAt),
-        ),
+        h("span", { class: "row-sub" }, rowSubtitle(b)),
       ),
       st && h("span", { class: badgeClass(st.state), "aria-hidden": "true" }),
       h(
@@ -294,7 +355,7 @@ function addScreen(s: Extract<Screen, { kind: "add" }>): HTMLElement {
   const link = h("textarea", {
     id: "box-link",
     rows: 3,
-    placeholder: "peckboard://pair/…",
+    placeholder: "https://peckboard.com/pair#… or peckboard://pair/…",
     autocapitalize: "off",
     autocorrect: "off",
     spellcheck: "false",
@@ -343,7 +404,7 @@ function addScreen(s: Extract<Screen, { kind: "add" }>): HTMLElement {
       h(
         "p",
         { class: "hint" },
-        "Each phone needs its own pairing link — reusing your computer’s link would disconnect it.",
+        "Each device needs its own pairing link. A link works once and expires after an hour.",
       ),
     ),
   );
@@ -401,6 +462,12 @@ function connectScreen(s: Extract<Screen, { kind: "connect" }>): HTMLElement {
   );
 }
 
+function pairingLabel(b: BoxView): string {
+  if (b.auth === "enrolled") return "This device's own key, pinned to the box";
+  if (b.auth === "enrolling") return "Not finished — open the box to retry";
+  return "Older link — secured once your box and app are both updated";
+}
+
 function manageScreen(s: Extract<Screen, { kind: "manage" }>): HTMLElement {
   const name = h("input", {
     id: "rename",
@@ -448,6 +515,10 @@ function manageScreen(s: Extract<Screen, { kind: "manage" }>): HTMLElement {
         h("dd", {}, String(s.box.port)),
         h("dt", {}, "Paired"),
         h("dd", {}, new Date(s.box.addedAt).toLocaleString()),
+        h("dt", {}, "Pairing"),
+        h("dd", {}, pairingLabel(s.box)),
+        s.box.boxFp && h("dt", {}, "Box key"),
+        s.box.boxFp && h("dd", { class: "mono" }, s.box.boxFp),
       ),
       s.confirmRemove
         ? h(
@@ -460,7 +531,7 @@ function manageScreen(s: Extract<Screen, { kind: "manage" }>): HTMLElement {
             h(
               "p",
               {},
-              `Remove “${s.box.name}”? This phone forgets its pairing secret; you’ll need a new link to pair again.`,
+              `Remove “${s.box.name}”? This device forgets its pairing key; you’ll need a new link to pair again.`,
             ),
             h(
               "div",
@@ -493,9 +564,11 @@ function manageScreen(s: Extract<Screen, { kind: "manage" }>): HTMLElement {
     ),
   );
 }
+
 function confirmPairScreen(
   s: Extract<Screen, { kind: "confirmPair" }>,
 ): HTMLElement {
+  const p = s.prompt;
   const name = h("input", {
     id: "box-name",
     type: "text",
@@ -505,13 +578,15 @@ function confirmPairScreen(
   });
   const confirm = (ev: Event) => {
     ev.preventDefault();
-    screen = { kind: "add", link: s.link, name: name.value };
-    void pair(s.link, name.value);
+    void confirmPair(p, name.value);
   };
+  const cancel = () => void dismissPair(p);
+  const now = Date.now() / 1000;
+  const expired = p.expiresAt != null && now > p.expiresAt;
   return h(
     "section",
     { class: "screen" },
-    header("Pair a box?", () => go({ kind: "list" })),
+    header("Pair a box?", cancel),
     h(
       "form",
       { class: "form", onSubmit: confirm },
@@ -520,24 +595,65 @@ function confirmPairScreen(
         { class: "lead" },
         "A pairing link opened PeckBoard. Only continue if you just created it on your own box.",
       ),
+      p.boxFingerprint
+        ? h(
+            "div",
+            { class: "fingerprint-block" },
+            h("div", { class: "fingerprint-label" }, "Box fingerprint"),
+            h(
+              "div",
+              { class: "fingerprint", id: "pair-fingerprint" },
+              p.boxFingerprint,
+            ),
+            h(
+              "p",
+              { class: "hint" },
+              "Check this matches the code shown on your PeckBoard, next to the QR code. If it differs, cancel — the link may have been swapped.",
+            ),
+          )
+        : h(
+            "p",
+            { class: "note" },
+            "Older box: this link has no fingerprint to compare. The pairing is secured once your box updates.",
+          ),
       h(
         "dl",
         { class: "facts" },
         h("dt", {}, "Relay"),
-        h("dd", { id: "pair-relay" }, s.relay),
+        h("dd", { id: "pair-relay" }, p.relay ?? ""),
+        p.expiresAt != null && h("dt", {}, "Link expires"),
+        p.expiresAt != null &&
+          h(
+            "dd",
+            { class: expired ? "warn" : undefined },
+            expired
+              ? `${clock(p.expiresAt)} — that time has passed; your box decides. Create a new link if pairing fails.`
+              : clock(p.expiresAt),
+          ),
       ),
       h("label", { for: "box-name" }, "Name"),
       name,
-      h("button", { type: "submit", class: "btn primary block" }, "Pair"),
+      h(
+        "button",
+        { type: "submit", class: "btn primary block", disabled: s.busy },
+        s.busy ? "Pairing…" : "Pair",
+      ),
       h(
         "button",
         {
           type: "button",
           class: "btn block",
-          onClick: () => go({ kind: "list" }),
+          disabled: s.busy,
+          onClick: cancel,
         },
         "Cancel",
       ),
+      s.busy &&
+        h(
+          "p",
+          { class: "hint" },
+          "Reaching your box to exchange keys. The link is used up once this succeeds.",
+        ),
     ),
   );
 }
@@ -561,6 +677,9 @@ function render() {
       view = confirmPairScreen(screen);
       break;
   }
+  if (toastText) {
+    view.append(h("div", { class: "toast", role: "status" }, toastText));
+  }
   app.replaceChildren(view);
 }
 
@@ -569,9 +688,11 @@ async function takePairLink() {
   const p = await call<PairPrompt | null>("take_pair_link");
   if (!p) return;
   if (p.error || !p.relay) {
+    // Invalid: release the prompt and let the user fix the text.
+    await call("dismiss_pair", { id: p.id }).catch(() => {});
     go({ kind: "add", link: p.link, error: p.error ?? undefined });
   } else {
-    go({ kind: "confirmPair", link: p.link, relay: p.relay });
+    go({ kind: "confirmPair", prompt: p });
   }
 }
 
@@ -589,6 +710,10 @@ async function leaveBox() {
 (window as unknown as { __pbmBack?: () => boolean }).__pbmBack = () => {
   if (screen.kind === "list") return false;
   if (screen.kind === "connect") void leaveBox();
+  if (screen.kind === "confirmPair") {
+    void dismissPair(screen.prompt);
+    return true;
+  }
   go({ kind: "list" });
   return true;
 };
@@ -596,6 +721,9 @@ async function leaveBox() {
 async function main() {
   await listen<TunnelStatus>("tunnel-status", (e) => onStatus(e.payload));
   await listen("pair-link", () => void takePairLink());
+  await listen("pair-link-ignored", () =>
+    toast("Another pairing link was ignored while this one is open."),
+  );
   await leaveBox();
   try {
     await refresh();

@@ -18,13 +18,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use peckboard_relay::client::{ClientConfig, Event, RelayClient};
-use peckboard_relay::keys::PairingSecret;
+use peckboard_relay::identity::BoxIdentity;
+use peckboard_relay::keys::{PairingSecret, RendezvousSecret};
 use peckboard_relay::proto::Role;
 use peckboard_relay::server::{Relay, RelayConfig};
 use peckboard_relay::tls;
+use peckboard_relay::tunnel::enroll::{EnrollMsg, EnrollRequest, exporter, read_msg, write_msg};
 use peckboard_relay::tunnel::{
-    Advertise, EstablishOptions, PathKind, PunchedPath, Registration, RelayFallback, TunnelError,
-    TunnelEvent, connect_device, establish_with, serve_box,
+    Advertise, BoxCredential, DeviceCredential, EnrollHandler, EnrollMode, EstablishOptions,
+    LinkMode, PairingLink, PathKind, PunchedPath, RefuseReason, Registration, RelayFallback,
+    STREAM_ENROLL, TunnelError, TunnelEvent, async_trait, connect_device, connect_raw_with,
+    establish_with, quinn, serve_box, serve_box_with,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -772,5 +776,72 @@ async fn staggered_registration_still_falls_back() {
         let p = serve(bpath, s.clone(), dpath, s, echo_server().await).await;
         let r = http_get(p.port, "/staggered").await;
         assert!(r.ends_with("echo GET /staggered HTTP/1.1"), "{r}");
+    }
+}
+
+/// Pairing v2 enrollment works the same over the relayed path.
+#[tokio::test]
+async fn enrollment_over_relayed_path() {
+    struct Grant(RendezvousSecret);
+    #[async_trait]
+    impl EnrollHandler for Grant {
+        async fn enroll(
+            &self,
+            _mode: EnrollMode,
+            _device_key: [u8; 32],
+            _name: &str,
+            _from: SocketAddr,
+        ) -> Result<RendezvousSecret, RefuseReason> {
+            Ok(self.0.clone())
+        }
+    }
+    let h = start(RelayConfig::default(), false).await;
+    let bcfg = behind_nat(&h, Ipv4Addr::new(127, 0, 0, 2)).await;
+    let dcfg = behind_nat(&h, Ipv4Addr::new(127, 0, 0, 3)).await;
+    let id = BoxIdentity::generate();
+    let s = PairingSecret::generate();
+    let r = RendezvousSecret::generate();
+    let cred = BoxCredential::Link {
+        s: s.clone(),
+        identity: id.clone(),
+        mode: LinkMode::Enroll,
+    };
+    let (bs, br, target) = (s.clone(), r.clone(), echo_server().await);
+    tokio::spawn(async move {
+        let p = establish_with(&bcfg, &bs, Role::Box, &opts(None))
+            .await
+            .unwrap();
+        assert_eq!(p.kind(), PathKind::Relayed);
+        serve_box_with(p, &cred, target, Some(Arc::new(Grant(br))), |_| {}).await
+    });
+    let dp = tokio::time::timeout(T, establish_with(&dcfg, &s, Role::Device, &opts(None)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dp.kind(), PathKind::Relayed);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+    let dev = DeviceCredential::Link {
+        link: PairingLink::new_v2(s, "unused.test", id.public_key(), u64::MAX / 2),
+        device_key: key.clone(),
+    };
+    let (_ep, conn) = connect_raw_with(dp, &dev).await.unwrap();
+    let x = exporter(&conn).unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    send.write_all(&[STREAM_ENROLL]).await.unwrap();
+    let req = EnrollRequest::sign(&x, EnrollMode::Link, &key, "relayed");
+    write_msg(&mut send, &EnrollMsg::Request(req))
+        .await
+        .unwrap();
+    let EnrollMsg::Grant(g) = read_msg(&mut recv).await.unwrap() else {
+        panic!("expected a grant");
+    };
+    assert!(g.verify(&x, &key.verifying_key().to_bytes()));
+    assert_eq!(g.box_key, id.public_key());
+    assert!(g.r == r);
+    write_msg(&mut send, &EnrollMsg::Ack).await.unwrap();
+    let _ = send.finish();
+    match tokio::time::timeout(T, conn.closed()).await.unwrap() {
+        quinn::ConnectionError::ApplicationClosed(c) => assert_eq!(&c.reason[..], b"enrolled"),
+        other => panic!("expected `enrolled`, got {other:?}"),
     }
 }

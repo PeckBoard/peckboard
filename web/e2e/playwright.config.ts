@@ -66,6 +66,22 @@ process.env.PECKBOARD_E2E_DATA_DIR = DATA_DIR
 // tests probe. First one with a built wasm wins.
 const e2eDir = path.dirname(fileURLToPath(import.meta.url))
 
+// Pairing-v2 enrollment (`remote-access-enroll.spec.ts`) runs a real local
+// relay (`peckboard-relay --dev-self-signed`) and a real `peckboard-connect`
+// against the box. Both binaries come from scripts/build-local-release.sh
+// (target/verify-tools). The relay writes its throwaway cert into
+// RELAY_STATE_DIR; the box pins that file on every relay connection
+// (hidden dev knob PECKBOARD_DEV_RELAY_CERT, read lazily), so the spec can
+// start the relay long after the server booted. PECKBOARD_DEV_LINK_TTL_SECS
+// keeps the default hour but unlocks a per-link `ttl_secs` so one spec can
+// watch a link expire within seconds.
+const RELAY_STATE_DIR = path.join(DATA_DIR, 'e2e-relay')
+process.env.PECKBOARD_E2E_RELAY_STATE_DIR = RELAY_STATE_DIR
+const TOOLS_DIR =
+  process.env.PECKBOARD_E2E_TOOLS_DIR ??
+  path.resolve(e2eDir, '..', '..', 'target', 'verify-tools', 'release')
+process.env.PECKBOARD_E2E_TOOLS_DIR = TOOLS_DIR
+
 // The binary scripts/build-local-release.sh produces (`--profile verify`).
 // PECKBOARD_E2E_BIN points the suite at another, already-built binary, e.g.
 // ../../target/release/peckboard to test exactly what CI compiles.
@@ -151,7 +167,9 @@ export default defineConfig({
     // crate-plugin-install.spec.ts which round-trips from this state.
     // PECKBOARD_MIRROR_TEST_ENDPOINTS=1 lets the Assistant mirror post to
     // the http://127.0.0.1 receiver `assistant-mirror.spec.ts` runs.
-    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_MIRROR_TEST_ENDPOINTS=1 PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ${SERVER_BIN} --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
+    // PECKBOARD_DEV_RELAY_CERT + PECKBOARD_DEV_LINK_TTL_SECS: see the
+    // RELAY_STATE_DIR comment above (remote-access-enroll.spec.ts).
+    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_MIRROR_TEST_ENDPOINTS=1 PECKBOARD_DEV_RELAY_CERT=${RELAY_STATE_DIR}/dev-cert.der PECKBOARD_DEV_LINK_TTL_SECS=3600 PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ${SERVER_BIN} --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     stdout: 'pipe',

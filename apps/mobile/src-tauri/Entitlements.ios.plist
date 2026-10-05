@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- iOS entitlements. Universal Links for pairing: https://peckboard.com/pair#…
+     opens the app directly (the fragment never leaves the device). Pairs
+     with docs/.well-known/apple-app-site-association on peckboard.com and
+     the Associated Domains capability on the App ID. The deep-link plugin
+     adds the same entry from the `appLink: true` entry in tauri.conf.json;
+     this file is the explicit, checked-in source for it. -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:peckboard.com</string>
+	</array>
+</dict>
+</plist>

@@ -75,6 +75,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_voice_prompt_versions_table(conn)?;
     ensure_pending_actions_table(conn)?;
     ensure_remote_devices_table(conn)?;
+    ensure_remote_device_enrollments_table(conn)?;
     ensure_auth_sessions_remote_device_column(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
@@ -250,6 +251,47 @@ fn ensure_remote_devices_table(conn: &mut SqliteConnection) -> anyhow::Result<()
         .execute(conn)?;
     Ok(())
 }
+
+/// Heal DBs that predate `1791228194_remote_device_enrollments` (pairing
+/// v2). `CREATE TABLE IF NOT EXISTS` is idempotent so this is safe on a
+/// fully-migrated DB and only does work on one that lacks the table. DDL
+/// mirrors the migration.
+fn ensure_remote_device_enrollments_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "remote_device_enrollments")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS remote_device_enrollments (
+            device_id                TEXT PRIMARY KEY NOT NULL
+                                     REFERENCES remote_devices(id) ON DELETE CASCADE,
+            state                    TEXT NOT NULL CHECK (state IN ('pending','staged','active')),
+            link_expires_at          TEXT,
+            device_pubkey            BLOB CHECK (device_pubkey IS NULL OR length(device_pubkey) = 32),
+            rendezvous_ciphertext    BLOB,
+            rendezvous_nonce         BLOB,
+            link_secret_ciphertext   BLOB,
+            link_secret_nonce        BLOB,
+            link_refuse_until        TEXT,
+            enrolled_at              TEXT,
+            enrolled_from            TEXT,
+            device_name_hint         TEXT,
+            activated_at             TEXT,
+            reuse_attempts           INTEGER NOT NULL DEFAULT 0,
+            last_reuse_at            TEXT,
+            last_reuse_from          TEXT,
+            created_at               TEXT NOT NULL,
+            CHECK (state <> 'pending' OR link_expires_at IS NOT NULL),
+            CHECK (state = 'pending' OR (device_pubkey IS NOT NULL
+                   AND rendezvous_ciphertext IS NOT NULL AND rendezvous_nonce IS NOT NULL))
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_remote_device_enrollments_state \
+         ON remote_device_enrollments(state)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
 /// Heal DBs that predate `1791221285_auth_sessions_remote_device`, whose
 /// `ALTER TABLE … ADD COLUMN` can't be made idempotent. Nullable, FK-less,
 /// like the migration.
@@ -2937,6 +2979,48 @@ mod tests {
         .execute(&mut conn)
         .unwrap();
         let n: CountRow = sql_query("SELECT count(*) AS n FROM device_activity")
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(n.n, 1);
+        // idempotent second run
+        ensure_schema(&mut conn).unwrap();
+    }
+
+    /// Pre-existing DB with `remote_devices` but no
+    /// `remote_device_enrollments` (pre-pairing-v2). ensure_schema must
+    /// create it with its CHECKs: a `staged` row needs a device key and R.
+    #[test]
+    fn ensure_schema_creates_missing_remote_device_enrollments_table() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        assert!(!table_exists(&mut conn, "remote_device_enrollments").unwrap());
+
+        ensure_schema(&mut conn).unwrap();
+
+        assert!(table_exists(&mut conn, "remote_device_enrollments").unwrap());
+        sql_query(
+            "INSERT INTO remote_devices (id, user_id, name, secret_ciphertext, secret_nonce, created_at) \
+             VALUES ('d1', 'u1', 'phone', x'00', x'00', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO remote_device_enrollments (device_id, state, link_expires_at, created_at) \
+             VALUES ('d1', 'pending', '2026-01-01T01:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let staged_without_key = sql_query(
+            "UPDATE remote_device_enrollments SET state = 'staged' WHERE device_id = 'd1'",
+        )
+        .execute(&mut conn);
+        assert!(
+            staged_without_key.is_err(),
+            "CHECK must reject staged without a key and R"
+        );
+        let n: CountRow = sql_query("SELECT count(*) AS n FROM remote_device_enrollments")
             .get_result(&mut conn)
             .unwrap();
         assert_eq!(n.n, 1);

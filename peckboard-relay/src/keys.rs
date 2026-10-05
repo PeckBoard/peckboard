@@ -277,6 +277,53 @@ impl MsgCounter {
     }
 }
 
+/// HKDF salt separating pairing-v2 rendezvous secrets from v1 link secrets.
+const PAIR_V2_SALT: &[u8] = b"peckboard-pair/2";
+
+/// Pairing v2 rendezvous secret `R`: 32 random bytes the box hands an
+/// enrolled device. It only ever names the rendezvous — through
+/// [`relay_secret`](Self::relay_secret), an ordinary v1-shaped secret the
+/// relay can't tell apart from a link secret. It never authenticates a
+/// tunnel: there is deliberately no way to derive a tunnel key from it.
+/// Deliberately not `Debug`/`Display`.
+#[derive(Clone)]
+pub struct RendezvousSecret([u8; SECRET_LEN]);
+
+impl RendezvousSecret {
+    pub fn generate() -> Self {
+        let mut s = [0u8; SECRET_LEN];
+        rand::rngs::OsRng.fill_bytes(&mut s);
+        Self(s)
+    }
+
+    pub fn from_bytes(bytes: [u8; SECRET_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Raw `R`, for sealed storage only.
+    pub fn as_bytes(&self) -> &[u8; SECRET_LEN] {
+        &self.0
+    }
+
+    /// `S_R = HKDF(salt "peckboard-pair/2", R).expand("rendezvous-ikm/1")`,
+    /// fed to the unchanged v1 derivation (rid, relay key, E2E key).
+    pub fn relay_secret(&self) -> PairingSecret {
+        let hk = Hkdf::<Sha256>::new(Some(PAIR_V2_SALT), &self.0);
+        let mut s = [0u8; SECRET_LEN];
+        hk.expand(b"rendezvous-ikm/1", &mut s).expect("hkdf");
+        PairingSecret(s)
+    }
+}
+
+impl PartialEq for RendezvousSecret {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
+
+impl Eq for RendezvousSecret {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +446,21 @@ mod tests {
             &ex,
             &sig
         ));
+    }
+
+    #[test]
+    fn rendezvous_secret_is_domain_separated() {
+        let r = RendezvousSecret::from_bytes([5; 32]);
+        let rid = r.relay_secret().derive().rendezvous_id;
+        let hex: String = rid.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "3ba1ed266d7f6bc3e222b23f24461ceb8ae2761b7c068a2c1e154b9868cc24ab"
+        );
+        // Never the rid a v1 link with the same bytes would use.
+        assert_ne!(
+            rid,
+            PairingSecret::from_bytes([5; 32]).derive().rendezvous_id
+        );
     }
 }

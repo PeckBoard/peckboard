@@ -59,7 +59,20 @@ if web_stale; then
 else
   echo "▶ web build skipped — web/dist is newer than every input"
 fi
-
 echo "▶ cargo build --profile verify (incremental)"
 cd "$ROOT" || exit 1
-CARGO_INCREMENTAL=1 cargo build --profile verify
+CARGO_INCREMENTAL=1 cargo build --profile verify || exit 1
+
+# The pairing-v2 enrollment spec (web/e2e/tests/remote-access-enroll.spec.ts)
+# drives a real local relay and a real peckboard-connect against the box.
+# Both are standalone crates (own Cargo.lock), built into one shared
+# target dir of their own so they never trade fingerprints with the
+# peckboard crate's. Skipped with PECKBOARD_E2E_SKIP_TOOLS=1.
+if [[ "${PECKBOARD_E2E_SKIP_TOOLS:-}" != "1" ]]; then
+  TOOLS="$ROOT/target/verify-tools"
+  echo "▶ cargo build --release peckboard-relay + peckboard-connect → $TOOLS"
+  cargo build --release --manifest-path "$ROOT/peckboard-relay/Cargo.toml" \
+    --features server --bin peckboard-relay --target-dir "$TOOLS" || exit 1
+  cargo build --release --manifest-path "$ROOT/peckboard-connect/Cargo.toml" \
+    --target-dir "$TOOLS" || exit 1
+fi

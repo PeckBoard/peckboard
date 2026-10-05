@@ -18,7 +18,15 @@
   },
   "plugins": {
     "deep-link": {
-      "mobile": [{ "scheme": ["peckboard"], "appLink": false }],
+      "mobile": [
+        { "scheme": ["peckboard"], "appLink": false },
+        {
+          "scheme": ["https"],
+          "host": "peckboard.com",
+          "pathPrefix": ["/pair"],
+          "appLink": true
+        }
+      ],
       "desktop": { "schemes": ["peckboard"] }
     }
   },

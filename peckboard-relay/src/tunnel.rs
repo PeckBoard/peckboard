@@ -14,6 +14,22 @@
 //! type header ([`STREAM_TCP`]) followed by raw bytes. The box pipes it to
 //! its configured local target; the device has no way to choose that
 //! target. HTTP, WebSocket and uploads all pass through untouched.
+//! Pairing v2 ([`cred`]): a v2 link pins the box identity key `B` and is
+//! good for one enrollment ([`STREAM_ENROLL`], ALPN [`TUNNEL_ALPN_V2`]);
+//! afterwards the tunnel is authenticated by `B` and the device's own key,
+//! and the rendezvous runs on a secret only the enrolled device holds. The
+//! credential a loop runs with ([`BoxCredential`], [`DeviceCredential`])
+//! picks the ALPN, the certificates and what a connection may do:
+//!
+//! | box loop | ALPN | connection may |
+//! | --- | --- | --- |
+//! | `Legacy` | `/1` | forward + ping; upgrade (`0x03` mode 2) with an identity |
+//! | `Link(Enroll)` | `/2` | ping + enroll (mode 1); closed `enrolled` after the ack |
+//! | `Link(Enroll)` | `/1` | nothing: closed `update-app` |
+//! | `Link(Refuse(r))` | `/2` | ping; every enrollment refused with `r` |
+//! | `Link(Refuse(r))` | `/1` | nothing: closed `link-used` / `link-expired` |
+//! | `Enrolled` | `/2` | forward + ping |
+//!
 //!
 //! ```no_run
 //! # async fn demo(secret: peckboard_relay::keys::PairingSecret) -> anyhow::Result<()> {
@@ -33,8 +49,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -42,6 +56,8 @@ use quinn::{Connection, Endpoint, EndpointConfig, TransportConfig, VarInt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use sha2::Sha256;
 use tokio::io::AsyncWriteExt;
@@ -51,32 +67,52 @@ use tokio::sync::{mpsc, watch};
 pub use crate::client::IdentityStatus;
 use crate::client::{ClientConfig, Event, RelayClient};
 pub use crate::identity::BoxIdentity;
-use crate::keys::{PairingSecret, SECRET_LEN};
+use crate::keys::PairingSecret;
 use crate::proto::Role;
 
+pub mod cred;
 mod device;
+pub mod enroll;
 mod relayed;
+/// Re-exported so [`EnrollHandler`] implementors need no direct dep.
+pub use async_trait::async_trait;
+pub use cred::{
+    BoxCredential, DeviceCredential, EnrollMode, EnrolledCredential, HTTPS_LINK_PREFIX,
+    LINK_PREFIX, LINK_VERSION, LinkMode, PairingLink, RefuseReason,
+};
 pub use device::{
     AcceptFilter, Admitted, CookieGate, DeviceEvent, DeviceKick, DeviceOptions, KICK_DEBOUNCE,
-    ListenAddr, bind_listener, run_device,
+    ListenAddr, OnEnrolled, bind_listener, run_device,
 };
+pub use enroll::EnrollHandler;
 pub use quinn;
 pub use relayed::RelayedPath;
 /// Stops [`run_device`]; re-exported so callers need no `tokio-util` dep.
 pub use tokio_util::sync::CancellationToken;
 
-/// ALPN of the box↔device QUIC connection.
+/// ALPN of the box↔device QUIC connection with `S`-derived certificates
+/// (pairings from before v2).
 pub const TUNNEL_ALPN: &[u8] = b"peckboard-tunnel/1";
+/// ALPN of a pairing-v2 connection: box cert is the box identity `B`.
+pub const TUNNEL_ALPN_V2: &[u8] = b"peckboard-tunnel/2";
 /// Stream type: forward to the box's configured local TCP target.
 pub const STREAM_TCP: u8 = 0x01;
 /// Stream type: liveness ping. The device writes one byte every 5 s, the
 /// box echoes it; either side drops the tunnel after 3 silent intervals.
 /// Peers that predate it reset the stream and fall back to the idle timeout.
 pub const STREAM_PING: u8 = 0x02;
+/// Stream type: pairing-v2 enrollment (see [`enroll`]). Boxes that
+/// predate it reset the stream.
+pub const STREAM_ENROLL: u8 = 0x03;
+/// Application close code: enrollment done, reconnect with the new
+/// credential (reason `enrolled`).
+pub const CLOSE_ENROLLED: u32 = 0x10;
+/// Application close code: this connection is refused (reason
+/// `update-app`, `link-used`, `link-expired` or `not-enrollable`).
+pub const CLOSE_REFUSED: u32 = 0x11;
 /// Default rendezvous server.
 pub const DEFAULT_RELAY: &str = "relay.peckboard.com";
 
-const LINK_PREFIX: &str = "peckboard://pair/";
 const HKDF_SALT: &[u8] = b"peckboard-relay/v1";
 const SERVER_NAME: &str = "peckboard-tunnel";
 const KEEPALIVE: Duration = Duration::from_secs(15);
@@ -86,6 +122,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PING_EVERY: Duration = Duration::from_secs(5);
 const PING_MISSES: u32 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// An enrollment-only connection is closed after this long.
+const ENROLL_ONLY_MAX: Duration = Duration::from_secs(60);
 /// Concurrent box-side handshakes from the expected peer address (only a
 /// spoofer or a retrying device makes more than one).
 const MAX_HANDSHAKES: usize = 8;
@@ -116,6 +154,10 @@ pub enum TunnelError {
     /// The other side never showed up at the relay (device side only).
     #[error("peer is not online")]
     PeerOffline,
+    /// The box refused to enroll this device with its v2 link, for a
+    /// reason retrying won't fix ([`RefuseReason::is_final`]).
+    #[error("{reason}")]
+    EnrollRefused { reason: RefuseReason },
 }
 
 /// The punched (or relayed) path, ready for [`serve_box`] /
@@ -221,67 +263,6 @@ pub enum TunnelEvent {
     },
     Error(String),
 }
-
-// ---- pairing link -------------------------------------------------------
-
-/// `peckboard://pair/<base64url(S)>?relay=<host[:port]>`.
-#[derive(Clone)]
-pub struct PairingLink {
-    pub secret: PairingSecret,
-    pub relay: String,
-}
-
-impl fmt::Debug for PairingLink {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PairingLink")
-            .field("relay", &self.relay)
-            .finish_non_exhaustive()
-    }
-}
-
-impl PairingLink {
-    pub fn new(secret: PairingSecret, relay: &str) -> Self {
-        Self {
-            secret,
-            relay: relay.to_string(),
-        }
-    }
-
-    pub fn to_uri(&self) -> String {
-        format!(
-            "{LINK_PREFIX}{}?relay={}",
-            URL_SAFE_NO_PAD.encode(self.secret.as_bytes()),
-            self.relay
-        )
-    }
-
-    pub fn parse(link: &str) -> anyhow::Result<Self> {
-        let rest = link
-            .trim()
-            .strip_prefix(LINK_PREFIX)
-            .ok_or_else(|| anyhow!("not a peckboard://pair/ link"))?;
-        let (b64, query) = rest.split_once('?').unwrap_or((rest, ""));
-        let bytes = URL_SAFE_NO_PAD
-            .decode(b64.trim_end_matches('/').trim_end_matches('='))
-            .map_err(|_| anyhow!("pairing link: secret is not base64url"))?;
-        let secret: [u8; SECRET_LEN] = bytes
-            .try_into()
-            .map_err(|_| anyhow!("pairing link: secret must be {SECRET_LEN} bytes"))?;
-        let mut relay = DEFAULT_RELAY.to_string();
-        for kv in query.split('&').filter(|s| !s.is_empty()) {
-            if let Some(v) = kv.strip_prefix("relay=")
-                && !v.is_empty()
-            {
-                relay = v.to_string();
-            }
-        }
-        Ok(Self {
-            secret: PairingSecret::from_bytes(secret),
-            relay,
-        })
-    }
-}
-
 /// Resolve `host[:port]` (default port 443) to a webpki-trusting
 /// [`ClientConfig`]. Prefers IPv4 (STUN + punching are address-family
 /// bound and most NATs are v4).
@@ -880,36 +861,149 @@ fn transport() -> anyhow::Result<Arc<TransportConfig>> {
     Ok(Arc::new(t))
 }
 
-fn peer_verifier(secret: &PairingSecret, me: Role) -> Arc<PinnedPeer> {
+fn pinned(key: &SigningKey) -> Arc<PinnedPeer> {
     Arc::new(PinnedPeer {
-        key: tunnel_key(secret, me.other()).verifying_key(),
+        key: key.verifying_key(),
     })
 }
 
-fn server_config(secret: &PairingSecret) -> anyhow::Result<quinn::ServerConfig> {
-    let (cert, key) = identity(&tunnel_key(secret, Role::Box))?;
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_client_cert_verifier(peer_verifier(secret, Role::Box))
-        .with_single_cert(vec![cert], key)?;
-    tls.alpn_protocols = vec![TUNNEL_ALPN.to_vec()];
+impl PinnedPeer {
+    /// Pin a stored public key (box identity, enrolled device key).
+    fn from_public(key: &[u8; 32]) -> anyhow::Result<Arc<Self>> {
+        anyhow::ensure!(
+            crate::identity::is_valid_public_key(key),
+            "invalid pinned peer key"
+        );
+        Ok(Arc::new(Self {
+            key: VerifyingKey::from_bytes(key)?,
+        }))
+    }
+}
+
+fn certified(key: &SigningKey) -> anyhow::Result<Arc<CertifiedKey>> {
+    let (cert, der) = identity(key)?;
+    let signer = provider().key_provider.load_private_key(der)?;
+    Ok(Arc::new(CertifiedKey::new(vec![cert], signer)))
+}
+
+/// A `Link` loop's server cert, by what the client offers: the box
+/// identity for `/2`, the `S`-derived cert for an old app's `/1` (which is
+/// then closed with a reason it can show).
+#[derive(Debug)]
+struct AlpnCerts {
+    v2: Arc<CertifiedKey>,
+    v1: Arc<CertifiedKey>,
+}
+
+impl ResolvesServerCert for AlpnCerts {
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let v2 = hello
+            .alpn()
+            .is_some_and(|mut a| a.any(|p| p == TUNNEL_ALPN_V2));
+        Some(if v2 { self.v2.clone() } else { self.v1.clone() })
+    }
+}
+
+fn server_config(cred: &BoxCredential) -> anyhow::Result<quinn::ServerConfig> {
+    let builder = rustls::ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])?;
+    let mut tls = match cred {
+        BoxCredential::Legacy { s, .. } => {
+            let (cert, key) = identity(&tunnel_key(s, Role::Box))?;
+            let mut t = builder
+                .with_client_cert_verifier(pinned(&tunnel_key(s, Role::Device)))
+                .with_single_cert(vec![cert], key)?;
+            t.alpn_protocols = vec![TUNNEL_ALPN.to_vec()];
+            t
+        }
+        BoxCredential::Link {
+            s, identity: id, ..
+        } => {
+            let certs = AlpnCerts {
+                v2: certified(id.signing_key())?,
+                v1: certified(&tunnel_key(s, Role::Box))?,
+            };
+            let mut t = builder
+                .with_client_cert_verifier(pinned(&tunnel_key(s, Role::Device)))
+                .with_cert_resolver(Arc::new(certs));
+            t.alpn_protocols = vec![TUNNEL_ALPN_V2.to_vec(), TUNNEL_ALPN.to_vec()];
+            t
+        }
+        BoxCredential::Enrolled {
+            identity: id,
+            device_key,
+            ..
+        } => {
+            let (cert, key) = identity(id.signing_key())?;
+            let mut t = builder
+                .with_client_cert_verifier(PinnedPeer::from_public(device_key)?)
+                .with_single_cert(vec![cert], key)?;
+            t.alpn_protocols = vec![TUNNEL_ALPN_V2.to_vec()];
+            t
+        }
+    };
     tls.send_tls13_tickets = 0;
     let mut sc = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
     sc.transport_config(transport()?);
     Ok(sc)
 }
 
-fn client_config(secret: &PairingSecret) -> anyhow::Result<quinn::ClientConfig> {
-    let (cert, key) = identity(&tunnel_key(secret, Role::Device))?;
+/// A device offers exactly one ALPN, so a box that strips `/2` can't
+/// downgrade it: the handshake just fails.
+fn client_config(cred: &DeviceCredential) -> anyhow::Result<quinn::ClientConfig> {
+    let (me, verifier, alpn) = match cred {
+        DeviceCredential::Legacy { link, .. } => (
+            tunnel_key(&link.secret, Role::Device),
+            pinned(&tunnel_key(&link.secret, Role::Box)),
+            TUNNEL_ALPN,
+        ),
+        DeviceCredential::Link { link, .. } => {
+            let k = link
+                .box_key
+                .ok_or_else(|| anyhow!("pairing link has no box key"))?;
+            (
+                tunnel_key(&link.secret, Role::Device),
+                PinnedPeer::from_public(&k)?,
+                TUNNEL_ALPN_V2,
+            )
+        }
+        DeviceCredential::Enrolled(c) => (
+            c.device_key().clone(),
+            PinnedPeer::from_public(&c.box_key())?,
+            TUNNEL_ALPN_V2,
+        ),
+    };
+    let (cert, key) = identity(&me)?;
     let mut tls = rustls::ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
-        .with_custom_certificate_verifier(peer_verifier(secret, Role::Device))
+        .with_custom_certificate_verifier(verifier)
         .with_client_auth_cert(vec![cert], key)?;
-    tls.alpn_protocols = vec![TUNNEL_ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     let mut cc = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
     cc.transport_config(transport()?);
     Ok(cc)
+}
+
+fn negotiated_alpn(conn: &Connection) -> Option<Vec<u8>> {
+    conn.handshake_data()?
+        .downcast::<quinn::crypto::rustls::HandshakeData>()
+        .ok()?
+        .protocol
+}
+
+/// A peer's application close with one of our codes, as its bare reason
+/// (`enrolled`, `update-app`, …); anything else as quinn words it.
+fn close_text(e: &quinn::ConnectionError) -> String {
+    match e {
+        quinn::ConnectionError::ApplicationClosed(c)
+            if c.error_code == VarInt::from_u32(CLOSE_ENROLLED)
+                || c.error_code == VarInt::from_u32(CLOSE_REFUSED) =>
+        {
+            String::from_utf8_lossy(&c.reason).into_owned()
+        }
+        e => e.to_string(),
+    }
 }
 
 fn endpoint(path: PunchedPath, server: Option<quinn::ServerConfig>) -> anyhow::Result<Endpoint> {
@@ -933,18 +1027,101 @@ fn rtt_ms(c: &Connection) -> u32 {
 
 // ---- box ----------------------------------------------------------------
 
+/// What a box connection may do, from the loop's credential and the
+/// negotiated ALPN (see the table in the module docs).
+#[derive(Clone, Copy, Debug)]
+enum Policy {
+    /// Forward TCP + ping (+ enrollment per the gate).
+    Full,
+    /// Ping + enrollment only, for at most [`ENROLL_ONLY_MAX`].
+    EnrollOnly,
+    /// Close at once with this reason; `reuse`: report a link reuse.
+    Close {
+        reason: &'static str,
+        reuse: Option<RefuseReason>,
+    },
+}
+
+fn session_policy(
+    cred: &BoxCredential,
+    alpn: Option<&[u8]>,
+    handler: bool,
+) -> (Policy, Option<enroll::EnrollGate>) {
+    let v1 = alpn == Some(TUNNEL_ALPN);
+    let v2 = alpn == Some(TUNNEL_ALPN_V2);
+    match cred {
+        BoxCredential::Legacy { identity, .. } if v1 => (
+            Policy::Full,
+            (identity.is_some() && handler).then_some(enroll::EnrollGate::Upgrade),
+        ),
+        BoxCredential::Link { mode, .. } if v2 => {
+            let refuse = match mode {
+                LinkMode::Enroll => None,
+                LinkMode::Refuse(r) => Some(*r),
+            };
+            (
+                Policy::EnrollOnly,
+                Some(enroll::EnrollGate::Link { refuse }),
+            )
+        }
+        BoxCredential::Link { mode, .. } if v1 => {
+            let close = match mode {
+                LinkMode::Enroll => Policy::Close {
+                    reason: "update-app",
+                    reuse: None,
+                },
+                LinkMode::Refuse(r) => Policy::Close {
+                    reason: r.close_reason(),
+                    reuse: Some(*r),
+                },
+            };
+            (close, None)
+        }
+        BoxCredential::Enrolled { .. } if v2 => (Policy::Full, None),
+        _ => (
+            Policy::Close {
+                reason: "protocol",
+                reuse: None,
+            },
+            None,
+        ),
+    }
+}
+
+fn legacy_box(secret: &PairingSecret) -> BoxCredential {
+    BoxCredential::Legacy {
+        s: secret.clone(),
+        identity: None,
+    }
+}
+
 /// Box side: accept QUIC from the paired device on the punched path and
 /// forward every stream to `target` (box-side config only — the device
 /// cannot choose it). Only `path.peer` may connect (see [`accept_device`]).
 /// Returns `Ok` when an established connection ends, `Err` if no
-/// authenticated device connects within 15 s.
+/// authenticated device connects within 15 s. A legacy pairing; see
+/// [`serve_box_with`].
 pub async fn serve_box(
     path: PunchedPath,
     secret: &PairingSecret,
     target: SocketAddr,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    serve_box_inner(path, secret, target, None, on_event).await
+    serve_box_with(path, &legacy_box(secret), target, None, on_event).await
+}
+
+/// [`serve_box`] for any credential. `enroll` answers enrollment
+/// requests (required for `Link` loops and legacy upgrades) and hears
+/// about activations of `Enrolled` loops. Establish `path` with
+/// [`BoxCredential::relay_secret`].
+pub async fn serve_box_with(
+    path: PunchedPath,
+    cred: &BoxCredential,
+    target: SocketAddr,
+    enroll: Option<Arc<dyn EnrollHandler>>,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    serve_box_inner(path, cred, target, None, enroll, on_event).await
 }
 
 /// How [`serve_box_rejoining`] stays at the relay while serving: the same
@@ -975,7 +1152,7 @@ pub struct BoxRejoin {
 /// box session would replace it at the relay), so no standby runs while
 /// one is served. Returns like [`serve_box`]; when the served connection
 /// dies while a standby round is mid-handshake, that round is awaited
-/// first.
+/// first. A legacy pairing; see [`serve_box_rejoining_with`].
 pub async fn serve_box_rejoining(
     path: PunchedPath,
     secret: &PairingSecret,
@@ -983,7 +1160,19 @@ pub async fn serve_box_rejoining(
     rejoin: &BoxRejoin,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    serve_box_inner(path, secret, target, Some(rejoin), on_event).await
+    serve_box_rejoining_with(path, &legacy_box(secret), target, rejoin, None, on_event).await
+}
+
+/// [`serve_box_rejoining`] for any credential (see [`serve_box_with`]).
+pub async fn serve_box_rejoining_with(
+    path: PunchedPath,
+    cred: &BoxCredential,
+    target: SocketAddr,
+    rejoin: &BoxRejoin,
+    enroll: Option<Arc<dyn EnrollHandler>>,
+    on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    serve_box_inner(path, cred, target, Some(rejoin), enroll, on_event).await
 }
 
 /// First standby retry delay after a relay failure, doubling up to
@@ -1001,6 +1190,8 @@ struct Served {
     conn: Connection,
     path_rx: watch::Receiver<PathKind>,
     direct: bool,
+    policy: Policy,
+    gate: Option<enroll::EnrollGate>,
 }
 
 impl Served {
@@ -1026,18 +1217,25 @@ impl Drop for Served {
 
 /// Endpoint on `path` plus the device's authenticated connection from
 /// `path.peer` (see [`accept_device`]).
-async fn accept_path(path: PunchedPath, secret: &PairingSecret) -> anyhow::Result<Served> {
-    tracing::debug!(peer = %path.peer, path = %path.kind(), "tunnel: awaiting device QUIC");
+async fn accept_path(
+    path: PunchedPath,
+    cred: &BoxCredential,
+    handler: bool,
+) -> anyhow::Result<Served> {
+    tracing::debug!(peer = %path.peer, path = %path.kind(), cred = cred.kind(), "tunnel: awaiting device QUIC");
     let path_rx = path.path_watch();
     let direct = matches!(path.socket, PathSocket::Direct(_));
     let peer = path.peer;
-    let ep = endpoint(path, Some(server_config(secret)?))?;
+    let ep = endpoint(path, Some(server_config(cred)?))?;
     let conn = accept_device(&ep, peer).await?;
+    let (policy, gate) = session_policy(cred, negotiated_alpn(&conn).as_deref(), handler);
     Ok(Served {
         ep,
         conn,
         path_rx,
         direct,
+        policy,
+        gate,
     })
 }
 
@@ -1048,7 +1246,8 @@ async fn accept_path(path: PunchedPath, secret: &PairingSecret) -> anyhow::Resul
 /// next.
 async fn standby(
     rejoin: &BoxRejoin,
-    secret: &PairingSecret,
+    cred: &BoxCredential,
+    handler: bool,
     accepting: &watch::Sender<bool>,
 ) -> Served {
     let opts = EstablishOptions {
@@ -1056,13 +1255,14 @@ async fn standby(
         advertise: Vec::new(),
         ..rejoin.opts.clone()
     };
+    let secret = cred.relay_secret();
     let mut backoff = STANDBY_BACKOFF_MIN;
     loop {
         let started = tokio::time::Instant::now();
-        match establish_with(&rejoin.cfg, secret, Role::Box, &opts).await {
+        match establish_with(&rejoin.cfg, &secret, Role::Box, &opts).await {
             Ok(path) => {
                 accepting.send_replace(true);
-                let r = accept_path(path, secret).await;
+                let r = accept_path(path, cred, handler).await;
                 accepting.send_replace(false);
                 match r {
                     Ok(s) => return s,
@@ -1081,27 +1281,70 @@ async fn standby(
     }
 }
 
+/// What every stream of one box connection needs.
+struct StreamCtx {
+    target: SocketAddr,
+    /// [`Policy::Full`]: forward TCP streams.
+    forward: bool,
+    enroll: Option<enroll::BoxEnroll>,
+}
+
 async fn serve_box_inner(
     path: PunchedPath,
-    secret: &PairingSecret,
+    cred: &BoxCredential,
     target: SocketAddr,
     rejoin: Option<&BoxRejoin>,
+    handler: Option<Arc<dyn EnrollHandler>>,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    let mut cur = match accept_path(path, secret).await {
+    let mut cur = match accept_path(path, cred, handler.is_some()).await {
         Ok(s) => s,
         Err(e) => {
             on_event(TunnelEvent::Error(format!("{e:#}")));
             return Err(e);
         }
     };
-    on_event(cur.connected());
     let (accepting_tx, mut accepting) = watch::channel(false);
     loop {
+        let from = cur.conn.remote_address();
+        if let Policy::Close { reason, reuse } = cur.policy {
+            tracing::info!(%from, reason, cred = cred.kind(), "tunnel: closing a connection this pairing doesn't serve");
+            if let (Some(r), Some(h)) = (reuse, &handler) {
+                h.link_reuse(from, r).await;
+            }
+            cur.conn
+                .close(VarInt::from_u32(CLOSE_REFUSED), reason.as_bytes());
+            on_event(TunnelEvent::Disconnected {
+                reason: reason.to_string(),
+            });
+            // Let the close reach the device before the endpoint goes.
+            let _ = tokio::time::timeout(Duration::from_secs(1), cur.ep.wait_idle()).await;
+            return Ok(());
+        }
+        if let (BoxCredential::Enrolled { device_key, .. }, Some(h)) = (cred, &handler) {
+            h.activated(*device_key, from).await;
+        }
+        on_event(cur.connected());
+        let ctx = Arc::new(StreamCtx {
+            target,
+            forward: matches!(cur.policy, Policy::Full),
+            enroll: match (cur.gate, cred.identity()) {
+                (Some(gate), Some(identity)) => Some(enroll::BoxEnroll {
+                    conn: cur.conn.clone(),
+                    gate,
+                    identity: identity.clone(),
+                    handler: handler.clone(),
+                }),
+                _ => None,
+            },
+        });
+        let enroll_only = matches!(cur.policy, Policy::EnrollOnly);
+        let cap = tokio::time::sleep(ENROLL_ONLY_MAX);
+        tokio::pin!(cap);
         let direct = cur.direct;
         let next = async {
             match rejoin {
-                Some(r) if direct => standby(r, secret, &accepting_tx).await,
+                Some(r) if direct => standby(r, cred, handler.is_some(), &accepting_tx).await,
                 _ => std::future::pending().await,
             }
         };
@@ -1121,12 +1364,16 @@ async fn serve_box_inner(
                 Some(_) = streams.join_next(), if !streams.is_empty() => {}
                 s = cur.conn.accept_bi() => match s {
                     Ok((send, recv)) => {
-                        streams.spawn(box_stream(send, recv, target, dead_tx.clone()));
+                        streams.spawn(box_stream(send, recv, ctx.clone(), dead_tx.clone()));
                     }
-                    Err(e) => break Err(e.to_string()),
+                    Err(e) => break Err(close_text(&e)),
                 },
                 Some(()) = dead_rx.recv() => {
                     break Err(format!("device stopped pinging ({PING_MISSES} missed)"));
+                }
+                _ = &mut cap, if enroll_only => {
+                    cur.conn.close(VarInt::from_u32(CLOSE_REFUSED), b"enrollment window closed");
+                    break Err("enrollment window closed".to_string());
                 }
                 // One device per path: refuse anything else on it. A new
                 // path arrives through the standby round.
@@ -1161,7 +1408,6 @@ async fn serve_box_inner(
         cur.conn.close(VarInt::from_u32(0), b"replaced");
         cur.ep.close(VarInt::from_u32(0), b"replaced");
         cur = new;
-        on_event(cur.connected());
     }
 }
 
@@ -1209,7 +1455,7 @@ async fn accept_device(ep: &Endpoint, peer: SocketAddr) -> anyhow::Result<Connec
 async fn box_stream(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-    target: SocketAddr,
+    ctx: Arc<StreamCtx>,
     dead: mpsc::Sender<()>,
 ) {
     let mut ty = [0u8; 1];
@@ -1220,12 +1466,18 @@ async fn box_stream(
     if ok && ty[0] == STREAM_PING {
         return box_pong(send, recv, dead).await;
     }
-    if !ok || ty[0] != STREAM_TCP {
+    if ok
+        && ty[0] == STREAM_ENROLL
+        && let Some(e) = &ctx.enroll
+    {
+        return enroll::serve(send, recv, e).await;
+    }
+    if !ok || ty[0] != STREAM_TCP || !ctx.forward {
         let _ = send.reset(VarInt::from_u32(1));
         let _ = recv.stop(VarInt::from_u32(1));
         return;
     }
-    match TcpStream::connect(target).await {
+    match TcpStream::connect(ctx.target).await {
         Ok(tcp) => pipe(send, recv, tcp).await,
         Err(_) => {
             let _ = send.reset(VarInt::from_u32(2));
@@ -1262,11 +1514,19 @@ async fn box_pong(
 
 // ---- device -------------------------------------------------------------
 
+fn legacy_device(secret: &PairingSecret) -> DeviceCredential {
+    DeviceCredential::Legacy {
+        link: PairingLink::new(secret.clone(), DEFAULT_RELAY),
+        upgrade_key: None,
+    }
+}
+
 /// Device side: connect QUIC to the box over the punched path and expose
 /// `listen`; each accepted TCP connection becomes one stream. Returns `Ok`
 /// when an established tunnel ends (connections queued on `listen` in the
 /// meantime are served by the next call), `Err` if the handshake fails.
-/// [`run_device`] wraps this in a reconnect loop with an accept filter.
+/// [`run_device`] wraps this in a reconnect loop with an accept filter. A
+/// legacy pairing; [`run_device`] handles every [`DeviceCredential`].
 pub async fn connect_device(
     path: PunchedPath,
     secret: &PairingSecret,
@@ -1274,22 +1534,44 @@ pub async fn connect_device(
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     let never = CancellationToken::new();
-    device_session(path, secret, listen, None, &never, None, on_event).await
+    device_session(
+        path,
+        &legacy_device(secret),
+        listen,
+        None,
+        &never,
+        None,
+        None,
+        on_event,
+    )
+    .await
 }
 
-/// [`connect_device`] plus an optional [`AcceptFilter`] run on every
-/// accepted connection, a `cancel` token that ends the tunnel (and every
-/// stream on it) with `Disconnected { reason: "stopped" }`, and an
-/// optional [`DeviceKick`]: a network change closes the connection at once
-/// (`Disconnected { reason: "network changed" }`) instead of waiting for
-/// the pings to time out.
+/// A legacy-upgrade attempt to run alongside a legacy tunnel.
+struct Upgrade<'a> {
+    key: &'a SigningKey,
+    name: &'a str,
+    on_enrolled: Option<&'a OnEnrolled>,
+    /// Gets the attempt's result once (not called if the tunnel ends first).
+    report: &'a (dyn Fn(anyhow::Result<enroll::Outcome>) + Send + Sync),
+}
+
+/// [`connect_device`] for `cred` (`Legacy` or `Enrolled`), plus an
+/// optional [`AcceptFilter`] run on every accepted connection, a `cancel`
+/// token that ends the tunnel (and every stream on it) with
+/// `Disconnected { reason: "stopped" }`, an optional [`DeviceKick`]: a
+/// network change closes the connection at once (`Disconnected { reason:
+/// "network changed" }`) instead of waiting for the pings to time out, and
+/// an optional legacy [`Upgrade`].
+#[allow(clippy::too_many_arguments)]
 async fn device_session(
     path: PunchedPath,
-    secret: &PairingSecret,
+    cred: &DeviceCredential,
     listen: &TcpListener,
     filter: Option<&AcceptFilter>,
     cancel: &CancellationToken,
     kick: Option<&DeviceKick>,
+    upgrade: Option<Upgrade<'_>>,
     on_event: impl Fn(TunnelEvent) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     let kicked = || async move {
@@ -1300,7 +1582,7 @@ async fn device_session(
     };
     let mut path_rx = path.path_watch();
     let handshake = tokio::select! {
-        r = connect_raw(path, secret) => r,
+        r = connect_raw_with(path, cred) => r,
         _ = cancel.cancelled() => return Ok(()),
         _ = kicked() => return Ok(()),
     };
@@ -1318,12 +1600,37 @@ async fn device_session(
     });
     let alive = device_liveness(conn.clone());
     tokio::pin!(alive);
+    let mut upgrading = upgrade.is_some();
+    let upgrade_run = async {
+        match &upgrade {
+            Some(u) => {
+                enroll::device_enroll(
+                    &conn,
+                    EnrollMode::LegacyUpgrade,
+                    u.key,
+                    u.name,
+                    None,
+                    cred.relay_host(),
+                    u.on_enrolled,
+                )
+                .await
+            }
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(upgrade_run);
     let reason = loop {
         tokio::select! {
-            e = conn.closed() => break e.to_string(),
+            e = conn.closed() => break close_text(&e),
             r = &mut alive => break r,
             Ok(()) = path_rx.changed() => {
                 on_event(TunnelEvent::PathChanged { path: *path_rx.borrow_and_update() });
+            }
+            r = &mut upgrade_run, if upgrading => {
+                upgrading = false;
+                if let Some(u) = &upgrade {
+                    (u.report)(r);
+                }
             }
             _ = cancel.cancelled() => break "stopped".to_string(),
             _ = kicked() => break "network changed".to_string(),
@@ -1357,6 +1664,48 @@ async fn device_session(
     on_event(TunnelEvent::Disconnected { reason });
     ep.close(VarInt::from_u32(0), b"");
     Ok(())
+}
+
+/// One enrollment-only round for a v2 link (`cred` must be
+/// [`DeviceCredential::Link`]): handshake pinned to the link's box key,
+/// enroll, wait for the box to close with `enrolled`. No `Connected`; the
+/// local listener isn't served. `None`: cancelled or kicked.
+async fn enroll_session(
+    path: PunchedPath,
+    cred: &DeviceCredential,
+    name: &str,
+    on_enrolled: Option<&OnEnrolled>,
+    cancel: &CancellationToken,
+    kick: &DeviceKick,
+) -> anyhow::Result<Option<enroll::Outcome>> {
+    let DeviceCredential::Link { link, device_key } = cred else {
+        bail!("enroll_session needs a v2 pairing link");
+    };
+    let work = async {
+        let (ep, conn) = connect_raw_with(path, cred).await?;
+        let out = enroll::device_enroll(
+            &conn,
+            EnrollMode::Link,
+            device_key,
+            name,
+            link.box_key,
+            &link.relay,
+            on_enrolled,
+        )
+        .await;
+        if matches!(out, Ok(enroll::Outcome::Enrolled(_))) {
+            // The box closes once it has the ack.
+            let _ = tokio::time::timeout(HEADER_TIMEOUT, conn.closed()).await;
+        }
+        conn.close(VarInt::from_u32(0), b"");
+        ep.close(VarInt::from_u32(0), b"");
+        out
+    };
+    tokio::select! {
+        r = work => r.map(Some),
+        _ = cancel.cancelled() => Ok(None),
+        _ = kick.notified() => Ok(None),
+    }
 }
 
 /// Device half of the liveness check: one [`STREAM_PING`] stream, a byte
@@ -1395,24 +1744,33 @@ async fn device_liveness(conn: Connection) -> String {
     }
 }
 
-/// The device's authenticated QUIC connection, without the TCP plumbing.
-/// Test hook; keep the returned endpoint alive with the connection.
+/// The device's authenticated QUIC connection, without the TCP plumbing
+/// (legacy pairing). Test hook; keep the returned endpoint alive with the
+/// connection.
 #[doc(hidden)]
 pub async fn connect_raw(
     path: PunchedPath,
     secret: &PairingSecret,
 ) -> anyhow::Result<(Endpoint, Connection)> {
+    connect_raw_with(path, &legacy_device(secret)).await
+}
+
+/// [`connect_raw`] for any credential. Test hook.
+#[doc(hidden)]
+pub async fn connect_raw_with(
+    path: PunchedPath,
+    cred: &DeviceCredential,
+) -> anyhow::Result<(Endpoint, Connection)> {
     let peer = path.peer;
-    tracing::debug!(%peer, "tunnel: QUIC connect");
+    tracing::debug!(%peer, cred = cred.kind(), "tunnel: QUIC connect");
     let ep = endpoint(path, None)?;
-    let connecting = ep.connect_with(client_config(secret)?, peer, SERVER_NAME)?;
+    let connecting = ep.connect_with(client_config(cred)?, peer, SERVER_NAME)?;
     let conn = tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting)
         .await
         .map_err(|_| anyhow!("box did not answer"))?
         .context("box handshake failed")?;
     Ok((ep, conn))
 }
-
 // ---- plumbing -----------------------------------------------------------
 
 /// Copy both directions with half-close; on an error in either direction,
@@ -1460,21 +1818,6 @@ async fn pipe(mut send: quinn::SendStream, mut recv: quinn::RecvStream, tcp: Tcp
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn link_roundtrip() {
-        let s = PairingSecret::generate();
-        let l = PairingLink::new(s.clone(), "relay.example:4443");
-        let uri = l.to_uri();
-        assert!(uri.starts_with("peckboard://pair/"));
-        let p = PairingLink::parse(&uri).unwrap();
-        assert_eq!(p.secret.as_bytes(), s.as_bytes());
-        assert_eq!(p.relay, "relay.example:4443");
-        let bare = PairingLink::parse(uri.split('?').next().unwrap()).unwrap();
-        assert_eq!(bare.relay, DEFAULT_RELAY);
-        assert!(PairingLink::parse("peckboard://pair/AAAA").is_err());
-        assert!(PairingLink::parse("https://x/pair/AAAA").is_err());
-    }
 
     #[test]
     fn tunnel_keys_are_separate_from_relay_keys() {

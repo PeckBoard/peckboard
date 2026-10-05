@@ -13,6 +13,8 @@
     "allow-connect-box",
     "allow-disconnect-box",
     "allow-tunnel-status",
-    "allow-take-pair-link"
+    "allow-take-pair-link",
+    "allow-confirm-pair",
+    "allow-dismiss-pair"
   ]
 }

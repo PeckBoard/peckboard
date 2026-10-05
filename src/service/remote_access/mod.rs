@@ -22,20 +22,30 @@ pub mod secret;
 pub mod tunnel;
 
 use std::collections::{BTreeSet, HashMap};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use axum::Router;
+use peckboard_relay::keys::RendezvousSecret;
+use peckboard_relay::tunnel::{EnrollMode, LinkMode, RefuseReason, async_trait};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 use crate::db::Db;
+use crate::db::crud::{
+    ActivateAttempt, EnrollAttempt, EnrollOutcome, EnrollRefusal, rfc3339_after,
+};
+use crate::db::models::{RemoteDeviceEnrollment, enrollment_state};
 use crate::routes::settings::{SETTINGS_COLLECTION, SETTINGS_NS};
 use secret::DeviceSecret;
-use tunnel::{BoxIdentity, DirectOptions, IdentityStatus, Registered, TunnelBackend, TunnelUpdate};
+use tunnel::{
+    BoxCredential, BoxIdentity, DirectOptions, EnrollHandler, IdentityStatus, Registered,
+    TunnelBackend, TunnelUpdate,
+};
 
 const SETTINGS_KEY: &str = "remote_access";
 pub const DEFAULT_RELAY_HOST: &str = "relay.peckboard.com";
@@ -53,6 +63,56 @@ const REGISTRATION_POLL_MIN: Duration = Duration::from_secs(5);
 const REGISTRATION_POLL_EVERY: Duration = Duration::from_secs(10);
 /// How long after an enable or an explicit refresh the box keeps polling.
 const REGISTRATION_WATCH: Duration = Duration::from_secs(180);
+/// How long a v2 pairing link may be used (`PECKBOARD_DEV_LINK_TTL_SECS`
+/// overrides it; dev / e2e only).
+pub const LINK_TTL: Duration = Duration::from_secs(60 * 60);
+/// After a link is used (or expired) the `rid(S)` loop keeps answering
+/// "already used" / "expired" for this long, then stops.
+pub const LINK_REFUSE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Loops that wait for a device block indefinitely, so expiry passes are
+/// driven by this tick as well as by DB changes.
+const RECONCILE_TICK: Duration = Duration::from_secs(60);
+/// Status of every enrolled device while the box identity file is gone:
+/// a new key would lock them out, so none is generated.
+pub const IDENTITY_MISSING: &str = "Box identity key missing — re-pair this device";
+/// Hidden dev knob: link TTL in seconds (default [`LINK_TTL`]). When set,
+/// `POST /api/remote-access/devices` also honours a per-link `ttl_secs`.
+pub const DEV_LINK_TTL_ENV: &str = "PECKBOARD_DEV_LINK_TTL_SECS";
+
+/// The link TTL in force ([`LINK_TTL`] unless [`DEV_LINK_TTL_ENV`] is set).
+pub fn link_ttl() -> Duration {
+    std::env::var(DEV_LINK_TTL_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map_or(LINK_TTL, Duration::from_secs)
+}
+
+/// Whether the dev TTL knob is on (so per-link overrides are accepted).
+pub fn dev_link_ttl_enabled() -> bool {
+    std::env::var_os(DEV_LINK_TTL_ENV).is_some()
+}
+
+/// What the UI shows for a device's pairing: `legacy` (no enrollment row,
+/// S-only), `pending` (unused v2 link), `expired`, `staged` (enrolled, not
+/// yet seen on `R`) or `enrolled`.
+pub fn enrollment_view_state(enr: Option<&RemoteDeviceEnrollment>, now: &str) -> &'static str {
+    match enr {
+        None => "legacy",
+        Some(e) if e.state == enrollment_state::PENDING => {
+            if e.link_expires_at
+                .as_deref()
+                .is_none_or(|exp| rfc3339_after(now, exp))
+            {
+                "expired"
+            } else {
+                "pending"
+            }
+        }
+        Some(e) if e.state == enrollment_state::STAGED => "staged",
+        Some(_) => "enrolled",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAccessSettings {
@@ -302,11 +362,111 @@ impl RegistrationState {
     }
 }
 
+/// Which of a device's two loops a task is: the `rid(S)` loop (legacy
+/// service, link enrollment, or refusal) or the `rid(R)` loop of an
+/// enrolled device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    S,
+    R,
+}
+
+impl Slot {
+    /// `inner.tasks` key: `<device_id>/s` or `<device_id>/r`.
+    fn key(self, device_id: &str) -> String {
+        match self {
+            Slot::S => format!("{device_id}/s"),
+            Slot::R => format!("{device_id}/r"),
+        }
+    }
+}
+
+/// What a loop serves, decided from the DB rows alone (no secrets opened)
+/// so `reconcile` can compare it with what is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Plan {
+    /// S-only pairing: full service on `/1`, upgrade offered.
+    Legacy,
+    /// Unused or staged v2 link: enrollment only.
+    LinkEnroll,
+    /// Used or expired link: every request refused with this reason.
+    LinkRefuse(RefuseReason),
+    /// `rid(R)`, box cert `B`, client cert `D`.
+    Enrolled,
+}
+
+impl Plan {
+    /// Legacy loops run without an identity (no upgrade offered then);
+    /// everything v2 needs `B`.
+    fn needs_identity(self) -> bool {
+        !matches!(self, Plan::Legacy)
+    }
+
+    /// Only loops that serve traffic lease a forwarded port.
+    fn leases_port(self) -> bool {
+        matches!(self, Plan::Legacy | Plan::Enrolled)
+    }
+}
+
+fn rfc3339_plus(stamp: &str, d: Duration) -> Option<String> {
+    let t = chrono::DateTime::parse_from_rfc3339(stamp).ok()?;
+    Some((t + chrono::Duration::from_std(d).ok()?).to_rfc3339())
+}
+
+/// The loop `slot` should run for a device in this enrollment state at
+/// `now` (`None`: no loop). See the state table in the pairing-v2 design.
+fn plan(slot: Slot, enr: Option<&RemoteDeviceEnrollment>, now: &str) -> Option<Plan> {
+    match (slot, enr) {
+        (Slot::S, None) => Some(Plan::Legacy),
+        (Slot::S, Some(e)) if e.state == enrollment_state::PENDING => {
+            let exp = e.link_expires_at.as_deref()?;
+            if !rfc3339_after(now, exp) {
+                Some(Plan::LinkEnroll)
+            } else if rfc3339_plus(exp, LINK_REFUSE_GRACE)
+                .is_some_and(|until| !rfc3339_after(now, &until))
+            {
+                Some(Plan::LinkRefuse(RefuseReason::Expired))
+            } else {
+                None
+            }
+        }
+        (Slot::S, Some(e)) if e.state == enrollment_state::STAGED => {
+            // A link re-delivers R to the enrolled key (crash recovery); a
+            // legacy upgrade keeps serving the device on S until it moves.
+            if e.link_expires_at.is_some() {
+                Some(Plan::LinkEnroll)
+            } else {
+                Some(Plan::Legacy)
+            }
+        }
+        (Slot::S, Some(e)) => {
+            let refusing = e.link_secret_ciphertext.is_some()
+                && e.link_refuse_until
+                    .as_deref()
+                    .is_some_and(|until| !rfc3339_after(now, until));
+            refusing.then_some(Plan::LinkRefuse(RefuseReason::AlreadyUsed))
+        }
+        (Slot::R, Some(e))
+            if e.state == enrollment_state::STAGED || e.state == enrollment_state::ACTIVE =>
+        {
+            Some(Plan::Enrolled)
+        }
+        (Slot::R, _) => None,
+    }
+}
+
+struct LoopTask {
+    plan: Plan,
+    handle: JoinHandle<()>,
+}
+
+/// Keyed by loop (`Slot::key`), not by device: an enrolled device runs a
+/// `rid(R)` loop and, for a while, a refusing `rid(S)` loop.
 #[derive(Default)]
 struct Inner {
-    tasks: HashMap<String, JoinHandle<()>>,
+    tasks: HashMap<String, LoopTask>,
     status: HashMap<String, DeviceStatus>,
-    /// The last registration per device, merged into its status.
+    /// The last registration per loop, merged into its status.
     registered: HashMap<String, Registered>,
     registration: RegistrationState,
 }
@@ -322,6 +482,7 @@ pub struct RemoteAccess {
     /// `<data_dir>/remote_access_identity`; loaded or created on demand.
     identity_path: PathBuf,
     identity: Mutex<Option<BoxIdentity>>,
+    ticking: AtomicBool,
 }
 
 impl RemoteAccess {
@@ -340,6 +501,7 @@ impl RemoteAccess {
             ports: PortPool::default(),
             identity_path: data_dir.join(IDENTITY_FILE),
             identity: Mutex::new(None),
+            ticking: AtomicBool::new(false),
         })
     }
 
@@ -359,10 +521,29 @@ impl RemoteAccess {
     }
 
     /// Bind the router tunnels are served into and start every device
-    /// loop the stored setting calls for.
+    /// loop the stored setting calls for; from then on a periodic tick
+    /// retires expired links and refuse loops.
     pub async fn start(self: &Arc<Self>, app: Router) {
         let _ = self.app.set(app);
         self.reconcile().await;
+        if !self.ticking.swap(true, Ordering::SeqCst) {
+            let weak = Arc::downgrade(self);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(RECONCILE_TICK).await;
+                    let Some(this) = weak.upgrade() else { return };
+                    let now = chrono::Utc::now().to_rfc3339();
+                    match this.db.clear_expired_remote_link_secrets(&now).await {
+                        Ok(n) if n > 0 => {
+                            tracing::info!("remote access: {n} refuse loop(s) retired")
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("remote access: retiring refuse loops: {e}"),
+                    }
+                    this.reconcile().await;
+                }
+            });
+        }
     }
 
     pub async fn settings(&self) -> RemoteAccessSettings {
@@ -401,63 +582,71 @@ impl RemoteAccess {
         Ok(())
     }
 
+    /// A device's live status: its `rid(R)` loop's once enrolled, else its
+    /// `rid(S)` loop's.
     pub fn status(&self, device_id: &str) -> DeviceStatus {
         let inner = self.inner.lock().unwrap();
-        let mut s = inner
-            .status
-            .get(device_id)
-            .cloned()
-            .unwrap_or_else(DeviceStatus::offline);
-        if let Some(r) = inner.registered.get(device_id) {
+        let pick = |slot: Slot| {
+            let key = slot.key(device_id);
+            inner.status.get(&key).cloned().map(|s| (key, s))
+        };
+        let Some((key, mut s)) = pick(Slot::R).or_else(|| pick(Slot::S)) else {
+            return DeviceStatus::offline();
+        };
+        if let Some(r) = inner.registered.get(&key) {
             s.local_port = Some(r.local_port);
             s.candidates = r.candidates.iter().map(|a| a.to_string()).collect();
         }
         s
     }
 
-    fn set_status(&self, device_id: &str, s: DeviceStatus) {
+    fn set_status(&self, key: &str, s: DeviceStatus) {
         let mut inner = self.inner.lock().unwrap();
-        // A revoked/stopped device's loop may race one last update in.
-        if inner.tasks.contains_key(device_id) {
-            inner.status.insert(device_id.to_string(), s);
+        // A revoked/stopped loop may race one last update in.
+        if inner.tasks.contains_key(key) {
+            inner.status.insert(key.to_string(), s);
         }
     }
 
     /// A connected tunnel moved between the direct and relayed path.
-    fn set_path(&self, device_id: &str, path: &'static str) {
+    fn set_path(&self, key: &str, path: &'static str) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(s) = inner.status.get_mut(device_id)
+        if let Some(s) = inner.status.get_mut(key)
             && s.state == "connected"
         {
             s.path = Some(path);
         }
     }
 
-    fn set_registered(&self, device_id: &str, r: Registered) {
+    fn set_registered(&self, key: &str, r: Registered) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.tasks.contains_key(device_id) {
+        if inner.tasks.contains_key(key) {
             if let Some(s) = r.identity {
                 inner.registration.note_handshake(s);
             }
-            inner.registered.insert(device_id.to_string(), r);
+            inner.registered.insert(key.to_string(), r);
         }
     }
 
-    /// Stop one device's loop and drop its tunnel (every open connection
-    /// through it dies with the task, and its UDP port lease with it).
+    /// Stop one device's loops and drop their tunnels (every open
+    /// connection through them dies with the task, and the UDP port lease
+    /// with it).
     pub fn stop_device(&self, device_id: &str) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(h) = inner.tasks.remove(device_id) {
-            h.abort();
+        for slot in [Slot::S, Slot::R] {
+            let key = slot.key(device_id);
+            if let Some(t) = inner.tasks.remove(&key) {
+                t.handle.abort();
+            }
+            inner.status.remove(&key);
+            inner.registered.remove(&key);
         }
-        inner.status.remove(device_id);
-        inner.registered.remove(device_id);
     }
 
     fn stop_all(&self) {
         let mut inner = self.inner.lock().unwrap();
-        for (_, h) in inner.tasks.drain() {
-            h.abort();
+        for (_, t) in inner.tasks.drain() {
+            t.handle.abort();
         }
         inner.status.clear();
         inner.registered.clear();
@@ -466,7 +655,8 @@ impl RemoteAccess {
     }
 
     /// Bring running loops in line with the setting and the DB: none when
-    /// disabled, exactly one per paired device when enabled.
+    /// disabled; otherwise, per device, the loops its enrollment state
+    /// calls for ([`plan`]), restarting any whose plan changed.
     pub async fn reconcile(self: &Arc<Self>) {
         let Some(app) = self.app.get().cloned() else {
             return;
@@ -477,12 +667,6 @@ impl RemoteAccess {
             self.inner.lock().unwrap().registration.watch_until = None;
             return;
         }
-        // Created on first enable: the relay may require a registered box
-        // for the relayed fallback. Without one, loops still run (direct
-        // paths never need it).
-        if let Err(e) = self.identity(true) {
-            tracing::warn!("remote access: {e:#}; relay registration unavailable");
-        }
         let devices = match self.db.list_remote_devices().await {
             Ok(d) => d,
             Err(e) => {
@@ -490,32 +674,95 @@ impl RemoteAccess {
                 return;
             }
         };
-        let mut inner = self.inner.lock().unwrap();
-        let wanted: std::collections::HashSet<&str> =
-            devices.iter().map(|d| d.id.as_str()).collect();
-        inner.tasks.retain(|id, h| {
-            let keep = wanted.contains(id.as_str()) && !h.is_finished();
-            if !keep {
-                h.abort();
+        let enrollments = match self.db.list_remote_device_enrollments().await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("remote access: listing enrollments failed: {e}");
+                return;
             }
-            keep
-        });
+        };
+        // Created on first enable: the relay may require a registered box
+        // for the relayed fallback, and v2 links pin it. Once any device
+        // pins it, a missing file is never replaced (it would lock every
+        // enrolled device out); those loops report IDENTITY_MISSING.
+        let identity = match self.identity(enrollments.is_empty()) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("remote access: {e:#}; relay registration unavailable");
+                None
+            }
+        };
+        let enr_by_id: HashMap<&str, &RemoteDeviceEnrollment> = enrollments
+            .iter()
+            .map(|e| (e.device_id.as_str(), e))
+            .collect();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut wanted: Vec<(String, String, Slot, Plan)> = Vec::new();
         for d in &devices {
-            if inner.tasks.contains_key(&d.id) {
+            let enr = enr_by_id.get(d.id.as_str()).copied();
+            for slot in [Slot::S, Slot::R] {
+                if let Some(p) = plan(slot, enr, &now) {
+                    wanted.push((slot.key(&d.id), d.id.clone(), slot, p));
+                }
+            }
+        }
+        let wanted_plan: HashMap<&str, Plan> =
+            wanted.iter().map(|(k, _, _, p)| (k.as_str(), *p)).collect();
+        let mut inner = self.inner.lock().unwrap();
+        let stale: Vec<String> = inner
+            .tasks
+            .iter()
+            .filter(|(k, t)| wanted_plan.get(k.as_str()) != Some(&t.plan) || t.handle.is_finished())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            if let Some(t) = inner.tasks.remove(&k) {
+                t.handle.abort();
+            }
+            inner.status.remove(&k);
+            inner.registered.remove(&k);
+        }
+        // Placeholders (IDENTITY_MISSING) of loops no longer wanted.
+        inner
+            .status
+            .retain(|k, _| wanted_plan.contains_key(k.as_str()));
+        for (key, id, slot, p) in wanted {
+            if inner.tasks.contains_key(&key) {
+                continue;
+            }
+            if p.needs_identity() && identity.is_none() {
+                tracing::warn!(device_id = %id, "remote access: {IDENTITY_MISSING}");
+                inner
+                    .status
+                    .insert(key, DeviceStatus::error(IDENTITY_MISSING.into()));
                 continue;
             }
             let this = self.clone();
-            let id = d.id.clone();
             let settings = settings.clone();
             let app = app.clone();
-            inner.status.insert(d.id.clone(), DeviceStatus::waiting());
-            inner.tasks.insert(
-                d.id.clone(),
-                tokio::spawn(async move { this.device_loop(id, settings, app).await }),
-            );
+            let identity = identity.clone();
+            inner.status.insert(key.clone(), DeviceStatus::waiting());
+            let handle = tokio::spawn(async move {
+                this.device_loop(id, slot, p, settings, app, identity).await
+            });
+            inner.tasks.insert(key, LoopTask { plan: p, handle });
         }
         drop(inner);
         self.watch_registration();
+    }
+
+    /// Re-run [`reconcile`](Self::reconcile) from a task of its own — for
+    /// callers inside a device loop, which `reconcile` may abort.
+    fn reconcile_soon(self: &Arc<Self>) {
+        let this = self.clone();
+        tokio::spawn(async move { this.reconcile().await });
+    }
+
+    /// Stop a device's loops and start the ones its rows call for now
+    /// (after a link re-issue: the running `rid(S)` loop holds the old S).
+    pub async fn restart_device(self: &Arc<Self>, device_id: &str) {
+        self.stop_device(device_id);
+        self.reconcile().await;
     }
 
     /// The box's identity key: cached, else loaded from `identity_path`,
@@ -525,13 +772,42 @@ impl RemoteAccess {
         if let Some(id) = &*slot {
             return Ok(Some(id.clone()));
         }
-        if !create && !self.identity_path.exists() {
-            return Ok(None);
+        match BoxIdentity::load_or_create_with(&self.identity_path, create) {
+            Ok(id) => {
+                *slot = Some(id.clone());
+                Ok(Some(id))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => Ok(None),
+            Err(e) => {
+                Err(e).with_context(|| format!("box identity {}", self.identity_path.display()))
+            }
         }
-        let id = BoxIdentity::load_or_create(&self.identity_path)
-            .with_context(|| format!("box identity {}", self.identity_path.display()))?;
-        *slot = Some(id.clone());
-        Ok(Some(id))
+    }
+
+    /// Whether the identity file may be created now: only while no device
+    /// pins it (no enrollment row at all).
+    async fn may_create_identity(&self) -> bool {
+        matches!(self.db.list_remote_device_enrollments().await, Ok(e) if e.is_empty())
+    }
+
+    /// The identity a new v2 link pins: created on first use, never
+    /// regenerated once a device pins it.
+    pub async fn link_identity(&self) -> anyhow::Result<BoxIdentity> {
+        let create = self.may_create_identity().await;
+        self.identity(create)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{IDENTITY_MISSING}: restore {} or revoke every enrolled device first",
+                self.identity_path.display()
+            )
+        })
+    }
+
+    /// Fingerprint of the box identity, `None` until it exists.
+    pub fn box_fingerprint(&self) -> Option<String> {
+        self.identity(false)
+            .ok()
+            .flatten()
+            .map(|id| id.fingerprint())
     }
 
     /// What the box knows about its relay registration; `relay_host` builds
@@ -554,7 +830,8 @@ impl RemoteAccess {
     /// background for a while, and report what is known.
     pub async fn refresh_registration(self: &Arc<Self>) -> RegistrationView {
         let relay_host = self.settings().await.relay_host;
-        if let Err(e) = self.identity(true) {
+        let create = self.may_create_identity().await;
+        if let Err(e) = self.identity(create) {
             tracing::warn!("remote access: {e:#}; relay registration unavailable");
         }
         self.watch_registration();
@@ -648,12 +925,12 @@ impl RemoteAccess {
     }
 
     /// Lease this loop's UDP port from the configured range, if any.
-    fn lease_port(&self, id: &str, s: &RemoteAccessSettings) -> Option<PortLease> {
+    fn lease_port(&self, key: &str, s: &RemoteAccessSettings) -> Option<PortLease> {
         let base = s.udp_port_base?;
         let lease = self.ports.lease(base, s.udp_port_count);
         if lease.is_none() {
             tracing::warn!(
-                device_id = %id,
+                loop_key = %key,
                 "remote access: UDP ports {base}..{} all in use; this device uses an \
                  ephemeral port (enlarge the range)",
                 base as u32 + s.udp_port_count as u32 - 1
@@ -662,45 +939,181 @@ impl RemoteAccess {
         lease
     }
 
-    async fn device_loop(self: Arc<Self>, id: String, settings: RemoteAccessSettings, app: Router) {
+    /// The credential a loop serves with right now, opened from the DB.
+    /// `Ok(None)`: the rows no longer call for this plan (device revoked,
+    /// or its state moved on — `reconcile` restarts the right loop).
+    async fn load_credential(
+        &self,
+        id: &str,
+        slot: Slot,
+        p: Plan,
+        identity: Option<&BoxIdentity>,
+    ) -> Result<Option<BoxCredential>, LoadError> {
+        let transient = |e: anyhow::Error| LoadError::Transient(e.to_string());
+        let fatal = |e: anyhow::Error| LoadError::Fatal(e.to_string());
+        let Some(row) = self.db.get_remote_device(id).await.map_err(transient)? else {
+            return Ok(None);
+        };
+        let enr = self
+            .db
+            .get_remote_device_enrollment(id)
+            .await
+            .map_err(transient)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        if plan(slot, enr.as_ref(), &now) != Some(p) {
+            return Ok(None);
+        }
+        let identity_or = || {
+            identity
+                .cloned()
+                .ok_or_else(|| LoadError::Fatal(IDENTITY_MISSING.into()))
+        };
+        let open_s = || secret::open(&self.vault_key, &row).map_err(fatal);
+        let cred = match p {
+            Plan::Legacy => BoxCredential::Legacy {
+                s: open_s()?.pairing_secret(),
+                identity: identity.cloned(),
+            },
+            Plan::LinkEnroll => BoxCredential::Link {
+                s: open_s()?.pairing_secret(),
+                identity: identity_or()?,
+                mode: LinkMode::Enroll,
+            },
+            Plan::LinkRefuse(reason) => {
+                let e = enr.as_ref().expect("plan requires a row");
+                // Active rows hold S under the refuse-loop AAD; an expired
+                // pending link still has it in the device row.
+                let s = match (&e.link_secret_ciphertext, &e.link_secret_nonce) {
+                    (Some(ct), Some(nonce)) if e.state == enrollment_state::ACTIVE => {
+                        secret::open_link_refuse(&self.vault_key, id, ct, nonce).map_err(fatal)?
+                    }
+                    _ => open_s()?,
+                };
+                BoxCredential::Link {
+                    s: s.pairing_secret(),
+                    identity: identity_or()?,
+                    mode: LinkMode::Refuse(reason),
+                }
+            }
+            Plan::Enrolled => {
+                let e = enr.as_ref().expect("plan requires a row");
+                let (Some(ct), Some(nonce), Some(key)) = (
+                    &e.rendezvous_ciphertext,
+                    &e.rendezvous_nonce,
+                    &e.device_pubkey,
+                ) else {
+                    return Err(LoadError::Fatal("enrollment row has no key or R".into()));
+                };
+                let device_key: [u8; 32] = key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| LoadError::Fatal("enrollment row: bad device key".into()))?;
+                BoxCredential::Enrolled {
+                    r: secret::open_rendezvous(&self.vault_key, id, ct, nonce).map_err(fatal)?,
+                    identity: identity_or()?,
+                    device_key,
+                }
+            }
+        };
+        Ok(Some(cred))
+    }
+
+    /// The activation transition for `device_id` (first handshake of the
+    /// enrolled key on `rid(R)`): `S` moves to the refuse loop and the
+    /// device row's secret becomes a tombstone, in one transaction. `Ok
+    /// (false)` when the row isn't `staged`.
+    async fn activate(&self, device_id: &str, device_key: [u8; 32]) -> anyhow::Result<bool> {
+        let Some(enr) = self.db.get_remote_device_enrollment(device_id).await? else {
+            return Ok(false);
+        };
+        if enr.state != enrollment_state::STAGED {
+            return Ok(false);
+        }
+        if enr.device_pubkey.as_deref() != Some(device_key.as_slice()) {
+            anyhow::bail!("activation by a key other than the enrolled one");
+        }
+        let Some(row) = self.db.get_remote_device(device_id).await? else {
+            return Ok(false);
+        };
+        let s = secret::open(&self.vault_key, &row)?;
+        let (link_secret_ciphertext, link_secret_nonce) =
+            secret::seal_link_refuse(&self.vault_key, device_id, &s)?;
+        let (tombstone_ciphertext, tombstone_nonce) =
+            secret::seal(&self.vault_key, device_id, &DeviceSecret::generate())?;
+        let now = chrono::Utc::now();
+        let base = enr
+            .link_expires_at
+            .as_deref()
+            .and_then(|e| chrono::DateTime::parse_from_rfc3339(e).ok())
+            .map(|e| e.with_timezone(&chrono::Utc))
+            .map_or(now, |e| e.max(now));
+        let link_refuse_until =
+            (base + chrono::Duration::from_std(LINK_REFUSE_GRACE)?).to_rfc3339();
+        self.db
+            .activate_remote_device_enrollment(ActivateAttempt {
+                device_id: device_id.to_string(),
+                now: now.to_rfc3339(),
+                link_secret_ciphertext,
+                link_secret_nonce,
+                link_refuse_until,
+                tombstone_ciphertext,
+                tombstone_nonce,
+            })
+            .await
+    }
+
+    async fn device_loop(
+        self: Arc<Self>,
+        id: String,
+        slot: Slot,
+        p: Plan,
+        settings: RemoteAccessSettings,
+        app: Router,
+        identity: Option<BoxIdentity>,
+    ) {
+        let key = slot.key(&id);
         let relay_host = settings.relay_host.clone();
-        // Created by `reconcile`; a loop runs without one if that failed.
-        let identity = self.identity(false).ok().flatten();
         // Held for the loop's lifetime; dropped with the task on stop.
-        let lease = self.lease_port(&id, &settings);
+        let lease = p
+            .leases_port()
+            .then(|| self.lease_port(&key, &settings))
+            .flatten();
         let public_host = (lease.is_some() && !settings.public_address.is_empty())
             .then(|| settings.public_address.clone());
         let public_ip: Arc<Mutex<Option<IpAddr>>> = Arc::default();
         let on_registered = {
             let this = Arc::downgrade(&self);
-            let (id, public_ip) = (id.clone(), public_ip.clone());
+            let (key, public_ip) = (key.clone(), public_ip.clone());
             Arc::new(move |r: Registered| {
                 *public_ip.lock().unwrap() = Some(r.public.ip());
                 if let Some(this) = this.upgrade() {
-                    this.set_registered(&id, r);
+                    this.set_registered(&key, r);
                 }
             }) as tunnel::OnRegistered
         };
+        let enroller: Arc<dyn EnrollHandler> = Arc::new(Enroller {
+            ra: Arc::downgrade(&self),
+            device_id: id.clone(),
+            activated: AtomicBool::new(false),
+        });
         let mut backoff = BACKOFF_MIN;
         loop {
-            let secret: DeviceSecret = match self.db.get_remote_device(&id).await {
-                Ok(Some(row)) => match secret::open(&self.vault_key, &row) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        // Not transient: the key or the row is wrong.
-                        self.set_status(&id, DeviceStatus::error(e.to_string()));
-                        return;
-                    }
-                },
+            let cred = match self.load_credential(&id, slot, p, identity.as_ref()).await {
+                Ok(Some(c)) => c,
                 Ok(None) => return,
-                Err(e) => {
-                    self.set_status(&id, DeviceStatus::error(e.to_string()));
+                Err(LoadError::Fatal(msg)) => {
+                    // Not transient: the key or the row is wrong.
+                    self.set_status(&key, DeviceStatus::error(msg));
+                    return;
+                }
+                Err(LoadError::Transient(msg)) => {
+                    self.set_status(&key, DeviceStatus::error(msg));
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                     continue;
                 }
             };
-            self.set_status(&id, DeviceStatus::waiting());
+            self.set_status(&key, DeviceStatus::waiting());
             let direct = DirectOptions {
                 bind_port: lease.as_ref().map(PortLease::port),
                 public_host: public_host.clone(),
@@ -710,7 +1123,7 @@ impl RemoteAccess {
                 .backend
                 .establish(
                     &relay_host,
-                    &secret,
+                    &cred.relay_secret(),
                     &direct,
                     identity.as_ref(),
                     on_registered.clone(),
@@ -720,7 +1133,7 @@ impl RemoteAccess {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::debug!(device_id = %id, "remote access: establish failed: {e:#}");
-                    self.set_status(&id, DeviceStatus::error(format!("{e:#}")));
+                    self.set_status(&key, DeviceStatus::error(format!("{e:#}")));
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                     continue;
@@ -735,11 +1148,12 @@ impl RemoteAccess {
             tracing::debug!(
                 device_id = %id,
                 path = punched.path(),
+                cred = cred.kind(),
                 "remote access: path established, awaiting device handshake"
             );
             let events = {
                 let this = Arc::downgrade(&self);
-                let id = id.clone();
+                let (id, key) = (id.clone(), key.clone());
                 Arc::new(move |u: TunnelUpdate| {
                     let Some(this) = this.upgrade() else { return };
                     match u {
@@ -756,7 +1170,7 @@ impl RemoteAccess {
                                 let _ = db.touch_remote_device(&did, &now).await;
                             });
                             this.set_status(
-                                &id,
+                                &key,
                                 DeviceStatus {
                                     state: "connected",
                                     peer: Some(peer.to_string()),
@@ -768,20 +1182,150 @@ impl RemoteAccess {
                         }
                         TunnelUpdate::PathChanged { path } => {
                             tracing::info!(device_id = %id, path, "remote access: tunnel path changed");
-                            this.set_path(&id, path);
+                            this.set_path(&key, path);
                         }
                         TunnelUpdate::Disconnected { .. } => {
-                            this.set_status(&id, DeviceStatus::waiting())
+                            this.set_status(&key, DeviceStatus::waiting())
                         }
-                        TunnelUpdate::Error(e) => this.set_status(&id, DeviceStatus::error(e)),
+                        TunnelUpdate::Error(e) => this.set_status(&key, DeviceStatus::error(e)),
                     }
                 }) as tunnel::TunnelEvents
             };
-            let res = tunnel::serve_tunnel(app.clone(), &id, punched, &secret, events).await;
-            tracing::info!(device_id = %id, "remote access: tunnel ended");
+            let res = tunnel::serve_tunnel(
+                app.clone(),
+                &id,
+                punched,
+                &cred,
+                Some(enroller.clone()),
+                events,
+            )
+            .await;
+            tracing::info!(device_id = %id, cred = cred.kind(), "remote access: tunnel ended");
             if let Err(e) = res {
-                self.set_status(&id, DeviceStatus::error(format!("{e:#}")));
+                self.set_status(&key, DeviceStatus::error(format!("{e:#}")));
                 tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+enum LoadError {
+    /// Retry with backoff (DB busy).
+    Transient(String),
+    /// The loop can't run (wrong key, bad row, no identity): report and stop.
+    Fatal(String),
+}
+
+/// The box side of pairing-v2 enrollment for one device, backed by the
+/// CRUD transitions. One per device loop; the relay library calls it with
+/// verified requests only.
+struct Enroller {
+    ra: Weak<RemoteAccess>,
+    device_id: String,
+    /// The row was seen active: later handshakes skip the DB.
+    activated: AtomicBool,
+}
+
+#[async_trait]
+impl EnrollHandler for Enroller {
+    async fn enroll(
+        &self,
+        mode: EnrollMode,
+        device_key: [u8; 32],
+        name: &str,
+        from: SocketAddr,
+    ) -> Result<RendezvousSecret, RefuseReason> {
+        let Some(ra) = self.ra.upgrade() else {
+            return Err(RefuseReason::Internal);
+        };
+        let r = RendezvousSecret::generate();
+        let (rendezvous_ciphertext, rendezvous_nonce) =
+            secret::seal_rendezvous(&ra.vault_key, &self.device_id, &r).map_err(|e| {
+                tracing::warn!(device_id = %self.device_id, "remote access: sealing R: {e}");
+                RefuseReason::Internal
+            })?;
+        let outcome = ra
+            .db
+            .enroll_remote_device(EnrollAttempt {
+                device_id: self.device_id.clone(),
+                legacy_upgrade: mode == EnrollMode::LegacyUpgrade,
+                device_pubkey: device_key,
+                rendezvous_ciphertext,
+                rendezvous_nonce,
+                device_name_hint: name.to_string(),
+                from: from.to_string(),
+                now: chrono::Utc::now().to_rfc3339(),
+            })
+            .await
+            .map_err(|e| {
+                tracing::warn!(device_id = %self.device_id, "remote access: enrollment failed: {e}");
+                RefuseReason::Internal
+            })?;
+        match outcome {
+            EnrollOutcome::Granted => {
+                tracing::info!(
+                    device_id = %self.device_id,
+                    %from,
+                    legacy_upgrade = mode == EnrollMode::LegacyUpgrade,
+                    device = %peckboard_relay::identity::fingerprint(&device_key),
+                    "remote access: device enrolled"
+                );
+                // Start its rid(R) loop.
+                ra.reconcile_soon();
+                Ok(r)
+            }
+            EnrollOutcome::ReDelivered {
+                rendezvous_ciphertext,
+                rendezvous_nonce,
+            } => secret::open_rendezvous(
+                &ra.vault_key,
+                &self.device_id,
+                &rendezvous_ciphertext,
+                &rendezvous_nonce,
+            )
+            .map_err(|_| RefuseReason::Internal),
+            EnrollOutcome::Refused(why) => {
+                tracing::warn!(device_id = %self.device_id, %from, ?why, "remote access: enrollment refused");
+                Err(match why {
+                    EnrollRefusal::AlreadyUsed => RefuseReason::AlreadyUsed,
+                    EnrollRefusal::Expired => RefuseReason::Expired,
+                    EnrollRefusal::NotEnrollable => RefuseReason::NotEnrollable,
+                })
+            }
+        }
+    }
+
+    async fn link_reuse(&self, from: SocketAddr, reason: RefuseReason) {
+        let Some(ra) = self.ra.upgrade() else { return };
+        tracing::warn!(device_id = %self.device_id, %from, reason = reason.as_str(), "remote access: used pairing link contacted");
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Err(e) = ra
+            .db
+            .note_remote_link_reuse(&self.device_id, &from.to_string(), &now)
+            .await
+        {
+            tracing::warn!(device_id = %self.device_id, "remote access: noting link reuse: {e}");
+        }
+    }
+
+    async fn activated(&self, device_key: [u8; 32], from: SocketAddr) {
+        // Fires on every accepted rid(R) handshake; only the first does
+        // work, and `Connected` already stamps `last_connected_at`.
+        if self.activated.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(ra) = self.ra.upgrade() else { return };
+        match ra.activate(&self.device_id, device_key).await {
+            Ok(done) => {
+                self.activated.store(true, Ordering::SeqCst);
+                if done {
+                    tracing::info!(device_id = %self.device_id, %from, "remote access: pairing activated; link secret retired");
+                    // The rid(S) loop switches to refusing.
+                    ra.reconcile_soon();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(device_id = %self.device_id, "remote access: activation failed: {e}")
             }
         }
     }
@@ -793,13 +1337,14 @@ impl RemoteAccess {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::net::SocketAddr;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    use super::secret::DeviceSecret;
+    use peckboard_relay::keys::PairingSecret;
+
     use super::tunnel::{
-        BoxIdentity, DirectOptions, IdentityStatus, OnRegistered, PunchedTunnel, Registered,
-        TunnelBackend, TunnelEvents, TunnelUpdate,
+        BoxCredential, BoxIdentity, DirectOptions, EnrollHandler, IdentityStatus, OnRegistered,
+        PunchedTunnel, Registered, TunnelBackend, TunnelEvents, TunnelUpdate,
     };
 
     #[derive(Default)]
@@ -808,6 +1353,8 @@ pub(crate) mod testing {
         pub(crate) bound: Mutex<Vec<Option<u16>>>,
         /// The identity key handed to each `establish`.
         pub(crate) identities: Mutex<Vec<Option<[u8; 32]>>>,
+        /// The credential kind of every served tunnel, in order.
+        pub(crate) served: Arc<Mutex<Vec<&'static str>>>,
         /// The relay's registration gate, as its handshake reports it.
         pub(crate) gated: AtomicBool,
         /// The relay's registry: is the box's key in it?
@@ -817,14 +1364,16 @@ pub(crate) mod testing {
         pub(crate) legacy_relay: AtomicBool,
         pub(crate) polls: AtomicUsize,
     }
-    pub(crate) struct FakePunched;
+    pub(crate) struct FakePunched {
+        served: Arc<Mutex<Vec<&'static str>>>,
+    }
 
     #[async_trait::async_trait]
     impl TunnelBackend for FakeBackend {
         async fn establish(
             &self,
             _relay_host: &str,
-            _secret: &DeviceSecret,
+            _secret: &PairingSecret,
             direct: &DirectOptions,
             identity: Option<&BoxIdentity>,
             on_registered: OnRegistered,
@@ -846,7 +1395,9 @@ pub(crate) mod testing {
                 candidates: vec![public],
                 identity: verdict,
             });
-            Ok(Box::new(FakePunched))
+            Ok(Box::new(FakePunched {
+                served: self.served.clone(),
+            }))
         }
 
         async fn registration_status(
@@ -869,10 +1420,12 @@ pub(crate) mod testing {
         }
         async fn serve(
             self: Box<Self>,
-            _secret: &DeviceSecret,
+            cred: &BoxCredential,
             _target: SocketAddr,
+            _enroll: Option<Arc<dyn EnrollHandler>>,
             events: TunnelEvents,
         ) -> anyhow::Result<()> {
+            self.served.lock().unwrap().push(cred.kind());
             events(TunnelUpdate::Connected {
                 peer: self.peer(),
                 rtt_ms: 1,
@@ -936,20 +1489,48 @@ mod tests {
         assert_eq!(pool.lease(65535, 5).unwrap().port(), 65535);
     }
 
-    async fn pair(db: &Db, key: &[u8], id: &str) {
-        let s = DeviceSecret::generate();
-        let (ct, nonce) = secret::seal(key, id, &s).unwrap();
-        db.insert_remote_device(NewRemoteDevice {
+    fn new_device(id: &str) -> NewRemoteDevice {
+        NewRemoteDevice {
             id: id.into(),
             user_id: "u1".into(),
             name: "phone".into(),
-            secret_ciphertext: ct,
-            secret_nonce: nonce,
+            secret_ciphertext: Vec::new(),
+            secret_nonce: Vec::new(),
             created_at: chrono::Utc::now().to_rfc3339(),
             last_connected_at: None,
+        }
+    }
+
+    /// A legacy (S-only) pairing.
+    async fn pair(db: &Db, key: &[u8], id: &str) -> DeviceSecret {
+        let s = DeviceSecret::generate();
+        let (ct, nonce) = secret::seal(key, id, &s).unwrap();
+        db.insert_remote_device(NewRemoteDevice {
+            secret_ciphertext: ct,
+            secret_nonce: nonce,
+            ..new_device(id)
         })
         .await
         .unwrap();
+        s
+    }
+
+    /// A v2 link expiring `expires_in` seconds from now.
+    async fn pair_v2(db: &Db, key: &[u8], id: &str, expires_in: i64) -> DeviceSecret {
+        let s = DeviceSecret::generate();
+        let (ct, nonce) = secret::seal(key, id, &s).unwrap();
+        let exp = (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339();
+        db.insert_remote_device_with_link(
+            NewRemoteDevice {
+                secret_ciphertext: ct,
+                secret_nonce: nonce,
+                ..new_device(id)
+            },
+            exp,
+        )
+        .await
+        .unwrap();
+        s
     }
 
     async fn wait_connected(ra: &RemoteAccess, id: &str) {
@@ -970,6 +1551,18 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("timed out waiting for {what}");
+    }
+
+    /// The running loops as `(key, plan)`, sorted.
+    fn plans(ra: &RemoteAccess) -> Vec<(String, Plan)> {
+        let inner = ra.inner.lock().unwrap();
+        let mut v: Vec<_> = inner
+            .tasks
+            .iter()
+            .map(|(k, t)| (k.clone(), t.plan))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
     }
 
     #[tokio::test]
@@ -1049,6 +1642,197 @@ mod tests {
             Some(40000),
             "released on revoke"
         );
+    }
+
+    /// Pairing v2 across the state machine, as `reconcile` sees it: a
+    /// pending link runs one enrollment-only `rid(S)` loop (no port lease),
+    /// an expired one a refusing loop, a long-expired one nothing; an
+    /// enrollment adds the `rid(R)` loop; activation retires S (tombstone +
+    /// refuse loop) and the refuse loop ends with its grace period.
+    #[tokio::test]
+    async fn reconcile_runs_the_loops_each_enrollment_state_calls_for() {
+        let db = Db::in_memory().unwrap();
+        let key = vec![3u8; 32];
+        let backend = Arc::new(FakeBackend::default());
+        let dir = tempfile::tempdir().unwrap();
+        let ra = RemoteAccess::new(db.clone(), key.clone(), dir.path(), backend.clone());
+        // Issuing the first link creates the identity the links pin.
+        ra.link_identity().await.unwrap();
+        pair(&db, &key, "legacy").await;
+        let s = pair_v2(&db, &key, "pending", 3600).await;
+        pair_v2(&db, &key, "expired", -5).await;
+        pair_v2(&db, &key, "ancient", -3 * 86_400).await;
+        ra.start(Router::new()).await;
+        ra.put_settings(&RemoteAccessSettings {
+            enabled: true,
+            udp_port_base: Some(40000),
+            udp_port_count: 4,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            plans(&ra),
+            vec![
+                ("expired/s".into(), Plan::LinkRefuse(RefuseReason::Expired)),
+                ("legacy/s".into(), Plan::Legacy),
+                ("pending/s".into(), Plan::LinkEnroll),
+            ]
+        );
+        wait_connected(&ra, "legacy").await;
+        wait_connected(&ra, "pending").await;
+        assert_eq!(ra.status("legacy").local_port, Some(40000), "legacy leases");
+        assert_eq!(
+            ra.status("pending").local_port,
+            Some(50000),
+            "link loops don't"
+        );
+        assert_eq!(ra.status("ancient").state, "offline");
+
+        // The device enrolls over the link loop.
+        let enroller = Enroller {
+            ra: Arc::downgrade(&ra),
+            device_id: "pending".into(),
+            activated: AtomicBool::new(false),
+        };
+        let from: SocketAddr = "203.0.113.7:4000".parse().unwrap();
+        let r = enroller
+            .enroll(EnrollMode::Link, [7; 32], "iPhone", from)
+            .await
+            .unwrap();
+        let again = enroller
+            .enroll(EnrollMode::Link, [7; 32], "iPhone", from)
+            .await
+            .unwrap();
+        assert!(again == r, "same key, same R");
+        assert_eq!(
+            enroller
+                .enroll(EnrollMode::Link, [8; 32], "other", from)
+                .await
+                .err()
+                .unwrap(),
+            RefuseReason::AlreadyUsed
+        );
+        wait_for("the R loop", || {
+            plans(&ra).contains(&("pending/r".into(), Plan::Enrolled))
+        })
+        .await;
+        assert!(plans(&ra).contains(&("pending/s".into(), Plan::LinkEnroll)));
+        wait_connected(&ra, "pending").await;
+        assert_eq!(
+            ra.status("pending").local_port,
+            Some(40001),
+            "enrolled leases"
+        );
+        let enr = db
+            .get_remote_device_enrollment("pending")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(enr.state, "staged");
+        assert_eq!(enr.reuse_attempts, 1);
+        assert_eq!(
+            enrollment_view_state(Some(&enr), &chrono::Utc::now().to_rfc3339()),
+            "staged"
+        );
+
+        // First handshake on rid(R): active, S tombstoned and moved.
+        enroller.activated([7; 32], from).await;
+        enroller.activated([7; 32], from).await;
+        let enr = db
+            .get_remote_device_enrollment("pending")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(enr.state, "active");
+        let row = db.get_remote_device("pending").await.unwrap().unwrap();
+        assert_ne!(
+            secret::open(&key, &row).unwrap().as_bytes(),
+            s.as_bytes(),
+            "device row no longer opens to S"
+        );
+        let moved = secret::open_link_refuse(
+            &key,
+            "pending",
+            enr.link_secret_ciphertext.as_ref().unwrap(),
+            enr.link_secret_nonce.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(moved.as_bytes(), s.as_bytes());
+        wait_for("the S loop to refuse", || {
+            plans(&ra).contains(&(
+                "pending/s".into(),
+                Plan::LinkRefuse(RefuseReason::AlreadyUsed),
+            ))
+        })
+        .await;
+        assert!(backend.served.lock().unwrap().contains(&"enrolled"));
+
+        // Past the grace period the refuse loop goes; R stays.
+        let far = (chrono::Utc::now() + chrono::Duration::days(2)).to_rfc3339();
+        assert_eq!(db.clear_expired_remote_link_secrets(&far).await.unwrap(), 1);
+        ra.reconcile().await;
+        assert_eq!(
+            plans(&ra)
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("pending/"))
+                .collect::<Vec<_>>(),
+            vec![("pending/r".into(), Plan::Enrolled)]
+        );
+
+        // Revoke stops both.
+        ra.stop_device("pending");
+        assert!(plans(&ra).iter().all(|(k, _)| !k.starts_with("pending/")));
+    }
+
+    /// SECURITY: once a device pins the box identity, a missing identity
+    /// file is never silently replaced — the enrolled device shows an
+    /// error instead, legacy devices keep running, and a new link can't be
+    /// issued until the file is back or every enrolled device is gone.
+    #[tokio::test]
+    async fn identity_is_never_recreated_once_a_device_pins_it() {
+        let db = Db::in_memory().unwrap();
+        let key = vec![3u8; 32];
+        pair(&db, &key, "legacy").await;
+        pair_v2(&db, &key, "linked", 3600).await;
+        let backend = Arc::new(FakeBackend::default());
+        let dir = tempfile::tempdir().unwrap();
+        let identity_file = dir.path().join(IDENTITY_FILE);
+        let ra = RemoteAccess::new(db.clone(), key.clone(), dir.path(), backend.clone());
+        ra.start(Router::new()).await;
+        // A pending link already pins B, so the file isn't created now…
+        ra.put_settings(&RemoteAccessSettings {
+            enabled: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(!identity_file.exists());
+        assert_eq!(ra.status("linked").state, "error");
+        assert_eq!(ra.status("linked").error.as_deref(), Some(IDENTITY_MISSING));
+        wait_connected(&ra, "legacy").await;
+        assert!(ra.link_identity().await.is_err());
+        // …until the pinning row is gone.
+        db.delete_remote_device("linked").await.unwrap();
+        let id = ra.link_identity().await.unwrap();
+        assert!(identity_file.exists());
+        assert_eq!(ra.box_fingerprint(), Some(id.fingerprint()));
+        pair_v2(&db, &key, "linked2", 3600).await;
+        ra.reconcile().await;
+        wait_connected(&ra, "linked2").await;
+
+        // The file disappears on a running box: nothing is regenerated.
+        std::fs::remove_file(&identity_file).unwrap();
+        *ra.identity.lock().unwrap() = None;
+        ra.stop_all();
+        ra.reconcile().await;
+        assert!(!identity_file.exists());
+        assert_eq!(
+            ra.status("linked2").error.as_deref(),
+            Some(IDENTITY_MISSING)
+        );
+        wait_connected(&ra, "legacy").await;
+        assert!(ra.link_identity().await.is_err());
     }
 
     /// Enabling creates the box identity and hands it to every establish;

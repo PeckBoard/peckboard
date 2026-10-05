@@ -2,13 +2,15 @@
 //! the setting opens a path into this host from the internet, and every
 //! paired device gets the same reach as the admin's browser.
 //!
-//! The pairing secret is minted by `POST /api/remote-access/devices`
-//! and handed back EXACTLY ONCE, inside the pairing link (+ its QR code).
-//! It is stored only sealed (`service::remote_access::secret`) and no
-//! response shape after creation carries it — `DeviceView` is built field
-//! by field and `RemoteDevice` isn't even `Serialize`.
+//! The link secret is minted by `POST /api/remote-access/devices` (and
+//! `POST …/devices/{id}/link`, which re-issues an unused one) and handed
+//! back EXACTLY ONCE, inside the pairing link (+ its QR code). It is stored
+//! only sealed (`service::remote_access::secret`) and no response shape
+//! after creation carries it — `DeviceView` is built field by field and
+//! `RemoteDevice` isn't even `Serialize`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -22,9 +24,10 @@ use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::{AuthUser, require_admin, require_auth};
-use crate::db::models::{NewRemoteDevice, RemoteDevice};
+use crate::db::models::{NewRemoteDevice, RemoteDevice, RemoteDeviceEnrollment, enrollment_state};
 use crate::service::remote_access::{
-    DeviceStatus, RemoteAccess, RemoteAccessSettings, secret, validate_direct, validate_relay_host,
+    DeviceStatus, RemoteAccess, RemoteAccessSettings, dev_link_ttl_enabled, enrollment_view_state,
+    link_ttl, secret, validate_direct, validate_relay_host,
 };
 use crate::state::AppState;
 
@@ -42,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/remote-access/devices/{id}",
             patch(rename).delete(revoke),
         )
+        .route("/api/remote-access/devices/{id}/link", post(reissue_link))
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
@@ -59,7 +63,8 @@ fn valid_name(raw: &str) -> Option<String> {
     (!name.is_empty() && name.chars().count() <= NAME_MAX_LEN).then_some(name)
 }
 
-/// Public metadata + live tunnel status. Never the secret.
+/// Public metadata + live tunnel status + pairing-v2 state. Never a
+/// secret.
 #[derive(Serialize)]
 struct DeviceView {
     id: String,
@@ -67,19 +72,50 @@ struct DeviceView {
     created_at: String,
     last_connected_at: Option<String>,
     status: DeviceStatus,
+    /// `legacy` | `pending` | `expired` | `staged` | `enrolled`.
+    enrollment: &'static str,
+    link_expires_at: Option<String>,
+    enrolled_at: Option<String>,
+    enrolled_from: Option<String>,
+    device_name_hint: Option<String>,
+    activated_at: Option<String>,
+    reuse_attempts: i32,
+    last_reuse_at: Option<String>,
+    last_reuse_from: Option<String>,
 }
 
 impl DeviceView {
-    fn of(d: &RemoteDevice, ra: &RemoteAccess) -> Self {
+    fn of(d: &RemoteDevice, enr: Option<&RemoteDeviceEnrollment>, ra: &RemoteAccess) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
         DeviceView {
             id: d.id.clone(),
             name: d.name.clone(),
             created_at: d.created_at.clone(),
             last_connected_at: d.last_connected_at.clone(),
             status: ra.status(&d.id),
+            enrollment: enrollment_view_state(enr, &now),
+            link_expires_at: enr.and_then(|e| e.link_expires_at.clone()),
+            enrolled_at: enr.and_then(|e| e.enrolled_at.clone()),
+            enrolled_from: enr.and_then(|e| e.enrolled_from.clone()),
+            device_name_hint: enr.and_then(|e| e.device_name_hint.clone()),
+            activated_at: enr.and_then(|e| e.activated_at.clone()),
+            reuse_attempts: enr.map_or(0, |e| e.reuse_attempts),
+            last_reuse_at: enr.and_then(|e| e.last_reuse_at.clone()),
+            last_reuse_from: enr.and_then(|e| e.last_reuse_from.clone()),
         }
     }
+
+    /// The view of one device, with its enrollment row looked up.
+    async fn load(state: &AppState, d: &RemoteDevice) -> Result<Self, Response> {
+        let enr = state
+            .db
+            .get_remote_device_enrollment(&d.id)
+            .await
+            .map_err(internal_err)?;
+        Ok(Self::of(d, enr.as_ref(), &state.remote_access))
+    }
 }
+
 fn settings_json(s: &RemoteAccessSettings) -> serde_json::Map<String, serde_json::Value> {
     let serde_json::Value::Object(m) = serde_json::json!({
         "enabled": s.enabled,
@@ -94,26 +130,40 @@ fn settings_json(s: &RemoteAccessSettings) -> serde_json::Map<String, serde_json
 }
 
 /// GET /api/remote-access — the settings (`enabled`, `relay_host`,
-/// `udp_port_base`, `udp_port_count`, `public_address`), `devices`, and
+/// `udp_port_base`, `udp_port_count`, `public_address`), `devices`,
 /// `registration` (`{supported, registered, gated, url}`: the box
 /// identity's relay registration; `supported: false` + nulls until the
-/// relay has said anything, e.g. one predating relay registration).
+/// relay has said anything, e.g. one predating relay registration) and
+/// `box_fingerprint` (null until the identity exists).
 async fn overview(State(state): State<Arc<AppState>>) -> Response {
     let ra = &state.remote_access;
     let settings = ra.settings().await;
-    match state.db.list_remote_devices().await {
-        Ok(devices) => {
-            let views: Vec<DeviceView> = devices.iter().map(|d| DeviceView::of(d, ra)).collect();
-            let mut body = settings_json(&settings);
-            body.insert("devices".into(), serde_json::json!(views));
-            body.insert(
-                "registration".into(),
-                serde_json::json!(ra.registration(&settings.relay_host)),
-            );
-            Json(body).into_response()
-        }
-        Err(e) => internal_err(e),
-    }
+    let devices = match state.db.list_remote_devices().await {
+        Ok(d) => d,
+        Err(e) => return internal_err(e),
+    };
+    let enrollments = match state.db.list_remote_device_enrollments().await {
+        Ok(e) => e,
+        Err(e) => return internal_err(e),
+    };
+    let views: Vec<DeviceView> = devices
+        .iter()
+        .map(|d| {
+            let enr = enrollments.iter().find(|e| e.device_id == d.id);
+            DeviceView::of(d, enr, ra)
+        })
+        .collect();
+    let mut body = settings_json(&settings);
+    body.insert("devices".into(), serde_json::json!(views));
+    body.insert(
+        "registration".into(),
+        serde_json::json!(ra.registration(&settings.relay_host)),
+    );
+    body.insert(
+        "box_fingerprint".into(),
+        serde_json::json!(ra.box_fingerprint()),
+    );
+    Json(body).into_response()
 }
 
 /// POST /api/remote-access/registration/refresh — ask the relay now whether
@@ -187,45 +237,69 @@ struct NameBody {
     name: String,
 }
 
-/// POST /api/remote-access/devices `{name}` → 201
-/// `{device, pairing_link, qr_svg}`. The only response that ever carries
-/// the secret.
-async fn create(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<AuthUser>,
-    Json(body): Json<NameBody>,
-) -> Response {
-    let Some(name) = valid_name(&body.name) else {
-        return err(StatusCode::BAD_REQUEST, "name must be 1..=128 chars");
-    };
-    let id = uuid::Uuid::new_v4().to_string();
+#[derive(Deserialize)]
+struct CreateBody {
+    name: String,
+    /// Per-link TTL override; honoured only under the dev TTL knob
+    /// (`PECKBOARD_DEV_LINK_TTL_SECS`), ignored otherwise.
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+struct ReissueBody {
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+/// The TTL a new link gets (see [`CreateBody::ttl_secs`]).
+fn effective_ttl(requested: Option<u64>) -> Duration {
+    match requested.filter(|s| *s > 0) {
+        Some(secs) if dev_link_ttl_enabled() => Duration::from_secs(secs),
+        _ => link_ttl(),
+    }
+}
+
+/// A fresh sealed link secret for `id` and the link it encodes, expiring
+/// `ttl` from now.
+struct MintedLink {
+    secret_ciphertext: Vec<u8>,
+    secret_nonce: Vec<u8>,
+    link: peckboard_relay::tunnel::PairingLink,
+    expires_at: String,
+    box_fingerprint: String,
+}
+
+async fn mint_link(state: &AppState, id: &str, ttl: Duration) -> Result<MintedLink, Response> {
+    let identity = state
+        .remote_access
+        .link_identity()
+        .await
+        .map_err(|e| err(StatusCode::CONFLICT, &format!("{e:#}")))?;
     let s = secret::DeviceSecret::generate();
     let (secret_ciphertext, secret_nonce) =
-        match secret::seal(state.remote_access.vault_key(), &id, &s) {
-            Ok(v) => v,
-            Err(e) => return internal_err(e),
-        };
-    let row = match state
-        .db
-        .insert_remote_device(NewRemoteDevice {
-            id,
-            user_id: user.user_id.clone(),
-            name,
-            secret_ciphertext,
-            secret_nonce,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_connected_at: None,
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return internal_err(e),
-    };
-    state.remote_access.reconcile().await;
-
+        secret::seal(state.remote_access.vault_key(), id, &s).map_err(internal_err)?;
+    let expires = chrono::Utc::now() + chrono::Duration::from_std(ttl).map_err(internal_err)?;
     let relay_host = state.remote_access.settings().await.relay_host;
-    let link = s.pairing_link(&relay_host);
-    let qr_svg = QrCode::new(link.as_bytes())
+    let link = s.link_v2(
+        &relay_host,
+        identity.public_key(),
+        expires.timestamp().max(0) as u64,
+    );
+    Ok(MintedLink {
+        secret_ciphertext,
+        secret_nonce,
+        link,
+        expires_at: expires.to_rfc3339(),
+        box_fingerprint: identity.fingerprint(),
+    })
+}
+
+/// `{device, pairing_link, app_link, qr_svg, expires_at, box_fingerprint}`
+/// — the only response shape that carries a link secret.
+fn link_response(status: StatusCode, device: DeviceView, minted: &MintedLink) -> Response {
+    let https = minted.link.to_https();
+    let qr_svg = QrCode::new(https.as_bytes())
         .map(|c| {
             c.render::<qrcode::render::svg::Color>()
                 .min_dimensions(200, 200)
@@ -233,14 +307,123 @@ async fn create(
         })
         .unwrap_or_default();
     (
-        StatusCode::CREATED,
+        status,
         Json(serde_json::json!({
-            "device": DeviceView::of(&row, &state.remote_access),
-            "pairing_link": link,
+            "device": device,
+            "pairing_link": https,
+            "app_link": minted.link.to_uri(),
             "qr_svg": qr_svg,
+            "expires_at": minted.expires_at,
+            "box_fingerprint": minted.box_fingerprint,
         })),
     )
         .into_response()
+}
+
+/// POST /api/remote-access/devices `{name}` → 201
+/// `{device, pairing_link, app_link, qr_svg, expires_at, box_fingerprint}`.
+/// `pairing_link` is the `https://peckboard.com/pair#…` form (what the QR
+/// encodes), `app_link` the `peckboard://` form. The link pins this box's
+/// identity key, works once, and expires after an hour. 409 when the box
+/// identity file is missing while devices still pin it.
+async fn create(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<CreateBody>,
+) -> Response {
+    let Some(name) = valid_name(&body.name) else {
+        return err(StatusCode::BAD_REQUEST, "name must be 1..=128 chars");
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let minted = match mint_link(&state, &id, effective_ttl(body.ttl_secs)).await {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let row = match state
+        .db
+        .insert_remote_device_with_link(
+            NewRemoteDevice {
+                id,
+                user_id: user.user_id.clone(),
+                name,
+                secret_ciphertext: minted.secret_ciphertext.clone(),
+                secret_nonce: minted.secret_nonce.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_connected_at: None,
+            },
+            minted.expires_at.clone(),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return internal_err(e),
+    };
+    state.remote_access.reconcile().await;
+    let view = match DeviceView::load(&state, &row).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    link_response(StatusCode::CREATED, view, &minted)
+}
+
+/// POST /api/remote-access/devices/:id/link → 200, the same shape as
+/// create: a fresh link (new secret, new hour) for a device whose link
+/// was never used — unused or expired. 409 for a device that already
+/// enrolled (staged / enrolled) or a legacy pairing: revoke and pair again
+/// instead.
+async fn reissue_link(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<ReissueBody>>,
+) -> Response {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let row = match state.db.get_remote_device(&id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "no such device"),
+        Err(e) => return internal_err(e),
+    };
+    match state.db.get_remote_device_enrollment(&id).await {
+        Ok(Some(e)) if e.state == enrollment_state::PENDING => {}
+        Ok(Some(_)) => {
+            return err(
+                StatusCode::CONFLICT,
+                "this device already enrolled with its link; revoke it and pair again",
+            );
+        }
+        Ok(None) => {
+            return err(
+                StatusCode::CONFLICT,
+                "this device was paired with an older link that can't be re-issued; revoke it and pair again",
+            );
+        }
+        Err(e) => return internal_err(e),
+    }
+    let minted = match mint_link(&state, &id, effective_ttl(body.ttl_secs)).await {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .db
+        .reissue_remote_device_link(
+            &id,
+            minted.secret_ciphertext.clone(),
+            minted.secret_nonce.clone(),
+            &minted.expires_at,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return err(StatusCode::CONFLICT, "this link was used meanwhile"),
+        Err(e) => return internal_err(e),
+    }
+    // The running rid(S) loop holds the old secret.
+    state.remote_access.restart_device(&id).await;
+    tracing::info!(device_id = %id, "remote access: pairing link re-issued");
+    let view = match DeviceView::load(&state, &row).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    link_response(StatusCode::OK, view, &minted)
 }
 
 /// PATCH /api/remote-access/devices/:id `{name}` → `{device}`.
@@ -258,20 +441,20 @@ async fn rename(
         Err(e) => return internal_err(e),
     }
     match state.db.get_remote_device(&id).await {
-        Ok(Some(d)) => {
-            Json(serde_json::json!({ "device": DeviceView::of(&d, &state.remote_access) }))
-                .into_response()
-        }
+        Ok(Some(d)) => match DeviceView::load(&state, &d).await {
+            Ok(v) => Json(serde_json::json!({ "device": v })).into_response(),
+            Err(resp) => resp,
+        },
         Ok(None) => err(StatusCode::NOT_FOUND, "no such device"),
         Err(e) => internal_err(e),
     }
 }
 
-/// DELETE /api/remote-access/devices/:id → 204. Deletes the row (and so
-/// the sealed secret — the device's rendezvous id dies with it), drops the
-/// live tunnel and every connection through it immediately, and revokes
-/// the auth sessions created through the device (their WebSockets close
-/// on their next session check).
+/// DELETE /api/remote-access/devices/:id → 204. Deletes the row and its
+/// enrollment (and so every sealed secret — the device's rendezvous ids
+/// die with them), drops the live tunnels and every connection through
+/// them immediately, and revokes the auth sessions created through the
+/// device (their WebSockets close on their next session check).
 async fn revoke(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match state.db.delete_remote_device(&id).await {
         Ok(true) => {
@@ -289,11 +472,11 @@ async fn revoke(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> R
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::middleware::tests::{seed_authenticated_user, test_state, test_state_with};
     use crate::db::Db;
+    use crate::db::crud::{EnrollAttempt, EnrollOutcome};
     use crate::service::remote_access::{IDENTITY_FILE, testing::FakeBackend};
     use axum::body::Body;
     use axum::http::{Request, header};
@@ -333,6 +516,15 @@ mod tests {
         )
     }
 
+    /// `s=` of an https pairing link.
+    fn link_secret_b64(link: &str) -> String {
+        let frag = link.split('#').nth(1).unwrap();
+        frag.split('&')
+            .find_map(|kv| kv.strip_prefix("s="))
+            .unwrap()
+            .to_string()
+    }
+
     #[tokio::test]
     async fn non_admin_is_forbidden_everywhere() {
         let dir = tempfile::tempdir().unwrap();
@@ -356,6 +548,7 @@ mod tests {
                 "/api/remote-access/devices/x",
                 Some(serde_json::json!({ "name": "y" })),
             ),
+            ("POST", "/api/remote-access/devices/x/link", None),
             ("DELETE", "/api/remote-access/devices/x", None),
         ] {
             let (status, _) = call(&state, &token, method, uri, body).await;
@@ -364,6 +557,10 @@ mod tests {
         assert!(state.db.list_remote_devices().await.unwrap().is_empty());
     }
 
+    /// Create hands out the https v2 link (pinning this box, expiring in an
+    /// hour) with the box fingerprint, exactly once; the list and rename
+    /// never carry the secret; a legacy row shows as such; revoke deletes
+    /// the row.
     #[tokio::test]
     async fn pair_once_list_without_secret_rename_revoke() {
         let dir = tempfile::tempdir().unwrap();
@@ -374,6 +571,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["enabled"], false, "off by default");
         assert_eq!(body["relay_host"], "relay.peckboard.com");
+        assert_eq!(body["box_fingerprint"], serde_json::Value::Null);
 
         let (status, body) = call(
             &state,
@@ -383,19 +581,38 @@ mod tests {
             Some(serde_json::json!({ "name": " phone " })),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(status, StatusCode::CREATED, "{body}");
         let link = body["pairing_link"].as_str().unwrap().to_string();
-        assert!(link.starts_with("peckboard://pair/"), "{link}");
-        assert!(link.ends_with("?relay=relay.peckboard.com"), "{link}");
+        assert!(
+            link.starts_with("https://peckboard.com/pair#v=2&s="),
+            "{link}"
+        );
+        assert!(!link.contains("&r="), "default relay is implied: {link}");
+        let parsed = peckboard_relay::tunnel::PairingLink::parse(&link).unwrap();
+        let app_link = body["app_link"].as_str().unwrap();
+        assert!(app_link.starts_with("peckboard://pair/"), "{app_link}");
+        assert_eq!(
+            peckboard_relay::tunnel::PairingLink::parse(app_link)
+                .unwrap()
+                .secret
+                .as_bytes(),
+            parsed.secret.as_bytes()
+        );
+        let fp = body["box_fingerprint"].as_str().unwrap().to_string();
+        assert_eq!(parsed.box_fingerprint().as_deref(), Some(fp.as_str()));
+        assert_eq!(fp.len(), 19, "XXXX-XXXX-XXXX-XXXX: {fp}");
+        let expires = body["expires_at"].as_str().unwrap();
+        let exp = chrono::DateTime::parse_from_rfc3339(expires).unwrap();
+        let ttl = exp.with_timezone(&chrono::Utc) - chrono::Utc::now();
+        assert!(ttl.num_minutes() >= 59 && ttl.num_minutes() <= 60, "{ttl}");
+        assert_eq!(parsed.expires, Some(exp.timestamp() as u64));
         assert!(body["qr_svg"].as_str().unwrap().contains("<svg"));
         assert_eq!(body["device"]["name"], "phone");
+        assert_eq!(body["device"]["enrollment"], "pending");
+        assert_eq!(body["device"]["link_expires_at"], expires);
+        assert!(dir.path().join(IDENTITY_FILE).exists());
         let id = body["device"]["id"].as_str().unwrap().to_string();
-        let encoded = link
-            .trim_start_matches("peckboard://pair/")
-            .split('?')
-            .next()
-            .unwrap()
-            .to_string();
+        let encoded = link_secret_b64(&link);
 
         // The secret is stored sealed, and opens back to the linked value.
         let row = state.db.get_remote_device(&id).await.unwrap().unwrap();
@@ -418,13 +635,38 @@ mod tests {
         )
         .await;
         assert_eq!(renamed["device"]["name"], "tablet");
+        assert_eq!(renamed["device"]["enrollment"], "pending");
         for v in [&list, &renamed] {
             let s = v.to_string();
             assert!(!s.contains(&encoded), "secret leaked: {s}");
             assert!(!s.contains("secret"), "secret field leaked: {s}");
         }
+        assert_eq!(list["box_fingerprint"], fp);
         assert_eq!(list["devices"].as_array().unwrap().len(), 1);
         assert_eq!(list["devices"][0]["status"]["state"], "offline");
+
+        // A device paired before v2 (no enrollment row) is legacy.
+        state
+            .db
+            .insert_remote_device(NewRemoteDevice {
+                id: "old".into(),
+                user_id: "u1".into(),
+                name: "old phone".into(),
+                secret_ciphertext: vec![0; 48],
+                secret_nonce: vec![0; 12],
+                created_at: "2026-01-01T00:00:00Z".into(),
+                last_connected_at: None,
+            })
+            .await
+            .unwrap();
+        let (_, list) = call(&state, &token, "GET", "/api/remote-access", None).await;
+        let old = list["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "old")
+            .unwrap();
+        assert_eq!(old["enrollment"], "legacy");
 
         // Revoke deletes the row (and the sealed secret with it).
         let (status, _) = call(
@@ -437,11 +679,125 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert!(state.db.get_remote_device(&id).await.unwrap().is_none());
+        assert!(
+            state
+                .db
+                .get_remote_device_enrollment(&id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let (status, _) = call(
             &state,
             &token,
             "DELETE",
             &format!("/api/remote-access/devices/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// `…/link` re-issues a pending (or expired) link with a new secret;
+    /// once a device enrolled, or for a legacy pairing, it answers 409.
+    #[tokio::test]
+    async fn link_reissue_only_for_unused_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let (_, created) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/remote-access/devices",
+            Some(serde_json::json!({ "name": "phone" })),
+        )
+        .await;
+        let id = created["device"]["id"].as_str().unwrap().to_string();
+        let first = link_secret_b64(created["pairing_link"].as_str().unwrap());
+
+        let (status, body) = call(
+            &state,
+            &token,
+            "POST",
+            &format!("/api/remote-access/devices/{id}/link"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = link_secret_b64(body["pairing_link"].as_str().unwrap());
+        assert_ne!(first, second, "a new secret");
+        assert_eq!(body["device"]["enrollment"], "pending");
+        assert_eq!(body["box_fingerprint"], created["box_fingerprint"]);
+        let row = state.db.get_remote_device(&id).await.unwrap().unwrap();
+        let opened = secret::open(state.remote_access.vault_key(), &row).unwrap();
+        use base64::Engine as _;
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(opened.as_bytes()),
+            second,
+            "the old secret is gone"
+        );
+
+        // Enrolled (staged): no re-issue.
+        let outcome = state
+            .db
+            .enroll_remote_device(EnrollAttempt {
+                device_id: id.clone(),
+                legacy_upgrade: false,
+                device_pubkey: [7; 32],
+                rendezvous_ciphertext: vec![1; 48],
+                rendezvous_nonce: vec![1; 12],
+                device_name_hint: "iPhone".into(),
+                from: "203.0.113.7:4000".into(),
+                now: chrono::Utc::now().to_rfc3339(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, EnrollOutcome::Granted);
+        let (status, _) = call(
+            &state,
+            &token,
+            "POST",
+            &format!("/api/remote-access/devices/{id}/link"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (_, list) = call(&state, &token, "GET", "/api/remote-access", None).await;
+        let d = &list["devices"][0];
+        assert_eq!(d["enrollment"], "staged");
+        assert_eq!(d["enrolled_from"], "203.0.113.7:4000");
+        assert_eq!(d["device_name_hint"], "iPhone");
+        assert!(!list.to_string().contains(&second), "no secret in the list");
+
+        // Legacy: no re-issue either; unknown: 404.
+        state
+            .db
+            .insert_remote_device(NewRemoteDevice {
+                id: "old".into(),
+                user_id: "u1".into(),
+                name: "old phone".into(),
+                secret_ciphertext: vec![0; 48],
+                secret_nonce: vec![0; 12],
+                created_at: "2026-01-01T00:00:00Z".into(),
+                last_connected_at: None,
+            })
+            .await
+            .unwrap();
+        let (status, _) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/remote-access/devices/old/link",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/remote-access/devices/nope/link",
             None,
         )
         .await;

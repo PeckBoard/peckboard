@@ -25,6 +25,7 @@ apps/mobile/
 │   ├── src/commands.rs         shell-UI commands
 │   ├── capabilities/           IPC grants (shell UI only; box UI gets nothing)
 │   ├── Info.ios.plist          merged into the generated iOS Info.plist
+│   ├── Entitlements.ios.plist  iOS entitlements (associated domains for Universal Links)
 │   ├── Info.macos.plist, Entitlements.macos.plist   macOS bundle (tauri.macos.conf.json)
 │   └── tauri.windows.conf.json NSIS/MSI + WebView2 bootstrapper
 └── plugins/peckboard-native/   first-party Tauri plugin (Rust + Swift + Kotlin)
@@ -79,16 +80,35 @@ between 5 s ticks is reported as background + foreground, so the same
 pause/resume path drops the stale tunnel and reconnects right away instead
 of waiting out QUIC's idle timeout and the retry backoff.
 
-**Secrets.** The pairing link (the only credential) is stored via the
-native plugin: iOS Keychain generic password,
-`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, non-synchronizable;
-Android: AES-256-GCM key in the Android Keystore wrapping the value in
-app-private prefs; backups and device transfer are disabled; macOS Keychain /
-Windows Credential Manager (`keyring` crate, service `com.peckboard.app`).
-Non-secret metadata (name, relay, port, a public key fingerprint for
-duplicate detection) is `boxes.json` in the app data dir. Linux (dev only)
-uses a 0600 `dev-secrets.json`; on macOS / Windows a `dev-secrets.json`
-left by an older dev build is imported into the keychain once and deleted.
+**Secrets.** Credentials are stored via the native plugin: iOS Keychain
+generic password, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`,
+non-synchronizable; Android: AES-256-GCM key in the Android Keystore
+wrapping the value in app-private prefs; backups and device transfer are
+disabled; macOS Keychain / Windows Credential Manager (`keyring` crate,
+service `com.peckboard.app`). One item per kind and box (`store.rs`):
+`box:<id>` the pairing link, `boxkey:<id>` this device's key seed while
+enrolling, `box2:<id>` the enrolled credential (`peckboard-cred:2:…`: the
+rendezvous secret, the device key and the pinned box key). Non-secret
+metadata (name, relay, port, a public key fingerprint for duplicate
+detection, `auth` = legacy / enrolling / enrolled, the box fingerprint) is
+`boxes.json` in the app data dir. Linux (dev only) uses a 0600
+`dev-secrets.json`; on macOS / Windows a `dev-secrets.json` left by an older
+dev build is imported into the keychain once and deleted.
+
+**Pairing v2** (`tmp-scratch/pairing-v2-design.md`). A v2 link
+(`https://peckboard.com/pair#v=2&s=…&k=…&e=…`, or the same fields on
+`peckboard://pair/<S>?…`) pins the box identity key and works once. Pairing
+is an enrollment-only tunnel round (`TunnelManager::enroll`): the app
+generates a device key (stored first, so a retry after a crash reuses it),
+proves the link secret over ALPN `peckboard-tunnel/2` pinned to the box key,
+enrolls the device key, and stores the credential the box grants
+(`on_enrolled`, before the box is told). No box page is loaded. Right after,
+a background "activate" connect lets the box retire the link secret; the
+app then deletes `box:` and `boxkey:`. Pairings from before v2 keep working
+as legacy (ALPN `/1`) and upgrade in place on their first connect to an
+updated box. `credential()` picks what to connect with from what secure
+storage holds, so a crash between the keychain write and the JSON save
+heals itself.
 
 **WebView hardening.**
 
@@ -180,12 +200,23 @@ Release builds, signing and publishing: see Releasing the App.
 
 ## Pair a Phone
 
-1. On the box: Settings → Remote Access → **Add phone**. Use a fresh link
-   per phone — reusing another device's link takes over its slot.
-2. In the app: **Pair a box** → _Scan pairing QR code_, or paste the
-   `peckboard://pair/…` link. Optionally name it.
-3. The app connects right away and opens the box UI. Sign in once; the
-   login is remembered for that box.
+1. On the box: Settings → Remote Access → **Add phone**. Each link works
+   once and expires after an hour; make one per device.
+2. Scan the QR code with the system camera (or tap the link on the device):
+   the app opens on a _Pair a box?_ screen showing the relay and the box
+   fingerprint (`XXXX-XXXX-XXXX-XXXX`). Check it matches the one next to the
+   QR code on the box, name the box, tap **Pair**. The app exchanges keys
+   with the box and returns to the list ("Paired"); the box UI is **not**
+   opened on its own after a deep link.
+   Alternatively, in the app: **Pair a box** → _Scan pairing QR code_, or
+   paste either link form; manual pairing opens the box right away.
+3. Tap the box. Sign in once; the login is remembered for that box.
+
+Pairing errors are spelled out: link already used by another device, link
+expired, link needs a newer app, box key doesn't match the link ("don't
+continue"), box offline ("…or the link expired" once past the expiry). A
+link the box will never accept removes the half-paired box again; any
+other failure leaves it as _Finishing pairing… tap to retry_.
 
 Connection states shown: _Finding your box…_, _Reconnecting…_, _Box offline_
 (box not at the relay, or the pairing was revoked), _Can't connect_ (neither
@@ -193,13 +224,29 @@ a direct path nor the encrypted relay fallback worked; no router setup is
 ever required), _Connection failed_. The app keeps retrying with backoff
 while the screen is open.
 
-**Deep links.** The app registers `peckboard://` (Tauri deep-link plugin).
-Opening a `peckboard://pair/…` link — tapping it, or scanning the QR code
-with the system camera — brings the app to a _Pair a box?_ screen that shows
-the relay host; nothing is paired until the user taps **Pair**. A link that
-launches the app is caught by `src/launch_url.rs` (iOS: tao drops the scene's
-launch URLs). Test on the simulator with
-`xcrun simctl openurl <udid> 'peckboard://pair/…'`.
+**Deep links.** Two forms open the app: `https://peckboard.com/pair#…`
+(iOS Universal Links / Android App Links, `appLink: true` in
+`tauri.conf.json`; verified against `docs/.well-known/` on peckboard.com)
+and `peckboard://pair/…` (custom scheme, every platform). Either brings the
+app to the confirm screen; nothing is paired until the user taps **Pair**,
+and **Pair** pairs the link Rust holds for that prompt (`PairSlot`,
+`confirm_pair`), never a string from the page. A second link opened while
+one is being confirmed is dropped with a toast. The `/pair` page itself
+(`docs/pair.html`) is static, sends nothing, and offers an "Open in the
+PeckBoard app" button that builds the `peckboard://` form on tap (the
+Windows / Linux / older-app path). A link that launches the app is caught
+by `src/launch_url.rs` (iOS: tao drops the scene's launch URLs). Test on the
+simulator with `xcrun simctl openurl <udid> 'https://peckboard.com/pair#…'`
+(Universal Links need the AASA to verify at install time; the custom scheme
+works regardless).
+
+iOS needs the Associated Domains capability on the App ID and
+`Entitlements.ios.plist` (`applinks:peckboard.com`) in the generated Xcode
+project (`gen/apple/*_iOS/*_iOS.entitlements`); Android's App Link intent
+filter is generated by the deep-link plugin into `gen/android`. Check both
+after `tauri ios init` / `tauri android init`. After a deploy verify
+`https://app-site-association.cdn-apple.com/a/v1/peckboard.com` returns the
+AASA and `adb shell pm get-app-links com.peckboard.app` says `verified`.
 
 On desktop the scheme is registered by the macOS bundle's Info.plist, the
 Windows installer, and at runtime on Windows / Linux (`register_all`, which
@@ -220,14 +267,20 @@ cargo test --manifest-path apps/mobile/src-tauri/Cargo.toml
 cargo test --manifest-path apps/mobile/plugins/peckboard-native/Cargo.toml
 ```
 
-Covers link parsing, the store round trip (secret kept out of the JSON),
-port assignment (never reused; old `boxes.json` files migrate), the shell
-IPC proof (`ShellProof`), gate boot URL construction, the navigation
-allow-list (this platform's shell origin only), event → status mapping, and pause/resume releasing and
-rebinding the port; the plugin test covers the desktop `dev-secrets.json` →
-keychain import. Device smoke tests (pair against
-`peckboard-relay/examples/box_forward`, load `/`, WS connects) are manual
-for now.
+Covers link parsing (v1 / v2, https and `peckboard://` forms, surrounding
+text, bad input, newer-version links), the deep-link prompt slot (a second
+link is dropped while one shows), the store round trip (secrets kept out of
+the JSON), the v2 credential lifecycle (stable device key across a retry,
+`box2:` winning over a stale record, activation deleting the link, legacy
+pairings loading as legacy and upgrading in place), port assignment (never
+reused; old `boxes.json` files migrate), the shell IPC proof (`ShellProof`,
+including a source guard that every command takes one), gate boot URL
+construction, the navigation allow-list (this platform's shell origin
+only), event → status mapping (pairing milestones, §5.6 error texts), and
+pause/resume releasing and rebinding the port; the plugin test covers the
+desktop `dev-secrets.json` → keychain import. Device smoke tests (pair
+against `peckboard-relay/examples/box_forward`, load `/`, WS connects) are
+manual for now.
 
 ## Releasing the App
 

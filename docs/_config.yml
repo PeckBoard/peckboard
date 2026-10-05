@@ -18,6 +18,11 @@ footer_content: "Assembled with many small pecks."
 mermaid:
   version: "10.9.1"
 
+# Universal Links (iOS) / App Links (Android) for pairing links: Jekyll
+# skips dot-paths unless listed here.
+include:
+  - .well-known
+
 exclude:
   - README.md
   - Gemfile

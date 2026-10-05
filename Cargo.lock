@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "peckboard"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4552,6 +4552,7 @@ name = "peckboard-relay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chacha20poly1305",
  "ed25519-dalek 2.2.0",

@@ -130,15 +130,22 @@ pub enum TunnelEvent {
     Error(String),
 }
 
-// `peckboard://pair/<base64url(S)>?relay=<host[:port]>`; relay defaults to
-// DEFAULT_RELAY ("relay.peckboard.com") when absent.
-pub struct PairingLink { pub secret: PairingSecret, pub relay: String }
-impl PairingLink { fn new(secret, relay: &str); fn to_uri(&self) -> String;
+// v1: `peckboard://pair/<base64url(S)>?relay=<host[:port]>`; relay defaults
+// to DEFAULT_RELAY ("relay.peckboard.com") when absent. v2 (see Pairing v2
+// below) adds the box key and an expiry, in either form:
+//   https://peckboard.com/pair#v=2&s=<S>&k=<B>&e=<unix secs>[&r=<relay>]
+//   peckboard://pair/<S>?relay=<relay>&v=2&k=<B>&e=<unix secs>
+pub struct PairingLink { pub secret: PairingSecret, pub relay: String, pub version: u8,
+                         pub box_key: Option<[u8; 32]>, pub expires: Option<u64> }
+impl PairingLink { fn new(secret, relay: &str); fn new_v2(secret, relay, box_key, expires);
+                   fn to_uri(&self) -> String; fn to_https(&self) -> String;
                    fn parse(link: &str) -> anyhow::Result<Self>; }
 ```
 
-Box loop: `loop { let p = establish_with(.., Role::Box, &opts).await?; serve_box_rejoining(p, .., &BoxRejoin { cfg, opts }, ..).await; }`
-— one rendezvous id per paired device, so run one loop per device secret.
+Box loop: `loop { let p = establish_with(.., &cred.relay_secret(), Role::Box, &opts).await?; serve_box_rejoining_with(p, &cred, .., &BoxRejoin { cfg, opts }, handler, ..).await; }`
+— one rendezvous id per credential, so run one loop per device credential
+(`serve_box` / `serve_box_rejoining` with a `&PairingSecret` are the legacy
+shorthand).
 
 ### Device Loop and Loopback Gate
 
@@ -152,8 +159,11 @@ pub async fn bind_listener(addr: ListenAddr) -> std::io::Result<TcpListener>;
 
 #[derive(Clone)]
 pub struct DeviceOptions {
-    pub link: PairingLink,
-    pub relay: Option<ClientConfig>,         // None: relay_config(&link.relay) per attempt
+    pub credential: DeviceCredential,        // Legacy / Link (v2, enrolling) / Enrolled
+    pub device_name: String,                 // shown on the box at enrollment
+    pub on_enrolled: Option<OnEnrolled>,     // persist the credential; runs before the ack
+    pub try_upgrade: bool,                   // legacy + upgrade key: enroll once per run
+    pub relay: Option<ClientConfig>,         // None: relay_config(credential's relay) per attempt
     pub accept_filter: Option<AcceptFilter>, // None: forward every local connection
     pub min_backoff: Duration,               // 1 s, doubles per failure ...
     pub max_backoff: Duration,               // ... up to 30 s
@@ -163,7 +173,7 @@ pub struct DeviceOptions {
                                              // network change: drop the tunnel, retry now
 }
 impl DeviceOptions {
-    pub fn new(link: PairingLink) -> Self;                // the defaults above
+    pub fn new(credential: impl Into<DeviceCredential>) -> Self; // the defaults above
     pub fn with_gate(self, gate: &CookieGate) -> Self;    // accept_filter = gate.filter()
 }
 
@@ -187,6 +197,10 @@ pub enum DeviceEvent {     // per attempt: Connecting, then Connected..Disconnec
     PunchFailed { rounds: u32 },         // both NATs hard: no direct path
     Failed(String),                      // relay unreachable, handshake, local accept
     Retrying { after: Duration },
+    Enrolled { box_fingerprint: String, legacy_upgrade: bool },
+    EnrollRefused { reason: RefuseReason },  // final for a v2 link: run_device returns
+                                         // Err(TunnelError::EnrollRefused)
+    Activated,                           // first tunnel on the enrolled credential
 }
 
 // Runs on each accepted local connection before it becomes a stream:
@@ -237,6 +251,25 @@ with a fresh `CookieGate`; on background `token.cancel()` and await the
 task, keeping `l` bound; on foreground the same with the same `l` and a new
 gate. `peckboard-connect` runs the same loop (`--gate` turns the cookie gate
 on; off by default) and maps `DeviceEvent`s to its terminal messages.
+
+### Pairing v2
+
+A v2 link pins the box identity key `B` (the cert of every `/2` tunnel,
+shown to users as an 80-bit `XXXX-XXXX-XXXX-XXXX` fingerprint) and is good
+for one enrollment. The device connects on `rid(S)` with ALPN
+`peckboard-tunnel/2`, proving `S` with its `S`-derived client cert, and
+opens stream `0x03`: `EnrollRequest` (its own Ed25519 key `D`, signed over
+the connection's TLS exporter `EXPORTER-peckboard-enroll`, so it can't be
+replayed elsewhere) → `EnrollGrant` (rendezvous secret `R`, signed by `B`)
+→ `EnrollAck`; the box closes with `0x10 "enrolled"`. From then on the
+device registers under `S_R = HKDF("peckboard-pair/2", R)` (an ordinary v1
+registration to the relay — the wire is unchanged) and both certs are
+`B` / `D`; `R` never authenticates a tunnel. The box side decides through
+an `EnrollHandler` (first key wins, same key gets the same `R` again);
+the library does framing, channel binding and signatures. Pairings from
+before v2 keep working on `/1` and may upgrade in place (`0x03` mode 2);
+an old app on a v2 link is closed with `update-app`. Details and the
+session policy table: the `tunnel` module docs.
 
 ### Tunnel Wire Format
 

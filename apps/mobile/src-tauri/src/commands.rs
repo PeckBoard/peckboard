@@ -10,17 +10,17 @@ use tauri::{AppHandle, Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_peckboard_native::{MicDecision, MicPolicy, PeckboardNativeExt};
 use url::Url;
 
-use crate::link::{PairPrompt, parse_link};
+use crate::link::{PairPrompt, PairSlot, parse_link};
 use crate::nav;
-use crate::store::{BoxRecord, SecretStore, Store};
+use crate::store::{BoxRecord, SecretStore, Store, enrolled_writer};
 use crate::tunnel::{TunnelManager, TunnelState, TunnelStatus};
 
 pub struct AppState {
     pub store: Mutex<Store>,
     pub secrets: Arc<dyn SecretStore>,
     pub tunnel: Arc<TunnelManager>,
-    /// Raw deep-linked pairing link awaiting the user's confirmation.
-    pub pending_link: Mutex<Option<String>>,
+    /// The deep-linked pairing link awaiting the user's confirmation.
+    pub pair_slot: Mutex<PairSlot>,
 }
 
 /// Header the shell sends with every command, carrying the [`ShellNonce`].
@@ -164,21 +164,93 @@ pub fn list_boxes(state: State<'_, AppState>, _shell: ShellProof) -> Vec<BoxView
     boxes.into_iter().map(|b| view(&state, b)).collect()
 }
 
+/// Manual pairing (pasted or scanned link): store it and, for a v2 link,
+/// run the enrollment round.
 #[tauri::command]
-pub fn add_box(
+pub async fn add_box(
+    app: AppHandle,
     state: State<'_, AppState>,
     _shell: ShellProof,
     link: String,
     name: String,
 ) -> CmdResult<BoxView> {
-    let link = parse_link(&link)?;
+    pair_link(&app, &state, &link, &name).await
+}
+
+/// Pair `raw`: metadata + link to the store, then — for a v2 link — the
+/// enrollment-only round (`TunnelManager::enroll`): the box grants this
+/// device its own key, the credential lands in secure storage, and the
+/// link is used up. No box page is opened. A refusal the box will never
+/// lift (link used, expired) removes the half-paired record again. A v1
+/// link is stored as legacy; it upgrades on its first connect.
+async fn pair_link(app: &AppHandle, state: &AppState, raw: &str, name: &str) -> CmdResult<BoxView> {
+    let link = parse_link(raw)?;
     let rec = state
         .store
         .lock()
         .unwrap()
-        .add(state.secrets.as_ref(), &link, &name, now_ms())
+        .add(state.secrets.as_ref(), &link, name, now_ms())
         .map_err(msg)?;
-    Ok(view(&state, rec))
+    if !link.is_v2() {
+        return Ok(view(state, rec));
+    }
+    let id = rec.id.clone();
+    let cred = state
+        .store
+        .lock()
+        .unwrap()
+        .credential(state.secrets.as_ref(), &id)
+        .map_err(msg)?;
+    let writer = enrolled_writer(state.secrets.clone(), &id);
+    let on_activated = activation_hook(app, &id);
+    match state
+        .tunnel
+        .enroll(cred, link.expires, writer, on_activated)
+        .await
+    {
+        Ok(box_fp) => {
+            let mut store = state.store.lock().unwrap();
+            if let Err(e) = store.set_enrolled(&id, &box_fp) {
+                log::warn!("enrolled, but the record wasn't updated: {e:#}");
+            }
+            let rec = store.get(&id).cloned().unwrap_or(rec);
+            drop(store);
+            log::info!("paired box {id}: enrolled with box {box_fp}");
+            Ok(view(state, rec))
+        }
+        Err(f) => {
+            if f.final_refusal {
+                log::warn!("pairing refused for good; removing box {id}");
+                let _ = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .remove(state.secrets.as_ref(), &id);
+            }
+            Err(f.message)
+        }
+    }
+}
+
+/// Runs when the background activate connect after pairing succeeds: the
+/// box retired the link, so the device drops it (and the loose key).
+fn activation_hook(app: &AppHandle, id: &str) -> Arc<dyn Fn() + Send + Sync> {
+    let app = app.clone();
+    let id = id.to_string();
+    Arc::new(move || {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let done = state
+            .store
+            .lock()
+            .unwrap()
+            .finish_activation(state.secrets.as_ref(), &id);
+        match done {
+            Ok(()) => log::info!("box {id}: activated, link retired"),
+            Err(e) => log::warn!("box {id}: activation bookkeeping failed: {e:#}"),
+        }
+    })
 }
 
 #[tauri::command]
@@ -200,8 +272,8 @@ pub fn rename_box(
     Ok(view(&state, rec))
 }
 
-/// Forget a box: stop its tunnel, drop its secret and metadata, and clear
-/// the website data its UI left at its loopback origin.
+/// Forget a box: stop its tunnel, drop its credentials and metadata, and
+/// clear the website data its UI left at its loopback origin.
 #[tauri::command]
 pub async fn remove_box(
     app: AppHandle,
@@ -254,13 +326,18 @@ pub async fn connect_box(
     _shell: ShellProof,
     id: String,
 ) -> CmdResult<TunnelStatus> {
-    let (link, port) = {
+    let (cred, port) = {
         let store = state.store.lock().unwrap();
         let rec = store.get(&id).ok_or("No such box.")?;
-        let link = store.link(state.secrets.as_ref(), &id).map_err(msg)?;
-        (link, rec.port)
+        let cred = store.credential(state.secrets.as_ref(), &id).map_err(msg)?;
+        (cred, rec.port)
     };
-    let status = state.tunnel.start(&id, link, port).await.map_err(msg)?;
+    let writer = enrolled_writer(state.secrets.clone(), &id);
+    let status = state
+        .tunnel
+        .start(&id, cred, port, Some(writer))
+        .await
+        .map_err(msg)?;
     sync_mic_policy(&app);
     Ok(status)
 }
@@ -281,11 +358,39 @@ pub fn tunnel_status(state: State<'_, AppState>, _shell: ShellProof) -> Option<T
     state.tunnel.status()
 }
 
-/// The pairing deep link waiting for confirmation, if any (taken once).
+/// The pairing deep link waiting for confirmation, if any (taken once;
+/// it stays reserved under the prompt's `id` until confirmed or dismissed).
 #[tauri::command]
 pub fn take_pair_link(state: State<'_, AppState>, _shell: ShellProof) -> Option<PairPrompt> {
-    let raw = state.pending_link.lock().unwrap().take()?;
-    Some(PairPrompt::from_link(&raw))
+    state.pair_slot.lock().unwrap().take()
+}
+
+/// Pair the link shown as prompt `id` — the one Rust holds, so what the
+/// user checked (relay, box fingerprint) is what gets paired. The prompt
+/// is released afterwards, success or not.
+#[tauri::command]
+pub async fn confirm_pair(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+    id: String,
+    name: String,
+) -> CmdResult<BoxView> {
+    let raw = state
+        .pair_slot
+        .lock()
+        .unwrap()
+        .confirm(&id)
+        .ok_or("This pairing link is no longer waiting. Open it again.")?;
+    let result = pair_link(&app, &state, &raw, &name).await;
+    state.pair_slot.lock().unwrap().clear(&id);
+    result
+}
+
+/// The user cancelled prompt `id`: forget the link.
+#[tauri::command]
+pub fn dismiss_pair(state: State<'_, AppState>, _shell: ShellProof, id: String) {
+    state.pair_slot.lock().unwrap().clear(&id);
 }
 
 /// The microphone policy last pushed to the native WebView delegate, so
@@ -356,6 +461,56 @@ mod tests {
 
     fn u(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    /// SECURITY: every command the shell can invoke takes a `ShellProof`
+    /// (the only way to get one is the `CommandArg` impl above). Guards the
+    /// source so a new command can't silently skip it, and that each one is
+    /// in the `build.rs` manifest (what the capability can grant).
+    #[test]
+    fn every_command_takes_a_shell_proof() {
+        let src = include_str!("commands.rs");
+        let mut seen = Vec::new();
+        for (i, _) in src.match_indices("#[tauri::command]\n") {
+            let rest = &src[i..];
+            let sig_end = rest
+                .find(") ->")
+                .or_else(|| rest.find(") {"))
+                .expect("signature end");
+            let sig = &rest[..sig_end];
+            let name = sig
+                .split("fn ")
+                .nth(1)
+                .and_then(|s| s.split('(').next())
+                .expect("fn name")
+                .to_string();
+            assert!(
+                sig.contains("_shell: ShellProof"),
+                "{name} lacks a ShellProof"
+            );
+            seen.push(name);
+        }
+        for cmd in [
+            "list_boxes",
+            "add_box",
+            "rename_box",
+            "remove_box",
+            "connect_box",
+            "disconnect_box",
+            "tunnel_status",
+            "take_pair_link",
+            "confirm_pair",
+            "dismiss_pair",
+        ] {
+            assert!(seen.contains(&cmd.to_string()), "{cmd} not found");
+        }
+        let build = include_str!("../build.rs");
+        for name in &seen {
+            assert!(
+                build.contains(&format!("\"{name}\"")),
+                "{name} missing from build.rs"
+            );
+        }
     }
 
     #[test]

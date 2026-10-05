@@ -1,29 +1,51 @@
 //! Production [`TunnelBackend`]: the `peckboard-relay` tunnel API
-//! (`establish_with` as the box, then `serve_box_rejoining`, which keeps a
-//! standby relay session so the device's next round reaches us at once).
+//! (`establish_with` as the box, then `serve_box_rejoining_with`, which
+//! keeps a standby relay session so the device's next round reaches us at
+//! once).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use peckboard_relay::client::ClientConfig;
 use peckboard_relay::keys::PairingSecret;
 use peckboard_relay::proto::Role;
 use peckboard_relay::tunnel::{
     self, Advertise, BoxRejoin, EstablishOptions, PunchedPath, TunnelEvent,
 };
 
-use super::secret::DeviceSecret;
 use super::tunnel::{
-    BoxIdentity, DirectOptions, IdentityStatus, OnRegistered, PunchedTunnel, Registered,
-    TunnelBackend, TunnelEvents, TunnelUpdate,
+    BoxCredential, BoxIdentity, DirectOptions, EnrollHandler, IdentityStatus, OnRegistered,
+    PunchedTunnel, Registered, TunnelBackend, TunnelEvents, TunnelUpdate,
 };
 
 /// Cap on one registration-status request (TLS connect + GET).
 const STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Hidden dev knob: path of a DER certificate to pin for the relay instead
+/// of the public CAs, so a local `peckboard-relay --dev-self-signed` can
+/// stand in for relay.peckboard.com (the e2e enrollment spec). Read on
+/// every connection, so the relay may start after the box.
+pub const DEV_RELAY_CERT_ENV: &str = "PECKBOARD_DEV_RELAY_CERT";
+
 pub struct RelayBackend;
 
-fn relay_secret(s: &DeviceSecret) -> PairingSecret {
-    PairingSecret::from_bytes(*s.as_bytes())
+/// Resolve the relay; under [`DEV_RELAY_CERT_ENV`] trust exactly that
+/// certificate.
+async fn client_config(relay_host: &str) -> anyhow::Result<ClientConfig> {
+    let cfg = tunnel::relay_config(relay_host).await?;
+    match std::env::var_os(DEV_RELAY_CERT_ENV) {
+        None => Ok(cfg),
+        Some(path) => {
+            let der = std::fs::read(&path).map_err(|e| {
+                anyhow::anyhow!("{DEV_RELAY_CERT_ENV}: read {}: {e}", path.to_string_lossy())
+            })?;
+            ClientConfig::pinned(
+                cfg.relay,
+                &cfg.server_name,
+                rustls::pki_types::CertificateDer::from(der),
+            )
+        }
+    }
 }
 
 /// The fixed port on the configured public host, or on the STUN-observed
@@ -55,12 +77,12 @@ impl TunnelBackend for RelayBackend {
     async fn establish(
         &self,
         relay_host: &str,
-        secret: &DeviceSecret,
+        secret: &PairingSecret,
         direct: &DirectOptions,
         identity: Option<&BoxIdentity>,
         on_registered: OnRegistered,
     ) -> anyhow::Result<Box<dyn PunchedTunnel>> {
-        let cfg = tunnel::relay_config(relay_host).await?;
+        let cfg = client_config(relay_host).await?;
         let opts = EstablishOptions {
             bind_port: direct.bind_port,
             advertise: advertise(direct).await,
@@ -76,7 +98,7 @@ impl TunnelBackend for RelayBackend {
             identity: identity.cloned(),
             ..EstablishOptions::default()
         };
-        let path = tunnel::establish_with(&cfg, &relay_secret(secret), Role::Box, &opts).await?;
+        let path = tunnel::establish_with(&cfg, secret, Role::Box, &opts).await?;
         // The standby session while serving re-registers with the same
         // options; the status display keeps the main registration.
         let rejoin = BoxRejoin {
@@ -90,7 +112,11 @@ impl TunnelBackend for RelayBackend {
     }
 
     async fn registration_status(&self, relay_host: &str, key: &[u8; 32]) -> anyhow::Result<bool> {
-        tokio::time::timeout(STATUS_TIMEOUT, tunnel::registration_status(relay_host, key))
+        let status = async {
+            let cfg = client_config(relay_host).await?;
+            peckboard_relay::client::registration_status(&cfg, key).await
+        };
+        tokio::time::timeout(STATUS_TIMEOUT, status)
             .await
             .map_err(|_| anyhow::anyhow!("relay {relay_host}: registration status timed out"))?
     }
@@ -117,13 +143,13 @@ impl PunchedTunnel for RelayPunched {
 
     async fn serve(
         self: Box<Self>,
-        secret: &DeviceSecret,
+        cred: &BoxCredential,
         target: SocketAddr,
+        enroll: Option<Arc<dyn EnrollHandler>>,
         events: TunnelEvents,
     ) -> anyhow::Result<()> {
         let RelayPunched { path, rejoin } = *self;
-        let secret = relay_secret(secret);
-        tunnel::serve_box_rejoining(path, &secret, target, &rejoin, move |ev| {
+        tunnel::serve_box_rejoining_with(path, cred, target, &rejoin, enroll, move |ev| {
             events(match ev {
                 TunnelEvent::Connected { peer, rtt_ms, path } => TunnelUpdate::Connected {
                     peer,

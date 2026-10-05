@@ -52,10 +52,21 @@ impl BoxIdentity {
             signing: SigningKey::from_bytes(&seed),
         }
     }
-
     /// Load the identity stored at `path`, or create one there (file mode
     /// 0600, written atomically). The file holds the base64url seed.
+    ///
+    /// Creates silently — only for callers with no device pinning the key.
+    /// Once a device has enrolled (pinned the public key), use
+    /// [`load_or_create_with`](Self::load_or_create_with) with
+    /// `create = false`: a new key would lock every such device out.
     pub fn load_or_create(path: &Path) -> std::io::Result<Self> {
+        Self::load_or_create_with(path, true)
+    }
+
+    /// [`load_or_create`](Self::load_or_create) with an explicit creation
+    /// policy: with `create = false` a missing file is
+    /// `Err(ErrorKind::NotFound)` and nothing is written.
+    pub fn load_or_create_with(path: &Path, create: bool) -> std::io::Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
                 let seed = decode_key(s.trim()).ok_or_else(|| {
@@ -66,7 +77,7 @@ impl BoxIdentity {
                 })?;
                 Ok(Self::from_seed(seed))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
                 let id = Self::generate();
                 let seed = encode_key(&id.signing.to_bytes());
                 write_private(path, format!("{seed}\n").as_bytes())?;
@@ -74,6 +85,18 @@ impl BoxIdentity {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// The signing key, for the tunnel's TLS certificate and enrollment
+    /// grants (prefixes disjoint from [`identity_message`]).
+    #[cfg_attr(not(feature = "tunnel"), allow(dead_code))]
+    pub(crate) fn signing_key(&self) -> &SigningKey {
+        &self.signing
+    }
+
+    /// [`fingerprint`] of this identity.
+    pub fn fingerprint(&self) -> String {
+        fingerprint(&self.public_key())
     }
 
     pub fn public_key(&self) -> [u8; 32] {
@@ -154,6 +177,34 @@ pub fn decode_key(s: &str) -> Option<[u8; 32]> {
         .ok()
 }
 
+const FINGERPRINT_CONTEXT: &[u8] = b"peckboard box-fp/1";
+
+/// Human-comparable box fingerprint, 80 bits:
+/// `base32(SHA-256("peckboard box-fp/1" ‖ key))[..16]` as
+/// `XXXX-XXXX-XXXX-XXXX` (RFC 4648 alphabet, no padding). The box, the app
+/// and the CLI all show this string.
+pub fn fingerprint(key: &[u8; 32]) -> String {
+    use sha2::{Digest, Sha256};
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let digest = Sha256::new()
+        .chain_update(FINGERPRINT_CONTEXT)
+        .chain_update(key)
+        .finalize();
+    // 16 chars × 5 bits = the first 10 bytes.
+    let mut bits: u128 = 0;
+    for b in &digest[..10] {
+        bits = (bits << 8) | u128::from(*b);
+    }
+    let mut out = String::with_capacity(19);
+    for i in 0..16 {
+        if i > 0 && i % 4 == 0 {
+            out.push('-');
+        }
+        let idx = (bits >> (75 - 5 * i)) & 0x1f;
+        out.push(ALPHABET[idx as usize] as char);
+    }
+    out
+}
 /// A usable Ed25519 public key (on the curve, not small-order).
 pub fn is_valid_public_key(key: &[u8; 32]) -> bool {
     VerifyingKey::from_bytes(key).is_ok_and(|vk| !vk.is_weak())
@@ -216,6 +267,27 @@ mod tests {
         std::fs::write(&p, "garbage").unwrap();
         assert!(BoxIdentity::load_or_create(&p).is_err());
         let _ = std::fs::remove_dir_all(d);
+    }
+    #[test]
+    fn load_without_create_never_writes() {
+        let d = tmp_dir();
+        let p = d.join("box-identity");
+        let e = BoxIdentity::load_or_create_with(&p, false).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        assert!(!p.exists());
+        let a = BoxIdentity::load_or_create_with(&p, true).unwrap();
+        let b = BoxIdentity::load_or_create_with(&p, false).unwrap();
+        assert_eq!(a.public_key(), b.public_key());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn fingerprint_fixed_vector() {
+        let fp = fingerprint(&[7; 32]);
+        // Cross-checked: base32(sha256(b"peckboard box-fp/1" + b"\x07" * 32))[:16].
+        assert_eq!(fp, "HF27-SQLY-XYDE-WWUQ");
+        assert_eq!(fp.len(), 19);
+        assert_ne!(fp, fingerprint(&[8; 32]));
     }
 
     #[test]

@@ -3,12 +3,14 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 /**
  * UI e2e for Settings → Remote Access (relay pairing).
  *
- * Pair a device → the one-time link + QR + `peckboard-connect` command are
- * shown → the device appears in the list → revoke it through the shared
- * confirm. Remote access stays OFF for the whole test (the default), so the
- * server never registers with a relay and nothing here touches
- * relay.peckboard.com; the API is also checked to never hand the secret
- * back after creation.
+ * Pair a device → the one-time https link + QR, the box fingerprint, the
+ * expiry and the `peckboard-connect` command are shown → the device
+ * appears in the list waiting for its first connection → revoke it
+ * through the shared confirm. Remote access stays OFF for the whole test
+ * (the default), so the server never registers with a relay and nothing
+ * here touches relay.peckboard.com; the API is also checked to never hand
+ * the secret back after creation. The real enrollment flow lives in
+ * remote-access-enroll.spec.ts.
  */
 
 const E2E_USER = 'e2e-user'
@@ -53,15 +55,27 @@ test('pair a device, see its link once, then revoke it', async ({ request, page 
   await modal.getByTestId('remote-pair-name').fill('e2e-laptop')
   await modal.getByTestId('remote-pair-submit').click()
 
-  // ── The link, QR code and connect command, shown once ──────────────
+  // ── The link, QR code, fingerprint and expiry, shown once ──────────
   const linkModal = page.getByTestId('remote-pair-link-modal')
   await expect(linkModal).toBeVisible()
   const link = linkModal.getByTestId('remote-pair-link')
+  // v2: the https form, every field in the fragment, the default relay implied.
   await expect(link).toHaveValue(
-    /^peckboard:\/\/pair\/[A-Za-z0-9_-]{43}\?relay=relay\.peckboard\.com$/,
+    /^https:\/\/peckboard\.com\/pair#v=2&s=[A-Za-z0-9_-]{43}&k=[A-Za-z0-9_-]{43}&e=\d+$/,
   )
   const linkValue = await link.inputValue()
   await expect(linkModal.getByTestId('remote-pair-qr').locator('svg')).toBeVisible()
+  const fingerprint = await linkModal.getByTestId('remote-pair-fingerprint').innerText()
+  expect(fingerprint).toMatch(/^[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}$/)
+  await expect(linkModal.getByTestId('remote-pair-expires')).toHaveText(
+    'Works once · expires in 60 min',
+  )
+  // The app link carries the same secret for peckboard-connect / older apps.
+  const appLink = await linkModal.getByTestId('remote-pair-app-link').inputValue()
+  const secretPart = /[#&]s=([A-Za-z0-9_-]{43})/.exec(linkValue)![1]
+  expect(appLink).toMatch(
+    new RegExp(`^peckboard://pair/${secretPart}\\?relay=relay\\.peckboard\\.com&v=2&k=`),
+  )
   // The suggested command reads the link from stdin, never from argv.
   await expect(linkModal.getByTestId('remote-pair-command')).toHaveText(
     'peckboard-connect --save -',
@@ -70,15 +84,21 @@ test('pair a device, see its link once, then revoke it', async ({ request, page 
   await linkModal.getByTestId('remote-pair-done').click()
   await expect(linkModal).toBeHidden()
 
-  // ── Listed, and the secret is never served again ───────────────────
+  // ── Listed, the fingerprint matches the box's, the secret is never served again
   await expect(section.getByTestId('remote-device-row-e2e-laptop')).toBeVisible()
   await expect(section.getByTestId('remote-device-state-e2e-laptop')).toHaveText('off')
-  const secretPart = linkValue.slice('peckboard://pair/'.length).split('?')[0]
+  await expect(section.getByTestId('remote-device-enrollment-e2e-laptop')).toContainText(
+    'Waiting for first connection',
+  )
+  await expect(section.getByTestId('remote-box-fingerprint')).toContainText(fingerprint)
   const listRes = await request.get('/api/remote-access', {
     headers: { Authorization: `Bearer ${token}` },
   })
   expect(listRes.ok()).toBeTruthy()
-  expect(await listRes.text()).not.toContain(secretPart)
+  const listText = await listRes.text()
+  expect(listText).not.toContain(secretPart)
+  expect(listText).toContain(`"box_fingerprint":"${fingerprint}"`)
+  expect(listText).toContain('"enrollment":"pending"')
 
   // ── Revoke, via the row's 3-dot menu and the shared confirm ────────
   const row = section.locator('.list-view-row').filter({ hasText: 'e2e-laptop' })

@@ -19,12 +19,31 @@ interface DeviceStatus {
   path: 'direct' | 'relayed' | null
 }
 
+/**
+ * Pairing state. `legacy`: paired with an older link (the link itself is
+ * the credential; the app secures it on its first connect after an
+ * update). `pending`: a one-time link that nobody used yet. `expired`:
+ * that link's hour is over. `staged`: a device enrolled its own key and
+ * hasn't connected with it yet. `enrolled`: it has.
+ */
+type Enrollment = 'legacy' | 'pending' | 'expired' | 'staged' | 'enrolled'
+
 interface RemoteDevice {
   id: string
   name: string
   created_at: string
   last_connected_at: string | null
   status: DeviceStatus
+  enrollment: Enrollment
+  link_expires_at: string | null
+  enrolled_at: string | null
+  enrolled_from: string | null
+  device_name_hint: string | null
+  activated_at: string | null
+  /** Enrollment attempts with another key after this link was used. */
+  reuse_attempts: number
+  last_reuse_at: string | null
+  last_reuse_from: string | null
 }
 
 /** Relay registration of this box's identity key. */
@@ -47,12 +66,19 @@ interface Overview {
   public_address: string
   devices: RemoteDevice[]
   registration: Registration
+  /** Fingerprint of the box identity every v2 link pins; null until it exists. */
+  box_fingerprint: string | null
 }
 
 interface Pairing {
   device: RemoteDevice
+  /** `https://peckboard.com/pair#…` — what the QR encodes. */
   pairing_link: string
+  /** `peckboard://pair/…` — for `peckboard-connect` and older apps. */
+  app_link: string
   qr_svg: string
+  expires_at: string
+  box_fingerprint: string
 }
 
 const POLL_MS = 5000
@@ -144,13 +170,139 @@ function formatWhen(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
 }
 
+function formatTime(iso: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString([], { timeStyle: 'short' })
+}
+
+/** The wall clock, re-read every `everyMs` — for countdowns. */
+function useNow(everyMs: number): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), everyMs)
+    return () => clearInterval(t)
+  }, [everyMs])
+  return now
+}
+
+/** "59 min" / "40 s" until `iso`, or null once it has passed. */
+function expiresIn(iso: string | null, now: number): string | null {
+  if (!iso) return null
+  const diff = new Date(iso).getTime() - now
+  if (Number.isNaN(diff) || diff <= 0) return null
+  if (diff >= 90_000) return `${Math.ceil(diff / 60_000)} min`
+  return `${Math.ceil(diff / 1000)} s`
+}
+
+/** The one-time link + QR of a pairing, shown exactly once. */
+function PairingLinkModal({ pairing, onClose }: { pairing: Pairing; onClose: () => void }) {
+  const [copied, setCopied] = useState(false)
+  const now = useNow(1000)
+  const left = expiresIn(pairing.expires_at, now)
+  // Read from stdin: a link on the command line leaks to `ps` and history.
+  const command = 'peckboard-connect --save -'
+  return (
+    <Modal onClose={onClose} maxWidth={560} data-testid="remote-pair-link-modal">
+      <h2>Pair {pairing.device.name}</h2>
+      <p className="form-hint">
+        Scan this with the PeckBoard app. The link is shown <strong>only once</strong>, works for
+        one device, and expires after an hour; the device then keeps its own key, and the link is
+        useless to anyone else.
+      </p>
+      {left ? (
+        pairing.qr_svg && (
+          <div
+            className="mfa-qr"
+            data-testid="remote-pair-qr"
+            dangerouslySetInnerHTML={{ __html: pairing.qr_svg }}
+          />
+        )
+      ) : (
+        <div className="list-view-empty" data-testid="remote-pair-expired">
+          Expired — create a new link
+        </div>
+      )}
+      <p className="form-hint" style={{ textAlign: 'center' }} data-testid="remote-pair-expires">
+        {left ? `Works once · expires in ${left}` : 'Expired — create a new link'}
+      </p>
+      <div className="form-field">
+        <label className="form-label" htmlFor="remote-pair-fingerprint">
+          Box fingerprint — check this matches in the app
+        </label>
+        <code
+          id="remote-pair-fingerprint"
+          className="form-input"
+          style={{ display: 'block', textAlign: 'center', letterSpacing: '0.08em' }}
+          data-testid="remote-pair-fingerprint"
+        >
+          {pairing.box_fingerprint}
+        </code>
+      </div>
+      <div className="form-field">
+        <label className="form-label" htmlFor="remote-pair-link">
+          Pairing link
+        </label>
+        <textarea
+          id="remote-pair-link"
+          className="form-input"
+          rows={3}
+          readOnly
+          value={pairing.pairing_link}
+          data-testid="remote-pair-link"
+        />
+      </div>
+      <details>
+        <summary className="form-hint">For peckboard-connect or an older app</summary>
+        <textarea
+          className="form-input"
+          rows={3}
+          readOnly
+          value={pairing.app_link}
+          aria-label="Pairing link for the command line"
+          data-testid="remote-pair-app-link"
+        />
+        <p className="form-hint">
+          Connect with: <code data-testid="remote-pair-command">{command}</code>, then paste the
+          link and press Ctrl-D (Ctrl-Z, Enter on Windows). Reading it from stdin keeps the secret
+          out of the process list and shell history; the device&rsquo;s key is saved so later runs
+          need no link. A copied link sits on the clipboard, where other apps can read it.
+        </p>
+      </details>
+      <div className="form-actions">
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() =>
+            void copyText(pairing.pairing_link).then((ok) => {
+              setCopied(ok)
+              if (ok) setTimeout(() => setCopied(false), 2000)
+            })
+          }
+          disabled={!left}
+          data-testid="remote-pair-copy"
+        >
+          {copied ? 'Copied' : 'Copy link'}
+        </button>
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={onClose}
+          data-testid="remote-pair-done"
+        >
+          Done
+        </button>
+      </div>
+    </Modal>
+  )
+}
+
 /** Name the device, then show its pairing link + QR code exactly once. */
 function PairDeviceModal({ onClose, onPaired }: { onClose: () => void; onPaired: () => void }) {
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [pairing, setPairing] = useState<Pairing | null>(null)
-  const [copied, setCopied] = useState(false)
   const disabledReason = name.trim() ? '' : 'Name the device first.'
 
   const handleSubmit = async (e: FormEvent) => {
@@ -172,74 +324,14 @@ function PairDeviceModal({ onClose, onPaired }: { onClose: () => void; onPaired:
     }
   }
 
-  if (pairing) {
-    // Read from stdin: a link on the command line leaks to `ps` and history.
-    const command = 'peckboard-connect --save -'
-    return (
-      <Modal onClose={onClose} maxWidth={560} data-testid="remote-pair-link-modal">
-        <h2>Pair {pairing.device.name}</h2>
-        <p className="form-hint">
-          This link is shown <strong>only once</strong> — it holds the device&rsquo;s secret. Anyone
-          with it can reach this Peckboard while remote access is on. Revoke the device to
-          invalidate it.
-        </p>
-        {pairing.qr_svg && (
-          <div
-            className="mfa-qr"
-            data-testid="remote-pair-qr"
-            dangerouslySetInnerHTML={{ __html: pairing.qr_svg }}
-          />
-        )}
-        <div className="form-field">
-          <label className="form-label" htmlFor="remote-pair-link">
-            Pairing link
-          </label>
-          <textarea
-            id="remote-pair-link"
-            className="form-input"
-            rows={2}
-            readOnly
-            value={pairing.pairing_link}
-            data-testid="remote-pair-link"
-          />
-        </div>
-        <p className="form-hint">
-          Connect with: <code data-testid="remote-pair-command">{command}</code>, then paste the
-          link and press Ctrl-D (Ctrl-Z, Enter on Windows). Reading it from stdin keeps the secret
-          out of the process list and shell history; <code>--save</code> remembers it so later runs
-          need no link. A copied link sits on the clipboard, where other apps can read it.
-        </p>
-        <div className="form-actions">
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() =>
-              void copyText(pairing.pairing_link).then((ok) => {
-                setCopied(ok)
-                if (ok) setTimeout(() => setCopied(false), 2000)
-              })
-            }
-            data-testid="remote-pair-copy"
-          >
-            {copied ? 'Copied' : 'Copy link'}
-          </button>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={onClose}
-            data-testid="remote-pair-done"
-          >
-            Done
-          </button>
-        </div>
-      </Modal>
-    )
-  }
+  if (pairing) return <PairingLinkModal pairing={pairing} onClose={onClose} />
 
   return (
     <Modal onClose={onClose} maxWidth={480} data-testid="remote-pair-modal">
       <h2>Pair a Device</h2>
-      <p className="form-hint">Each device gets its own secret, so it can be revoked on its own.</p>
+      <p className="form-hint">
+        Each device gets its own one-time link and its own key, so it can be revoked on its own.
+      </p>
       <form onSubmit={handleSubmit}>
         <div className="form-field">
           <label className="form-label" htmlFor="remote-pair-name">
@@ -280,6 +372,52 @@ function PairDeviceModal({ onClose, onPaired }: { onClose: () => void; onPaired:
   )
 }
 
+/** The pairing badge of a device row. */
+function EnrollmentBadge({ d, now }: { d: RemoteDevice; now: number }) {
+  const testId = `remote-device-enrollment-${d.name}`
+  switch (d.enrollment) {
+    case 'legacy':
+      return (
+        <span
+          className="list-view-tag"
+          title="Paired with an older link, which is still its only credential. Update the PeckBoard app on this device to secure the pairing with a device key."
+          data-testid={testId}
+        >
+          Not enrolled (legacy)
+        </span>
+      )
+    case 'pending': {
+      const left = expiresIn(d.link_expires_at, now)
+      return (
+        <span className="list-view-tag" data-testid={testId}>
+          {left ? `Waiting for first connection · expires in ${left}` : 'Link expired'}
+        </span>
+      )
+    }
+    case 'expired':
+      return (
+        <span className="list-view-tag" data-testid={testId}>
+          Link expired
+        </span>
+      )
+    default: {
+      const who = [d.device_name_hint, formatTime(d.enrolled_at)].filter(Boolean).join(' · ')
+      const from = d.enrolled_from ? ` from ${d.enrolled_from}` : ''
+      return (
+        <span
+          className="list-view-tag"
+          title={d.enrolled_at ? `Enrolled ${formatWhen(d.enrolled_at)}${from}` : undefined}
+          data-testid={testId}
+        >
+          {`Enrolled${who ? ` · ${who}` : ''}${from}${
+            d.enrollment === 'staged' ? ' · first connection pending' : ''
+          }`}
+        </span>
+      )
+    }
+  }
+}
+
 /**
  * Settings → Remote Access: reach this Peckboard from anywhere through
  * relay.peckboard.com. The relay only introduces the two ends; traffic
@@ -294,6 +432,7 @@ export default function RemoteAccessSection() {
   const [saving, setSaving] = useState(false)
   const [confirmEnable, setConfirmEnable] = useState(false)
   const [showPair, setShowPair] = useState(false)
+  const [reissued, setReissued] = useState<Pairing | null>(null)
   const [renaming, setRenaming] = useState<RemoteDevice | null>(null)
   const [revoking, setRevoking] = useState<RemoteDevice | null>(null)
   const [revokeBusy, setRevokeBusy] = useState(false)
@@ -302,6 +441,7 @@ export default function RemoteAccessSection() {
   const [directServerErrors, setDirectServerErrors] = useState<DirectErrors>({})
   /** When the relay's registration page was opened; polling until registered. */
   const [regWaitingSince, setRegWaitingSince] = useState<number | null>(null)
+  const now = useNow(5000)
 
   const load = useCallback(
     () =>
@@ -397,8 +537,31 @@ export default function RemoteAccessSection() {
     })
   }
 
+  /** A fresh one-time link for a device whose link was never used. */
+  const reissueLink = async (d: RemoteDevice) => {
+    try {
+      const p = await api<Pairing>(`/api/remote-access/devices/${d.id}/link`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      setReissued(p)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to create a new link')
+    }
+  }
+
   const buildMenu = (d: RemoteDevice): MenuItem[] => [
     { label: 'Rename', onSelect: () => setRenaming(d), testId: `remote-device-rename-${d.id}` },
+    ...(d.enrollment === 'pending' || d.enrollment === 'expired'
+      ? [
+          {
+            label: 'New link',
+            onSelect: () => void reissueLink(d),
+            testId: `remote-device-new-link-${d.id}`,
+          } satisfies MenuItem,
+        ]
+      : []),
     { divider: true },
     {
       label: 'Revoke',
@@ -503,6 +666,15 @@ export default function RemoteAccessSection() {
             </button>
           )}
         </div>
+      )}
+      {data?.box_fingerprint && (
+        <p
+          className="form-hint"
+          title="Every pairing link pins this key; the app shows the same fingerprint before it pairs."
+          data-testid="remote-box-fingerprint"
+        >
+          Box fingerprint: <code>{data.box_fingerprint}</code>
+        </p>
       )}
 
       <div className="form-field">
@@ -630,6 +802,19 @@ export default function RemoteAccessSection() {
               >
                 {enabled ? STATE_LABEL[d.status.state] : 'off'}
               </span>
+              <EnrollmentBadge d={d} now={now} />
+              {d.reuse_attempts > 0 && (
+                <span
+                  className="list-view-tag"
+                  style={{ color: 'var(--danger, #c0392b)' }}
+                  title="Someone else tried to pair with this device's link after it was used. If that wasn't you, revoke this device."
+                  data-testid={`remote-device-reuse-${d.name}`}
+                >
+                  ⚠ Link already used by another device
+                  {d.last_reuse_at ? ` — tried ${formatTime(d.last_reuse_at)}` : ''}
+                  {d.last_reuse_from ? ` from ${d.last_reuse_from}` : ''}
+                </span>
+              )}
               {enabled && d.status.local_port !== null && (
                 <span
                   title={
@@ -665,6 +850,7 @@ export default function RemoteAccessSection() {
       {showPair && (
         <PairDeviceModal onClose={() => setShowPair(false)} onPaired={() => void load()} />
       )}
+      {reissued && <PairingLinkModal pairing={reissued} onClose={() => setReissued(null)} />}
       {renaming && (
         <RenameModal
           title="Rename device"

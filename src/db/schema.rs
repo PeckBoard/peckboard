@@ -465,6 +465,28 @@ diesel::table! {
     }
 }
 diesel::table! {
+    remote_device_enrollments (device_id) {
+        device_id -> Text,
+        state -> Text,
+        link_expires_at -> Nullable<Text>,
+        device_pubkey -> Nullable<Binary>,
+        rendezvous_ciphertext -> Nullable<Binary>,
+        rendezvous_nonce -> Nullable<Binary>,
+        link_secret_ciphertext -> Nullable<Binary>,
+        link_secret_nonce -> Nullable<Binary>,
+        link_refuse_until -> Nullable<Text>,
+        enrolled_at -> Nullable<Text>,
+        enrolled_from -> Nullable<Text>,
+        device_name_hint -> Nullable<Text>,
+        activated_at -> Nullable<Text>,
+        reuse_attempts -> Integer,
+        last_reuse_at -> Nullable<Text>,
+        last_reuse_from -> Nullable<Text>,
+        created_at -> Text,
+    }
+}
+diesel::joinable!(remote_device_enrollments -> remote_devices (device_id));
+diesel::table! {
     device_activity (id) {
         id -> Text,
         device_id -> Text,
@@ -774,4 +796,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     voice_prompt_versions,
     session_view_nodes,
     remote_devices,
+    remote_device_enrollments,
 );

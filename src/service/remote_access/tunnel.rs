@@ -33,12 +33,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::secret::DeviceSecret;
+use peckboard_relay::keys::PairingSecret;
 
-/// The box's permanent identity key (relay registration), and the relay's
-/// verdict on it for one session.
+/// The box's permanent identity key (relay registration, and the box's
+/// TLS identity on pairing-v2 tunnels), the relay's verdict on it for one
+/// session, and the pairing-v2 credential / enrollment hook a loop serves
+/// with.
 pub use peckboard_relay::identity::BoxIdentity;
-pub use peckboard_relay::tunnel::IdentityStatus;
+pub use peckboard_relay::tunnel::{BoxCredential, EnrollHandler, IdentityStatus};
 
 /// Request extension present on every request that came through a relay
 /// tunnel. Loopback-trusting routes must refuse requests carrying it.
@@ -102,15 +104,16 @@ pub type OnRegistered = Arc<dyn Fn(Registered) + Send + Sync>;
 /// production uses [`super::relay::RelayBackend`].
 #[async_trait::async_trait]
 pub trait TunnelBackend: Send + Sync + 'static {
-    /// Register as the box for this pairing and return once the device
-    /// has shown up and the punch succeeded. `identity` is proven to the
-    /// relay so a registered box may use the relayed fallback when the
-    /// relay's registration gate is on. `on_registered` fires once the
-    /// relay knows our endpoint.
+    /// Register as the box for this pairing (`secret`:
+    /// [`BoxCredential::relay_secret`] — `S`, or `S_R` for an enrolled
+    /// device) and return once the device has shown up and the punch
+    /// succeeded. `identity` is proven to the relay so a registered box may
+    /// use the relayed fallback when the relay's registration gate is on.
+    /// `on_registered` fires once the relay knows our endpoint.
     async fn establish(
         &self,
         relay_host: &str,
-        secret: &DeviceSecret,
+        secret: &PairingSecret,
         direct: &DirectOptions,
         identity: Option<&BoxIdentity>,
         on_registered: OnRegistered,
@@ -136,13 +139,17 @@ pub trait PunchedTunnel: Send {
     fn relay_identity(&self) -> Option<IdentityStatus> {
         None
     }
-    /// Accept the device's QUIC connection and forward every stream to
-    /// `target`. Returns when the connection ends (a device reconnecting on
-    /// a new path meanwhile replaces it without returning).
+    /// Accept the device's QUIC connection under `cred` and forward every
+    /// stream to `target` (what the connection may do follows from the
+    /// credential and the negotiated ALPN; `enroll` answers enrollment
+    /// requests and hears about activations). Returns when the connection
+    /// ends (a device reconnecting on a new path meanwhile replaces it
+    /// without returning).
     async fn serve(
         self: Box<Self>,
-        secret: &DeviceSecret,
+        cred: &BoxCredential,
         target: SocketAddr,
+        enroll: Option<Arc<dyn EnrollHandler>>,
         events: TunnelEvents,
     ) -> anyhow::Result<()>;
 }
@@ -275,7 +282,8 @@ pub async fn serve_tunnel(
     app: Router,
     device_id: &str,
     punched: Box<dyn PunchedTunnel>,
-    secret: &DeviceSecret,
+    cred: &BoxCredential,
+    enroll: Option<Arc<dyn EnrollHandler>>,
     events: TunnelEvents,
 ) -> anyhow::Result<()> {
     use tower::Service;
@@ -306,7 +314,7 @@ pub async fn serve_tunnel(
         ))
         .into_make_service_with_connect_info::<SocketAddr>();
 
-    let serve = punched.serve(secret, target, events);
+    let serve = punched.serve(cred, target, enroll, events);
     tokio::pin!(serve);
     let mut conns = JoinSet::new();
     // Never sent on; dropping it (with this future) ends every `TunnelIo`.
@@ -382,6 +390,14 @@ mod tests {
         assert_eq!(h.get(COOKIE).unwrap(), "x=1;y=2");
     }
 
+    /// A legacy (S-only) loop credential, as every pre-v2 pairing runs.
+    fn legacy() -> BoxCredential {
+        BoxCredential::Legacy {
+            s: PairingSecret::generate(),
+            identity: None,
+        }
+    }
+
     /// Fake tunnel whose "device" sends one raw HTTP request to the target
     /// — i.e. from 127.0.0.1, exactly like the relay library's forwarder.
     struct OneRequest {
@@ -397,8 +413,9 @@ mod tests {
         }
         async fn serve(
             self: Box<Self>,
-            _secret: &DeviceSecret,
+            _cred: &BoxCredential,
             target: SocketAddr,
+            _enroll: Option<Arc<dyn EnrollHandler>>,
             _events: TunnelEvents,
         ) -> anyhow::Result<()> {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -436,7 +453,8 @@ mod tests {
                 app.clone(),
                 "dev",
                 punched,
-                &DeviceSecret::generate(),
+                &legacy(),
+                None,
                 Arc::new(|_| {}),
             )
             .await
@@ -533,15 +551,9 @@ mod tests {
             request,
             response: response.clone(),
         });
-        serve_tunnel(
-            app,
-            "dev1",
-            punched,
-            &DeviceSecret::generate(),
-            Arc::new(|_| {}),
-        )
-        .await
-        .unwrap();
+        serve_tunnel(app, "dev1", punched, &legacy(), None, Arc::new(|_| {}))
+            .await
+            .unwrap();
         let resp = response.lock().unwrap().clone();
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
         let sessions = state

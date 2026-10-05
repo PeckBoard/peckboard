@@ -20,13 +20,17 @@ use tauri_plugin_peckboard_native::{Lifecycle, PeckboardNativeExt};
 use url::Url;
 
 use commands::{AppState, MicSync, ShellNonce, ShellOrigins, now_ms};
+use link::PairSlot;
 use store::{SecretStore, Store};
-use tunnel::{TunnelManager, TunnelState, TunnelStatus};
+use tunnel::{Milestone, TunnelManager, TunnelState, TunnelStatus};
 
 /// Event the shell UI listens to; payload is a `TunnelStatus`.
 pub const STATUS_EVENT: &str = "tunnel-status";
 /// A pairing deep link is waiting; the shell UI calls `take_pair_link`.
 pub const PAIR_EVENT: &str = "pair-link";
+/// A pairing link arrived while another was on the confirm screen and was
+/// dropped (the shell shows a toast).
+pub const PAIR_IGNORED_EVENT: &str = "pair-link-ignored";
 
 /// Pairing links in the Keychain / Keystore via the native plugin.
 struct NativeSecrets(AppHandle);
@@ -81,15 +85,23 @@ fn init_debug_log(dir: &std::path::Path) {
 #[derive(Default)]
 struct ShellHome(Arc<Mutex<Option<Url>>>);
 
-/// A `peckboard://pair/…` link opened the app: park it for the shell UI,
-/// which asks the user to confirm (showing the relay) before pairing, and
-/// bring the WebView back to the shell if a box UI is showing.
+/// A pairing link (`https://peckboard.com/pair#…` or `peckboard://pair/…`)
+/// opened the app: park it for the shell UI, which asks the user to
+/// confirm (showing the relay and the box fingerprint) before pairing, and
+/// bring the WebView back to the shell if a box UI is showing. While one
+/// link is on the confirm screen a second one is dropped, so a page can't
+/// swap the link under the user.
 fn open_pair_link(app: &AppHandle, raw: &str) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     log::info!("deep link opened ({} chars)", raw.len());
-    *state.pending_link.lock().unwrap() = Some(raw.to_string());
+    let parked = state.pair_slot.lock().unwrap().offer(raw);
+    if !parked {
+        log::warn!("deep link ignored: another pairing link is being confirmed");
+        let _ = app.emit(PAIR_IGNORED_EVENT, ());
+        return;
+    }
     let _ = app.emit(PAIR_EVENT, ());
     let Some(win) = app.get_webview_window("main") else {
         return;
@@ -185,16 +197,49 @@ pub fn run() {
             let events = handle.clone();
             let badge_shell = shell.clone();
             let tunnel = Arc::new(TunnelManager::new(move |st: &TunnelStatus| {
-                if st.state == TunnelState::Connected
-                    && let Some(s) = events.try_state::<AppState>()
-                {
-                    let _ = s
-                        .store
-                        .lock()
-                        .unwrap()
-                        .touch_connected(&st.box_id, now_ms());
-                    if st.rekeyed {
-                        reboot_box_page(&events, &s.tunnel, st.port);
+                if let Some(s) = events.try_state::<AppState>() {
+                    if st.state == TunnelState::Connected {
+                        let _ = s
+                            .store
+                            .lock()
+                            .unwrap()
+                            .touch_connected(&st.box_id, now_ms());
+                        if st.rekeyed {
+                            reboot_box_page(&events, &s.tunnel, st.port);
+                        }
+                    }
+                    // Pairing v2 bookkeeping (the credential itself was
+                    // stored by `on_enrolled` before the box was told).
+                    match &st.milestone {
+                        Some(Milestone::Enrolled {
+                            box_fingerprint,
+                            legacy_upgrade,
+                        }) => {
+                            log::info!(
+                                "box {}: enrolled with box {box_fingerprint} (legacy upgrade: {legacy_upgrade})",
+                                st.box_id
+                            );
+                            if let Err(e) = s
+                                .store
+                                .lock()
+                                .unwrap()
+                                .set_enrolled(&st.box_id, box_fingerprint)
+                            {
+                                log::warn!("enrollment bookkeeping failed: {e:#}");
+                            }
+                        }
+                        Some(Milestone::Activated) => {
+                            log::info!("box {}: activated, link retired", st.box_id);
+                            if let Err(e) = s
+                                .store
+                                .lock()
+                                .unwrap()
+                                .finish_activation(s.secrets.as_ref(), &st.box_id)
+                            {
+                                log::warn!("activation bookkeeping failed: {e:#}");
+                            }
+                        }
+                        None => {}
                     }
                 }
                 // Keep the box page's "Relayed" badge on the live path.
@@ -263,7 +308,7 @@ pub fn run() {
                 store: Mutex::new(store),
                 secrets: Arc::new(NativeSecrets(handle.clone())),
                 tunnel: tunnel.clone(),
-                pending_link: Mutex::new(None),
+                pair_slot: Mutex::new(PairSlot::default()),
             });
 
             let opener = handle.clone();
@@ -357,8 +402,10 @@ pub fn run() {
                 .min_inner_size(400.0, 600.0);
             builder.build()?;
 
-            // peckboard://pair/… links: launch URL, then any later ones
-            // (on Windows / Linux a later one arrives via single-instance).
+            // Pairing links (https://peckboard.com/pair#… via Universal /
+            // App Links on iOS / Android, peckboard://pair/… everywhere):
+            // launch URL, then any later ones (on Windows / Linux a later
+            // one arrives via single-instance).
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             if let Err(e) = app.deep_link().register_all() {
                 log::warn!("registering peckboard:// failed: {e}");
@@ -384,6 +431,8 @@ pub fn run() {
             commands::disconnect_box,
             commands::tunnel_status,
             commands::take_pair_link,
+            commands::confirm_pair,
+            commands::dismiss_pair,
         ])
         .build(tauri::generate_context!())
         .expect("error while building PeckBoard");

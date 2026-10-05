@@ -1230,6 +1230,56 @@ pub struct NewRemoteDevice {
     pub last_connected_at: Option<String>,
 }
 
+/// Pairing-v2 state of a remote-access device (`remote_device_enrollments`;
+/// see the migration for the state machine). No row = legacy pairing. The
+/// sealed blobs (`R`, and `S` once moved to the refuse loop) are only ever
+/// opened by `service::remote_access`. Not `Serialize`, like
+/// [`RemoteDevice`]: routes build their own view.
+#[derive(Queryable, Selectable, Clone, Debug)]
+#[diesel(table_name = remote_device_enrollments)]
+pub struct RemoteDeviceEnrollment {
+    pub device_id: String,
+    /// `pending` | `staged` | `active` ([`enrollment_state`]).
+    pub state: String,
+    pub link_expires_at: Option<String>,
+    pub device_pubkey: Option<Vec<u8>>,
+    pub rendezvous_ciphertext: Option<Vec<u8>>,
+    pub rendezvous_nonce: Option<Vec<u8>>,
+    pub link_secret_ciphertext: Option<Vec<u8>>,
+    pub link_secret_nonce: Option<Vec<u8>>,
+    pub link_refuse_until: Option<String>,
+    pub enrolled_at: Option<String>,
+    pub enrolled_from: Option<String>,
+    pub device_name_hint: Option<String>,
+    pub activated_at: Option<String>,
+    pub reuse_attempts: i32,
+    pub last_reuse_at: Option<String>,
+    pub last_reuse_from: Option<String>,
+    pub created_at: String,
+}
+
+/// Valid `RemoteDeviceEnrollment::state` values.
+pub mod enrollment_state {
+    pub const PENDING: &str = "pending";
+    pub const STAGED: &str = "staged";
+    pub const ACTIVE: &str = "active";
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = remote_device_enrollments)]
+pub struct NewRemoteDeviceEnrollment {
+    pub device_id: String,
+    pub state: String,
+    pub link_expires_at: Option<String>,
+    pub device_pubkey: Option<Vec<u8>>,
+    pub rendezvous_ciphertext: Option<Vec<u8>>,
+    pub rendezvous_nonce: Option<Vec<u8>>,
+    pub enrolled_at: Option<String>,
+    pub enrolled_from: Option<String>,
+    pub device_name_hint: Option<String>,
+    pub created_at: String,
+}
+
 /// One bridged remote-agent action against a device — the audit log the
 /// Agents panel's recent-actions drawer renders. `args_summary` is a
 /// short redacted summary of the request arguments (never the payload

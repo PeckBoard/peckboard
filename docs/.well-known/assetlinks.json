@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.peckboard.app",
+      "sha256_cert_fingerprints": [
+        "26:73:4F:D5:1C:7C:48:85:92:AF:D5:D3:59:10:97:51:67:2E:BD:65:84:BD:4D:77:95:F2:A9:F7:A9:C5:F2:4F"
+      ]
+    }
+  }
+]

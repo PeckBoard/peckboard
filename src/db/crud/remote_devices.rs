@@ -72,13 +72,18 @@ impl Db {
         .await
     }
 
-    /// Delete a paired device — and with it its sealed pairing secret.
-    /// Idempotent: `false` when nothing was removed.
+    /// Delete a paired device — and with it its sealed pairing secret and
+    /// its pairing-v2 enrollment row (the FK cascades too; deleting it
+    /// here keeps revoke correct even on a connection without
+    /// `foreign_keys`). Idempotent: `false` when nothing was removed.
     pub async fn delete_remote_device(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();
         self.with_conn(move |conn| {
-            let count = diesel::delete(remote_devices::table.find(&id)).execute(conn)?;
-            Ok(count > 0)
+            conn.transaction::<_, anyhow::Error, _>(|conn| {
+                diesel::delete(remote_device_enrollments::table.find(&id)).execute(conn)?;
+                let count = diesel::delete(remote_devices::table.find(&id)).execute(conn)?;
+                Ok(count > 0)
+            })
         })
         .await
     }
