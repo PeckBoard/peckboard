@@ -208,6 +208,9 @@ for now.
 1. Bump `version` in `src-tauri/tauri.conf.json` (keeps local builds in
    step; CI versions from the tag anyway), commit, push `main`.
 2. `git tag -a mobile-0.1.0 -m "mobile-0.1.0" && git push origin mobile-0.1.0`.
+3. When the run has attached the assets, repoint every app link in
+   `docs/downloads.md` (the site's Downloads page) at the new tag, refresh
+   the "Current app release" line, and push `main`.
 
 CI stamps the version into `tauri.conf.json` on the runner: Android
 `versionCode` = `X*1000000 + Y*1000 + Z` (must only ever grow), iOS build

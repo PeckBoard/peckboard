@@ -257,6 +257,17 @@ expects every completed change to go out. The release flow:
    `git push origin 0.1.27` — the tag triggers `Publish Release`
    (`.github/workflows/release-promote.yml`), which attaches the
    binaries built for that commit.
+5. Once the release is published, update `docs/downloads.md` (the
+   Downloads page on peckboard.com) if it names anything that release
+   changed — new or renamed binaries, platform notes, version examples.
+   Commit + push to `main` (docs-only: no version bump, no tag).
+
+**App releases (`mobile-X.Y.Z` tags) must always update
+`docs/downloads.md`**: its app links are pinned per version (macOS DMG,
+Windows exe/msi, Android APK + signing-cert fingerprint, the "Current
+app release" line). Wait for the `Mobile Release` run to attach the
+assets, check them with `gh release view mobile-X.Y.Z`, then repoint
+every link and push.
 
 If verification surfaces failures, fix them or confirm they are the
 known pre-existing ones before shipping; say which in the commit body.
