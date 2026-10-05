@@ -186,7 +186,12 @@
           return round();
         }
 
-        getJson("/api/registered?key=" + encodeURIComponent(key))
+        // POST, so the key stays out of the request line.
+        getJson("/api/registered", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key }),
+        })
           .then(function (j) {
             if (j.registered) {
               say("This box is already registered.", "ok");

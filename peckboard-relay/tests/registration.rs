@@ -253,6 +253,17 @@ async fn tunnel_works(
 // ---- HTTP over the TLS listener ------------------------------------------
 
 async fn http(h: &Harness, method: &str, target: &str, body: &str) -> (u16, String) {
+    http_from(h, None, method, target, body).await
+}
+
+/// [`http`] from loopback address `src` (default 127.0.0.1).
+async fn http_from(
+    h: &Harness,
+    src: Option<Ipv4Addr>,
+    method: &str,
+    target: &str,
+    body: &str,
+) -> (u16, String) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(h.cert.clone()).unwrap();
     let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -263,7 +274,13 @@ async fn http(h: &Harness, method: &str, target: &str, body: &str) -> (u16, Stri
     .with_root_certificates(roots)
     .with_no_client_auth();
     cfg.alpn_protocols = vec![b"h2".to_vec(), ALPN_HTTP1.to_vec()];
-    let tcp = TcpStream::connect(h.cfg.relay).await.unwrap();
+    let sock = tokio::net::TcpSocket::new_v4().unwrap();
+    sock.bind(SocketAddr::new(
+        IpAddr::V4(src.unwrap_or(Ipv4Addr::LOCALHOST)),
+        0,
+    ))
+    .unwrap();
+    let tcp = sock.connect(h.cfg.relay).await.unwrap();
     let mut tls = TlsConnector::from(Arc::new(cfg))
         .connect(ServerName::try_from(NAME).unwrap(), tcp)
         .await
@@ -287,6 +304,17 @@ fn json_str<'a>(body: &'a str, field: &str) -> &'a str {
     let pat = format!("\"{field}\":\"");
     let rest = &body[body.find(&pat).unwrap() + pat.len()..];
     &rest[..rest.find('"').unwrap()]
+}
+
+/// Challenge → proof of work → `POST /api/register` for `key`, from `src`.
+async fn register_from(h: &Harness, src: Option<Ipv4Addr>, key: &str) -> (u16, String) {
+    let (_, ch) = http_from(h, src, "GET", "/api/register/challenge", "").await;
+    let nonce = json_str(&ch, "nonce").to_string();
+    let form = format!(
+        "key={key}&nonce={nonce}&solution={}",
+        pow_solve(&nonce, key, 8)
+    );
+    http_from(h, src, "POST", "/api/register", &form).await
 }
 
 // ---- tests -------------------------------------------------------------------
@@ -367,6 +395,68 @@ async fn register_over_https() {
         .unwrap();
     assert_eq!(c.protocol_version(), 3);
     let _ = std::fs::remove_dir_all(dir);
+}
+/// The registry can't be grown without bound from the page: new keys are
+/// capped per address per day and in total (re-registering is free);
+/// challenges only work from the address they were issued to; the status
+/// check takes a JSON POST.
+#[tokio::test]
+async fn registration_is_capped_and_challenges_are_bound_to_the_address() {
+    let h = start(
+        RelayConfig {
+            registration_max_keys: 3,
+            registration_per_ip_per_day: 2.0,
+            ..RelayConfig::default()
+        },
+        Arc::new(Registry::in_memory()),
+        false,
+    )
+    .await;
+    let keys: Vec<String> = (0..4)
+        .map(|_| BoxIdentity::generate().public_key_b64())
+        .collect();
+    let other = Some(Ipv4Addr::new(127, 0, 0, 2));
+
+    // Per-address daily cap.
+    assert_eq!(register_from(&h, None, &keys[0]).await.0, 200);
+    assert_eq!(register_from(&h, None, &keys[1]).await.0, 200);
+    let (st, body) = register_from(&h, None, &keys[2]).await;
+    assert_eq!(st, 429, "{body}");
+    let (st, body) = register_from(&h, None, &keys[0]).await;
+    assert_eq!(
+        (st, body.as_str()),
+        (200, "{\"registered\":true,\"new\":false}")
+    );
+
+    // A challenge is good only from the address it was issued to.
+    let (_, ch) = http(&h, "GET", "/api/register/challenge", "").await;
+    let nonce = json_str(&ch, "nonce").to_string();
+    let form = format!(
+        "key={}&nonce={nonce}&solution={}",
+        keys[2],
+        pow_solve(&nonce, &keys[2], 8)
+    );
+    let (st, body) = http_from(&h, other, "POST", "/api/register", &form).await;
+    assert_eq!(st, 400, "{body}");
+
+    // Total cap: another address fills the last slot, then it's full.
+    assert_eq!(register_from(&h, other, &keys[2]).await.0, 200);
+    let (st, body) = register_from(&h, other, &keys[3]).await;
+    assert_eq!(st, 503, "{body}");
+    assert_eq!(h.relay.registry().len(), 3);
+
+    // Status over POST (JSON body), no key in the request line.
+    let status = |k: &str| format!("{{\"key\":\"{k}\"}}");
+    let (st, body) = http(&h, "POST", "/api/registered", &status(&keys[2])).await;
+    assert_eq!((st, body.as_str()), (200, "{\"registered\":true}"));
+    let (st, body) = http(&h, "POST", "/api/registered", &status(&keys[3])).await;
+    assert_eq!((st, body.as_str()), (200, "{\"registered\":false}"));
+    assert_eq!(
+        http(&h, "POST", "/api/registered", "{\"key\":\"xyz\"}")
+            .await
+            .0,
+        400
+    );
 }
 
 /// Gate off (the default): an unregistered box relays as before, and the

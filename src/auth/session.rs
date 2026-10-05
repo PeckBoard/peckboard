@@ -9,7 +9,9 @@ use crate::db::models::NewAuthSession;
 ///
 /// `require_auth` rejects tokens whose `jti` is missing from this table,
 /// so every issuer (login, password-change, desktop bootstrap) must go
-/// through here.
+/// through here. `remote_device_id`: the remote-access device the request
+/// came through (the `Tunnelled` extension), so revoking the device
+/// revokes this session too.
 pub async fn issue_session_token(
     db: &Db,
     jwt_secret: &[u8],
@@ -17,6 +19,7 @@ pub async fn issue_session_token(
     role: &str,
     user_agent: Option<String>,
     ip_address: Option<String>,
+    remote_device_id: Option<String>,
 ) -> anyhow::Result<String> {
     let session_id = uuid::Uuid::new_v4().to_string();
     let (token, exp) = create_token(jwt_secret, user_id, role, &session_id)?;
@@ -26,17 +29,19 @@ pub async fn issue_session_token(
         .unwrap()
         .as_secs() as i64;
 
-    db.create_auth_session(NewAuthSession {
-        id: session_id,
-        user_id: user_id.to_string(),
-        token_hash: hash_token(&token),
-        created_at: now_ts,
-        expires_at: exp as i64,
-        user_agent,
-        ip_address,
-    })
+    db.create_auth_session_via(
+        NewAuthSession {
+            id: session_id,
+            user_id: user_id.to_string(),
+            token_hash: hash_token(&token),
+            created_at: now_ts,
+            expires_at: exp as i64,
+            user_agent,
+            ip_address,
+        },
+        remote_device_id,
+    )
     .await?;
-
     Ok(token)
 }
 
@@ -72,6 +77,7 @@ mod tests {
             &user.role,
             Some("Peckboard desktop".into()),
             Some("127.0.0.1".into()),
+            None,
         )
         .await
         .unwrap();

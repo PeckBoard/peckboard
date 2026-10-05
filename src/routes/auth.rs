@@ -16,7 +16,14 @@ use crate::auth::password::{hash_password, verify_password};
 use crate::auth::rate_limit::RateLimiter;
 use crate::auth::session::issue_session_token;
 use crate::db::models::NewUser;
+use crate::service::remote_access::tunnel::Tunnelled;
 use crate::state::AppState;
+
+/// The remote-access device a request came through, recorded on the auth
+/// session it creates so revoking the device revokes the session.
+fn via_device(tunnelled: Option<Extension<Tunnelled>>) -> Option<String> {
+    tunnelled.map(|Extension(t)| t.device_id)
+}
 
 /// Minimum allowed password length. Bumped from 8 → 12 to keep a
 /// LAN-exposed deployment out of trivial brute-force range when paired
@@ -234,6 +241,7 @@ async fn login(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    tunnelled: Option<Extension<Tunnelled>>,
     Json(body): Json<LoginRequest>,
 ) -> Result<LoginSuccess, (StatusCode, Json<serde_json::Value>)> {
     tracing::info!(username = %body.username, "Login attempt");
@@ -306,15 +314,21 @@ async fn login(
 
     match proof.session_grant() {
         Ok(grant) => {
-            let token =
-                mfa::complete_login(&state.db, &state.jwt_secret, &grant, user_agent, ip_address)
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": e.to_string()})),
-                        )
-                    })?;
+            let token = mfa::complete_login(
+                &state.db,
+                &state.jwt_secret,
+                &grant,
+                user_agent,
+                ip_address,
+                via_device(tunnelled),
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+            })?;
             state.login_limiter.reset(&ip);
             Ok(LoginSuccess::Authed(Json(AuthResponse {
                 token,
@@ -388,6 +402,7 @@ async fn change_password(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    tunnelled: Option<Extension<Tunnelled>>,
     request: axum::http::Request<axum::body::Body>,
 ) -> impl IntoResponse {
     let auth_user = request
@@ -570,6 +585,7 @@ async fn change_password(
         &user.role,
         user_agent,
         ip_address,
+        via_device(tunnelled),
     )
     .await
     .map_err(|e| {
@@ -1024,6 +1040,7 @@ async fn mfa_verify(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    tunnelled: Option<Extension<Tunnelled>>,
     Json(body): Json<MfaVerifyBody>,
 ) -> Result<Json<AuthResponse>, (StatusCode, Json<serde_json::Value>)> {
     let ip = addr.ip();
@@ -1078,6 +1095,7 @@ async fn mfa_verify(
                 &grant,
                 user_agent,
                 Some(ip.to_string()),
+                via_device(tunnelled),
             )
             .await
             .map_err(|e| {
@@ -1276,6 +1294,7 @@ mod tests {
             State(state),
             ConnectInfo("10.9.8.7:1".parse().unwrap()),
             HeaderMap::new(),
+            None,
             Json(MfaVerifyBody {
                 challenge: "fresh-token".into(),
                 method: "totp".into(),

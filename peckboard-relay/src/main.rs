@@ -1,8 +1,9 @@
 //! `peckboard-relay` binary. Administration is local only: CLI flags at
 //! start, `SIGUSR1` toggles debug logging, `SIGTERM`/`SIGINT` shut down
 //! gracefully, and `peckboard-relay registry …` edits the box registry
-//! file (a running relay picks the change up within ~30 s). Nothing
-//! administrative is reachable over the network.
+//! file under a lock shared with the running relay, which picks the change
+//! up within a few seconds. Nothing administrative is reachable over the
+//! network.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -109,6 +110,21 @@ struct Args {
     #[arg(long, env = "PECKRELAY_REGISTRATION_POW_BITS", default_value_t = 18,
           value_parser = clap::value_parser!(u8).range(8..=28))]
     registration_pow_bits: u8,
+    /// Most registered boxes the public page may add (the admin CLI is not
+    /// capped); past it, registration answers 503.
+    #[arg(
+        long,
+        env = "PECKRELAY_REGISTRATION_MAX_KEYS",
+        default_value_t = 100_000
+    )]
+    registration_max_keys: usize,
+    /// New box registrations one IP (IPv6: /64) may make per day.
+    #[arg(
+        long,
+        env = "PECKRELAY_REGISTRATIONS_PER_IP_PER_DAY",
+        default_value_t = 50
+    )]
+    registrations_per_ip_per_day: u32,
     /// Initial log filter (also RUST_LOG).
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     log: String,
@@ -230,6 +246,8 @@ async fn run(
         relay_idle_timeout: Duration::from_secs(args.relay_idle_secs),
         registration_gate: args.registration_gate,
         registration_pow_bits: args.registration_pow_bits,
+        registration_max_keys: args.registration_max_keys,
+        registration_per_ip_per_day: f64::from(args.registrations_per_ip_per_day),
         ..RelayConfig::default()
     };
     let registry = Arc::new(

@@ -430,6 +430,47 @@ async fn device_notices_vanished_box() {
     assert!(t0.elapsed() < Duration::from_secs(20));
     assert!(dev.await.unwrap().is_ok());
 }
+/// Revoke / disable aborts the box's serve task. That must end the tunnel
+/// for real: the device hears about it at once (no ping timeout), and a
+/// long-lived stream through it (a WebSocket) is cut, not left running.
+#[tokio::test]
+async fn aborting_the_box_closes_the_tunnel_and_its_streams() {
+    let target = echo_server().await;
+    let (bp, dp) = paths().await;
+    let s = PairingSecret::generate();
+    let bs = s.clone();
+    let (on_box, mut box_ev) = events();
+    let srv = tokio::spawn(async move { serve_box(bp, &bs, target, on_box).await });
+    let listen = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listen.local_addr().unwrap().port();
+    let (on_dev, mut dev_ev) = events();
+    tokio::spawn(async move { connect_device(dp, &s, &listen, on_dev).await });
+    connected(&mut dev_ev).await;
+    connected(&mut box_ev).await;
+
+    let mut ws = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    ws.write_all(
+        b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert!(read_head(&mut ws).await.starts_with("HTTP/1.1 101"));
+
+    srv.abort();
+    let quick = Duration::from_secs(2);
+    match tokio::time::timeout(quick, dev_ev.recv()).await {
+        Ok(Some(TunnelEvent::Disconnected { reason })) => {
+            assert!(!reason.contains("ping"), "{reason}")
+        }
+        other => panic!("expected Disconnected within 2 s, got {other:?}"),
+    }
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(quick, ws.read(&mut buf)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        other => panic!("WebSocket stream survived the box: {other:?}"),
+    }
+}
 
 // ---- run_device + cookie gate -------------------------------------------
 

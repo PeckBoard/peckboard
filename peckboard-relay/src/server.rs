@@ -98,6 +98,9 @@ const RELAY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// Idle-id records may outnumber live ids by this factor (+ slack) before
 /// stale ones are compacted away.
 const IDLE_QUEUE_SLACK: usize = 1024;
+/// First retry after a failed registry reload (doubling up to the reload
+/// interval).
+const REGISTRY_RETRY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct RelayConfig {
@@ -116,11 +119,12 @@ pub struct RelayConfig {
     /// else.
     pub stun_rate_per_ip: f64,
     pub stun_burst_per_ip: f64,
-    /// STUN requests per second per credential and burst.
+    /// STUN requests per second per credential and burst, charged only for
+    /// requests whose integrity verifies.
     pub stun_rate_per_cred: f64,
     pub stun_burst_per_cred: f64,
-    /// Global STUN ceiling, charged only for well-formed requests naming a
-    /// live credential.
+    /// Global STUN ceiling, likewise charged only for verified requests
+    /// (after the credential's own budget).
     pub stun_rate_global: f64,
     pub stun_burst_global: f64,
     /// Signaling messages per second per session and burst.
@@ -208,8 +212,11 @@ pub struct RelayConfig {
     pub registration_pow_bits: u8,
     /// How long a registration challenge stays valid (single use).
     pub registration_challenge_ttl: Duration,
-    /// Outstanding registration challenges, relay-wide.
-    pub registration_max_challenges: usize,
+    /// Registered boxes the public page may grow the registry to; past it,
+    /// registration answers 503 (the admin CLI is not capped).
+    pub registration_max_keys: usize,
+    /// New registrations one IP may make per day (v6: /64, /56 ×2, /48 ×4).
+    pub registration_per_ip_per_day: f64,
     /// Registration-page HTTP requests per second per IP (v6: /64, /56 ×2,
     /// /48 ×4) and burst, plus the relay-wide ceiling.
     pub http_rate_per_ip: f64,
@@ -274,7 +281,8 @@ impl Default for RelayConfig {
             registration_gate: false,
             registration_pow_bits: 18,
             registration_challenge_ttl: Duration::from_secs(300),
-            registration_max_challenges: 10_000,
+            registration_max_keys: 100_000,
+            registration_per_ip_per_day: 50.0,
             http_rate_per_ip: 0.5,
             http_burst_per_ip: 20.0,
             http_rate_global: 50.0,
@@ -640,8 +648,14 @@ struct Shared {
     registry: Arc<Registry>,
     /// Registration-page requests per IP + global.
     http_limiter: RateLimiter,
-    /// Outstanding proof-of-work challenges → expiry (single use).
-    pow_challenges: Mutex<HashMap<[u8; 16], Instant>>,
+    /// New registrations per IP (daily budget).
+    register_limiter: RateLimiter,
+    /// Keys the stateless proof-of-work challenges ([`http`]).
+    challenge_key: [u8; 32],
+    /// Challenges already submitted, per client address key → their
+    /// expiry (unix secs): single use. Only challenges minted for that
+    /// address get in, so it is bounded by the HTTP rate × the TTL.
+    pow_seen: Mutex<HashMap<IpAddr, Vec<(http::Nonce, u64)>>>,
 }
 
 impl Shared {
@@ -705,7 +719,12 @@ impl Relay {
                 cfg.http_rate_global,
                 cfg.http_burst_global,
             ),
-            pow_challenges: Mutex::new(HashMap::new()),
+            register_limiter: RateLimiter::per_ip_only(
+                cfg.registration_per_ip_per_day / 86_400.0,
+                cfg.registration_per_ip_per_day,
+            ),
+            challenge_key: random(),
+            pow_seen: Mutex::new(HashMap::new()),
             conn_limiter: RateLimiter::new(
                 cfg.conn_rate_per_ip,
                 cfg.conn_burst_per_ip,
@@ -748,6 +767,7 @@ impl Relay {
             shared: Arc::new(shared),
         };
         relay.spawn_housekeeping();
+        relay.spawn_registry_reload();
         relay
     }
 
@@ -819,6 +839,42 @@ impl Relay {
         });
     }
 
+    /// Keep the registry's in-memory set in step with its file (admin CLI
+    /// edits, revokes) off the data path: lookups never touch disk. A
+    /// failed reload keeps the last good set and retries soon.
+    fn spawn_registry_reload(&self) {
+        if self.shared.registry.path().is_none() {
+            return;
+        }
+        let relay = self.clone();
+        self.shared.tasks.spawn(async move {
+            let s = &relay.shared;
+            let every = s.registry.reload_interval();
+            let first_retry = REGISTRY_RETRY.min(every);
+            let mut delay = every;
+            loop {
+                tokio::select! {
+                    _ = s.shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                let reg = s.registry.clone();
+                match tokio::task::spawn_blocking(move || reg.reload()).await {
+                    Ok(Ok(())) => delay = every,
+                    r => {
+                        if let Ok(Err(e)) = r {
+                            warn!("registry reload: {e}");
+                        }
+                        delay = if delay >= every {
+                            first_retry
+                        } else {
+                            (delay * 2).min(every)
+                        };
+                    }
+                }
+            }
+        });
+    }
+
     /// Periodic sweep: limiter tables, expired credentials and ids, idle
     /// relay pairs, and unpaired sessions past their lifetime.
     fn housekeep(&self, now: Instant) {
@@ -827,9 +883,16 @@ impl Relay {
         s.stun_limiter.prune();
         s.new_id_limiter.prune();
         s.relay_limiter.prune();
-        s.relay_limiter.prune();
         s.http_limiter.prune();
-        s.pow_challenges.lock().unwrap().retain(|_, exp| *exp > now);
+        s.register_limiter.prune();
+        {
+            let now_s = unix_ms() / 1000;
+            let mut seen = s.pow_seen.lock().unwrap();
+            seen.retain(|_, v| {
+                v.retain(|(_, exp)| *exp > now_s);
+                !v.is_empty()
+            });
+        }
         {
             let mut guard = s.ids.lock().unwrap();
             let ids = &mut *guard;
@@ -1169,6 +1232,8 @@ impl Relay {
         // ---- main loop
         let mut bucket = (cfg.msg_burst, Instant::now());
         let mut alive_until = Instant::now() + cfg.idle_timeout;
+        // Until then, this pair was just refused by the registration gate.
+        let mut gate_denied_until: Option<Instant> = None;
         loop {
             let frame = tokio::select! {
                 _ = kick.cancelled() => break,
@@ -1182,9 +1247,22 @@ impl Relay {
                     break;
                 };
                 match binding {
+                    // Gate-refused a moment ago: dropped without touching
+                    // the id table, charged to this address's relay bytes,
+                    // and never keeps the session alive.
+                    Some(_)
+                        if meta.class() == CLASS_PAIRED
+                            && gate_denied_until.is_some_and(|t| now < t) =>
+                    {
+                        s.stats.dropped_limit.fetch_add(1, Ordering::Relaxed);
+                        let _ = s.relay_limiter.allow_cost(meta.ip, packet.len() as f64);
+                    }
                     Some(b) if meta.class() == CLASS_PAIRED => {
-                        self.relay_data(&b, packet);
-                        alive_until = now + cfg.idle_timeout;
+                        if self.relay_data(&b, packet) {
+                            gate_denied_until = Some(now + RELAY_RETRY_INTERVAL);
+                        } else {
+                            alive_until = now + cfg.idle_timeout;
+                        }
                     }
                     // No online peer (decoys alike): nothing to relay to.
                     // Charged like signaling, and never keeps the session
@@ -1384,23 +1462,27 @@ impl Relay {
     }
 
     /// Forward one v2 datagram to the other peer, within the bandwidth caps.
-    /// Opaque: never inspected, stored or logged.
-    fn relay_data(&self, b: &Binding, packet: Vec<u8>) {
+    /// Opaque: never inspected, stored or logged. True ⇒ refused by the
+    /// registration gate (the caller backs off before asking again).
+    fn relay_data(&self, b: &Binding, packet: Vec<u8>) -> bool {
         let s = &self.shared;
         let st = &s.stats;
         if !s.cfg.relay_enabled {
             st.dropped_no_peer.fetch_add(1, Ordering::Relaxed);
-            return;
+            return false;
         }
         let len = packet.len();
         let now = Instant::now();
+        // Taken before `ids`: the gate decision under that lock is a plain
+        // lookup in an immutable set (no registry lock, no disk).
+        let registered = s.cfg.registration_gate.then(|| s.registry.snapshot());
         let (peer_out, my_ip) = {
             let mut ids = s.ids.lock().unwrap();
             let Some(e) = ids.map.get(&b.rendezvous_id) else {
-                return;
+                return false;
             };
             if !owns(e, b) {
-                return;
+                return false;
             }
             let my_ip = e.slots[b.role.index()].as_ref().expect("owned").ip;
             // Both ends online — each slot holds a verified signature — and
@@ -1410,31 +1492,39 @@ impl Relay {
                 .filter(|p| p.out.data.is_some())
             else {
                 st.dropped_no_peer.fetch_add(1, Ordering::Relaxed);
-                return;
+                return false;
             };
             let (peer_out, ips, held) = (peer.out.clone(), [my_ip, peer.ip], e.relay.is_some());
             // The registration gate: the box end must have proven a
             // registered identity (re-checked per datagram, so a revoke
             // bites within the registry's reload interval). Refused like a
-            // full relay: dropped, the pair's slot freed.
-            if s.cfg.registration_gate {
+            // full relay: dropped, the pair's slot freed; the bytes still
+            // count against the id's and the sender's relay budgets.
+            if let Some(registered) = &registered {
                 let box_ok = e.slots[Role::Box.index()]
                     .as_ref()
                     .and_then(|bx| bx.identity)
-                    .is_some_and(|k| s.registry.contains(&k));
+                    .is_some_and(|k| registered.contains(&k));
                 if !box_ok {
                     let Ids { map, relaying, .. } = &mut *ids;
                     if let Some(e) = map.get_mut(&b.rendezvous_id) {
                         end_relay(s, relaying, &b.rendezvous_id, e);
                         e.relay_denied = Some(now);
+                        let _ = e.relay_bucket.take(
+                            s.cfg.relay_rate_per_id,
+                            s.cfg.relay_burst_per_id,
+                            len as f64,
+                        );
                     }
+                    drop(ids);
                     st.dropped_limit.fetch_add(1, Ordering::Relaxed);
-                    return;
+                    let _ = s.relay_limiter.allow_cost(my_ip, len as f64);
+                    return true;
                 }
             }
             if !held && !self.acquire_relay(&mut ids, &b.rendezvous_id, ips, now) {
                 st.dropped_limit.fetch_add(1, Ordering::Relaxed);
-                return;
+                return false;
             }
             let e = ids.map.get_mut(&b.rendezvous_id).expect("present");
             if let Some(h) = e.relay.as_mut() {
@@ -1446,13 +1536,13 @@ impl Relay {
                 len as f64,
             ) {
                 st.dropped_limit.fetch_add(1, Ordering::Relaxed);
-                return;
+                return false;
             }
             (peer_out, my_ip)
         };
         if !s.relay_limiter.allow_cost(my_ip, len as f64) {
             st.dropped_limit.fetch_add(1, Ordering::Relaxed);
-            return;
+            return false;
         }
         if let Some(tap) = s.tap.get() {
             tap(&packet);
@@ -1463,6 +1553,7 @@ impl Relay {
         } else {
             st.dropped_queue.fetch_add(1, Ordering::Relaxed);
         }
+        false
     }
 
     /// Give `rid` a relay pair slot (its ends at `ips`). Refusals are
@@ -1598,8 +1689,8 @@ impl Relay {
                 r = socket.recv_from(&mut buf) => r,
             };
             let Ok((n, src)) = r else { continue };
-            // Per-source buckets first, so one address (or prefix) can
-            // neither drain the global budget nor reach it with junk.
+            // Per-source buckets first, so one address (or prefix) can't
+            // even reach the credential table in volume.
             if !s.stun_limiter.allow(src.ip()) {
                 continue;
             }
@@ -1614,8 +1705,15 @@ impl Relay {
                 else {
                     continue;
                 };
-                // Only well-formed requests naming a live credential cost
-                // global tokens, after that credential's own budget.
+                // Integrity before any shared budget: junk naming a live
+                // credential (from spoofed sources, say) must not spend
+                // that credential's tokens or the global ones. HMAC-SHA1
+                // over ≤ 548 bytes is cheap enough to do under the lock.
+                // (Decoy sessions keep their working credential: denying
+                // them one would tell a decoy apart.)
+                if !req.verify(c.password.as_bytes()) {
+                    continue;
+                }
                 if !c
                     .bucket
                     .take(s.cfg.stun_rate_per_cred, s.cfg.stun_burst_per_cred, 1.0)
@@ -1632,9 +1730,6 @@ impl Relay {
                 (c.password.clone(), c.bind)
             };
             let (password, bind) = found;
-            if !req.verify(password.as_bytes()) {
-                continue;
-            }
             if let Some(b) = bind {
                 let mut ids = s.ids.lock().unwrap();
                 if let Some(e) = ids.map.get_mut(&b.rendezvous_id)
@@ -1835,6 +1930,8 @@ mod tests {
         rd: ReadHalf<DuplexStream>,
         wr: WriteHalf<DuplexStream>,
         task: tokio::task::JoinHandle<()>,
+        /// The `Registered` the handshake ended with.
+        registered: Option<ServerMsg>,
     }
 
     /// Admit a v2 session from `ip` over an in-memory pipe (`buf` bytes of
@@ -1851,7 +1948,12 @@ mod tests {
             })
         };
         let (rd, wr) = tokio::io::split(client);
-        let mut p = Peer { rd, wr, task };
+        let mut p = Peer {
+            rd,
+            wr,
+            task,
+            registered: None,
+        };
         let keys = match who {
             Who::Decoy => {
                 p.send_raw(&[0x01, 0xff]).await;
@@ -1880,8 +1982,10 @@ mod tests {
                 .await
             }
         }
-        p.wait_for(|m| matches!(m, ServerMsg::Registered { .. }))
+        let reg = p
+            .wait_for(|m| matches!(m, ServerMsg::Registered { .. }))
             .await;
+        p.registered = Some(reg);
         Some(p)
     }
 
@@ -2045,6 +2149,7 @@ mod tests {
             rd: mut dev_rd,
             wr: dev_wr,
             task: dev_task,
+            ..
         } = dev;
         let slow = tokio::spawn(async move {
             let mut buf = [0u8; 100];
@@ -2216,5 +2321,58 @@ mod tests {
         let (_p2, _p2d) = relaying_pair(&relay, [hog, hog]).await;
         let st = relay.relay_stats();
         assert_eq!((st.active_pairs, st.dropped_limit), (1, 1));
+    }
+
+    /// Requests naming a live credential with a bad MESSAGE-INTEGRITY (e.g.
+    /// from spoofed sources) cost neither that credential's budget nor the
+    /// global one.
+    #[tokio::test]
+    async fn stun_bad_integrity_spends_no_budget() {
+        let relay = Relay::new(
+            RelayConfig {
+                stun_burst_per_ip: 1000.0,
+                stun_rate_per_cred: 0.001,
+                stun_burst_per_cred: 3.0,
+                stun_rate_global: 0.001,
+                stun_burst_global: 3.0,
+                ..cfg()
+            },
+            3478,
+        );
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let r = relay.clone();
+        tokio::spawn(async move { r.serve_stun(server).await });
+        let mut p = connect(&relay, "198.51.100.1", Who::Decoy, 64 * 1024)
+            .await
+            .unwrap();
+        let Some(ServerMsg::Registered {
+            stun_username: user,
+            stun_password: pw,
+            ..
+        }) = p.registered.take()
+        else {
+            panic!("no credential");
+        };
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        for i in 0..50u8 {
+            let junk = stun::build_request(&[i; 12], &user, b"not the password");
+            client.send_to(&junk, addr).await.unwrap();
+        }
+        let mut buf = [0u8; 1024];
+        let mut answered = 0;
+        for i in 0..4u8 {
+            let txid = [100 + i; 12];
+            let req = stun::build_request(&txid, &user, pw.as_bytes());
+            client.send_to(&req, addr).await.unwrap();
+            let wait = Duration::from_millis(if i < 3 { 2000 } else { 300 });
+            if let Ok(Ok((n, _))) = tokio::time::timeout(wait, client.recv_from(&mut buf)).await {
+                assert!(stun::parse_response(&buf[..n], &txid, pw.as_bytes()).is_some());
+                answered += 1;
+            }
+        }
+        // All three tokens were left for the real requests; the fourth
+        // finds the bucket empty.
+        assert_eq!(answered, 3);
     }
 }

@@ -1010,6 +1010,7 @@ async fn mint_desktop_bootstrap_token(
         &user.role,
         Some("Peckboard desktop".into()),
         Some("127.0.0.1".into()),
+        None,
     )
     .await
     {

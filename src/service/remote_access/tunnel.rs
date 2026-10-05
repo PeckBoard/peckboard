@@ -10,18 +10,27 @@
 //!   [`tunnel_client_addr`] — never a loopback address), so every
 //!   `is_loopback()` check, rate limit, and auth-session IP sees the
 //!   remote peer, and
-//! - a [`Tunnelled`] request extension, which loopback-only routes refuse
-//!   outright as a second, explicit guard.
+//! - a [`Tunnelled`] request extension naming the device, which
+//!   loopback-only routes refuse outright as a second, explicit guard, and
+//!   which auth sessions created through the tunnel record so revoking the
+//!   device revokes them.
 //!
 //! Per-connection tasks live in a `JoinSet` owned by the serving future,
-//! so aborting the device's task (revoke / disable) drops every open
-//! HTTP/WebSocket connection with it.
+//! and every connection's socket is a [`TunnelIo`] that closes once that
+//! future is gone, so aborting the device's task (revoke / disable) drops
+//! every open HTTP connection with it — upgraded WebSockets included,
+//! which hyper hands to tasks of their own.
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use axum::Router;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::secret::DeviceSecret;
@@ -33,8 +42,11 @@ pub use peckboard_relay::tunnel::IdentityStatus;
 
 /// Request extension present on every request that came through a relay
 /// tunnel. Loopback-trusting routes must refuse requests carrying it.
-#[derive(Clone, Copy, Debug)]
-pub struct Tunnelled;
+#[derive(Clone, Debug)]
+pub struct Tunnelled {
+    /// The remote-access device whose tunnel carried the request.
+    pub device_id: String,
+}
 
 /// Live tunnel state reported by the relay library.
 #[derive(Debug, Clone)]
@@ -188,9 +200,80 @@ fn strip_gate_cookie(headers: &mut axum::http::HeaderMap) {
     }
 }
 
-/// Serve `app` to one tunnel until it ends. See the module docs.
+/// One tunnelled TCP connection, cut when its tunnel's serving future is
+/// dropped (the `watch::Sender` it holds goes away): from then on reads
+/// see EOF, writes fail, and the socket is closed.
+struct TunnelIo {
+    tcp: Option<TcpStream>,
+    ended: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl TunnelIo {
+    fn new(tcp: TcpStream, mut alive: watch::Receiver<()>) -> Self {
+        let ended = Box::pin(async move { while alive.changed().await.is_ok() {} });
+        TunnelIo {
+            tcp: Some(tcp),
+            ended,
+        }
+    }
+
+    /// The live socket, or `None` once the tunnel ended (closing it).
+    fn live(&mut self, cx: &mut Context<'_>) -> Option<&mut TcpStream> {
+        if self.tcp.is_some() && self.ended.as_mut().poll(cx).is_ready() {
+            self.tcp = None;
+        }
+        self.tcp.as_mut()
+    }
+}
+
+fn tunnel_gone() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "remote-access tunnel ended")
+}
+
+impl AsyncRead for TunnelIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut().live(cx) {
+            Some(tcp) => Pin::new(tcp).poll_read(cx, buf),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+impl AsyncWrite for TunnelIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut().live(cx) {
+            Some(tcp) => Pin::new(tcp).poll_write(cx, buf),
+            None => Poll::Ready(Err(tunnel_gone())),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut().live(cx) {
+            Some(tcp) => Pin::new(tcp).poll_flush(cx),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut().live(cx) {
+            Some(tcp) => Pin::new(tcp).poll_shutdown(cx),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+/// Serve `app` to `device_id`'s tunnel until it ends. See the module docs.
 pub async fn serve_tunnel(
     app: Router,
+    device_id: &str,
     punched: Box<dyn PunchedTunnel>,
     secret: &DeviceSecret,
     events: TunnelEvents,
@@ -212,7 +295,9 @@ pub async fn serve_tunnel(
         })
     };
     let mut make_service = app
-        .layer(axum::Extension(Tunnelled))
+        .layer(axum::Extension(Tunnelled {
+            device_id: device_id.to_string(),
+        }))
         .layer(axum::middleware::map_request(
             |mut req: axum::extract::Request| async move {
                 strip_gate_cookie(req.headers_mut());
@@ -224,6 +309,8 @@ pub async fn serve_tunnel(
     let serve = punched.serve(secret, target, events);
     tokio::pin!(serve);
     let mut conns = JoinSet::new();
+    // Never sent on; dropping it (with this future) ends every `TunnelIo`.
+    let (alive, _) = watch::channel(());
     loop {
         tokio::select! {
             res = &mut serve => return res,
@@ -243,8 +330,9 @@ pub async fn serve_tunnel(
                 }
                 let client = *client.lock().unwrap();
                 let Ok(svc) = make_service.call(client).await;
+                let io = TunnelIo::new(tcp, alive.subscribe());
                 conns.spawn(async move {
-                    let io = hyper_util::rt::TokioIo::new(tcp);
+                    let io = hyper_util::rt::TokioIo::new(io);
                     let svc = hyper_util::service::TowerToHyperService::new(svc);
                     if let Err(e) = hyper_util::server::conn::auto::Builder::new(
                         hyper_util::rt::TokioExecutor::new(),
@@ -346,6 +434,7 @@ mod tests {
             });
             serve_tunnel(
                 app.clone(),
+                "dev",
                 punched,
                 &DeviceSecret::generate(),
                 Arc::new(|_| {}),
@@ -356,5 +445,140 @@ mod tests {
             assert!(resp.starts_with("HTTP/1.1 403"), "{peer}: {resp}");
             assert!(resp.contains("loopback only"), "{peer}: {resp}");
         }
+    }
+
+    /// A connection handed to the router (say, an upgraded WebSocket in a
+    /// task of its own) dies with the tunnel: the router side reads EOF
+    /// and can't write, and the peer sees the socket close.
+    #[tokio::test]
+    async fn tunnel_io_ends_with_the_tunnel() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut peer = TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
+        let (tcp, _) = l.accept().await.unwrap();
+        let (alive, rx) = watch::channel(());
+        let mut io = TunnelIo::new(tcp, rx);
+        peer.write_all(b"hi").await.unwrap();
+        let mut buf = [0u8; 2];
+        io.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hi");
+        // Blocked mid-read when the tunnel goes, like a WebSocket handler.
+        let reader = tokio::spawn(async move {
+            let n = io.read(&mut [0u8; 8]).await.unwrap();
+            (n, io.write_all(b"late").await.is_err())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(alive);
+        let t = std::time::Duration::from_secs(2);
+        let (n, write_failed) = tokio::time::timeout(t, reader).await.unwrap().unwrap();
+        assert_eq!(n, 0);
+        assert!(write_failed);
+        let n = tokio::time::timeout(t, peer.read(&mut [0u8; 8]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0, "peer still connected");
+    }
+
+    /// SECURITY: an auth session created through a device's tunnel
+    /// (password login) records the device, and revoking the device
+    /// revokes that session — and only that one.
+    #[tokio::test]
+    async fn revoking_a_device_revokes_sessions_created_through_it() {
+        use crate::auth::middleware::tests::seed_authenticated_user;
+        use crate::db::models::{NewRemoteDevice, NewUser};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        let admin_token = seed_authenticated_user(&state, "admin").await;
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_user(NewUser {
+                id: "phone-user".into(),
+                username: "bob".into(),
+                email: None,
+                password_hash: crate::auth::password::hash_password("twelve-chars!!").unwrap(),
+                role: "user".into(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .insert_remote_device(NewRemoteDevice {
+                id: "dev1".into(),
+                user_id: "u1".into(),
+                name: "phone".into(),
+                secret_ciphertext: vec![0; 48],
+                secret_nonce: vec![0; 12],
+                created_at: now,
+                last_connected_at: None,
+            })
+            .await
+            .unwrap();
+
+        let app = crate::routes::auth::router(state.clone()).with_state(state.clone());
+        let body = r#"{"username":"bob","password":"twelve-chars!!"}"#;
+        let request = format!(
+            "POST /api/auth/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response = Arc::new(std::sync::Mutex::new(String::new()));
+        let punched = Box::new(OneRequest {
+            peer: "203.0.113.5:40000".parse().unwrap(),
+            request,
+            response: response.clone(),
+        });
+        serve_tunnel(
+            app,
+            "dev1",
+            punched,
+            &DeviceSecret::generate(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let resp = response.lock().unwrap().clone();
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        let sessions = state
+            .db
+            .list_auth_sessions_by_user("phone-user")
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].remote_device_id.as_deref(), Some("dev1"));
+
+        let revoke = axum::http::Request::builder()
+            .method("DELETE")
+            .uri("/api/remote-access/devices/dev1")
+            .header("authorization", format!("Bearer {admin_token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = crate::routes::remote_access::router(state.clone())
+            .with_state(state.clone())
+            .oneshot(revoke)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+        let left = state
+            .db
+            .list_auth_sessions_by_user("phone-user")
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "device session survived revoke");
+        // The admin's own (non-tunnel) session is untouched.
+        assert_eq!(
+            state
+                .db
+                .list_auth_sessions_by_user("u1")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

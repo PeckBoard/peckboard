@@ -777,7 +777,7 @@ impl RemoteAccess {
                     }
                 }) as tunnel::TunnelEvents
             };
-            let res = tunnel::serve_tunnel(app.clone(), punched, &secret, events).await;
+            let res = tunnel::serve_tunnel(app.clone(), &id, punched, &secret, events).await;
             tracing::info!(device_id = %id, "remote access: tunnel ended");
             if let Err(e) = res {
                 self.set_status(&id, DeviceStatus::error(format!("{e:#}")));

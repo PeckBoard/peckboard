@@ -89,7 +89,9 @@ Rates are bytes per second. `--no-relay-data` (`PECKRELAY_NO_RELAY_DATA=true`) t
 
 Start the relay with `--registration-gate` (`PECKRELAY_REGISTRATION_GATE=true`) and only registered boxes may use the relayed fallback; rendezvous, direct connections, and STUN stay open to all. Boxes register exactly as on the official relay: their **Register** button opens `https://<your relay>/register#<box key>`, a page your relay serves on port 443, where a browser proof-of-work check stands in for a captcha. `--registration-pow-bits` (`PECKRELAY_REGISTRATION_POW_BITS`, default 18, range 8–28) sets its difficulty; each extra bit doubles the work. The page works with the gate off too, so boxes can register ahead of switching it on.
 
-Registered boxes are kept in `registered-boxes.txt` in the state directory, one public key and registration time per line. The running relay rereads the file within about 30 seconds of a change, so additions and revocations need no restart. Manage it with the `registry` subcommand, run as the service user so the file stays readable by the relay:
+The page caps how far registration can grow: `--registration-max-keys` (`PECKRELAY_REGISTRATION_MAX_KEYS`, default 100,000) is the most boxes it will register in total, and `--registrations-per-ip-per-day` (`PECKRELAY_REGISTRATIONS_PER_IP_PER_DAY`, default 50) is how many new boxes one address may register per day. Neither limits the `registry add` command below.
+
+Registered boxes are kept in `registered-boxes.txt` in the state directory, one public key and registration time per line. The running relay rereads the file within a few seconds of a change, so additions and revocations need no restart. Manage it with the `registry` subcommand, run as the service user so the file stays readable by the relay:
 
 ```bash
 sudo -u peckrelay /opt/peckboard-relay/peckboard-relay registry list

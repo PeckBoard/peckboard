@@ -703,7 +703,7 @@ export default function RemoteAccessSection() {
       {revoking && (
         <ConfirmDialog
           title="Revoke device"
-          message={`Revoke "${revoking.name}"? Its pairing secret is destroyed and any open connection is dropped. Pair it again to restore access.`}
+          message={`Revoke "${revoking.name}"? Its pairing secret is destroyed, any open connection is dropped, and logins made through it are signed out. Pair it again to restore access.`}
           confirmLabel="Revoke"
           danger
           busy={revokeBusy}

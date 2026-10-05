@@ -171,6 +171,7 @@ diesel::table! {
         expires_at -> BigInt,
         last_used_at -> Nullable<BigInt>,
         user_agent -> Nullable<Text>,
+        remote_device_id -> Nullable<Text>,
         ip_address -> Nullable<Text>,
     }
 }

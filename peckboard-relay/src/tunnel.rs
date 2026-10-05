@@ -992,7 +992,10 @@ pub async fn serve_box_rejoining(
 const STANDBY_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const STANDBY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// One authenticated device connection on its own endpoint.
+/// One authenticated device connection on its own endpoint. Dropping it
+/// closes both, so a box serve future that is aborted (device revoked,
+/// remote access disabled) tells the device at once and frees the socket,
+/// instead of leaving the endpoint driver alive behind it.
 struct Served {
     ep: Endpoint,
     conn: Connection,
@@ -1007,6 +1010,17 @@ impl Served {
             rtt_ms: rtt_ms(&self.conn),
             path: *self.path_rx.borrow_and_update(),
         }
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        // Directly on the connection (see the replacement in
+        // `serve_box_inner`); keep an earlier, more specific reason.
+        if self.conn.close_reason().is_none() {
+            self.conn.close(VarInt::from_u32(0), b"stopped");
+        }
+        self.ep.close(VarInt::from_u32(0), b"stopped");
     }
 }
 
@@ -1096,14 +1110,18 @@ async fn serve_box_inner(
         // channel per connection, so a replaced connection's late timeout
         // can't end its successor.
         let (dead_tx, mut dead_rx) = mpsc::channel::<()>(1);
+        // This connection's stream tasks: owned here, so they end with it
+        // (and with this future, when it is aborted).
+        let mut streams = tokio::task::JoinSet::new();
         let ended = loop {
             tokio::select! {
                 Ok(()) = cur.path_rx.changed() => {
                     on_event(TunnelEvent::PathChanged { path: *cur.path_rx.borrow_and_update() });
                 }
+                Some(_) = streams.join_next(), if !streams.is_empty() => {}
                 s = cur.conn.accept_bi() => match s {
                     Ok((send, recv)) => {
-                        tokio::spawn(box_stream(send, recv, target, dead_tx.clone()));
+                        streams.spawn(box_stream(send, recv, target, dead_tx.clone()));
                     }
                     Err(e) => break Err(e.to_string()),
                 },

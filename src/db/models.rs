@@ -520,8 +520,11 @@ pub struct AuthSession {
     pub last_used_at: Option<i64>,
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
+    /// The remote-access device this session was created through, if any.
+    pub remote_device_id: Option<String>,
 }
 
+/// `remote_device_id` is set separately, by `Db::create_auth_session_via`.
 #[derive(Insertable, Deserialize, Debug)]
 #[diesel(table_name = auth_sessions)]
 pub struct NewAuthSession {

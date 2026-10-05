@@ -7,26 +7,35 @@
 //! <base64url ed25519 public key> <registered_at, unix seconds>
 //! ```
 //!
-//! Writes are atomic (temp file + rename, mode 0600). The relay re-checks
-//! the file's mtime/size at most every [`DEFAULT_RELOAD_INTERVAL`], so an
-//! external edit or a `registry revoke` from the admin CLI takes effect on
-//! a running relay without a restart. A file that fails to parse keeps the
-//! last good set (logged); a missing file is an empty registry.
+//! Writes are atomic (temp file + rename, mode 0600) and every
+//! read-modify-write — this process's or the admin CLI's — holds an
+//! exclusive `flock` on [`LOCK_FILE`] from the read to the rename, so a
+//! `registry revoke` can't be undone by a racing registration.
+//!
+//! Lookups ([`Registry::contains`], [`Snapshot`]) never touch disk: they
+//! read the in-memory set. The relay re-checks the file's identity
+//! (mtime/size/inode) on a background task every [`DEFAULT_RELOAD_INTERVAL`]
+//! ([`Registry::reload`]), so an external edit or a revoke from the admin CLI
+//! takes effect on a running relay within seconds, without a restart. A file
+//! that fails to parse keeps the last good set (logged, retried); a missing
+//! file is an empty registry.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-use tracing::warn;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::identity::{decode_key, encode_key, write_private};
 
 /// File name under the state dir.
 pub const REGISTRY_FILE: &str = "registered-boxes.txt";
-/// How stale the in-memory view of the file may get.
-pub const DEFAULT_RELOAD_INTERVAL: Duration = Duration::from_secs(30);
+/// Lock file next to it (the registry file itself is replaced by rename,
+/// so it can't carry the lock).
+pub const LOCK_FILE: &str = ".registered-boxes.lock";
+/// How stale the in-memory view of the file may get on a running relay.
+pub const DEFAULT_RELOAD_INTERVAL: Duration = Duration::from_secs(2);
 
 const HEADER: &str =
     "# peckboard-relay registered boxes: <base64url ed25519 key> <registered_at unix secs>\n";
@@ -38,22 +47,53 @@ pub struct Entry {
     pub registered_at: u64,
 }
 
+/// Outcome of [`Registry::add_capped`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Added {
+    New,
+    /// Already registered (idempotent; nothing written).
+    Already,
+    /// The registry holds the maximum number of keys; nothing written.
+    Full,
+}
+
+/// (mtime, len, inode) of the file a view was loaded from.
+type Stamp = (SystemTime, u64, u64);
+
 #[derive(Default)]
 struct State {
     keys: HashMap<[u8; 32], u64>,
-    /// (mtime, len) of the file this view was loaded from.
-    stamp: Option<(SystemTime, u64)>,
+    stamp: Option<Stamp>,
+}
+
+/// An immutable view of the registry at one moment: lookups take no lock
+/// and never touch disk.
+#[derive(Clone)]
+pub struct Snapshot(Arc<State>);
+
+impl Snapshot {
+    pub fn contains(&self, key: &[u8; 32]) -> bool {
+        self.0.keys.contains_key(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.keys.is_empty()
+    }
 }
 
 pub struct Registry {
     /// None: in-memory only (tests, or no state dir).
     path: Option<PathBuf>,
     reload_every: Duration,
-    state: RwLock<State>,
-    epoch: Instant,
-    /// Ms after `epoch` of the last mtime check.
-    checked_ms: AtomicU64,
-    /// Serialises read-modify-write of the file within this process.
+    /// Swapped whole on every reload / write.
+    state: RwLock<Arc<State>>,
+    /// Serialises reloads and read-modify-writes within this process (the
+    /// file lock covers other processes), so an older reload can never
+    /// overwrite a newer write's view.
     write: Mutex<()>,
 }
 
@@ -72,9 +112,17 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn stamp(path: &Path) -> std::io::Result<Option<(SystemTime, u64)>> {
+fn stamp_of(m: &std::fs::Metadata) -> std::io::Result<Stamp> {
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(m);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Ok((m.modified()?, m.len(), ino))
+}
+
+fn stamp(path: &Path) -> std::io::Result<Option<Stamp>> {
     match std::fs::metadata(path) {
-        Ok(m) => Ok(Some((m.modified()?, m.len()))),
+        Ok(m) => Ok(Some(stamp_of(&m)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
@@ -136,81 +184,76 @@ impl Registry {
         Self {
             path,
             reload_every: DEFAULT_RELOAD_INTERVAL,
-            state: RwLock::new(State::default()),
-            epoch: Instant::now(),
-            checked_ms: AtomicU64::new(0),
+            state: RwLock::new(Arc::default()),
             write: Mutex::new(()),
         }
     }
 
-    /// How often [`contains`](Self::contains) re-checks the file.
+    /// How often the relay's background task calls [`reload`](Self::reload).
     pub fn with_reload_interval(mut self, every: Duration) -> Self {
         self.reload_every = every;
         self
+    }
+
+    pub fn reload_interval(&self) -> Duration {
+        self.reload_every
     }
 
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
-    /// Re-read the file now if its mtime/size changed. On a parse error the
-    /// previous set stays in force.
+    /// Re-read the file now if it changed (blocking IO: call it off the
+    /// async workers). On any error the previous set stays in force.
     pub fn reload(&self) -> std::io::Result<()> {
+        let _w = self.write.lock().unwrap();
+        self.reload_locked()
+    }
+
+    /// Caller holds `write`.
+    fn reload_locked(&self) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        self.checked_ms
-            .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
-        let st = stamp(path)?;
-        if self.state.read().unwrap().stamp == st && st.is_some() {
+        // Stamp and content from the same open file: a rename racing this
+        // read can't pair new content with an old stamp or vice versa.
+        let mut f = match File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if self.state.read().unwrap().stamp.is_some() {
+                    *self.state.write().unwrap() = Arc::default();
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        let st = stamp_of(&f.metadata()?)?;
+        if self.state.read().unwrap().stamp == Some(st) {
             return Ok(());
         }
-        let keys = match st {
-            None => HashMap::new(),
-            Some(_) => {
-                let text = match std::fs::read_to_string(path) {
-                    Ok(t) => t,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-                    Err(e) => return Err(e),
-                };
-                parse(&text).map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("{}: {e}", path.display()),
-                    )
-                })?
-            }
-        };
-        *self.state.write().unwrap() = State { keys, stamp: st };
+        let mut text = String::new();
+        f.read_to_string(&mut text)?;
+        let keys = parse(&text).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: {e}", path.display()),
+            )
+        })?;
+        *self.state.write().unwrap() = Arc::new(State {
+            keys,
+            stamp: Some(st),
+        });
         Ok(())
     }
 
-    fn maybe_reload(&self) {
-        if self.path.is_none() {
-            return;
-        }
-        let now = self.epoch.elapsed().as_millis() as u64;
-        let last = self.checked_ms.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < self.reload_every.as_millis() as u64 {
-            return;
-        }
-        // One thread re-checks; the rest keep using the current view.
-        if self
-            .checked_ms
-            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        if let Err(e) = self.reload() {
-            warn!("registry reload: {e}");
-        }
+    /// The current set, for many lookups without touching the registry's
+    /// lock again (e.g. while holding another lock).
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot(self.state.read().unwrap().clone())
     }
 
-    /// Is `key` registered? Cheap; re-checks the file at most every
-    /// reload interval.
+    /// Is `key` registered? In memory only; never touches disk.
     pub fn contains(&self, key: &[u8; 32]) -> bool {
-        self.maybe_reload();
         self.state.read().unwrap().keys.contains_key(key)
     }
 
@@ -224,7 +267,6 @@ impl Registry {
 
     /// All entries, oldest registration first.
     pub fn list(&self) -> Vec<Entry> {
-        self.maybe_reload();
         let mut v: Vec<Entry> = self
             .state
             .read()
@@ -240,30 +282,70 @@ impl Registry {
         v
     }
 
-    /// Register `key`. Ok(false) if it already was (idempotent).
+    /// Register `key` with no cap (admin CLI). Ok(false) if it already
+    /// was (idempotent).
     pub fn add(&self, key: [u8; 32]) -> std::io::Result<bool> {
+        Ok(self.add_capped(key, usize::MAX)? == Added::New)
+    }
+
+    /// Register `key` unless the registry already holds `max_keys` keys.
+    pub fn add_capped(&self, key: [u8; 32], max_keys: usize) -> std::io::Result<Added> {
         self.modify(|keys| {
             if keys.contains_key(&key) {
-                return false;
+                (false, Added::Already)
+            } else if keys.len() >= max_keys {
+                (false, Added::Full)
+            } else {
+                keys.insert(key, now_secs());
+                (true, Added::New)
             }
-            keys.insert(key, now_secs());
-            true
         })
     }
 
     /// Unregister `key`. Ok(false) if it wasn't registered.
     pub fn revoke(&self, key: &[u8; 32]) -> std::io::Result<bool> {
-        self.modify(|keys| keys.remove(key).is_some())
+        self.modify(|keys| {
+            let gone = keys.remove(key).is_some();
+            (gone, gone)
+        })
     }
 
-    /// Read-modify-write against the file's current content (so external
-    /// edits made since the last reload are kept).
-    fn modify(&self, f: impl FnOnce(&mut HashMap<[u8; 32], u64>) -> bool) -> std::io::Result<bool> {
+    /// Exclusive lock shared with every other process editing this
+    /// registry; released on drop. None for an in-memory registry.
+    fn lock_file(&self) -> std::io::Result<Option<File>> {
+        let Some(path) = &self.path else {
+            return Ok(None);
+        };
+        let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+        if let Some(d) = dir {
+            std::fs::create_dir_all(d)?;
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let f = opts.open(path.with_file_name(LOCK_FILE))?;
+        f.lock()?;
+        Ok(Some(f))
+    }
+
+    /// Read-modify-write against the file's current content, under the
+    /// file lock from read to rename (so edits by other processes are
+    /// never lost or undone). `f` returns (changed, result).
+    fn modify<T>(
+        &self,
+        f: impl FnOnce(&mut HashMap<[u8; 32], u64>) -> (bool, T),
+    ) -> std::io::Result<T> {
         let _w = self.write.lock().unwrap();
-        self.reload()?;
+        let _lock = self.lock_file()?;
+        self.reload_locked()?;
         let mut keys = self.state.read().unwrap().keys.clone();
-        if !f(&mut keys) {
-            return Ok(false);
+        let (changed, out) = f(&mut keys);
+        if !changed {
+            return Ok(out);
         }
         let st = match &self.path {
             Some(p) => {
@@ -272,8 +354,8 @@ impl Registry {
             }
             None => None,
         };
-        *self.state.write().unwrap() = State { keys, stamp: st };
-        Ok(true)
+        *self.state.write().unwrap() = Arc::new(State { keys, stamp: st });
+        Ok(out)
     }
 }
 
@@ -281,7 +363,6 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::identity::BoxIdentity;
-
     fn tmp_dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("peckrelay-reg-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&d).unwrap();
@@ -302,20 +383,25 @@ mod tests {
         assert!(r.add(b).unwrap());
         assert!(r.contains(&a) && r.contains(&b));
         // Persisted atomically: no temp files left, readable by a fresh open.
-        let names: Vec<_> = std::fs::read_dir(&d)
+        let mut names: Vec<_> = std::fs::read_dir(&d)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        assert_eq!(names, vec![REGISTRY_FILE.to_string()]);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![LOCK_FILE.to_string(), REGISTRY_FILE.to_string()]
+        );
         let r2 = Registry::open_in(&d).unwrap();
         assert_eq!(r2.list().len(), 2);
         assert!(r2.list().iter().all(|e| e.registered_at > 0));
 
-        // An external revoke (another process: the admin CLI) shows up
-        // after the reload interval without touching `r`.
-        let r = r.with_reload_interval(Duration::from_millis(0));
+        // An external revoke (another process: the admin CLI) shows up on
+        // the next reload without touching `r`; lookups alone never read.
         assert!(r2.revoke(&a).unwrap());
         assert!(!r2.revoke(&a).unwrap());
+        assert!(r.contains(&a), "no disk IO on lookup");
+        r.reload().unwrap();
         assert!(!r.contains(&a));
         assert!(r.contains(&b));
 
@@ -325,7 +411,57 @@ mod tests {
         assert!(r.contains(&b));
         // Deleted: empty.
         std::fs::remove_file(d.join(REGISTRY_FILE)).unwrap();
+        r.reload().unwrap();
         assert!(!r.contains(&b));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn cap_refuses_new_keys_only() {
+        let r = Registry::in_memory();
+        let keys: Vec<_> = (0..3)
+            .map(|_| BoxIdentity::generate().public_key())
+            .collect();
+        assert_eq!(r.add_capped(keys[0], 2).unwrap(), Added::New);
+        assert_eq!(r.add_capped(keys[1], 2).unwrap(), Added::New);
+        assert_eq!(r.add_capped(keys[2], 2).unwrap(), Added::Full);
+        assert_eq!(r.add_capped(keys[0], 2).unwrap(), Added::Already);
+        assert_eq!(r.len(), 2);
+        let snap = r.snapshot();
+        assert!(r.revoke(&keys[0]).unwrap());
+        assert!(snap.contains(&keys[0]), "snapshots are immutable");
+        assert!(!r.contains(&keys[0]));
+        assert_eq!(r.add_capped(keys[2], 2).unwrap(), Added::New);
+    }
+
+    /// A revoke racing a stream of registrations from another handle (the
+    /// CLI vs the running relay) always sticks.
+    #[test]
+    fn concurrent_revoke_and_add_keeps_the_revoke() {
+        let d = tmp_dir();
+        let victim = BoxIdentity::generate().public_key();
+        Registry::open_in(&d).unwrap().add(victim).unwrap();
+        for _ in 0..5 {
+            let server = Arc::new(Registry::open_in(&d).unwrap());
+            server.add(victim).unwrap();
+            let adder = {
+                let server = server.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        server.add(BoxIdentity::generate().public_key()).unwrap();
+                    }
+                })
+            };
+            // A separate handle, like the admin CLI process.
+            let cli = Registry::open_in(&d).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+            assert!(cli.revoke(&victim).unwrap());
+            adder.join().unwrap();
+            let fresh = Registry::open_in(&d).unwrap();
+            assert!(!fresh.contains(&victim), "revoke undone by a racing add");
+            server.reload().unwrap();
+            assert!(!server.contains(&victim));
+        }
         let _ = std::fs::remove_dir_all(d);
     }
 

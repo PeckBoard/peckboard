@@ -344,20 +344,39 @@ older relay negotiate v2 and report no status.
   fallback, so a hopeless punch fails as `PunchFailed`. Old boxes (no
   identity) count as unregistered.
 - `--registration-pow-bits` (`PECKRELAY_REGISTRATION_POW_BITS`, default 18).
+- `--registration-max-keys` (`PECKRELAY_REGISTRATION_MAX_KEYS`, default
+  100,000): the registration page refuses new keys past this (503); the
+  admin CLI is not capped.
+- `--registrations-per-ip-per-day` (`PECKRELAY_REGISTRATIONS_PER_IP_PER_DAY`,
+  default 50): new keys one IPv4 address / IPv6 /64 may register per day
+  (re-registering a known key is free).
 - Registry: `<state-dir>/registered-boxes.txt`, one
   `<base64url key> <registered_at unix secs>` per line, written atomically
-  (0600). A running relay re-checks its mtime every 30 s (edits/revokes take
-  effect without a restart; a file that fails to parse keeps the last good
-  set). Admin: `peckboard-relay registry list|add <key>|revoke <key>
-[--state-dir DIR]` — run it as the service user (`sudo -u peckrelay`) so
-  the file stays readable by the relay.
+  (0600). Every edit, the relay's and the admin CLI's, holds an exclusive
+  `flock` on `<state-dir>/.registered-boxes.lock` from read to rename, so a
+  revoke can't be undone by a racing registration. A running relay
+  re-checks the file every 2 s on a background task; lookups (including
+  the per-datagram gate check) only read memory. A file that fails to parse
+  keeps the last good set and is retried within a second or two. Admin:
+  `peckboard-relay registry list|add <key>|revoke <key> [--state-dir DIR]`
+  — run it as the service user (`sudo -u peckrelay`) so the file stays
+  readable by the relay.
 - Registration page, on the same :443 listener for TLS clients that
   negotiate `http/1.1` or no ALPN (one request per connection, per-IP rate
   limited): `GET /register` (static page; box key in the URL fragment,
   proof of work `sha256("peckrelay-register:<nonce>:<key>:<n>")` solved in
   the browser with WebCrypto), `GET /api/register/challenge`,
   `POST /api/register` (form `key`, `nonce`, `solution`), and
-  `GET /api/registered?key=` → `{"registered":bool}`. Everything else is 404. Registration works with the gate off, so boxes can pre-register.
+  `POST /api/registered` (JSON `{"key":"…"}`) → `{"registered":bool}`;
+  `GET /api/registered?key=` answers the same for boxes that already poll
+  it. Everything else is 404. Registration works with the gate off, so
+  boxes can pre-register.
+- Challenges are stateless: the nonce is its issue time plus an HMAC (a
+  per-process key) over that time and the client's IPv4 address / IPv6
+  /64, valid for 5 min and single-use (a per-address list of used ones).
+  There is no table for anyone to fill; a relay restart voids outstanding
+  challenges, and a browser that switches address family between fetching
+  and submitting gets "challenge expired, try again".
 
 ## Non-Discoverability
 
@@ -391,7 +410,7 @@ listed).
 | New connections per IP                                   | 2/s, burst 64; global 200/s, burst 1000  |
 | STUN per source IP (checked first)                       | 5 pps, burst 40                          |
 | STUN per credential                                      | 10 pps, burst 40                         |
-| STUN global (valid username only)                        | 2000 pps, burst 5000                     |
+| STUN global (verified requests only)                     | 2000 pps, burst 5000                     |
 | Signaling messages per session                           | 10/s, burst 40                           |
 | Frames / blobs / datagrams                               | 8 KiB / 4 KiB / 2 KiB                    |
 | Handshake / idle timeout                                 | 10 s / 90 s                              |

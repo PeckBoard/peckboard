@@ -268,13 +268,19 @@ async fn rename(
 }
 
 /// DELETE /api/remote-access/devices/:id → 204. Deletes the row (and so
-/// the sealed secret — the device's rendezvous id dies with it) and drops
-/// the live tunnel immediately.
+/// the sealed secret — the device's rendezvous id dies with it), drops the
+/// live tunnel and every connection through it immediately, and revokes
+/// the auth sessions created through the device (their WebSockets close
+/// on their next session check).
 async fn revoke(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match state.db.delete_remote_device(&id).await {
         Ok(true) => {
             state.remote_access.stop_device(&id);
-            tracing::info!(device_id = %id, "remote access device revoked");
+            let sessions = match state.db.delete_auth_sessions_by_remote_device(&id).await {
+                Ok(n) => n,
+                Err(e) => return internal_err(e),
+            };
+            tracing::info!(device_id = %id, sessions, "remote access device revoked");
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => err(StatusCode::NOT_FOUND, "no such device"),

@@ -539,6 +539,7 @@ pub async fn complete_login(
     grant: &SessionGrant,
     user_agent: Option<String>,
     ip_address: Option<String>,
+    remote_device_id: Option<String>,
 ) -> anyhow::Result<String> {
     issue_session_token(
         db,
@@ -547,6 +548,7 @@ pub async fn complete_login(
         grant.role(),
         user_agent,
         ip_address,
+        remote_device_id,
     )
     .await
 }
@@ -610,7 +612,7 @@ mod tests {
             .unwrap();
         let grant = verified.session_grant();
         let secret = generate_jwt_secret();
-        let token = complete_login(&db, &secret, &grant, None, None)
+        let token = complete_login(&db, &secret, &grant, None, None, None)
             .await
             .unwrap();
         let claims = validate_token(&secret, &token).unwrap();
@@ -652,7 +654,7 @@ mod tests {
         let proof = PasswordVerified::after_password_ok(&user, false);
         let grant = proof.session_grant().expect("no mfa");
         let secret = generate_jwt_secret();
-        let token = complete_login(&db, &secret, &grant, None, None)
+        let token = complete_login(&db, &secret, &grant, None, None, None)
             .await
             .unwrap();
         assert!(validate_token(&secret, &token).is_ok());

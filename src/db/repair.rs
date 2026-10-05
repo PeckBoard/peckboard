@@ -75,6 +75,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_voice_prompt_versions_table(conn)?;
     ensure_pending_actions_table(conn)?;
     ensure_remote_devices_table(conn)?;
+    ensure_auth_sessions_remote_device_column(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -247,6 +248,26 @@ fn ensure_remote_devices_table(conn: &mut SqliteConnection) -> anyhow::Result<()
     .execute(conn)?;
     sql_query("CREATE INDEX IF NOT EXISTS idx_remote_devices_user_id ON remote_devices(user_id)")
         .execute(conn)?;
+    Ok(())
+}
+/// Heal DBs that predate `1791221285_auth_sessions_remote_device`, whose
+/// `ALTER TABLE … ADD COLUMN` can't be made idempotent. Nullable, FK-less,
+/// like the migration.
+fn ensure_auth_sessions_remote_device_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(auth_sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "remote_device_id") {
+        tracing::info!("Repairing schema: adding auth_sessions.remote_device_id");
+        sql_query("ALTER TABLE auth_sessions ADD COLUMN remote_device_id TEXT").execute(conn)?;
+    }
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_auth_sessions_remote_device \
+         ON auth_sessions (remote_device_id)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

@@ -15,6 +15,22 @@ impl Db {
         })
         .await
     }
+    /// [`Db::create_auth_session`] for a session created through
+    /// remote-access device `remote_device_id` (`None`: not tunnelled).
+    pub async fn create_auth_session_via(
+        &self,
+        new: NewAuthSession,
+        remote_device_id: Option<String>,
+    ) -> anyhow::Result<AuthSession> {
+        self.with_conn(move |conn| {
+            diesel::insert_into(auth_sessions::table)
+                .values((&new, auth_sessions::remote_device_id.eq(remote_device_id)))
+                .returning(AuthSession::as_returning())
+                .get_result(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
 
     pub async fn get_auth_session(&self, id: &str) -> anyhow::Result<Option<AuthSession>> {
         let id = id.to_string();
@@ -68,6 +84,23 @@ impl Db {
             diesel::delete(auth_sessions::table.filter(auth_sessions::user_id.eq(&user_id)))
                 .execute(conn)
                 .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Revoke every session created through remote-access device
+    /// `device_id` (see `AuthSession::remote_device_id`).
+    pub async fn delete_auth_sessions_by_remote_device(
+        &self,
+        device_id: &str,
+    ) -> anyhow::Result<usize> {
+        let device_id = device_id.to_string();
+        self.with_conn(move |conn| {
+            diesel::delete(
+                auth_sessions::table.filter(auth_sessions::remote_device_id.eq(&device_id)),
+            )
+            .execute(conn)
+            .map_err(Into::into)
         })
         .await
     }
