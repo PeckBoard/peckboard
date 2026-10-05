@@ -6,6 +6,39 @@ use url::Url;
 
 pub const LOOPBACK: &str = "127.0.0.1";
 
+/// The shell UI's origin(s). Tauri serves the bundled shell from
+/// `tauri://localhost` on iOS, macOS and Linux and from
+/// `http://tauri.localhost` on Windows and Android (`http_scheme`). Only this
+/// platform's origin counts: the other platform's is a plain web origin here
+/// that nothing in the app serves, and a page there must never pass as the
+/// shell. `dev` is the Vite dev server (debug builds only).
+pub fn shell_origins(http_scheme: bool, dev: Option<Url>) -> Vec<Url> {
+    let shell = if http_scheme {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    };
+    let mut out = vec![Url::parse(shell).expect("static shell origin")];
+    out.extend(dev);
+    out
+}
+
+/// Whether `url` is a shell page (same origin as one of `shell`).
+pub fn is_shell(url: &Url, shell: &[Url]) -> bool {
+    shell.iter().any(|s| same_origin(s, url))
+}
+
+/// `scheme://host[:port]` as `location.protocol + "//" + location.host`
+/// yields it in the page (`Url::origin` serialises custom schemes as
+/// "null").
+pub fn origin_string(url: &Url) -> String {
+    let mut s = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
+    if let Some(p) = url.port() {
+        s.push_str(&format!(":{p}"));
+    }
+    s
+}
+
 /// `http://127.0.0.1:<port>` — the box UI's origin inside the app.
 pub fn origin(port: u16) -> String {
     format!("http://{LOOPBACK}:{port}")
@@ -29,7 +62,7 @@ pub enum Decision {
 /// origin. `shell` is the shell UI's origin(s) (`tauri://localhost`,
 /// `http(s)://tauri.localhost`, the dev server in debug builds).
 pub fn decide(url: &Url, shell: &[Url], box_port: Option<u16>) -> Decision {
-    if shell.iter().any(|s| same_origin(s, url)) {
+    if is_shell(url, shell) {
         return Decision::Allow;
     }
     if url.scheme() == "http"
@@ -224,5 +257,49 @@ mod tests {
         }
         // No tunnel, no box page.
         assert_eq!(script("http://127.0.0.1:41000/", None), None);
+    }
+
+    #[test]
+    fn shell_origins_are_the_current_platforms_only() {
+        // iOS / macOS / Linux: only the custom scheme is the shell.
+        let apple = shell_origins(false, None);
+        assert_eq!(apple, [u("tauri://localhost")]);
+        assert!(is_shell(&u("tauri://localhost/index.html"), &apple));
+        assert!(!is_shell(&u("http://tauri.localhost/"), &apple));
+        assert!(!is_shell(&u("https://tauri.localhost/"), &apple));
+        assert_eq!(
+            decide(&u("http://tauri.localhost/"), &apple, Some(41000)),
+            Decision::OpenExternally
+        );
+
+        // Windows / Android: only `http://tauri.localhost`.
+        let http = shell_origins(true, None);
+        assert_eq!(http, [u("http://tauri.localhost")]);
+        assert!(is_shell(&u("http://tauri.localhost/"), &http));
+        assert!(!is_shell(&u("tauri://localhost/"), &http));
+        assert!(!is_shell(&u("https://tauri.localhost/"), &http));
+        assert_eq!(
+            decide(&u("tauri://localhost/"), &http, Some(41000)),
+            Decision::Block
+        );
+
+        // Dev server joins the list; a box page never does.
+        let dev = shell_origins(false, Some(u("http://localhost:1420")));
+        assert!(is_shell(&u("http://localhost:1420/index.html"), &dev));
+        assert!(!is_shell(&u("http://localhost:1421/"), &dev));
+        assert!(!is_shell(&u("http://127.0.0.1:41000/"), &dev));
+
+        assert_eq!(
+            origin_string(&u("tauri://localhost/x")),
+            "tauri://localhost"
+        );
+        assert_eq!(
+            origin_string(&u("http://localhost:1420/")),
+            "http://localhost:1420"
+        );
+        assert_eq!(
+            origin_string(&u("http://tauri.localhost/")),
+            "http://tauri.localhost"
+        );
     }
 }

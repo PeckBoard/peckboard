@@ -32,5 +32,9 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // WebStorageCompat.deleteBrowsingDataForSite: wipe all of 127.0.0.1's
+    // website data (incl. service workers and CacheStorage) once the last
+    // box is removed, where the installed WebView supports it.
+    implementation("androidx.webkit:webkit:1.14.0")
     implementation(project(":tauri-android"))
 }

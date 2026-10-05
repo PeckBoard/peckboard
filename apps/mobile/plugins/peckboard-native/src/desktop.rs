@@ -13,6 +13,12 @@
 //!   across a sleep (the wake check covers that); a dependency-free
 //!   portable default-route monitor doesn't exist, so a live switch falls
 //!   back to the tunnel's ping timeout.
+//! - **Website data / history / microphone**: no native hooks. The app
+//!   clears a removed box's data with Tauri's `clear_all_browsing_data`
+//!   (profile-wide on WebView2, all WebKit data on macOS — there is no
+//!   per-origin API on either); history navigations go through the
+//!   allow-list on desktop; microphone prompts are the platform WebView's
+//!   own (per origin, no per-box memory).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -23,7 +29,7 @@ use serde::de::DeserializeOwned;
 use tauri::plugin::PluginApi;
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::{Lifecycle, NetworkChange};
+use crate::{Lifecycle, MicDecision, MicPolicy, NetworkChange};
 
 /// Where pairing secrets live on this platform.
 trait Backend: Send + Sync {
@@ -236,6 +242,30 @@ impl<R: Runtime> Native<R> {
     pub fn watch_network(
         &self,
         _f: impl Fn(NetworkChange) + Send + Sync + 'static,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    /// No-op on desktop: no per-origin API (see the module docs); the app
+    /// uses Tauri's `clear_all_browsing_data` when the last box goes.
+    pub fn clear_site_data(&self, _origin: &str, _host_wide: bool) -> crate::Result<()> {
+        Ok(())
+    }
+
+    /// No-op on desktop: history navigations pass the allow-list there.
+    pub fn clear_history(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    /// No-op on desktop (see the module docs).
+    pub fn set_mic_policy(&self, _policy: Option<&MicPolicy>) -> crate::Result<()> {
+        Ok(())
+    }
+
+    /// No-op on desktop; `f` is never called.
+    pub fn watch_mic_decisions(
+        &self,
+        _f: impl Fn(MicDecision) + Send + Sync + 'static,
     ) -> crate::Result<()> {
         Ok(())
     }

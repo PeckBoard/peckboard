@@ -6,6 +6,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Format, scan } from "@tauri-apps/plugin-barcode-scanner";
 
+// Every app command carries the shell's per-launch token (header checked by
+// `commands.rs` ShellProof). The app defines it on shell origins only, before
+// any page script runs; a tunnelled box page never has it.
+const SHELL_HEADER = "X-PeckBoard-Shell";
+const shellToken =
+  (window as unknown as { __PBM_SHELL__?: string }).__PBM_SHELL__ ?? "";
+function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(cmd, args, { headers: { [SHELL_HEADER]: shellToken } });
+}
+
 type TunnelState =
   | "connecting"
   | "connected"
@@ -37,6 +47,8 @@ interface BoxView {
   fingerprint: string;
   addedAt: number;
   lastConnectedAt: number | null;
+  /** Microphone answer for this box's UI; null until asked. */
+  micAllowed: boolean | null;
   status: TunnelStatus | null;
 }
 
@@ -132,7 +144,7 @@ function lastSeen(ms: number | null): string {
 // ---- data ---------------------------------------------------------------
 
 async function refresh() {
-  boxes = await invoke<BoxView[]>("list_boxes");
+  boxes = await call<BoxView[]>("list_boxes");
 }
 
 function go(next: Screen) {
@@ -143,7 +155,7 @@ function go(next: Screen) {
 async function openBox(box: BoxView) {
   go({ kind: "connect", box, status: box.status });
   try {
-    const st = await invoke<TunnelStatus>("connect_box", { id: box.id });
+    const st = await call<TunnelStatus>("connect_box", { id: box.id });
     onStatus(st);
   } catch (e) {
     if (screen.kind === "connect" && screen.box.id === box.id) {
@@ -171,7 +183,7 @@ async function pair(link: string, name: string) {
   if (screen.kind !== "add") return;
   go({ ...screen, link, name, busy: true, error: undefined });
   try {
-    const box = await invoke<BoxView>("add_box", { link, name });
+    const box = await call<BoxView>("add_box", { link, name });
     await refresh();
     await openBox(box);
   } catch (e) {
@@ -347,13 +359,13 @@ function connectScreen(s: Extract<Screen, { kind: "connect" }>): HTMLElement {
       ? STATE_LABEL[st.state]
       : "Starting…";
   const cancel = async () => {
-    await invoke("disconnect_box").catch(() => {});
+    await call("disconnect_box").catch(() => {});
     await refresh();
     go({ kind: "list" });
   };
   // Restart now instead of waiting out the backoff.
   const retry = async () => {
-    await invoke("disconnect_box").catch(() => {});
+    await call("disconnect_box").catch(() => {});
     await openBox(s.box);
   };
   return h(
@@ -400,7 +412,7 @@ function manageScreen(s: Extract<Screen, { kind: "manage" }>): HTMLElement {
   const save = async (ev: Event) => {
     ev.preventDefault();
     try {
-      await invoke("rename_box", { id: s.box.id, name: name.value });
+      await call("rename_box", { id: s.box.id, name: name.value });
       await refresh();
       go({ kind: "list" });
     } catch (e) {
@@ -409,7 +421,7 @@ function manageScreen(s: Extract<Screen, { kind: "manage" }>): HTMLElement {
   };
   const remove = async () => {
     try {
-      await invoke("remove_box", { id: s.box.id });
+      await call("remove_box", { id: s.box.id });
       await refresh();
       go({ kind: "list" });
     } catch (e) {
@@ -554,7 +566,7 @@ function render() {
 
 /** A deep-linked pairing link is waiting: ask before pairing (never silent). */
 async function takePairLink() {
-  const p = await invoke<PairPrompt | null>("take_pair_link");
+  const p = await call<PairPrompt | null>("take_pair_link");
   if (!p) return;
   if (p.error || !p.relay) {
     go({ kind: "add", link: p.link, error: p.error ?? undefined });
@@ -566,11 +578,9 @@ async function takePairLink() {
 /** The shell is showing again (Boxes button, Back, a deep link): any tunnel
  *  still up belongs to a box UI the user just left — stop it. */
 async function leaveBox() {
-  const st = await invoke<TunnelStatus | null>("tunnel_status").catch(
-    () => null,
-  );
+  const st = await call<TunnelStatus | null>("tunnel_status").catch(() => null);
   if (st && st.state !== "stopped") {
-    await invoke("disconnect_box").catch(() => {});
+    await call("disconnect_box").catch(() => {});
   }
 }
 

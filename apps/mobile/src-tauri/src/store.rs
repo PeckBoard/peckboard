@@ -36,17 +36,28 @@ pub struct BoxRecord {
     pub added_at: u64,
     #[serde(default)]
     pub last_connected_at: Option<u64>,
+    /// The user's answer to "Allow <box> to use the microphone?" for this
+    /// box's UI; `None` until asked. Remembered per box, not per origin, so
+    /// a box keeps its answer even if it ever has to run on another port.
+    #[serde(default)]
+    pub mic_allowed: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct FileV1 {
     version: u32,
     boxes: Vec<BoxRecord>,
+    /// Lowest port never handed out (see [`next_port`]). Absent in files
+    /// written before ports stopped being reused; [`Store::load`] then takes
+    /// the high-water mark of the ports still in use.
+    #[serde(default)]
+    next_port: Option<u16>,
 }
 
 pub struct Store {
     path: PathBuf,
     boxes: Vec<BoxRecord>,
+    next_port: u16,
 }
 
 pub fn secret_key(id: &str) -> String {
@@ -60,10 +71,32 @@ pub fn fingerprint(link: &PairingLink) -> String {
         .collect()
 }
 
-/// Lowest free port in `PORT_BASE..=PORT_LAST`.
-pub fn next_port(used: impl IntoIterator<Item = u16>) -> Option<u16> {
+/// The port for a new box: `high_water`, the lowest port this install has
+/// never handed out. A removed box's port is **not** reused — the WebView
+/// keeps that origin's website data (the box UI's login token in
+/// localStorage, IndexedDB, caches) and native per-origin clearing is only
+/// partial (see `commands::forget_site_data`), so a new box on an old port
+/// would be served another box's data. Only once every port in
+/// `PORT_BASE..=PORT_LAST` has been used (a thousand pairings) does it fall
+/// back to the lowest port no current box holds; `None` when all are held.
+pub fn next_port(high_water: u16, used: impl IntoIterator<Item = u16>) -> Option<u16> {
+    if (PORT_BASE..=PORT_LAST).contains(&high_water) {
+        return Some(high_water);
+    }
     let used: std::collections::HashSet<u16> = used.into_iter().collect();
     (PORT_BASE..=PORT_LAST).find(|p| !used.contains(p))
+}
+
+/// The high-water mark implied by the ports in use: one past the highest
+/// (an older file never recorded which lower ports had been used and
+/// released, so those stay off limits too).
+fn high_water(boxes: &[BoxRecord]) -> u16 {
+    boxes
+        .iter()
+        .map(|b| b.port.saturating_add(1))
+        .max()
+        .unwrap_or(PORT_BASE)
+        .max(PORT_BASE)
 }
 
 fn clean_name(name: &str) -> anyhow::Result<String> {
@@ -84,16 +117,23 @@ fn new_id() -> String {
 impl Store {
     pub fn load(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let path = path.into();
-        let boxes = match std::fs::read(&path) {
+        let (boxes, next_port) = match std::fs::read(&path) {
             Ok(b) => {
                 let f: FileV1 = serde_json::from_slice(&b)
                     .with_context(|| format!("read {}", path.display()))?;
-                f.boxes
+                // A file from before the mark existed, or one whose mark
+                // somehow fell behind: never go below what's in use.
+                let mark = f.next_port.unwrap_or(0).max(high_water(&f.boxes));
+                (f.boxes, mark)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), PORT_BASE),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
-        Ok(Self { path, boxes })
+        Ok(Self {
+            path,
+            boxes,
+            next_port,
+        })
     }
 
     pub fn boxes(&self) -> &[BoxRecord] {
@@ -124,8 +164,8 @@ impl Store {
                 n => format!("PeckBoard {}", n + 1),
             };
         }
-        let port =
-            next_port(self.boxes.iter().map(|b| b.port)).context("Too many paired boxes.")?;
+        let port = next_port(self.next_port, self.boxes.iter().map(|b| b.port))
+            .context("Too many paired boxes.")?;
         let rec = BoxRecord {
             id: new_id(),
             name,
@@ -134,13 +174,17 @@ impl Store {
             fingerprint: fp,
             added_at: now_ms,
             last_connected_at: None,
+            mic_allowed: None,
         };
         secrets
             .set(&secret_key(&rec.id), &link.to_uri())
             .context("Couldn't save the pairing secret to secure storage.")?;
+        let mark = self.next_port;
+        self.next_port = self.next_port.max(port.saturating_add(1));
         self.boxes.push(rec.clone());
         if let Err(e) = self.save() {
             self.boxes.pop();
+            self.next_port = mark;
             let _ = secrets.delete(&secret_key(&rec.id));
             return Err(e);
         }
@@ -163,15 +207,22 @@ impl Store {
         Ok(out)
     }
 
-    /// Forget a box and wipe its secret. Its port becomes reusable.
-    pub fn remove(&mut self, secrets: &dyn SecretStore, id: &str) -> anyhow::Result<()> {
-        let before = self.boxes.len();
-        self.boxes.retain(|b| b.id != id);
-        if self.boxes.len() == before {
-            bail!("No such box.");
+    /// Forget a box and wipe its secret. Its port is retired, never handed
+    /// out again (see [`next_port`]). Returns the removed record so the
+    /// caller can clear the WebView data its UI left at that port.
+    pub fn remove(&mut self, secrets: &dyn SecretStore, id: &str) -> anyhow::Result<BoxRecord> {
+        let i = self
+            .boxes
+            .iter()
+            .position(|b| b.id == id)
+            .context("No such box.")?;
+        let removed = self.boxes.remove(i);
+        if let Err(e) = self.save() {
+            self.boxes.insert(i, removed);
+            return Err(e);
         }
-        self.save()?;
-        secrets.delete(&secret_key(id))
+        secrets.delete(&secret_key(id))?;
+        Ok(removed)
     }
 
     /// The stored pairing link for `id`.
@@ -191,6 +242,21 @@ impl Store {
         Ok(())
     }
 
+    /// Remember the microphone answer for `id`'s UI (`None` forgets it, so
+    /// the box asks again).
+    pub fn set_mic_allowed(&mut self, id: &str, allowed: Option<bool>) -> anyhow::Result<()> {
+        let b = self
+            .boxes
+            .iter_mut()
+            .find(|b| b.id == id)
+            .context("No such box.")?;
+        if b.mic_allowed != allowed {
+            b.mic_allowed = allowed;
+            self.save()?;
+        }
+        Ok(())
+    }
+
     /// Write-then-rename so a crash never leaves a truncated file.
     fn save(&self) -> anyhow::Result<()> {
         write_atomic(
@@ -198,6 +264,7 @@ impl Store {
             &serde_json::to_vec_pretty(&FileV1 {
                 version: 1,
                 boxes: self.boxes.clone(),
+                next_port: Some(self.next_port),
             })?,
         )
     }
@@ -279,18 +346,28 @@ pub mod tests {
         let err = s.add(&secrets, &link(1), "Again", 0).unwrap_err();
         assert!(err.to_string().contains("Home"), "{err}");
 
-        s.remove(&secrets, &a.id).unwrap();
+        let removed = s.remove(&secrets, &a.id).unwrap();
+        assert_eq!(removed, a);
         assert!(s.boxes().is_empty());
         assert!(secrets.0.lock().unwrap().is_empty());
         assert!(s.link(&secrets, &a.id).is_err());
+        assert!(s.remove(&secrets, &a.id).is_err());
     }
 
     #[test]
-    fn ports_are_fixed_unique_and_reused_after_removal() {
-        assert_eq!(next_port([]), Some(PORT_BASE));
-        assert_eq!(next_port([PORT_BASE, PORT_BASE + 2]), Some(PORT_BASE + 1));
-        assert_eq!(next_port(PORT_BASE..=PORT_LAST), None);
+    fn next_port_is_the_high_water_mark_until_the_range_is_spent() {
+        assert_eq!(next_port(PORT_BASE, []), Some(PORT_BASE));
+        // Gaps below the mark are retired ports, never reused.
+        assert_eq!(next_port(41005, [41000, 41002]), Some(41005));
+        assert_eq!(next_port(PORT_LAST, [PORT_BASE]), Some(PORT_LAST));
+        // Every port used once: the lowest one no current box holds.
+        assert_eq!(next_port(PORT_LAST + 1, [41000, 41001]), Some(41002));
+        assert_eq!(next_port(PORT_LAST + 1, PORT_BASE..=PORT_LAST), None);
+        assert_eq!(next_port(u16::MAX, []), Some(PORT_BASE));
+    }
 
+    #[test]
+    fn ports_are_fixed_unique_and_never_reused_after_removal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("boxes.json");
         let secrets = MemSecrets::default();
@@ -300,9 +377,79 @@ pub mod tests {
         let c = s.add(&secrets, &link(3), "C", 0).unwrap();
         assert_eq!((a.port, b.port, c.port), (41000, 41001, 41002));
         s.remove(&secrets, &b.id).unwrap();
-        // Survivors keep their ports across reloads; the gap is reused.
+        // Survivors keep their ports across reloads; the gap stays retired.
         let mut s = Store::load(&path).unwrap();
         assert_eq!(s.get(&c.id).unwrap().port, 41002);
-        assert_eq!(s.add(&secrets, &link(4), "D", 0).unwrap().port, 41001);
+        let d = s.add(&secrets, &link(4), "D", 0).unwrap();
+        assert_eq!(d.port, 41003);
+        // Even with every box gone, old ports stay retired.
+        for id in [a.id, c.id, d.id] {
+            s.remove(&secrets, &id).unwrap();
+        }
+        assert!(s.boxes().is_empty());
+        let mut s = Store::load(&path).unwrap();
+        assert_eq!(s.add(&secrets, &link(5), "E", 0).unwrap().port, 41004);
+    }
+
+    #[test]
+    fn old_boxes_json_without_a_mark_retires_every_port_up_to_the_highest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boxes.json");
+        // Written by a version that reused ports: no `nextPort`, no
+        // `micAllowed`, and a gap at 41001 (a removed box's port).
+        std::fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "boxes": [
+    { "id": "aa", "name": "A", "relay": "relay.example.com", "port": 41000,
+      "fingerprint": "00", "addedAt": 1 },
+    { "id": "cc", "name": "C", "relay": "relay.example.com", "port": 41002,
+      "fingerprint": "02", "addedAt": 3, "lastConnectedAt": 9 }
+  ]
+}"#,
+        )
+        .unwrap();
+        let secrets = MemSecrets::default();
+        let mut s = Store::load(&path).unwrap();
+        assert_eq!(s.boxes().len(), 2);
+        assert_eq!(s.get("cc").unwrap().mic_allowed, None);
+        assert_eq!(s.get("cc").unwrap().last_connected_at, Some(9));
+        // 41001 may have belonged to a removed box: skipped.
+        let d = s.add(&secrets, &link(4), "D", 0).unwrap();
+        assert_eq!(d.port, 41003);
+
+        // The mark is now recorded and survives a reload — and a mark that
+        // somehow fell behind the ports in use is corrected on load.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"next_port\": 41004"), "{raw}");
+        let s = Store::load(&path).unwrap();
+        assert_eq!(s.next_port, 41004);
+        let behind = raw.replace("\"next_port\": 41004", "\"next_port\": 41000");
+        std::fs::write(&path, behind).unwrap();
+        assert_eq!(Store::load(&path).unwrap().next_port, 41004);
+    }
+
+    #[test]
+    fn mic_decision_is_remembered_per_box() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boxes.json");
+        let secrets = MemSecrets::default();
+        let mut s = Store::load(&path).unwrap();
+        let a = s.add(&secrets, &link(1), "A", 0).unwrap();
+        let b = s.add(&secrets, &link(2), "B", 0).unwrap();
+        assert_eq!(a.mic_allowed, None);
+        s.set_mic_allowed(&a.id, Some(true)).unwrap();
+        s.set_mic_allowed(&b.id, Some(false)).unwrap();
+        assert!(s.set_mic_allowed("nope", Some(true)).is_err());
+
+        let mut s = Store::load(&path).unwrap();
+        assert_eq!(s.get(&a.id).unwrap().mic_allowed, Some(true));
+        assert_eq!(s.get(&b.id).unwrap().mic_allowed, Some(false));
+        s.set_mic_allowed(&a.id, None).unwrap();
+        assert_eq!(
+            Store::load(&path).unwrap().get(&a.id).unwrap().mic_allowed,
+            None
+        );
     }
 }

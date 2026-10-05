@@ -19,7 +19,7 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_peckboard_native::{Lifecycle, PeckboardNativeExt};
 use url::Url;
 
-use commands::{AppState, now_ms};
+use commands::{AppState, MicSync, ShellNonce, ShellOrigins, now_ms};
 use store::{SecretStore, Store};
 use tunnel::{TunnelManager, TunnelState, TunnelStatus};
 
@@ -43,22 +43,15 @@ impl SecretStore for NativeSecrets {
     }
 }
 
-/// Origins the shell UI is served from (per platform, plus the dev server).
+/// Origins the shell UI is served from: this platform's Tauri origin (and
+/// the dev server in debug builds) — see `nav::shell_origins`.
 fn shell_origins(app: &AppHandle) -> Vec<Url> {
-    let mut out: Vec<Url> = [
-        "tauri://localhost",
-        "http://tauri.localhost",
-        "https://tauri.localhost",
-    ]
-    .iter()
-    .filter_map(|s| Url::parse(s).ok())
-    .collect();
-    if cfg!(debug_assertions)
-        && let Some(dev) = app.config().build.dev_url.clone()
-    {
-        out.push(dev);
-    }
-    out
+    let dev = if cfg!(debug_assertions) {
+        app.config().build.dev_url.clone()
+    } else {
+        None
+    };
+    nav::shell_origins(cfg!(any(windows, target_os = "android")), dev)
 }
 
 /// Debug builds: route `log` and `tracing` (relay punch, QUIC) to
@@ -111,14 +104,10 @@ fn open_pair_link(app: &AppHandle, raw: &str) {
 /// platform's default.
 fn shell_home(app: &AppHandle) -> Option<Url> {
     let home = app.state::<ShellHome>().0.lock().unwrap().clone();
-    let fallback = if cfg!(any(
-        target_os = "ios",
-        target_os = "macos",
-        target_os = "linux"
-    )) {
-        "tauri://localhost/"
-    } else {
+    let fallback = if cfg!(any(windows, target_os = "android")) {
         "http://tauri.localhost/"
+    } else {
+        "tauri://localhost/"
     };
     home.or_else(|| Url::parse(fallback).ok())
 }
@@ -170,7 +159,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_peckboard_native::init())
-        .manage(ShellHome::default());
+        .manage(ShellHome::default())
+        .manage(MicSync::default());
     #[cfg(mobile)]
     {
         builder = builder.plugin(tauri_plugin_barcode_scanner::init());
@@ -184,8 +174,16 @@ pub fn run() {
             }
             let store = Store::load(data_dir.join("boxes.json"))?;
 
+            // Navigation allow-list and IPC proof: shell + the active box's
+            // loopback origin; other web links go to the system browser.
+            let shell = shell_origins(&handle);
+            let nonce = ShellNonce::generate();
+            let init_script = nonce.init_script(&shell);
+            app.manage(nonce);
+            app.manage(ShellOrigins(shell.clone()));
+
             let events = handle.clone();
-            let badge_shell = shell_origins(&handle);
+            let badge_shell = shell.clone();
             let tunnel = Arc::new(TunnelManager::new(move |st: &TunnelStatus| {
                 if st.state == TunnelState::Connected
                     && let Some(s) = events.try_state::<AppState>()
@@ -207,6 +205,8 @@ pub fn run() {
                 {
                     let _ = win.eval(js);
                 }
+                // Microphone follows the active box (and none once stopped).
+                commands::sync_mic_policy(&events);
                 let _ = events.emit(STATUS_EVENT, st);
             }));
 
@@ -249,6 +249,16 @@ pub fn run() {
                 log::warn!("network monitor unavailable: {e}");
             }
 
+            // The user answered a box's microphone prompt (native). Off the
+            // caller's thread: saving it pushes the new policy to native.
+            let mic = handle.clone();
+            if let Err(e) = app.native().watch_mic_decisions(move |d| {
+                let app = mic.clone();
+                async_runtime::spawn_blocking(move || commands::apply_mic_decision(&app, d));
+            }) {
+                log::warn!("microphone decisions unavailable: {e}");
+            }
+
             app.manage(AppState {
                 store: Mutex::new(store),
                 secrets: Arc::new(NativeSecrets(handle.clone())),
@@ -256,24 +266,60 @@ pub fn run() {
                 pending_link: Mutex::new(None),
             });
 
-            // Navigation allow-list: shell + the active box's loopback
-            // origin; other web links go to the system browser.
-            let shell = shell_origins(&handle);
             let opener = handle.clone();
             let home = handle.state::<ShellHome>().0.clone();
             let (page_shell, page_tunnel) = (shell.clone(), tunnel.clone());
             let builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    // Every box page load (incl. the resume re-boot) gets
-                    // the app's "Boxes" button; SPA route changes keep it.
+                    // The shell's IPC nonce; defines itself on shell origins
+                    // only (see `ShellNonce::init_script`).
+                    .initialization_script(init_script)
                     .on_page_load(move |win, page| {
-                        if page.event() != PageLoadEvent::Finished {
-                            return;
+                        let app = win.app_handle();
+                        let port = page_tunnel.active_port();
+                        match page.event() {
+                            // Android's history navigations (Back) skip
+                            // `on_navigation`: re-check what's loading and
+                            // send anything off the allow-list (another
+                            // box's retired origin) back to the shell.
+                            // `about:blank` (the WebView's empty page) is
+                            // inert and never ours to redirect.
+                            PageLoadEvent::Started => {
+                                if page.url().scheme() != "about"
+                                    && nav::decide(page.url(), &page_shell, port)
+                                        != nav::Decision::Allow
+                                {
+                                    log::warn!(
+                                        "page load off the allow-list: {}",
+                                        nav::origin_string(page.url())
+                                    );
+                                    if let Some(h) = shell_home(app) {
+                                        let _ = win.navigate(h);
+                                    }
+                                }
+                                return;
+                            }
+                            PageLoadEvent::Finished => {}
                         }
-                        let Some(home) = shell_home(win.app_handle()) else {
+                        let Some(home) = shell_home(app) else {
                             return;
                         };
-                        let port = page_tunnel.active_port();
+                        // Back on the shell: a box's pages must not stay
+                        // reachable through history once it's left. Off this
+                        // thread: on Android this callback runs on the main
+                        // thread, and plugin calls are dispatched to — and
+                        // awaited from — that same thread.
+                        if nav::is_shell(page.url(), &page_shell) {
+                            let app = app.clone();
+                            async_runtime::spawn_blocking(move || {
+                                if let Err(e) = app.native().clear_history() {
+                                    log::warn!("clearing history failed: {e}");
+                                }
+                            });
+                        }
+                        // Every box page load (incl. the resume re-boot)
+                        // gets the app's "Boxes" button; SPA route changes
+                        // keep it.
                         if let Some(js) =
                             nav::boxes_button_script(page.url(), &page_shell, port, &home)
                         {
@@ -289,7 +335,7 @@ pub fn run() {
                     .on_navigation(move |url| {
                         match nav::decide(url, &shell, tunnel.active_port()) {
                             nav::Decision::Allow => {
-                                if nav::decide(url, &shell, None) == nav::Decision::Allow {
+                                if nav::is_shell(url, &shell) {
                                     home.lock().unwrap().get_or_insert_with(|| url.clone());
                                 }
                                 true

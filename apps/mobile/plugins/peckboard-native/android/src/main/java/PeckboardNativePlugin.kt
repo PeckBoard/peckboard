@@ -2,6 +2,7 @@ package com.peckboard.nativeplugin
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -15,16 +16,20 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.view.View
 import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebStorage
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
+import androidx.webkit.WebStorageCompat
+import androidx.webkit.WebViewFeature
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -61,14 +66,55 @@ class NetworkArgs {
     lateinit var channel: Channel
 }
 
+@InvokeArg
+class ClearSiteDataArgs {
+    /** `http://127.0.0.1:<port>` of the removed box. */
+    lateinit var origin: String
+    /** The last box is gone: wipe everything under the host. */
+    var hostWide: Boolean = false
+}
+
+/** Who may capture the microphone (mirrors the Rust `MicPolicy`). */
+class MicPolicy {
+    lateinit var origin: String
+    lateinit var boxId: String
+    lateinit var boxName: String
+    /** null: not asked yet. */
+    var allowed: Boolean? = null
+}
+
+@InvokeArg
+class MicPolicyArgs {
+    var policy: MicPolicy? = null
+}
+
+@InvokeArg
+class MicDecisionArgs {
+    lateinit var channel: Channel
+}
+
+/** `scheme://host[:port]`, like the Rust side's `nav::origin`. */
+internal fun originOf(uri: Uri): String? {
+    val scheme = uri.scheme ?: return null
+    val host = uri.host ?: return null
+    return if (uri.port == -1) "$scheme://$host" else "$scheme://$host:${uri.port}"
+}
+
 @TauriPlugin
 class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
     private var lifecycle: Channel? = null
     @Volatile private var network: Channel? = null
+    @Volatile private var micDecisions: Channel? = null
+    /** Written by `setMicPolicy` (any thread), read by the chrome client on
+     *  the UI thread. Never posted to the UI thread: Rust plugin calls are
+     *  dispatched to and awaited from that thread. */
+    @Volatile private var micPolicy: MicPolicy? = null
+    private var webView: WebView? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val vault by lazy { SecretVault(activity) }
 
     override fun load(webView: WebView) {
+        this.webView = webView
         webView.settings.mediaPlaybackRequiresUserGesture = false
         webView.settings.allowFileAccess = false
         appUserAgent(webView)
@@ -81,16 +127,24 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val inner = webView.webChromeClient
                 if (inner !is LoopbackChromeClient) {
-                    webView.webChromeClient = LoopbackChromeClient(activity, inner)
+                    webView.webChromeClient = LoopbackChromeClient(
+                        activity, webView, inner,
+                        policy = { micPolicy },
+                        decided = { boxId, allowed ->
+                            micDecisions?.send(JSObject().put("boxId", boxId).put("allowed", allowed))
+                        },
+                    )
                 }
             }
         }
     }
+
     /**
      * System Back: within a box UI, WebView history (whose first entry is the
-     * shell, so it leads back to the box list); on a box page with no history,
-     * the shell itself. On the shell, its own screens (`window.__pbmBack`),
-     * then the app goes to the background.
+     * shell — the Rust core clears history whenever the shell finishes
+     * loading — so it leads back to the box list); on a box page with no
+     * history, the shell itself. On the shell, its own screens
+     * (`window.__pbmBack`), then the app goes to the background.
      */
     private fun installBack(webView: WebView) {
         val owner = activity as? ComponentActivity ?: return
@@ -200,6 +254,73 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
         network?.send(JSObject().put("detail", detail))
     }
 
+    /** The active box's microphone policy (null denies everything). */
+    @Command
+    fun setMicPolicy(invoke: Invoke) {
+        val args = invoke.parseArgs(MicPolicyArgs::class.java)
+        micPolicy = args.policy
+        invoke.resolve()
+    }
+
+    @Command
+    fun watchMicDecision(invoke: Invoke) {
+        val args = invoke.parseArgs(MicDecisionArgs::class.java)
+        micDecisions = args.channel
+        invoke.resolve()
+    }
+
+    /**
+     * Drop the back/forward list (all but the current page). History
+     * navigations don't pass `shouldOverrideUrlLoading`, so without this
+     * Back from a new box could land on another box's retired origin.
+     */
+    @Command
+    fun clearHistory(invoke: Invoke) {
+        val wv = webView
+        activity.runOnUiThread { wv?.clearHistory() }
+        invoke.resolve()
+    }
+
+    /**
+     * Website data of a removed box. `WebStorage.deleteOrigin` is exact to
+     * the origin (port included) but only covers IndexedDB / file system /
+     * Web SQL — not localStorage, where the box UI keeps its login. So with
+     * `hostWide` (no box left) everything under 127.0.0.1 goes too:
+     * `WebStorageCompat.deleteBrowsingDataForSite` (all storage, cookies,
+     * caches, service workers) where the installed WebView has it, else
+     * `deleteAllData` + all cookies + the HTTP cache. Data a per-origin
+     * clear leaves behind stays orphaned behind a port the app never hands
+     * out again.
+     */
+    @Command
+    fun clearSiteData(invoke: Invoke) {
+        val args = invoke.parseArgs(ClearSiteDataArgs::class.java)
+        val wv = webView
+        activity.runOnUiThread {
+            try {
+                val storage = WebStorage.getInstance()
+                storage.deleteOrigin(args.origin)
+                if (args.hostWide) {
+                    val host = Uri.parse(args.origin).host ?: "127.0.0.1"
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)) {
+                        WebStorageCompat.deleteBrowsingDataForSite(
+                            storage, host, ContextCompat.getMainExecutor(activity)
+                        ) {}
+                    } else {
+                        storage.deleteAllData()
+                    }
+                    val cookies = CookieManager.getInstance()
+                    cookies.removeAllCookies(null)
+                    cookies.flush()
+                    wv?.clearCache(true)
+                }
+                invoke.resolve()
+            } catch (e: Exception) {
+                invoke.reject("clearing website data failed: ${e.message}")
+            }
+        }
+    }
+
     @Command
     fun secretGet(invoke: Invoke) {
         val args = invoke.parseArgs(KeyArgs::class.java)
@@ -292,34 +413,76 @@ class SecretVault(context: Context) {
 }
 
 /**
- * Wraps wry's chrome client. Microphone capture is granted without a web
- * prompt for the loopback origin (the tunnelled box UI) once the app holds
- * RECORD_AUDIO; otherwise the request goes to wry's client, which asks the
- * OS. Requests from any other origin are denied.
+ * Wraps wry's chrome client. Microphone capture is granted only to the
+ * active box's loopback origin (`policy().origin`) — the requesting frame's
+ * origin and the page's own origin must both match, which rules out
+ * sub-frames from elsewhere — and only after the user allowed it for that
+ * box: the first request shows "Allow <box> to use the microphone?" and the
+ * answer is remembered with the box (`decided`). Granting still goes through
+ * wry's client when the app doesn't hold RECORD_AUDIO yet, so the OS asks
+ * once. Camera, other origins and no active box are denied.
  */
 class LoopbackChromeClient(
     private val activity: Activity,
+    private val webView: WebView,
     private val inner: WebChromeClient?,
+    private val policy: () -> MicPolicy?,
+    private val decided: (String, Boolean) -> Unit,
 ) : WebChromeClient() {
+    private var prompt: AlertDialog? = null
+
     override fun onPermissionRequest(request: PermissionRequest) {
-        val origin = request.origin
-        val loopback = origin.scheme == "http" && origin.host == "127.0.0.1"
-        if (!loopback) {
+        val policy = policy()
+        val resources = request.resources
+        val audioOnly = resources.isNotEmpty() &&
+            resources.all { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+        val pageOrigin = webView.url?.let(Uri::parse)?.let(::originOf)
+        if (policy == null || !audioOnly ||
+            originOf(request.origin) != policy.origin || pageOrigin != policy.origin
+        ) {
             request.deny()
             return
         }
-        val audioOnly = request.resources.all { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
-        val micGranted = ContextCompat.checkSelfPermission(
+        when (policy.allowed) {
+            true -> grantMic(request)
+            false -> request.deny()
+            null -> ask(request, policy)
+        }
+    }
+
+    /** One prompt per box; a dismissed prompt denies without remembering. */
+    private fun ask(request: PermissionRequest, policy: MicPolicy) {
+        prompt?.dismiss()
+        prompt = AlertDialog.Builder(activity)
+            .setTitle("Microphone")
+            .setMessage("Allow “${policy.boxName}” to use the microphone?")
+            .setPositiveButton("Allow") { _, _ ->
+                decided(policy.boxId, true)
+                grantMic(request)
+            }
+            .setNegativeButton("Don’t allow") { _, _ ->
+                decided(policy.boxId, false)
+                request.deny()
+            }
+            .setOnCancelListener { request.deny() }
+            .setOnDismissListener { prompt = null }
+            .show()
+    }
+
+    private fun grantMic(request: PermissionRequest) {
+        val held = ContextCompat.checkSelfPermission(
             activity, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         when {
-            audioOnly && micGranted -> request.grant(request.resources)
+            held -> request.grant(request.resources)
+            // wry asks the OS for RECORD_AUDIO, then grants.
             inner != null -> inner.onPermissionRequest(request)
             else -> request.deny()
         }
     }
 
     override fun onPermissionRequestCanceled(request: PermissionRequest) {
+        prompt?.dismiss()
         inner?.onPermissionRequestCanceled(request) ?: super.onPermissionRequestCanceled(request)
     }
 

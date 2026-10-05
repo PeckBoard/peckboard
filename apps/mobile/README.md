@@ -51,7 +51,16 @@ loads. The button only navigates — box pages get no Tauri IPC.
 **Ports.** Each box gets a fixed port (41000, 41001, …) stored with its
 pairing, because the web UI keeps its login in per-origin localStorage — a
 changed port means signing in again. If the port is taken at connect time a
-free one is used for that session and the UI says so.
+free one is used for that session and the UI says so. A removed box's port is
+**retired, never handed to another box** (`boxes.json` keeps a `next_port`
+high-water mark; older files migrate to one past their highest port): the
+WebView keeps website data per origin and no platform can clear exactly one
+port's worth, so reuse would serve one box's login to another. Removing a
+box clears what can be cleared (Android `WebStorage.deleteOrigin`), and
+removing the **last** box wipes everything under `127.0.0.1` (all WebKit
+data records for the host; Android storage, cookies, cache; plus Tauri's
+`clear_all_browsing_data`). Only after all thousand ports have been used
+once does allocation fall back to the lowest port no current box holds.
 
 **Lifecycle.** The tunnel runs only while the app is in the foreground: the
 native plugin reports background/foreground (iOS
@@ -83,22 +92,41 @@ left by an older dev build is imported into the keychain once and deleted.
 
 **WebView hardening.**
 
-- Navigation allow-list (`nav.rs`): the shell origin and
+- Navigation allow-list (`nav.rs`): this platform's shell origin
+  (`tauri://localhost` on iOS/macOS, `http://tauri.localhost` on
+  Android/Windows — never the other one) and
   `http://127.0.0.1:<active box port>` only; other http(s) links open in the
-  system browser; everything else is blocked.
+  system browser; everything else is blocked. Android history navigations
+  (Back) skip the allow-list hook, so page starts are re-checked (`on_page_load`
+  → back to the shell) and the WebView history is cleared whenever the shell
+  finishes loading, so a box's pages can't be reached from another box.
 - Cleartext only to `127.0.0.1`: iOS `NSAllowsLocalNetworking` (no arbitrary
   loads); Android network security config (debug builds allow all cleartext
   so `tauri android dev` can reach Vite on your LAN).
-- Mic: auto-granted for the loopback origin only (iOS 15+
-  `requestMediaCapturePermissionFor`, Android `onPermissionRequest` once
-  `RECORD_AUDIO` is held); denied for any other origin. Both wrap — not
-  replace — wry's delegate/client so dialogs and file pickers keep working.
+- Mic: granted only to the **active box's** origin
+  (`http://127.0.0.1:<its port>`), from its main frame, and only after the
+  user allowed it for that box — the first request shows "Allow <box> to use
+  the microphone?" natively (iOS 15+ `requestMediaCapturePermissionFor`,
+  Android `onPermissionRequest`) and the answer is remembered per box
+  (`micAllowed` in `boxes.json`; the Rust core pushes the active box's policy
+  to the plugin). Camera, other origins, sub-frames and no active box are
+  denied. Both wrap — not replace — wry's delegate/client so dialogs and file
+  pickers keep working. Desktop keeps the platform WebView's own prompt.
 - Autoplay: Android `mediaPlaybackRequiresUserGesture = false`. iOS
   configuration flags are fixed at WKWebView creation; wry creates it with
   inline playback and autoplay enabled — verify on device.
 - IPC: app commands are permission-gated (`build.rs` app manifest) and only
-  `capabilities/shell*.json` grants them, to the local shell. The tunnelled
-  box UI is a remote URL with no capability.
+  `capabilities/shell*.json` grants them, to the local shell (`core:event`
+  only, no other core APIs). The tunnelled box UI is a remote URL with no
+  capability. Tauri 2 mobile has a single webview, so box pages can't be
+  moved to a label of their own; instead every command also takes a
+  `ShellProof` (`commands.rs`): the request must come from the `main`
+  webview, carry the per-launch shell token (`X-PeckBoard-Shell`, defined on
+  `window` by an initialization script only when the page is a shell origin)
+  and, when the runtime can report it, show a shell URL. Tauri's own check
+  judges the caller by the webview's current URL (on Android, the one seen at
+  `onPageStarted`), which a box page racing a navigation to the shell could
+  satisfy; the token closes that.
 
 ## Prerequisites
 
@@ -193,8 +221,9 @@ cargo test --manifest-path apps/mobile/plugins/peckboard-native/Cargo.toml
 ```
 
 Covers link parsing, the store round trip (secret kept out of the JSON),
-port assignment/reuse, gate boot URL construction, the navigation
-allow-list, event → status mapping, and pause/resume releasing and
+port assignment (never reused; old `boxes.json` files migrate), the shell
+IPC proof (`ShellProof`), gate boot URL construction, the navigation
+allow-list (this platform's shell origin only), event → status mapping, and pause/resume releasing and
 rebinding the port; the plugin test covers the desktop `dev-secrets.json` →
 keychain import. Device smoke tests (pair against
 `peckboard-relay/examples/box_forward`, load `/`, WS connects) are manual

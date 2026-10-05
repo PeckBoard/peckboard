@@ -6,8 +6,12 @@
 //!   Windows Credential Manager (`keyring`). Linux: a dev-only 0600 file
 //!   (Linux desktop is not shipped).
 //! - **WebView config**, applied natively when the WebView loads: media
-//!   autoplay without a gesture, mic capture auto-granted for the loopback
-//!   origin only, back-swipe on iOS.
+//!   autoplay without a gesture, back-swipe on iOS.
+//! - **Microphone**: capture is granted only to the active box's loopback
+//!   origin, from its main frame, after the user allowed it once for that
+//!   box ([`Native::set_mic_policy`] / [`Native::watch_mic_decisions`]).
+//! - **Website data**: a removed box's loopback origin is cleared as far as
+//!   the platform allows ([`Native::clear_site_data`]).
 //! - **Lifecycle**: foreground/background notifications so the core can stop
 //!   the tunnel while backgrounded; on desktop, a wake from sleep.
 //! - **Network**: default-network changes (Wi-Fi ↔ cellular) on iOS and
@@ -16,7 +20,7 @@
 //! Nothing here is callable from JavaScript (`COMMANDS` is empty in
 //! `build.rs`); only the app's Rust core uses [`PeckboardNativeExt`].
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime};
 
@@ -63,6 +67,29 @@ pub enum Lifecycle {
 pub struct NetworkChange {
     #[serde(default)]
     pub detail: String,
+}
+
+/// Who may capture the microphone right now: the active box's UI at
+/// `origin` (`http://127.0.0.1:<port>`), and only if the user allowed it for
+/// that box. `allowed: None` means not asked yet — the native side then asks
+/// "Allow <box_name> to use the microphone?" once and reports the answer
+/// through [`Native::watch_mic_decisions`]. No policy (`None` in
+/// [`Native::set_mic_policy`]) denies every request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicPolicy {
+    pub origin: String,
+    pub box_id: String,
+    pub box_name: String,
+    pub allowed: Option<bool>,
+}
+
+/// The user's answer to the microphone prompt for a box.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicDecision {
+    pub box_id: String,
+    pub allowed: bool,
 }
 
 pub trait PeckboardNativeExt<R: Runtime> {
