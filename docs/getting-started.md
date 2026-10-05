@@ -27,20 +27,9 @@ The web interface, database, and TLS certificate generator are all inside the bi
 
 ## Download the Remote Agent
 
-The optional **peckboard-agent** daemon runs on another machine and dials home to your Peckboard over an outbound WebSocket, so sessions can drive that machine (commands, servers, screenshots, mouse/keyboard) without opening inbound ports. The same [releases page](https://github.com/PeckBoard/peckboard/releases) ships one agent binary per platform:
+The optional **peckboard-agent** daemon runs on another machine and dials home to your PeckBoard over an outbound WebSocket, so sessions can drive that machine — commands, servers, screenshots, mouse and keyboard — without opening inbound ports. The same [releases page](https://github.com/PeckBoard/peckboard/releases) ships one agent binary per platform, named `peckboard-agent-<os>-<cpu>`. Every capability except a connectivity probe is off until you enable it on the machine. [Remote Agent]({{ "/remote-agent.html" | relative_url }}) walks through verifying, enrolling, permissions, and starting it at boot.
 
-- `peckboard-agent-macos-arm64` / `peckboard-agent-macos-x86_64`
-- `peckboard-agent-linux-x86_64` / `peckboard-agent-linux-arm64` (need `libxcb1`, preinstalled on desktop distros)
-- `peckboard-agent-windows-x86_64.exe`
-
-Verify the matching `.sha256`, put the binary on your `PATH`, then enroll from Peckboard's **Agents** panel:
-
-```bash
-peckboard-agent enroll --server https://your-peckboard-host:3345 --token <TOKEN>
-peckboard-agent run
-```
-
-Capabilities are deny-by-default — see the [peckboard-agent README](https://github.com/PeckBoard/peckboard/blob/main/peckboard-agent/README.md) for install, permissions, and service setup.
+To reach PeckBoard itself from your phone or another computer, see [Remote Access]({{ "/remote-access.html" | relative_url }}).
 
 ## Build from Source
 

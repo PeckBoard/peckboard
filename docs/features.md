@@ -73,7 +73,11 @@ Settings → Server shows ports, the data directory, and in-app software updates
 
 ## Remote-Control Agents
 
-The `peckboard-agent` daemon enrolls another machine — a laptop, a build box, a Windows VM — under your PeckBoard, and the Agents view lists every enrolled machine with its capabilities. Sessions can then run commands, take screenshots, and drive keyboard and mouse on that machine through the `remote_agent_*` tools, with every capability gated at enrollment. [Getting Started]({{ "/getting-started.html" | relative_url }}) covers downloading and enrolling the agent.
+The `peckboard-agent` daemon enrolls another machine — a laptop, a build box, a Windows VM — under your PeckBoard, and the Agents view lists every enrolled machine with its live state. Sessions can then run commands, manage servers, take screenshots, and drive keyboard and mouse on that machine through the `remote_agent_*` tools, each capability switched on per machine in the agent's own configuration. [Remote Agent]({{ "/remote-agent.html" | relative_url }}) covers downloading, enrolling, and running the agent.
+
+## Remote Access
+
+The PeckBoard app for iPhone, Android, macOS, and Windows reaches your box from anywhere through a relay, with no port forwarding: Settings → Connections → Remote Access pairs each device with its own QR code or link. Connections go direct when the network allows and through the end-to-end encrypted relay otherwise. [Remote Access]({{ "/remote-access.html" | relative_url }}) covers setup, the [official relay]({{ "/remote-access/official-relay.html" | relative_url }}), and [running your own]({{ "/remote-access/self-hosted-relay.html" | relative_url }}).
 
 ## Repeating Tasks, Reports, and Workflows
 
