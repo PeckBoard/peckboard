@@ -11,7 +11,7 @@ streams:
 
 - **Server and remote agent** — tags like `0.1.65`, on every release. The
   links below always fetch the newest one.
-- **Phone and desktop apps** — tags like `mobile-0.1.5`. Direct links below
+- **Phone and desktop apps** — tags like `mobile-0.1.6`. Direct links below
   point at the current app release; newer ones appear on the
   [releases page](https://github.com/PeckBoard/peckboard/releases) under
   `mobile-*` tags.
@@ -55,15 +55,15 @@ an outbound WebSocket, so sessions can drive that machine. Setup:
 The PeckBoard app pairs with your server once and then reaches it from
 anywhere — setup in
 [Remote Access]({{ "/remote-access.html" | relative_url }}). Current app
-release: **mobile-0.1.5**.
+release: **mobile-0.1.6**.
 
 | Platform              | Download                                                                                                                                             | Checksum                                                                                                                     | Notes                                                                                                                                         |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS (universal)     | [PeckBoard-0.1.5-macos-universal.dmg](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/PeckBoard-0.1.5-macos-universal.dmg)     | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/PeckBoard-0.1.5-macos-universal.dmg.sha256)   | Signed and notarized; Apple Silicon + Intel                                                                                                   |
-| Windows x64 installer | [PeckBoard-0.1.5-windows-x64-setup.exe](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/PeckBoard-0.1.5-windows-x64-setup.exe) | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/PeckBoard-0.1.5-windows-x64-setup.exe.sha256) | Unsigned: SmartScreen warns — More info → Run anyway. Per-user install, no admin                                                              |
-| Windows x64 MSI       | [PeckBoard-0.1.5-windows-x64.msi](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/PeckBoard-0.1.5-windows-x64.msi)             | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/PeckBoard-0.1.5-windows-x64.msi.sha256)       | Same app, MSI packaging                                                                                                                       |
+| macOS (universal)     | [PeckBoard-0.1.6-macos-universal.dmg](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/PeckBoard-0.1.6-macos-universal.dmg)     | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/PeckBoard-0.1.6-macos-universal.dmg.sha256)   | Signed and notarized; Apple Silicon + Intel                                                                                                   |
+| Windows x64 installer | [PeckBoard-0.1.6-windows-x64-setup.exe](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/PeckBoard-0.1.6-windows-x64-setup.exe) | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/PeckBoard-0.1.6-windows-x64-setup.exe.sha256) | Unsigned: SmartScreen warns — More info → Run anyway. Per-user install, no admin                                                              |
+| Windows x64 MSI       | [PeckBoard-0.1.6-windows-x64.msi](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/PeckBoard-0.1.6-windows-x64.msi)             | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/PeckBoard-0.1.6-windows-x64.msi.sha256)       | Same app, MSI packaging                                                                                                                       |
 | iPhone                | App Store — in review                                                                                                                                | —                                                                                                                            | TestFlight today; the App Store listing is being reviewed                                                                                     |
-| Android               | [peckboard-android-0.1.5.apk](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/peckboard-android-0.1.5.apk)                     | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.5/peckboard-android-0.1.5.apk.sha256)           | Sideload; allow your browser to install unknown apps. Signing cert SHA-256 `26734fd51c7c488592afd5d359109751672ebd6584bd4d7795f2a9f7a9c5f24f` |
+| Android               | [peckboard-android-0.1.6.apk](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/peckboard-android-0.1.6.apk)                     | [sha256](https://github.com/PeckBoard/peckboard/releases/download/mobile-0.1.6/peckboard-android-0.1.6.apk.sha256)           | Sideload; allow your browser to install unknown apps. Signing cert SHA-256 `26734fd51c7c488592afd5d359109751672ebd6584bd4d7795f2a9f7a9c5f24f` |
 
 ## Verifying a Download
 
