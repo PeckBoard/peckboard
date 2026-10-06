@@ -215,10 +215,27 @@ impl Store {
         now_ms: u64,
     ) -> anyhow::Result<BoxRecord> {
         let fp = fingerprint(link);
+        let box_fp = link.box_fingerprint();
+        // A pairing that never finished (enrollment failed or was cut off)
+        // is replaced, not a reason to refuse: same link or same box.
+        let stale: Vec<String> = self
+            .boxes
+            .iter()
+            .filter(|b| {
+                b.auth == Auth::Enrolling
+                    && (b.fingerprint == fp || (box_fp.is_some() && b.box_fp == box_fp))
+                    // Granted but the record lagged (crash): keep it.
+                    && matches!(secrets.get(&credential_key(&b.id)), Ok(None))
+            })
+            .map(|b| b.id.clone())
+            .collect();
+        for id in stale {
+            self.remove(secrets, &id)
+                .context("Couldn't clear the unfinished pairing for this box.")?;
+        }
         if let Some(b) = self.boxes.iter().find(|b| b.fingerprint == fp) {
             bail!("This link is already paired as “{}”.", b.name);
         }
-        let box_fp = link.box_fingerprint();
         if let Some(b) = self
             .boxes
             .iter()
@@ -567,9 +584,14 @@ pub mod tests {
             Some(link_v2(1).box_fingerprint().unwrap().as_str())
         );
         assert_eq!(a.link_expires_at, Some(1_800_000_000));
-        // Same box, different link: refused by box fingerprint.
-        let err = s.add(&*secrets, &link_v2(2), "Twice", 0).unwrap_err();
-        assert!(err.to_string().contains("already have this box"), "{err}");
+        // Same box again while that pairing is unfinished (enrollment
+        // failed or was cut off): the half-paired record is replaced.
+        let b = s.add(&*secrets, &link_v2(2), "Twice", 0).unwrap();
+        assert!(s.get(&a.id).is_none());
+        assert!(secrets.get(&secret_key(&a.id)).unwrap().is_none());
+        let a = s.add(&*secrets, &link_v2(1), "Home", 0).unwrap();
+        assert!(s.get(&b.id).is_none());
+        assert_eq!(s.boxes().len(), 1);
 
         // Enrolling: a `Link` credential whose key is created once and
         // reused (a crash between request and grant must not change it).
@@ -617,6 +639,9 @@ pub mod tests {
             s.credential(&*secrets, &a.id).unwrap(),
             DeviceCredential::Enrolled(_)
         ));
+        // Once enrolled, the same box is refused (remove it first).
+        let err = s.add(&*secrets, &link_v2(2), "Twice", 0).unwrap_err();
+        assert!(err.to_string().contains("already have this box"), "{err}");
     }
 
     /// A pairing from before v2 (only `box:`, no `auth` in the JSON) keeps

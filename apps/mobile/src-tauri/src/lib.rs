@@ -96,6 +96,23 @@ fn open_pair_link(app: &AppHandle, raw: &str) {
         return;
     };
     log::info!("deep link opened ({} chars)", raw.len());
+    // Debug builds only: `PBM_DEBUG_AUTOCONFIRM=1` (e.g. `devicectl device
+    // process launch --environment-variables`) pairs the link through the
+    // same path as the confirm screen's Pair button, so pairing can be
+    // verified on a device without a tap.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("PBM_DEBUG_AUTOCONFIRM").is_some() {
+        let app = app.clone();
+        let raw = raw.to_string();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            match commands::pair_link(&app, &state, &raw, "").await {
+                Ok(v) => log::info!("debug autoconfirm: paired {:?}", v.record.auth),
+                Err(e) => log::warn!("debug autoconfirm: {e}"),
+            }
+        });
+        return;
+    }
     let parked = state.pair_slot.lock().unwrap().offer(raw);
     if !parked {
         log::warn!("deep link ignored: another pairing link is being confirmed");

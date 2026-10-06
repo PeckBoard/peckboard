@@ -136,7 +136,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct BoxView {
     #[serde(flatten)]
-    record: BoxRecord,
+    pub(crate) record: BoxRecord,
     status: Option<TunnelStatus>,
 }
 
@@ -158,10 +158,14 @@ fn view(state: &AppState, record: BoxRecord) -> BoxView {
     BoxView { record, status }
 }
 
+// Every command is `async`: Tauri runs sync commands on the main thread,
+// and on iOS the keychain (native plugin) calls `pair_link` / `connect_box`
+// make while holding the store lock need the main thread too. A sync
+// command blocking on that lock deadlocked the app right after Pair.
 #[tauri::command]
-pub fn list_boxes(state: State<'_, AppState>, _shell: ShellProof) -> Vec<BoxView> {
+pub async fn list_boxes(state: State<'_, AppState>, _shell: ShellProof) -> CmdResult<Vec<BoxView>> {
     let boxes = state.store.lock().unwrap().boxes().to_vec();
-    boxes.into_iter().map(|b| view(&state, b)).collect()
+    Ok(boxes.into_iter().map(|b| view(&state, b)).collect())
 }
 
 /// Manual pairing (pasted or scanned link): store it and, for a v2 link,
@@ -183,7 +187,12 @@ pub async fn add_box(
 /// link is used up. No box page is opened. A refusal the box will never
 /// lift (link used, expired) removes the half-paired record again. A v1
 /// link is stored as legacy; it upgrades on its first connect.
-async fn pair_link(app: &AppHandle, state: &AppState, raw: &str, name: &str) -> CmdResult<BoxView> {
+pub(crate) async fn pair_link(
+    app: &AppHandle,
+    state: &AppState,
+    raw: &str,
+    name: &str,
+) -> CmdResult<BoxView> {
     let link = parse_link(raw)?;
     let rec = state
         .store
@@ -254,7 +263,7 @@ fn activation_hook(app: &AppHandle, id: &str) -> Arc<dyn Fn() + Send + Sync> {
 }
 
 #[tauri::command]
-pub fn rename_box(
+pub async fn rename_box(
     app: AppHandle,
     state: State<'_, AppState>,
     _shell: ShellProof,
@@ -354,15 +363,21 @@ pub async fn disconnect_box(
 }
 
 #[tauri::command]
-pub fn tunnel_status(state: State<'_, AppState>, _shell: ShellProof) -> Option<TunnelStatus> {
-    state.tunnel.status()
+pub async fn tunnel_status(
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+) -> CmdResult<Option<TunnelStatus>> {
+    Ok(state.tunnel.status())
 }
 
 /// The pairing deep link waiting for confirmation, if any (taken once;
 /// it stays reserved under the prompt's `id` until confirmed or dismissed).
 #[tauri::command]
-pub fn take_pair_link(state: State<'_, AppState>, _shell: ShellProof) -> Option<PairPrompt> {
-    state.pair_slot.lock().unwrap().take()
+pub async fn take_pair_link(
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+) -> CmdResult<Option<PairPrompt>> {
+    Ok(state.pair_slot.lock().unwrap().take())
 }
 
 /// Pair the link shown as prompt `id` — the one Rust holds, so what the
@@ -389,8 +404,13 @@ pub async fn confirm_pair(
 
 /// The user cancelled prompt `id`: forget the link.
 #[tauri::command]
-pub fn dismiss_pair(state: State<'_, AppState>, _shell: ShellProof, id: String) {
+pub async fn dismiss_pair(
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+    id: String,
+) -> CmdResult<()> {
     state.pair_slot.lock().unwrap().clear(&id);
+    Ok(())
 }
 
 /// The microphone policy last pushed to the native WebView delegate, so

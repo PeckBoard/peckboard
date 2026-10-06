@@ -37,10 +37,11 @@ struct LifecycleMessage {
 
 impl<R: Runtime> Native<R> {
     pub fn secret_get(&self, key: &str) -> crate::Result<Option<String>> {
-        let r: ValueResponse = self
+        // A missing key resolves with no payload (JSON null) on iOS.
+        let r: Option<ValueResponse> = self
             .0
             .run_mobile_plugin("secretGet", json!({ "key": key }))?;
-        Ok(r.value)
+        Ok(r.and_then(|r| r.value))
     }
 
     pub fn secret_set(&self, key: &str, value: &str) -> crate::Result<()> {
