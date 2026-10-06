@@ -1,3 +1,4 @@
+import LocalAuthentication
 import Network
 import Security
 import Tauri
@@ -60,6 +61,15 @@ struct MicDecisionMessage: Encodable {
   let allowed: Bool
 }
 
+class AuthenticateArgs: Decodable {
+  /// Shown in the Touch ID prompt (Face ID shows NSFaceIDUsageDescription).
+  let reason: String
+}
+
+class PrivacyCoverArgs: Decodable {
+  let armed: Bool
+}
+
 class PeckboardNativePlugin: Plugin {
   private var lifecycle: Channel?
   private var network: Channel?
@@ -75,6 +85,20 @@ class PeckboardNativePlugin: Plugin {
   private var lastPath: String?
   private var uiDelegate: LoopbackUIDelegate?
   private var observers: [NSObjectProtocol] = []
+  /// Guarded by `coverLock`: written from the command queue, read on the
+  /// main thread (same no-main-queue rule as `micPolicy`). `authenticating`
+  /// is set while our own biometric sheet is up — it makes the app resign
+  /// active, and must not raise the cover over the lock screen.
+  private var coverArmed = false
+  private var authenticating = false
+  private let coverLock = NSLock()
+  /// Main thread only. `coverBackgrounded`: the app reached the background
+  /// since the cover went up — only then does the core run the lock and
+  /// lower it; otherwise it was a transient resign (Control Center, a call
+  /// banner, a system alert) and the cover drops on becoming active again.
+  private var coverView: UIView?
+  private var coverBackgrounded = false
+  private weak var coverHost: WKWebView?
 
   @objc public override func load(webview: WKWebView) {
     // Configuration flags (inline playback, autoplay) are copied when the
@@ -118,6 +142,22 @@ class PeckboardNativePlugin: Plugin {
       center.addObserver(
         forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
       ) { [weak self] _ in self?.emit("foreground") })
+
+    // Privacy cover: up the moment the app leaves the foreground, so the
+    // app-switcher snapshot shows nothing; lowered only by the core.
+    coverHost = webview
+    observers.append(
+      center.addObserver(
+        forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
+      ) { [weak self] _ in self?.raiseCover(backgrounded: false) })
+    observers.append(
+      center.addObserver(
+        forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+      ) { [weak self] _ in self?.raiseCover(backgrounded: true) })
+    observers.append(
+      center.addObserver(
+        forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+      ) { [weak self] _ in self?.becameActive() })
   }
 
   deinit {
@@ -240,6 +280,120 @@ class PeckboardNativePlugin: Plugin {
     } else {
       invoke.reject("keychain delete failed (\(status))")
     }
+  }
+
+  /// Which biometric `authenticate` can use right now: hardware present,
+  /// enrolled, not locked out; "none" otherwise.
+  @objc public func biometricKind(_ invoke: Invoke) throws {
+    let context = LAContext()
+    var error: NSError?
+    guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+    else {
+      invoke.resolve(["kind": "none"])
+      return
+    }
+    invoke.resolve(["kind": PeckboardNativePlugin.kind(context.biometryType)])
+  }
+
+  private static func kind(_ type: LABiometryType) -> String {
+    if #available(iOS 17.0, macOS 14.0, *), type == .opticID { return "opticId" }
+    switch type {
+    case .faceID: return "faceId"
+    case .touchID: return "touchId"
+    default: return "none"
+    }
+  }
+
+  /// Biometrics only — no device-passcode fallback (the app's own code or
+  /// pattern is the fallback; the empty fallback title hides "Enter
+  /// Password"). Resolves `{ outcome }`, never rejects, for cancel/failure.
+  @objc public func authenticate(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(AuthenticateArgs.self)
+    let context = LAContext()
+    context.localizedFallbackTitle = ""
+    var error: NSError?
+    guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+    else {
+      invoke.resolve(["outcome": "unavailable"])
+      return
+    }
+    // An empty reason throws NSInvalidArgumentException.
+    let reason = args.reason.isEmpty ? "Unlock PeckBoard" : args.reason
+    setAuthenticating(true)
+    // The reply runs on a private queue; the closure keeps `context` alive
+    // (a released context cancels the evaluation).
+    context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) {
+      [weak self] ok, error in
+      withExtendedLifetime(context) {}
+      self?.setAuthenticating(false)
+      invoke.resolve(["outcome": ok ? "success" : PeckboardNativePlugin.outcome(error)])
+    }
+  }
+
+  private static func outcome(_ error: Error?) -> String {
+    guard let error = error as? LAError else { return "unavailable" }
+    switch error.code {
+    case .userCancel, .systemCancel, .appCancel, .userFallback: return "cancelled"
+    default: return "unavailable"
+    }
+  }
+
+  private func setAuthenticating(_ value: Bool) {
+    coverLock.lock()
+    authenticating = value
+    coverLock.unlock()
+  }
+
+  /// While armed, the cover goes up when the app leaves the foreground and
+  /// stays until `lowerPrivacyCover`. Disarming lowers it too.
+  @objc public func setPrivacyCover(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(PrivacyCoverArgs.self)
+    coverLock.lock()
+    coverArmed = args.armed
+    coverLock.unlock()
+    if !args.armed {
+      DispatchQueue.main.async { [weak self] in self?.removeCover() }
+    }
+    invoke.resolve()
+  }
+
+  @objc public func lowerPrivacyCover(_ invoke: Invoke) throws {
+    DispatchQueue.main.async { [weak self] in self?.removeCover() }
+    invoke.resolve()
+  }
+
+  /// Main thread. Our own biometric sheet also resigns active; then the
+  /// cover waits for an actual move to the background. A cover already up
+  /// is marked backgrounded too, so it outlives the return to the app.
+  private func raiseCover(backgrounded: Bool) {
+    coverLock.lock()
+    let armed = coverArmed
+    let skip = authenticating && !backgrounded
+    coverLock.unlock()
+    guard armed, !skip, let window = coverHost?.window else { return }
+    if backgrounded { coverBackgrounded = true }
+    if let cover = coverView {
+      window.bringSubviewToFront(cover)
+      return
+    }
+    let cover = UIView(frame: window.bounds)
+    cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    cover.backgroundColor = UIColor(red: 15 / 255.0, green: 17 / 255.0, blue: 21 / 255.0, alpha: 1)
+    window.addSubview(cover)
+    coverView = cover
+  }
+
+  /// Main thread. Active again without having been in the background: the
+  /// core never saw the app leave, so nothing will lower the cover — drop it.
+  private func becameActive() {
+    if coverView != nil && !coverBackgrounded { removeCover() }
+  }
+
+  /// Main thread.
+  private func removeCover() {
+    coverView?.removeFromSuperview()
+    coverView = nil
+    coverBackgrounded = false
   }
 }
 

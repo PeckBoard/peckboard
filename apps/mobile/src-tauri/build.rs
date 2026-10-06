@@ -12,6 +12,14 @@ const COMMANDS: &[&str] = &[
     "take_pair_link",
     "confirm_pair",
     "dismiss_pair",
+    "lock_status",
+    "lock_setup",
+    "lock_unlock",
+    "lock_unlock_biometric",
+    "lock_change",
+    "lock_set_options",
+    "lock_disable",
+    "lock_now",
 ];
 
 fn main() {

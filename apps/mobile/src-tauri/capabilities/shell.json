@@ -15,6 +15,14 @@
     "allow-tunnel-status",
     "allow-take-pair-link",
     "allow-confirm-pair",
-    "allow-dismiss-pair"
+    "allow-dismiss-pair",
+    "allow-lock-status",
+    "allow-lock-setup",
+    "allow-lock-unlock",
+    "allow-lock-unlock-biometric",
+    "allow-lock-change",
+    "allow-lock-set-options",
+    "allow-lock-disable",
+    "allow-lock-now"
   ]
 }

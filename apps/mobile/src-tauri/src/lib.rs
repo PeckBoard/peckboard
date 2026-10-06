@@ -6,10 +6,12 @@ mod commands;
 #[cfg(target_os = "ios")]
 mod launch_url;
 mod link;
+mod lock;
 mod nav;
 mod store;
 mod tunnel;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::webview::PageLoadEvent;
@@ -21,6 +23,7 @@ use url::Url;
 
 use commands::{AppState, MicSync, ShellNonce, ShellOrigins, now_ms};
 use link::PairSlot;
+use lock::LockManager;
 use store::{SecretStore, Store};
 use tunnel::{Milestone, TunnelManager, TunnelState, TunnelStatus};
 
@@ -85,6 +88,50 @@ fn init_debug_log(dir: &std::path::Path) {
 #[derive(Default)]
 struct ShellHome(Arc<Mutex<Option<Url>>>);
 
+/// The app just locked on its way back to the foreground: the native
+/// privacy cover stays up until the shell page (the lock screen) has loaded.
+#[derive(Default)]
+struct CoverPending(AtomicBool);
+
+/// What the lifecycle consumer reacts to, in order.
+#[derive(Debug)]
+enum Signal {
+    /// With whether one of our own biometric prompts was showing when it
+    /// fired (the Face ID sheet resigns the app active: not "away").
+    Life(Lifecycle, bool),
+    /// Desktop: the main window lost focus (alt-tab, a dialog, our own
+    /// Touch ID / Windows Hello prompt): not "away" by itself.
+    #[cfg(desktop)]
+    Blur,
+    /// Desktop: the main window was minimized / hidden at this wall-clock
+    /// ms (starts the auto-lock timer only; the tunnel keeps running).
+    #[cfg(desktop)]
+    Hidden(u64),
+    /// Desktop: the main window got focus back.
+    #[cfg(desktop)]
+    Focus,
+    /// Desktop: the machine slept, last awake at this wall-clock ms.
+    #[cfg(desktop)]
+    Slept(u64),
+}
+
+/// Desktop: how long after losing focus the window is checked for being
+/// minimized / hidden (the state lags the focus event on some platforms).
+#[cfg(desktop)]
+const HIDE_SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// Desktop: the main window is minimized or hidden (not merely unfocused).
+#[cfg(desktop)]
+fn window_away(win: &tauri::WebviewWindow) -> bool {
+    win.is_minimized().unwrap_or(false) || !win.is_visible().unwrap_or(true)
+}
+
+fn lower_privacy_cover(app: &AppHandle) {
+    if let Err(e) = app.native().lower_privacy_cover() {
+        log::warn!("lowering the privacy cover failed: {e}");
+    }
+}
+
 /// A pairing link (`https://peckboard.com/pair#…` or `peckboard://pair/…`)
 /// opened the app: park it for the shell UI, which asks the user to
 /// confirm (showing the relay and the box fingerprint) before pairing, and
@@ -106,6 +153,10 @@ fn open_pair_link(app: &AppHandle, raw: &str) {
         let raw = raw.to_string();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
+            if state.lock.is_locked() {
+                log::warn!("debug autoconfirm: app is locked");
+                return;
+            }
             match commands::pair_link(&app, &state, &raw, "").await {
                 Ok(v) => log::info!("debug autoconfirm: paired {:?}", v.record.auth),
                 Err(e) => log::warn!("debug autoconfirm: {e}"),
@@ -172,6 +223,36 @@ fn reboot_box_page(app: &AppHandle, tunnel: &TunnelManager, port: u16) {
     }
 }
 
+/// Engage the app lock (if one is configured): stop the tunnel and any
+/// pairing round and, with `navigate`, bring the WebView back to the shell,
+/// which boots into the lock screen; the privacy cover comes down once that
+/// page has loaded.
+pub(crate) async fn engage_lock(app: &AppHandle, navigate: bool) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let (lock, tunnel) = (state.lock.clone(), state.tunnel.clone());
+    if !lock.engage().await {
+        return;
+    }
+    log::info!("app locked");
+    tunnel.stop_all().await;
+    if navigate {
+        let pending = &app.state::<CoverPending>().0;
+        pending.store(true, Ordering::SeqCst);
+        let shown = match (app.get_webview_window("main"), shell_home(app)) {
+            (Some(win), Some(home)) => win.navigate(home).is_ok(),
+            _ => false,
+        };
+        if !shown && pending.swap(false, Ordering::SeqCst) {
+            let app = app.clone();
+            let _ = async_runtime::spawn_blocking(move || lower_privacy_cover(&app)).await;
+        }
+    }
+    let app = app.clone();
+    let _ = async_runtime::spawn_blocking(move || commands::emit_lock_status(&app, &lock)).await;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -189,6 +270,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_peckboard_native::init())
         .manage(ShellHome::default())
+        .manage(CoverPending::default())
         .manage(MicSync::default());
     #[cfg(mobile)]
     {
@@ -272,26 +354,115 @@ pub fn run() {
                 let _ = events.emit(STATUS_EVENT, st);
             }));
 
-            // Foreground-only tunnel. One consumer task keeps transitions in
-            // order (background → foreground in quick succession).
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Lifecycle>();
-            let lifecycle_tunnel = tunnel.clone();
+            // Foreground-only tunnel, and the app lock's timer. One consumer
+            // task keeps transitions in order (background → foreground in
+            // quick succession).
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Signal>();
+            let lifecycle_app = handle.clone();
             async_runtime::spawn(async move {
-                while let Some(l) = rx.recv().await {
-                    log::info!("lifecycle: {l:?}");
-                    match l {
-                        Lifecycle::Background => lifecycle_tunnel.pause().await,
-                        Lifecycle::Foreground => {
-                            if let Err(e) = lifecycle_tunnel.resume().await {
+                let app = lifecycle_app;
+                // Desktop: whether the main window has focus (it may come
+                // back from a wake still unfocused).
+                #[cfg_attr(mobile, allow(unused_mut))]
+                let mut focused = true;
+                while let Some(sig) = rx.recv().await {
+                    log::info!("lifecycle: {sig:?}");
+                    let Some(state) = app.try_state::<AppState>() else {
+                        continue;
+                    };
+                    let (lock, tunnel) = (state.lock.clone(), state.tunnel.clone());
+                    match sig {
+                        Signal::Life(Lifecycle::Background, own_prompt) => {
+                            // Our own Face ID sheet resigning the app
+                            // active isn't leaving it.
+                            if !own_prompt {
+                                lock.note_away(now_ms());
+                            }
+                            let (a, l) = (app.clone(), lock.clone());
+                            let _ = async_runtime::spawn_blocking(move || {
+                                commands::sync_privacy_cover(&a, &l)
+                            })
+                            .await;
+                            tunnel.pause().await;
+                        }
+                        Signal::Life(Lifecycle::Foreground, _) => {
+                            if lock.due(now_ms()) {
+                                engage_lock(&app, true).await;
+                                continue;
+                            }
+                            if focused {
+                                lock.clear_away();
+                            }
+                            // Locked (already): stays paused.
+                            if let Ok(unlocked) = lock.unlocked().await
+                                && let Err(e) = tunnel.resume(&unlocked).await
+                            {
                                 log::warn!("resume failed: {e:#}");
+                            }
+                            let a = app.clone();
+                            let _ =
+                                async_runtime::spawn_blocking(move || lower_privacy_cover(&a))
+                                    .await;
+                        }
+                        #[cfg(desktop)]
+                        Signal::Blur => focused = false,
+                        #[cfg(desktop)]
+                        Signal::Hidden(at) => {
+                            focused = false;
+                            lock.note_away(at);
+                        }
+                        #[cfg(desktop)]
+                        Signal::Focus => {
+                            focused = true;
+                            if lock.due(now_ms()) {
+                                engage_lock(&app, true).await;
+                            } else {
+                                lock.clear_away();
+                            }
+                        }
+                        #[cfg(desktop)]
+                        Signal::Slept(at) => {
+                            lock.note_away(at);
+                            if lock.due(now_ms()) {
+                                engage_lock(&app, true).await;
+                            } else if focused {
+                                lock.clear_away();
                             }
                         }
                     }
                 }
             });
+            let life_tx = tx.clone();
+            let life_app = handle.clone();
             app.native().watch_lifecycle(move |l| {
-                let _ = tx.send(l);
+                let own_prompt = life_app
+                    .try_state::<AppState>()
+                    .is_some_and(|s| s.lock.prompt_in_flight());
+                let _ = life_tx.send(Signal::Life(l, own_prompt));
             })?;
+            // Desktop: the plugin's wake report (Background + Foreground)
+            // comes after the sleep, so time asleep is measured here: a tick
+            // that took much longer than it should means the machine slept
+            // since the previous one.
+            #[cfg(desktop)]
+            {
+                let tx = tx.clone();
+                std::thread::Builder::new()
+                    .name("peckboard-lock-clock".into())
+                    .spawn(move || {
+                        let mut last = now_ms();
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            let now = now_ms();
+                            if now.saturating_sub(last) >= 10_000
+                                && tx.send(Signal::Slept(last)).is_err()
+                            {
+                                break;
+                            }
+                            last = now;
+                        }
+                    })?;
+            }
 
             // Wi-Fi ↔ cellular: reconnect now instead of after the ping
             // timeout. Only a running (foregrounded) tunnel is kicked, and
@@ -321,11 +492,26 @@ pub fn run() {
                 log::warn!("microphone decisions unavailable: {e}");
             }
 
+            let secrets: Arc<dyn SecretStore> = Arc::new(NativeSecrets(handle.clone()));
+            let lock = Arc::new(LockManager::load(
+                data_dir.join("lock.json"),
+                secrets.clone(),
+                !store.boxes().is_empty(),
+            ));
             app.manage(AppState {
                 store: Mutex::new(store),
-                secrets: Arc::new(NativeSecrets(handle.clone())),
+                secrets,
                 tunnel: tunnel.clone(),
                 pair_slot: Mutex::new(PairSlot::default()),
+                lock: lock.clone(),
+            });
+            // Check the lock against secure storage (announcing any change)
+            // and arm the privacy cover before the app can first leave the
+            // foreground. Off the main thread (plugin calls need it free).
+            let cover = handle.clone();
+            async_runtime::spawn_blocking(move || {
+                commands::lock_status_of(&cover, &lock);
+                commands::sync_privacy_cover(&cover, &lock);
             });
 
             let opener = handle.clone();
@@ -373,9 +559,17 @@ pub fn run() {
                         // awaited from — that same thread.
                         if nav::is_shell(page.url(), &page_shell) {
                             let app = app.clone();
+                            let lower = app
+                                .state::<CoverPending>()
+                                .0
+                                .swap(false, Ordering::SeqCst);
                             async_runtime::spawn_blocking(move || {
                                 if let Err(e) = app.native().clear_history() {
                                     log::warn!("clearing history failed: {e}");
+                                }
+                                // The lock screen is up: drop the cover.
+                                if lower {
+                                    lower_privacy_cover(&app);
                                 }
                             });
                         }
@@ -417,7 +611,37 @@ pub fn run() {
                 .title("PeckBoard")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(400.0, 600.0);
-            builder.build()?;
+            let _main = builder.build()?;
+            // Desktop: being minimized / hidden starts the auto-lock timer
+            // (the tunnel stays up); plain focus loss — alt-tab, a file
+            // picker, our own Touch ID / Windows Hello prompt — doesn't.
+            // Getting focus back checks the timer.
+            #[cfg(desktop)]
+            {
+                let tx = tx.clone();
+                let win = _main.clone();
+                _main.on_window_event(move |ev| match ev {
+                    tauri::WindowEvent::Focused(true) => {
+                        let _ = tx.send(Signal::Focus);
+                    }
+                    tauri::WindowEvent::Focused(false) => {
+                        let _ = tx.send(Signal::Blur);
+                        let (tx, win, at) = (tx.clone(), win.clone(), now_ms());
+                        async_runtime::spawn(async move {
+                            tokio::time::sleep(HIDE_SETTLE).await;
+                            if !win.is_focused().unwrap_or(false) && window_away(&win) {
+                                let _ = tx.send(Signal::Hidden(at));
+                            }
+                        });
+                    }
+                    // Windows reports a minimize as a resize to 0×0.
+                    tauri::WindowEvent::Resized(size) if size.width == 0 || size.height == 0 => {
+                        let _ = tx.send(Signal::Hidden(now_ms()));
+                    }
+                    _ => {}
+                });
+            }
+            drop(tx);
 
             // Pairing links (https://peckboard.com/pair#… via Universal /
             // App Links on iOS / Android, peckboard://pair/… everywhere):
@@ -450,6 +674,14 @@ pub fn run() {
             commands::take_pair_link,
             commands::confirm_pair,
             commands::dismiss_pair,
+            commands::lock_status,
+            commands::lock_setup,
+            commands::lock_unlock,
+            commands::lock_unlock_biometric,
+            commands::lock_change,
+            commands::lock_set_options,
+            commands::lock_disable,
+            commands::lock_now,
         ])
         .build(tauri::generate_context!())
         .expect("error while building PeckBoard");

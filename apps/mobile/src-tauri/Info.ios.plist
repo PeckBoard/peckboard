@@ -13,6 +13,8 @@
 	<string>PeckBoard uses the camera to scan your box's pairing QR code.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>PeckBoard connects directly to your box when it is on the same network.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>PeckBoard uses Face ID to unlock the app.</string>
 	<!-- Plain HTTP only to the in-app loopback tunnel (127.0.0.1); no arbitrary loads. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>

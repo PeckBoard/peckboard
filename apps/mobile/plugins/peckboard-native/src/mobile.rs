@@ -5,7 +5,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::plugin::{PluginApi, PluginHandle};
 use tauri::{AppHandle, Runtime};
 
-use crate::{Lifecycle, MicDecision, MicPolicy, NetworkChange};
+use crate::{AuthOutcome, BiometricKind, Lifecycle, MicDecision, MicPolicy, NetworkChange};
 
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_peckboard_native);
@@ -33,6 +33,16 @@ struct ValueResponse {
 #[derive(Deserialize)]
 struct LifecycleMessage {
     state: Lifecycle,
+}
+
+#[derive(Deserialize)]
+struct BiometricKindResponse {
+    kind: BiometricKind,
+}
+
+#[derive(Deserialize)]
+struct AuthResponse {
+    outcome: AuthOutcome,
 }
 
 impl<R: Runtime> Native<R> {
@@ -146,6 +156,43 @@ impl<R: Runtime> Native<R> {
         let _: serde_json::Value = self
             .0
             .run_mobile_plugin("watchNetwork", json!({ "channel": channel }))?;
+        Ok(())
+    }
+
+    /// Which biometric the device can use right now (native `biometricKind`
+    /// → `{ kind }`).
+    pub fn biometric_kind(&self) -> crate::Result<BiometricKind> {
+        let r: BiometricKindResponse = self.0.run_mobile_plugin("biometricKind", json!({}))?;
+        Ok(r.kind)
+    }
+
+    /// Shows the system biometric prompt with `reason` and blocks until the
+    /// user answers (native `authenticate { reason }` → `{ outcome }`). Call
+    /// it off the main thread (an async command or `spawn_blocking`).
+    pub fn authenticate(&self, reason: &str) -> crate::Result<AuthOutcome> {
+        let r: AuthResponse = self
+            .0
+            .run_mobile_plugin("authenticate", json!({ "reason": reason }))?;
+        Ok(r.outcome)
+    }
+
+    /// Arms (`true`) or disarms the privacy cover. While armed, the native
+    /// side puts an opaque cover over the WebView whenever the app leaves the
+    /// foreground (iOS `willResignActive`; Android also hides the recents
+    /// thumbnail) and keeps it up after returning until
+    /// [`Self::lower_privacy_cover`]. Disarming also lowers it.
+    pub fn set_privacy_cover(&self, armed: bool) -> crate::Result<()> {
+        let _: serde_json::Value = self
+            .0
+            .run_mobile_plugin("setPrivacyCover", json!({ "armed": armed }))?;
+        Ok(())
+    }
+
+    /// Removes the cover if it is up (no-op otherwise). The core calls this
+    /// once the WebView shows something safe: the box page when no lock was
+    /// due, or the shell's lock screen.
+    pub fn lower_privacy_cover(&self) -> crate::Result<()> {
+        let _: serde_json::Value = self.0.run_mobile_plugin("lowerPrivacyCover", json!({}))?;
         Ok(())
     }
 }

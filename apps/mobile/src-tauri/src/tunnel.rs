@@ -24,6 +24,7 @@ use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tokio::net::TcpListener;
 
+use crate::lock::{LockManager, Unlocked};
 use crate::nav;
 
 pub const HARD_NAT: &str = "Couldn't reach your PeckBoard from this network right now. Retrying…";
@@ -343,9 +344,11 @@ impl TunnelManager {
     /// Connect to `box_id` on its fixed `port`; replaces any other tunnel
     /// (and any enrollment round). `on_enrolled` stores the credential
     /// should this run enroll (a v2 link not yet enrolled, or a legacy
-    /// pairing the box upgrades).
+    /// pairing the box upgrades). Needs [`Unlocked`]: no tunnel while the
+    /// app lock is engaged.
     pub async fn start(
         &self,
+        _unlocked: &Unlocked,
         box_id: &str,
         cred: DeviceCredential,
         port: u16,
@@ -397,7 +400,8 @@ impl TunnelManager {
     /// origin, so the WebView's page and login stay valid) with a fresh
     /// gate key. The returned status has `rekeyed` set; once `Connected`
     /// the WebView must re-boot through the new key ([`Self::boot_url_to`]).
-    pub async fn resume(&self) -> anyhow::Result<Option<TunnelStatus>> {
+    /// Needs [`Unlocked`]: a locked app stays paused.
+    pub async fn resume(&self, _unlocked: &Unlocked) -> anyhow::Result<Option<TunnelStatus>> {
         let _op = self.ops.lock().await;
         let paused = {
             let guard = self.session.lock().unwrap();
@@ -438,6 +442,15 @@ impl TunnelManager {
             s.status.milestone = None;
             (self.emit)(&s.status);
         }
+    }
+
+    /// The app lock engaged: stop the tunnel and any pairing round.
+    pub async fn stop_all(&self) {
+        {
+            let _op = self.ops.lock().await;
+            self.stop_aux().await;
+        }
+        self.stop().await;
     }
 
     /// Stop only if `box_id` is the active box (it's being removed).
@@ -600,9 +613,11 @@ impl TunnelManager {
     /// connect (the box retires the link on the first tunnel with the new
     /// credential; `on_activated` then runs), capped at
     /// [`ACTIVATE_TIMEOUT`]; any real connect ends it early. No box page
-    /// is loaded at any point.
+    /// is loaded at any point. Refused while the app is locked; a round
+    /// that started before the lock engaged is ended by [`Self::stop_all`].
     pub async fn enroll(
         &self,
+        lock: &LockManager,
         cred: DeviceCredential,
         expires: Option<u64>,
         on_enrolled: OnEnrolled,
@@ -615,6 +630,9 @@ impl TunnelManager {
         let listener = bind_listener(ListenAddr::Ephemeral)
             .await
             .map_err(|e| EnrollFailure::other(format!("Couldn't open a local port: {e}")))?;
+        // Held until the round is registered in `aux`, so a lock engaging
+        // meanwhile waits for it and its `stop_all` then ends it.
+        let unlocked = lock.unlocked().await.map_err(EnrollFailure::other)?;
         // A gate whose key nobody has: the port admits nothing.
         let gate = CookieGate::new();
         let mut opts = DeviceOptions::new(cred).with_gate(&gate);
@@ -640,6 +658,7 @@ impl TunnelManager {
             task,
         };
         *self.aux.lock().unwrap() = Some(aux);
+        drop(unlocked);
 
         let now = || {
             std::time::SystemTime::now()
@@ -963,7 +982,11 @@ mod tests {
     async fn pause_keeps_port_and_resume_rotates_gate_key() {
         let port = free_port();
         let mgr = TunnelManager::new(|_| {});
-        let st = mgr.start("b1", legacy_link(), port, None).await.unwrap();
+        let u = Unlocked::for_tests();
+        let st = mgr
+            .start(&u, "b1", legacy_link(), port, None)
+            .await
+            .unwrap();
         assert_eq!(st.port, port);
         assert!(
             st.url
@@ -976,7 +999,7 @@ mod tests {
         assert_eq!(mgr.status().unwrap().state, TunnelState::Paused);
         assert!(!port_is_free(port), "paused tunnel released its port");
 
-        let st2 = mgr.resume().await.unwrap().unwrap();
+        let st2 = mgr.resume(&u).await.unwrap().unwrap();
         assert_eq!(st2.port, port);
         assert!(st2.rekeyed);
         assert_ne!(key(&st2.url), key(&st.url), "gate key not rotated");
@@ -998,12 +1021,13 @@ mod tests {
     #[tokio::test]
     async fn each_box_gets_its_own_gate_key() {
         let mgr = TunnelManager::new(|_| {});
+        let u = Unlocked::for_tests();
         let a = mgr
-            .start("a", legacy_link(), free_port(), None)
+            .start(&u, "a", legacy_link(), free_port(), None)
             .await
             .unwrap();
         let b = mgr
-            .start("b", legacy_link(), free_port(), None)
+            .start(&u, "b", legacy_link(), free_port(), None)
             .await
             .unwrap();
         assert_ne!(key(&a.url), key(&b.url));
@@ -1018,7 +1042,13 @@ mod tests {
         let mgr = TunnelManager::new(|_| {});
         assert!(!mgr.network_changed(), "no tunnel");
         let st = mgr
-            .start("b", legacy_link(), free_port(), None)
+            .start(
+                &Unlocked::for_tests(),
+                "b",
+                legacy_link(),
+                free_port(),
+                None,
+            )
             .await
             .unwrap();
         assert!(mgr.network_changed());

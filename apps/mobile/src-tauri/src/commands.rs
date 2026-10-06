@@ -1,16 +1,24 @@
 //! Shell-UI commands. Granted only to the local shell (capabilities/shell.json)
 //! — and, belt and braces, every command takes a [`ShellProof`], so a box
 //! page can't call one even if Tauri's origin check is caught mid-navigation.
+//! While the app lock is engaged, every command but the unlock ones fails
+//! with `"locked"` (also enforced by [`ShellProof`]).
 
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::ipc::{CommandArg, CommandItem, InvokeError};
-use tauri::{AppHandle, Manager, Runtime, State, WebviewWindow};
-use tauri_plugin_peckboard_native::{MicDecision, MicPolicy, PeckboardNativeExt};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow, async_runtime};
+use tauri_plugin_peckboard_native::{
+    AuthOutcome, BiometricKind, MicDecision, MicPolicy, PeckboardNativeExt,
+};
 use url::Url;
 
 use crate::link::{PairPrompt, PairSlot, parse_link};
+use crate::lock::{
+    AutoLock, BIOMETRIC_REASON, LOCK_EVENT, LOCKED, LockManager, LockMethod, LockStatus,
+    UnlockResult,
+};
 use crate::nav;
 use crate::store::{BoxRecord, SecretStore, Store, enrolled_writer};
 use crate::tunnel::{TunnelManager, TunnelState, TunnelStatus};
@@ -21,6 +29,7 @@ pub struct AppState {
     pub tunnel: Arc<TunnelManager>,
     /// The deep-linked pairing link awaiting the user's confirmation.
     pub pair_slot: Mutex<PairSlot>,
+    pub lock: Arc<LockManager>,
 }
 
 /// Header the shell sends with every command, carrying the [`ShellNonce`].
@@ -28,6 +37,8 @@ pub const SHELL_HEADER: &str = "x-peckboard-shell";
 /// Global the shell page reads the nonce from (see [`ShellNonce::init_script`]).
 const SHELL_GLOBAL: &str = "__PBM_SHELL__";
 const REJECT: &str = "This command is only available to the PeckBoard shell.";
+/// The commands a locked app still answers.
+const LOCK_EXEMPT: &[&str] = &["lock_status", "lock_unlock", "lock_unlock_biometric"];
 
 /// A per-launch secret only the shell page is given. Tauri's own IPC check
 /// resolves the caller from the webview's *current* URL (on Android, the
@@ -51,11 +62,17 @@ impl ShellNonce {
     /// `WKUserScript` / `addDocumentStartJavaScript` aren't in the DOM, and
     /// the HTML-injection fallback only applies to the shell's own protocol.
     /// `location.protocol` / `location.host` are unforgeable.
+    ///
+    /// Every other page gets a capture-phase `beforeunload` listener,
+    /// registered before any of its own, that stops the event: a box page
+    /// can't hold up the app lock's navigation to the shell with a "Leave
+    /// page?" dialog.
     pub fn init_script(&self, shell: &[Url]) -> String {
         let origins: Vec<String> = shell.iter().map(nav::origin_string).collect();
         format!(
-            "(function(){{var s={origins};if(window.top!==window)return;\
-if(s.indexOf(location.protocol+\"//\"+location.host)===-1)return;\
+            "(function(){{var s={origins};\
+if(window.top!==window||s.indexOf(location.protocol+\"//\"+location.host)===-1){{\
+window.addEventListener(\"beforeunload\",function(e){{e.stopImmediatePropagation();}},true);return;}}\
 Object.defineProperty(window,{global},{{value:{nonce},writable:false,configurable:false,enumerable:false}});}})();",
             origins = serde_json::to_string(&origins).unwrap_or_else(|_| "[]".into()),
             global = serde_json::to_string(SHELL_GLOBAL).unwrap_or_default(),
@@ -71,8 +88,9 @@ pub struct ShellOrigins(pub Vec<Url>);
 // Proof token: bearer is a command invoked by the app's own shell page — the
 // "main" webview, currently showing a shell origin, sending this launch's
 // shell nonce. The only constructor is the `CommandArg` impl below, so a
-// command that takes a `ShellProof` can't be reached without it. See
-// `remove_box` for an example.
+// command that takes a `ShellProof` can't be reached without it. It is also
+// refused (with `LOCKED`) while the app lock is engaged, unless the command
+// is in `LOCK_EXEMPT`. See `remove_box` for an example.
 pub struct ShellProof(());
 
 impl<'de, R: Runtime> CommandArg<'de, R> for ShellProof {
@@ -93,13 +111,26 @@ impl<'de, R: Runtime> CommandArg<'de, R> for ShellProof {
         // A URL the runtime can't report is not a reason to lock the shell
         // out: the nonce alone proves the caller.
         let url = webview.url().ok();
-        verify_shell_caller(webview.label(), header, &nonce.0, url.as_ref(), &shell.0)
-            .map(|()| ShellProof(()))
-            .map_err(|why| {
+        verify_shell_caller(webview.label(), header, &nonce.0, url.as_ref(), &shell.0).map_err(
+            |why| {
                 log::warn!("{} rejected: {why}", command.name);
                 InvokeError::from(REJECT)
-            })
+            },
+        )?;
+        let locked = webview
+            .try_state::<AppState>()
+            .is_some_and(|s| s.lock.is_locked());
+        lock_gate(command.name, locked).map_err(InvokeError::from)?;
+        Ok(ShellProof(()))
     }
+}
+
+/// While locked, only [`LOCK_EXEMPT`] commands get through.
+fn lock_gate(command: &str, locked: bool) -> Result<(), &'static str> {
+    if locked && !LOCK_EXEMPT.contains(&command) {
+        return Err(LOCKED);
+    }
+    Ok(())
 }
 
 /// The checks behind [`ShellProof`]: the shell's webview label, the nonce
@@ -214,7 +245,7 @@ pub(crate) async fn pair_link(
     let on_activated = activation_hook(app, &id);
     match state
         .tunnel
-        .enroll(cred, link.expires, writer, on_activated)
+        .enroll(&state.lock, cred, link.expires, writer, on_activated)
         .await
     {
         Ok(box_fp) => {
@@ -335,6 +366,9 @@ pub async fn connect_box(
     _shell: ShellProof,
     id: String,
 ) -> CmdResult<TunnelStatus> {
+    // Held across the start, so the lock can't engage until it's done (and
+    // its tunnel stop then catches this one).
+    let unlocked = state.lock.unlocked().await?;
     let (cred, port) = {
         let store = state.store.lock().unwrap();
         let rec = store.get(&id).ok_or("No such box.")?;
@@ -344,7 +378,7 @@ pub async fn connect_box(
     let writer = enrolled_writer(state.secrets.clone(), &id);
     let status = state
         .tunnel
-        .start(&id, cred, port, Some(writer))
+        .start(&unlocked, &id, cred, port, Some(writer))
         .await
         .map_err(msg)?;
     sync_mic_policy(&app);
@@ -411,6 +445,252 @@ pub async fn dismiss_pair(
 ) -> CmdResult<()> {
     state.pair_slot.lock().unwrap().clear(&id);
     Ok(())
+}
+
+// ---- App lock (see `lock.rs`). Secret checks, secure storage and the
+// biometric prompt block, so they run off the async workers.
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> CmdResult<T> {
+    async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn biometric_kind(app: &AppHandle) -> BiometricKind {
+    app.native().biometric_kind().unwrap_or_else(|e| {
+        log::warn!("biometric kind unavailable: {e}");
+        BiometricKind::None
+    })
+}
+
+/// The lock's state as the shell sees it, once secure storage has been
+/// checked (`LockManager::reconcile`; a change there is announced).
+/// Blocking (asks native).
+pub fn lock_status_of(app: &AppHandle, lock: &LockManager) -> LockStatus {
+    let changed = matches!(lock.reconcile(), Ok(true));
+    let status = lock.status(biometric_kind(app));
+    if changed {
+        sync_privacy_cover(app, lock);
+        let _ = app.emit(LOCK_EVENT, &status);
+    }
+    status
+}
+
+/// Tell the shell about a lock / config change. Blocking (asks native).
+pub fn emit_lock_status(app: &AppHandle, lock: &LockManager) -> LockStatus {
+    let status = lock_status_of(app, lock);
+    let _ = app.emit(LOCK_EVENT, &status);
+    status
+}
+
+/// Arm the native privacy cover while a lock is configured. Blocking.
+pub fn sync_privacy_cover(app: &AppHandle, lock: &LockManager) {
+    if let Err(e) = app.native().set_privacy_cover(lock.is_enabled()) {
+        log::warn!("privacy cover not updated: {e}");
+    }
+}
+
+/// Show the system biometric prompt (blocks until answered). The focus /
+/// active loss it causes doesn't count as the app being away.
+async fn biometric_prompt(app: &AppHandle, lock: &LockManager) -> CmdResult<AuthOutcome> {
+    let _own = lock.own_prompt();
+    let app = app.clone();
+    blocking(move || app.native().authenticate(BIOMETRIC_REASON))
+        .await?
+        .map_err(|e| e.to_string())
+}
+
+fn biometric_refusal(outcome: AuthOutcome) -> String {
+    match outcome {
+        AuthOutcome::Cancelled => "biometrics cancelled".into(),
+        _ => "biometrics unavailable".into(),
+    }
+}
+
+/// Authorise a settings change: the current code / pattern, or (`None`)
+/// a biometric prompt when biometrics are on.
+async fn authorize(
+    app: &AppHandle,
+    lock: &Arc<LockManager>,
+    current: Option<String>,
+) -> CmdResult<()> {
+    match current {
+        Some(c) => {
+            let (app, lock) = (app.clone(), lock.clone());
+            blocking(move || {
+                let checked = lock.check_current(&c);
+                // A wrong one counts toward the backoff.
+                if checked.is_err() {
+                    emit_lock_status(&app, &lock);
+                }
+                checked
+            })
+            .await?
+        }
+        None if lock.biometrics_on() => match biometric_prompt(app, lock).await? {
+            AuthOutcome::Success => Ok(()),
+            o => Err(biometric_refusal(o)),
+        },
+        None => Err("Enter your code or pattern.".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn lock_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+) -> CmdResult<LockStatus> {
+    let lock = state.lock.clone();
+    blocking(move || lock_status_of(&app, &lock)).await
+}
+
+/// Turn the lock on (only when it's off). The app stays unlocked.
+#[tauri::command]
+pub async fn lock_setup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+    method: LockMethod,
+    secret: String,
+    auto_lock: AutoLock,
+) -> CmdResult<LockStatus> {
+    let lock = state.lock.clone();
+    blocking(move || {
+        lock.setup(method, &secret, auto_lock)?;
+        sync_privacy_cover(&app, &lock);
+        Ok(emit_lock_status(&app, &lock))
+    })
+    .await?
+}
+
+/// Unlock with the code / pattern. Wrong, malformed or in backoff:
+/// `ok: false`.
+#[tauri::command]
+pub async fn lock_unlock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+    secret: String,
+) -> CmdResult<UnlockResult> {
+    let lock = state.lock.clone();
+    blocking(move || {
+        let ok = lock.unlock(&secret)?;
+        // Unlocked, or a failure counted: either way the state moved.
+        let status = emit_lock_status(&app, &lock);
+        Ok(UnlockResult { ok, status })
+    })
+    .await?
+}
+
+/// Unlock with biometrics (when the user turned them on). A cancelled or
+/// unavailable prompt is `ok: false` and never counts as a failure.
+#[tauri::command]
+pub async fn lock_unlock_biometric(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+) -> CmdResult<UnlockResult> {
+    let lock = state.lock.clone();
+    let ok = lock.biometrics_on() && biometric_prompt(&app, &lock).await? == AuthOutcome::Success;
+    blocking(move || {
+        if ok {
+            lock.unlock_biometric();
+        }
+        let status = if ok {
+            emit_lock_status(&app, &lock)
+        } else {
+            lock_status_of(&app, &lock)
+        };
+        UnlockResult { ok, status }
+    })
+    .await
+}
+
+/// New code / pattern, given the current one.
+#[tauri::command]
+pub async fn lock_change(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+    current: String,
+    method: LockMethod,
+    secret: String,
+) -> CmdResult<LockStatus> {
+    let lock = state.lock.clone();
+    blocking(move || {
+        let changed = lock.change(&current, method, &secret);
+        // On error, a wrong `current` still counted toward the backoff.
+        let status = emit_lock_status(&app, &lock);
+        changed.map(|()| status)
+    })
+    .await?
+}
+
+/// Biometrics on/off and the auto-lock delay. Turning biometrics on also
+/// takes one successful biometric prompt.
+#[tauri::command]
+pub async fn lock_set_options(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+    current: Option<String>,
+    biometrics: Option<bool>,
+    auto_lock: Option<AutoLock>,
+) -> CmdResult<LockStatus> {
+    let lock = state.lock.clone();
+    if !lock.is_enabled() {
+        return Err("App lock is off.".into());
+    }
+    authorize(&app, &lock, current).await?;
+    if biometrics == Some(true) && !lock.biometrics_on() {
+        let outcome = biometric_prompt(&app, &lock).await?;
+        if outcome != AuthOutcome::Success {
+            return Err(biometric_refusal(outcome));
+        }
+    }
+    blocking(move || {
+        lock.set_options(biometrics, auto_lock)?;
+        Ok(emit_lock_status(&app, &lock))
+    })
+    .await?
+}
+
+/// Turn the lock off.
+#[tauri::command]
+pub async fn lock_disable(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+    current: Option<String>,
+) -> CmdResult<LockStatus> {
+    let lock = state.lock.clone();
+    if !lock.is_enabled() {
+        return Err("App lock is off.".into());
+    }
+    authorize(&app, &lock, current).await?;
+    blocking(move || {
+        lock.disable()?;
+        sync_privacy_cover(&app, &lock);
+        Ok(emit_lock_status(&app, &lock))
+    })
+    .await?
+}
+
+/// "Lock now" from the shell: lock and stop the tunnel.
+#[tauri::command]
+pub async fn lock_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    _shell: ShellProof,
+) -> CmdResult<LockStatus> {
+    if !state.lock.is_enabled() {
+        return Err("App lock is off.".into());
+    }
+    // The shell is showing: no navigation, no cover to lower.
+    crate::engage_lock(&app, false).await;
+    let lock = state.lock.clone();
+    blocking(move || lock_status_of(&app, &lock)).await
 }
 
 /// The microphone policy last pushed to the native WebView delegate, so
@@ -521,15 +801,58 @@ mod tests {
             "take_pair_link",
             "confirm_pair",
             "dismiss_pair",
+            "lock_status",
+            "lock_setup",
+            "lock_unlock",
+            "lock_unlock_biometric",
+            "lock_change",
+            "lock_set_options",
+            "lock_disable",
+            "lock_now",
         ] {
             assert!(seen.contains(&cmd.to_string()), "{cmd} not found");
         }
         let build = include_str!("../build.rs");
+        let shell = include_str!("../capabilities/shell.json");
+        let handler = include_str!("lib.rs");
         for name in &seen {
             assert!(
                 build.contains(&format!("\"{name}\"")),
                 "{name} missing from build.rs"
             );
+            let allow = format!("\"allow-{}\"", name.replace('_', "-"));
+            assert!(shell.contains(&allow), "{allow} missing from shell.json");
+            assert!(
+                handler.contains(&format!("commands::{name},")),
+                "{name} not registered"
+            );
+        }
+        for name in LOCK_EXEMPT {
+            assert!(seen.contains(&name.to_string()), "{name} not a command");
+        }
+    }
+
+    /// While locked only the unlock commands answer; every other one fails
+    /// with exactly "locked".
+    #[test]
+    fn locked_app_answers_only_the_unlock_commands() {
+        for cmd in ["lock_status", "lock_unlock", "lock_unlock_biometric"] {
+            assert_eq!(lock_gate(cmd, true), Ok(()));
+        }
+        for cmd in [
+            "list_boxes",
+            "connect_box",
+            "add_box",
+            "confirm_pair",
+            "take_pair_link",
+            "lock_setup",
+            "lock_change",
+            "lock_set_options",
+            "lock_disable",
+            "lock_now",
+        ] {
+            assert_eq!(lock_gate(cmd, true), Err("locked"));
+            assert_eq!(lock_gate(cmd, false), Ok(()));
         }
     }
 
@@ -570,6 +893,13 @@ mod tests {
         assert!(js.contains(&format!("value:\"{}\"", nonce.0)));
         assert!(js.contains("location.protocol+\"//\"+location.host"));
         assert!(js.contains("window.top!==window"));
+        // Non-shell pages (box pages, frames) can't veto leaving with a
+        // "Leave page?" dialog: a capture listener registered first stops
+        // `beforeunload`, and only there — the nonce branch comes after it.
+        let veto = js
+            .find("window.addEventListener(\"beforeunload\",function(e){e.stopImmediatePropagation();},true);return;")
+            .expect("beforeunload guard");
+        assert!(veto < js.find("Object.defineProperty").unwrap());
         assert!(js.contains("\"__PBM_SHELL__\""));
         // Never an IPC call of its own, and the box origin isn't listed.
         assert!(!js.contains("__TAURI") && !js.contains("invoke"));

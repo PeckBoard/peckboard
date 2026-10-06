@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use tauri::plugin::PluginApi;
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::{Lifecycle, MicDecision, MicPolicy, NetworkChange};
+use crate::{AuthOutcome, BiometricKind, Lifecycle, MicDecision, MicPolicy, NetworkChange};
 
 /// Where pairing secrets live on this platform.
 trait Backend: Send + Sync {
@@ -183,12 +183,17 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     let backend: Box<dyn Backend> = Box::new(file);
     Ok(Native {
         backend,
+        #[cfg(target_os = "windows")]
+        app: app.clone(),
         _r: std::marker::PhantomData,
     })
 }
 
 pub struct Native<R: Runtime> {
     backend: Box<dyn Backend>,
+    /// Windows Hello parents its prompt to the main window.
+    #[cfg(target_os = "windows")]
+    app: AppHandle<R>,
     _r: std::marker::PhantomData<fn() -> R>,
 }
 
@@ -268,6 +273,163 @@ impl<R: Runtime> Native<R> {
         _f: impl Fn(MicDecision) + Send + Sync + 'static,
     ) -> crate::Result<()> {
         Ok(())
+    }
+
+    /// Touch ID (macOS) / Windows Hello; `None` elsewhere.
+    #[allow(unreachable_code)]
+    pub fn biometric_kind(&self) -> crate::Result<BiometricKind> {
+        #[cfg(target_os = "macos")]
+        return Ok(macos::biometric_kind());
+        #[cfg(target_os = "windows")]
+        return Ok(windows_hello::biometric_kind());
+        Ok(BiometricKind::None)
+    }
+
+    /// Shows the system biometric prompt and blocks until it is answered.
+    #[allow(unreachable_code, unused_variables)]
+    pub fn authenticate(&self, reason: &str) -> crate::Result<AuthOutcome> {
+        #[cfg(target_os = "macos")]
+        return Ok(macos::authenticate(reason));
+        #[cfg(target_os = "windows")]
+        return Ok(windows_hello::authenticate(self.main_hwnd(), reason));
+        Ok(AuthOutcome::Unavailable)
+    }
+
+    /// The main window's handle, to parent the Windows Hello prompt.
+    #[cfg(target_os = "windows")]
+    fn main_hwnd(&self) -> Option<windows::Win32::Foundation::HWND> {
+        let win = self.app.get_webview_window("main")?;
+        // Through the raw pointer: tauri's `HWND` may come from another
+        // `windows` release than ours.
+        win.hwnd()
+            .ok()
+            .map(|h| windows::Win32::Foundation::HWND(h.0))
+    }
+
+    /// No-op on desktop: no app-switcher snapshot to hide; the shell's lock
+    /// screen covers the box page.
+    pub fn set_privacy_cover(&self, _armed: bool) -> crate::Result<()> {
+        Ok(())
+    }
+
+    /// No-op on desktop (see [`Self::set_privacy_cover`]).
+    pub fn lower_privacy_cover(&self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+/// Touch ID through `LAContext` (`deviceOwnerAuthenticationWithBiometrics`):
+/// biometrics only, no system-password fallback — the app's own code or
+/// pattern is the fallback.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::sync::mpsc;
+
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_local_authentication::{LAContext, LAPolicy};
+
+    use crate::{AuthOutcome, BiometricKind};
+
+    // `LAError` codes (LAError.h).
+    const USER_CANCEL: isize = -2;
+    const USER_FALLBACK: isize = -3;
+    const SYSTEM_CANCEL: isize = -4;
+    const APP_CANCEL: isize = -9;
+
+    const POLICY: LAPolicy = LAPolicy::DeviceOwnerAuthenticationWithBiometrics;
+
+    /// Usable now: hardware present, a finger enrolled, not locked out.
+    pub fn biometric_kind() -> BiometricKind {
+        let ctx = unsafe { LAContext::new() };
+        match unsafe { ctx.canEvaluatePolicy_error(POLICY) } {
+            Ok(()) => BiometricKind::TouchId,
+            Err(_) => BiometricKind::None,
+        }
+    }
+
+    /// Blocks on the reply block, which LocalAuthentication calls on a
+    /// private queue (never the caller's thread).
+    pub fn authenticate(reason: &str) -> AuthOutcome {
+        let ctx = unsafe { LAContext::new() };
+        if unsafe { ctx.canEvaluatePolicy_error(POLICY) }.is_err() {
+            return AuthOutcome::Unavailable;
+        }
+        // Empty title hides the "Use Password…" button.
+        unsafe { ctx.setLocalizedFallbackTitle(Some(&NSString::from_str(""))) };
+        let (tx, rx) = mpsc::channel();
+        let reply = RcBlock::new(move |ok: Bool, err: *mut NSError| {
+            let outcome = if ok.as_bool() {
+                AuthOutcome::Success
+            } else {
+                // SAFETY: LocalAuthentication passes a valid NSError (or nil)
+                // that lives for the duration of the reply block.
+                match unsafe { err.as_ref() }.map(|e| e.code()) {
+                    Some(USER_CANCEL | USER_FALLBACK | SYSTEM_CANCEL | APP_CANCEL) => {
+                        AuthOutcome::Cancelled
+                    }
+                    _ => AuthOutcome::Unavailable,
+                }
+            };
+            let _ = tx.send(outcome);
+        });
+        let reason = NSString::from_str(reason);
+        unsafe { ctx.evaluatePolicy_localizedReason_reply(POLICY, &reason, &reply) };
+        rx.recv().unwrap_or(AuthOutcome::Unavailable)
+    }
+}
+
+/// Windows Hello through `UserConsentVerifier`: whatever Hello method the
+/// user set up (face, fingerprint, or the Hello PIN — Windows offers no
+/// biometrics-only policy here).
+#[cfg(target_os = "windows")]
+mod windows_hello {
+    use windows::Security::Credentials::UI::{
+        UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
+    };
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
+    use windows::core::{HSTRING, factory};
+    use windows_future::IAsyncOperation;
+
+    use crate::{AuthOutcome, BiometricKind};
+
+    pub fn biometric_kind() -> BiometricKind {
+        match UserConsentVerifier::CheckAvailabilityAsync().and_then(|op| op.join()) {
+            Ok(UserConsentVerifierAvailability::Available) => BiometricKind::Hello,
+            Ok(_) => BiometricKind::None,
+            Err(e) => {
+                log::warn!("Windows Hello availability check failed: {e}");
+                BiometricKind::None
+            }
+        }
+    }
+
+    /// Blocks until the prompt is answered; call it off the UI thread.
+    /// Parented to `hwnd` when given (the prompt then comes up in front of
+    /// the app instead of behind it), else the plain call.
+    pub fn authenticate(hwnd: Option<HWND>, reason: &str) -> AuthOutcome {
+        let message = HSTRING::from(reason);
+        let op = match hwnd {
+            Some(hwnd) => factory::<UserConsentVerifier, IUserConsentVerifierInterop>().and_then(
+                |interop| unsafe {
+                    interop.RequestVerificationForWindowAsync::<
+                        IAsyncOperation<UserConsentVerificationResult>,
+                    >(hwnd, &message)
+                },
+            ),
+            None => UserConsentVerifier::RequestVerificationAsync(&message),
+        };
+        match op.and_then(|op| op.join()) {
+            Ok(UserConsentVerificationResult::Verified) => AuthOutcome::Success,
+            Ok(UserConsentVerificationResult::Canceled) => AuthOutcome::Cancelled,
+            Ok(_) => AuthOutcome::Unavailable,
+            Err(e) => {
+                log::warn!("Windows Hello verification failed: {e}");
+                AuthOutcome::Unavailable
+            }
+        }
     }
 }
 

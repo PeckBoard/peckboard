@@ -447,7 +447,7 @@ fn device_key(secrets: &dyn SecretStore, id: &str) -> anyhow::Result<SigningKey>
     Ok(SigningKey::from_bytes(&seed))
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

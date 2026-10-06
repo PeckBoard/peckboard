@@ -16,6 +16,12 @@
 //!   the tunnel while backgrounded; on desktop, a wake from sleep.
 //! - **Network**: default-network changes (Wi-Fi ↔ cellular) on iOS and
 //!   Android, so the core reconnects the tunnel at once.
+//! - **App lock**: which biometric the device offers
+//!   ([`Native::biometric_kind`]), a system biometric prompt
+//!   ([`Native::authenticate`]), and a privacy cover that hides the box page
+//!   in the app switcher while the app is backgrounded
+//!   ([`Native::set_privacy_cover`] / [`Native::lower_privacy_cover`]). The
+//!   lock itself (code / pattern, backoff, gating) lives in the app core.
 //!
 //! Nothing here is callable from JavaScript (`COMMANDS` is empty in
 //! `build.rs`); only the app's Rust core uses [`PeckboardNativeExt`].
@@ -90,6 +96,33 @@ pub struct MicPolicy {
 pub struct MicDecision {
     pub box_id: String,
     pub allowed: bool,
+}
+
+/// The biometric the OS can verify right now (enrolled and not locked out).
+/// `None` also covers "hardware present but nothing enrolled".
+/// `Biometric` is Android's generic class (BiometricPrompt doesn't say
+/// whether it will use a fingerprint or a face).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BiometricKind {
+    None,
+    FaceId,
+    TouchId,
+    OpticId,
+    Biometric,
+    Hello,
+}
+
+/// Outcome of [`Native::authenticate`]. `Cancelled` = the user (or the
+/// system) dismissed the prompt; `Unavailable` = no usable biometric
+/// (not enrolled, locked out, changed). Neither is a failed attempt for the
+/// lock's backoff — only the code / pattern counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthOutcome {
+    Success,
+    Cancelled,
+    Unavailable,
 }
 
 pub trait PeckboardNativeExt<R: Runtime> {

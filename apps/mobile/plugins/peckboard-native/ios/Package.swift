@@ -22,6 +22,9 @@ let package = Package(
             dependencies: [
                 .byName(name: "Tauri")
             ],
-            path: "Sources")
+            path: "Sources",
+            linkerSettings: [
+                .linkedFramework("LocalAuthentication")
+            ])
     ]
 )

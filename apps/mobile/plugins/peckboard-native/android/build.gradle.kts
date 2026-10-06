@@ -36,5 +36,8 @@ dependencies {
     // website data (incl. service workers and CacheStorage) once the last
     // box is removed, where the installed WebView supports it.
     implementation("androidx.webkit:webkit:1.14.0")
+    // App lock: BiometricPrompt (strong class). Its FragmentActivity host
+    // comes with appcompat (TauriActivity is an AppCompatActivity).
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation(project(":tauri-android"))
 }

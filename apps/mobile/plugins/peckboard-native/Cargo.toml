@@ -21,5 +21,17 @@ log = "0.4"
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
+# Touch ID (LAContext) for the app lock.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext"] }
+
+# Windows Hello (UserConsentVerifier) for the app lock; same release as
+# tauri's own `windows` dependency.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_WinRT"] }
+windows-future = "0.3"
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }

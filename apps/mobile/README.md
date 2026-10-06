@@ -147,6 +147,38 @@ heals itself.
   judges the caller by the webview's current URL (on Android, the one seen at
   `onPageStarted`), which a box page racing a navigation to the shell could
   satisfy; the token closes that.
+  **App lock** (`lock.rs`, Settings → App lock). Optional; a 4–8 digit code
+  or a 3×3 pattern on every platform, plus optional biometrics on top (Face ID /
+  Touch ID / Optic ID, Android BiometricPrompt strong class, Windows Hello) —
+  the code or pattern is always the fallback.
+
+- The Rust core enforces it, not the shell: while locked every command but
+  `lock_status` / `lock_unlock` / `lock_unlock_biometric` fails with
+  `"locked"` (`ShellProof`), and the tunnel can only start or resume with an
+  `Unlocked` proof token. Locking stops the tunnel and any pairing round and
+  sends the WebView to the shell; the shell reopens the last box after
+  unlock. Box pages can't hold the navigation with `beforeunload`.
+- Secret: salted Argon2id hash in secure storage (`lock.v1`); `lock.json`
+  holds method, auto-lock, biometrics flag and the backoff. Fails closed: an
+  unreadable hash keeps the app locked; a lost `lock.json` with the hash and
+  a paired box is rebuilt as locked; a hash with no boxes (fresh reinstall,
+  the iOS keychain survives uninstall) is dropped. Forgot the code: reinstall
+  (or clear app data) and pair again.
+- Wrong attempts: 4 free, then 30 s, 1 min, 5 min, 15 min. The remaining
+  wait is stored and counted on a monotonic clock, so restarts and clock
+  changes don't shorten it. No wipe.
+- Auto-lock: immediately / 1 / 5 / 15 min after the app is backgrounded — on
+  desktop, after the window is minimized/hidden or the machine slept (plain
+  focus loss doesn't count). App start with a lock = locked.
+- Privacy cover (mobile, while a lock is on): an opaque view over the WebView
+  when the app leaves the foreground, so the app switcher shows no box page;
+  Android also hides the recents thumbnail (`setRecentsScreenshotEnabled`,
+  `FLAG_SECURE` before API 33, which also blocks screenshots). A brief
+  interruption (Control Center, a call banner) drops it natively; after a real
+  background the core lowers it once the lock screen or box page shows.
+- Not yet: biometrics aren't bound to the enrolment set (a newly enrolled
+  finger/face unlocks), and pairing secrets aren't themselves
+  biometric-gated in the keychain/keystore.
 
 ## Prerequisites
 

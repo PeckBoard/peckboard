@@ -15,6 +15,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
@@ -26,8 +28,11 @@ import android.webkit.WebChromeClient
 import android.webkit.WebStorage
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.webkit.WebStorageCompat
 import androidx.webkit.WebViewFeature
 import app.tauri.annotation.Command
@@ -93,11 +98,38 @@ class MicDecisionArgs {
     lateinit var channel: Channel
 }
 
+@InvokeArg
+class AuthenticateArgs {
+    lateinit var reason: String
+}
+
+@InvokeArg
+class PrivacyCoverArgs {
+    var armed: Boolean = false
+}
+
+/** App-lock biometrics: strong class only (no device-credential fallback). */
+private const val STRONG = BiometricManager.Authenticators.BIOMETRIC_STRONG
+
+/** The shell's background colour (#0f1115). */
+private val COVER_COLOR = 0xFF0F1115.toInt()
+
 /** `scheme://host[:port]`, like the Rust side's `nav::origin`. */
 internal fun originOf(uri: Uri): String? {
     val scheme = uri.scheme ?: return null
     val host = uri.host ?: return null
     return if (uri.port == -1) "$scheme://$host" else "$scheme://$host:${uri.port}"
+}
+
+/** One `authenticate` invoke, resolved exactly once (UI thread only). */
+internal class PromptAnswer(private val invoke: Invoke) {
+    private var answered = false
+
+    fun answer(outcome: String) {
+        if (answered) return
+        answered = true
+        invoke.resolve(JSObject().put("outcome", outcome))
+    }
 }
 
 @TauriPlugin
@@ -112,6 +144,18 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
     private var webView: WebView? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val vault by lazy { SecretVault(activity) }
+    /** UI thread only: the privacy cover is armed / currently up. */
+    private var coverArmed = false
+    private var cover: View? = null
+    /** UI thread only: `onStop` ran since the cover went up. Only then does
+     *  the core see a background and lower it; a pause without a stop is a
+     *  transient overlay (permission dialog, multi-window, the biometric
+     *  prompt) and the cover drops natively on `onResume`. */
+    private var coverStopped = false
+    /** UI thread only: the biometric prompt in flight and its one-shot
+     *  resolver, answered "cancelled" if the activity stops or goes away. */
+    private var pendingPrompt: BiometricPrompt? = null
+    private var pendingAnswer: PromptAnswer? = null
 
     override fun load(webView: WebView) {
         this.webView = webView
@@ -190,11 +234,28 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     override fun onResume() {
+        if (cover != null && !coverStopped) lowerCover()
         emit("foreground")
     }
 
+    /** Stopped = really backgrounded: the core runs the lock and lowers the
+     *  cover. Raised here too, should `onPause` not have raised it. */
     override fun onStop() {
+        cancelPrompt()
+        if (coverArmed) {
+            raiseCover()
+            coverStopped = true
+        }
         emit("background")
+    }
+
+    override fun onDestroy() {
+        cancelPrompt()
+    }
+
+    /** Armed: cover the WebView before the app-switcher sees it. */
+    override fun onPause() {
+        if (coverArmed) raiseCover()
     }
 
     private fun emit(state: String) {
@@ -321,6 +382,151 @@ class PeckboardNativePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /** `"biometric"` when a strong biometric is enrolled and usable now. */
+    @Command
+    fun biometricKind(invoke: Invoke) {
+        val can = BiometricManager.from(activity).canAuthenticate(STRONG)
+        val kind = if (can == BiometricManager.BIOMETRIC_SUCCESS) "biometric" else "none"
+        invoke.resolve(JSObject().put("kind", kind))
+    }
+
+    /**
+     * BiometricPrompt (strong class, no device-credential fallback: the
+     * app's own code/pattern is the fallback, behind the negative button).
+     * Always resolves `{ outcome }`; a single unrecognised finger
+     * (`onAuthenticationFailed`) keeps the prompt up and resolves nothing.
+     */
+    @Command
+    fun authenticate(invoke: Invoke) {
+        val args = invoke.parseArgs(AuthenticateArgs::class.java)
+        activity.runOnUiThread { showBiometricPrompt(invoke, args.reason) }
+    }
+
+    private fun showBiometricPrompt(invoke: Invoke, reason: String) {
+        val pending = PromptAnswer(invoke)
+        fun answer(outcome: String) {
+            if (pendingAnswer === pending) {
+                pendingPrompt = null
+                pendingAnswer = null
+            }
+            pending.answer(outcome)
+        }
+        // TauriActivity is an AppCompatActivity; anything else can't host the
+        // prompt's fragment. A saved state (app going away) would drop the
+        // prompt without ever calling back.
+        val host = activity as? FragmentActivity
+        if (host == null || host.supportFragmentManager.isStateSaved ||
+            BiometricManager.from(activity).canAuthenticate(STRONG) != BiometricManager.BIOMETRIC_SUCCESS
+        ) {
+            answer("unavailable")
+            return
+        }
+        val callback = object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                answer("success")
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                answer(
+                    when (errorCode) {
+                        BiometricPrompt.ERROR_USER_CANCELED,
+                        BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                        BiometricPrompt.ERROR_CANCELED,
+                        BiometricPrompt.ERROR_TIMEOUT -> "cancelled"
+                        // Lockout, no hardware, nothing enrolled, …
+                        else -> "unavailable"
+                    }
+                )
+            }
+        }
+        try {
+            val info = BiometricPrompt.PromptInfo.Builder()
+                .setTitle(reason.ifEmpty { "Unlock" })
+                .setNegativeButtonText("Cancel")
+                .setAllowedAuthenticators(STRONG)
+                .setConfirmationRequired(false)
+                .build()
+            val prompt = BiometricPrompt(host, ContextCompat.getMainExecutor(activity), callback)
+            // Only one prompt at a time: an older one still pending is answered.
+            cancelPrompt()
+            pendingPrompt = prompt
+            pendingAnswer = pending
+            prompt.authenticate(info)
+        } catch (e: Exception) {
+            answer("unavailable")
+        }
+    }
+
+    /**
+     * UI thread. A prompt still in flight when the activity stops or is
+     * destroyed (recreated mid-prompt) might never call back: answer it
+     * "cancelled" now and dismiss it. A late callback is a no-op.
+     */
+    private fun cancelPrompt() {
+        val pending = pendingAnswer ?: return
+        val prompt = pendingPrompt
+        pendingAnswer = null
+        pendingPrompt = null
+        pending.answer("cancelled")
+        try {
+            prompt?.cancelAuthentication()
+        } catch (e: Exception) {
+        }
+    }
+
+    /**
+     * Armed: an opaque cover goes over the WebView on every `onPause` and
+     * stays until `lowerPrivacyCover` (dropped natively on `onResume` when
+     * no `onStop` came in between); the recents thumbnail is hidden
+     * (`setRecentsScreenshotEnabled(false)` on API 33+, else `FLAG_SECURE`,
+     * which also blocks screenshots while armed). Disarming undoes both.
+     */
+    @Command
+    fun setPrivacyCover(invoke: Invoke) {
+        val args = invoke.parseArgs(PrivacyCoverArgs::class.java)
+        activity.runOnUiThread {
+            coverArmed = args.armed
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                activity.setRecentsScreenshotEnabled(!args.armed)
+            } else if (args.armed) {
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+            if (!args.armed) lowerCover()
+        }
+        invoke.resolve()
+    }
+
+    @Command
+    fun lowerPrivacyCover(invoke: Invoke) {
+        activity.runOnUiThread { lowerCover() }
+        invoke.resolve()
+    }
+
+    private fun raiseCover() {
+        if (cover != null) return
+        val root = activity.window.decorView as? ViewGroup ?: return
+        val view = View(activity).apply {
+            setBackgroundColor(COVER_COLOR)
+            // Above the content (the WebView), and swallows its touches.
+            translationZ = 10_000f
+            isClickable = true
+            isFocusable = true
+        }
+        root.addView(
+            view,
+            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+        cover = view
+    }
+
+    private fun lowerCover() {
+        cover?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        cover = null
+        coverStopped = false
+    }
+
     @Command
     fun secretGet(invoke: Invoke) {
         val args = invoke.parseArgs(KeyArgs::class.java)
@@ -387,18 +593,25 @@ class SecretVault(context: Context) {
         prefs.edit().putString(name, Base64.encodeToString(blob, Base64.NO_WRAP)).commit()
     }
 
-    /** Null when absent or undecryptable (e.g. key lost after a restore). */
+    /**
+     * Null only when absent — or when the Keystore key is gone (cleared
+     * app data / restore), which makes the ciphertext permanently unreadable,
+     * so it's dropped. A Keystore or decrypt failure with the key present
+     * throws: callers must not mistake a transient error for "no value".
+     */
     fun get(name: String): String? {
         val stored = prefs.getString(name, null) ?: return null
-        return try {
-            val blob = Base64.decode(stored, Base64.NO_WRAP)
-            val cipher = Cipher.getInstance(TRANSFORM)
-            cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, blob, 0, IV_LEN))
-            cipher.updateAAD(name.toByteArray())
-            String(cipher.doFinal(blob, IV_LEN, blob.size - IV_LEN), Charsets.UTF_8)
-        } catch (e: Exception) {
-            null
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val key = ks.getKey(ALIAS, null) as? SecretKey
+        if (key == null) {
+            delete(name)
+            return null
         }
+        val blob = Base64.decode(stored, Base64.NO_WRAP)
+        val cipher = Cipher.getInstance(TRANSFORM)
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, blob, 0, IV_LEN))
+        cipher.updateAAD(name.toByteArray())
+        return String(cipher.doFinal(blob, IV_LEN, blob.size - IV_LEN), Charsets.UTF_8)
     }
 
     fun delete(name: String) {

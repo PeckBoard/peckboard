@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lock-change"
+description = "Enables the lock_change command without any pre-configured scope."
+commands.allow = ["lock_change"]
+
+[[permission]]
+identifier = "deny-lock-change"
+description = "Denies the lock_change command without any pre-configured scope."
+commands.deny = ["lock_change"]

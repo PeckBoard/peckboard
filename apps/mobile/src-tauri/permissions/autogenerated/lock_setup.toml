@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lock-setup"
+description = "Enables the lock_setup command without any pre-configured scope."
+commands.allow = ["lock_setup"]
+
+[[permission]]
+identifier = "deny-lock-setup"
+description = "Denies the lock_setup command without any pre-configured scope."
+commands.deny = ["lock_setup"]
