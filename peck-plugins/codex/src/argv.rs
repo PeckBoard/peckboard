@@ -61,7 +61,7 @@ pub fn build_cli_args(
 
 /// Codex thread ids are UUIDs; accept that alphabet only (plus `_`), so a
 /// stored id can never smuggle a flag or extra argument into argv.
-fn is_valid_conversation_id(id: &str) -> bool {
+pub fn is_valid_conversation_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && !id.starts_with('-')

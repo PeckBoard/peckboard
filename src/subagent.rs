@@ -342,14 +342,56 @@ pub async fn claim_and_compose(
             id = session.id
         )
     } else {
+        let detail = crash_detail(
+            error,
+            last_crashed_agent_end(db, &session.id).await.as_ref(),
+        );
         format!(
-            "[subagent \"{name}\" ({id}) CRASHED]\n\n{err}\n\nRead its transcript with \
+            "[subagent \"{name}\" ({id}) CRASHED]\n\n{detail}\n\nRead its transcript with \
              read_worker_session, then re-spawn it or continue without it.",
             id = session.id,
-            err = error.unwrap_or("no error detail"),
         )
     };
     Some((parent_id.to_string(), text))
+}
+
+/// Data of the child's most recent crashed `agent-end`, if any.
+async fn last_crashed_agent_end(db: &crate::db::Db, session_id: &str) -> Option<serde_json::Value> {
+    let events = db.events_tail(session_id, 16).await.ok()?;
+    events
+        .iter()
+        .rev()
+        .filter(|e| e.kind == "agent-end")
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .find(|d| d.get("status").and_then(|s| s.as_str()) == Some("crashed"))
+}
+
+/// Max stderr characters quoted in a crash report (the tail is kept).
+const CRASH_STDERR_TAIL: usize = 2000;
+
+/// The crash report body: the completion's `error`, else the reason on the
+/// child's last crashed `agent-end` (an interrupt or server shutdown has no
+/// completion error), plus that event's exit code and stderr tail.
+fn crash_detail(error: Option<&str>, agent_end: Option<&serde_json::Value>) -> String {
+    let field = |k: &str| agent_end.and_then(|d| d.get(k));
+    let mut out = error
+        .or_else(|| field("reason").and_then(|v| v.as_str()))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("no error detail")
+        .to_string();
+    if let Some(code) = field("exitCode").and_then(|v| v.as_i64()) {
+        out.push_str(&format!("\n\nexit code: {code}"));
+    }
+    let stderr = field("stderr")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if !stderr.is_empty() && !out.contains(stderr) {
+        let skip = stderr.chars().count().saturating_sub(CRASH_STDERR_TAIL);
+        let tail: String = stderr.chars().skip(skip).collect();
+        out.push_str(&format!("\n\nstderr (tail):\n```\n{tail}\n```"));
+    }
+    out
 }
 
 /// The child's final reply: every `agent-text` event after the last `user`
@@ -498,9 +540,36 @@ pub async fn rearm_for_follow_up(db: &crate::db::Db, session_id: &str) -> bool {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crash_detail_falls_back_to_the_agent_end_reason_and_stderr() {
+        let end = serde_json::json!({
+            "status": "crashed",
+            "reason": "interrupted",
+            "exitCode": 1,
+            "stderr": "Reading additional input from stdin...\n",
+        });
+        let detail = crash_detail(None, Some(&end));
+        assert!(
+            detail.starts_with("interrupted\n\nexit code: 1"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("```\nReading additional input from stdin...\n```"),
+            "{detail}"
+        );
+        // stderr already quoted by the error is not repeated.
+        let detail = crash_detail(
+            Some("boom: Reading additional input from stdin..."),
+            Some(&end),
+        );
+        assert!(!detail.contains("stderr (tail)"), "{detail}");
+        assert_eq!(crash_detail(None, None), "no error detail");
+    }
 
     #[test]
     fn subagent_prompt_carries_rules_and_task() {

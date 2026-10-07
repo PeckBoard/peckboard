@@ -126,16 +126,21 @@ pub fn run(payload: &Value) -> Result<(), String> {
         );
     }
 
-    emit(
-        session_id,
-        &ProviderEvent::Started {
-            model: model.to_string(),
-            conversation_id: conversation_id.clone(),
-            metadata: json!({ "provider": "codex" }),
-        },
-    )?;
+    // A resumed turn knows its thread id up front; a fresh one learns it
+    // from `thread.started`, so its `Started` waits for that frame. That
+    // event is what persists the id, and a turn cut off mid-way (server
+    // restart) can only be resumed if the id was persisted before it ended.
+    let mut started = false;
+    let resume_id = conversation_id
+        .clone()
+        .filter(|c| argv::is_valid_conversation_id(c));
+    if resume_id.is_some() {
+        emit_started(session_id, model, resume_id, &mut started)?;
+    }
 
-    host::call_host(
+    // `close_stdin`: `codex exec` reads a piped stdin to EOF and appends it
+    // to the prompt, so a held-open pipe hangs it before its first event.
+    let spawned = host::call_host(
         HostFn::ProviderSpawn,
         &json!({
             "session_id": session_id,
@@ -144,10 +149,16 @@ pub fn run(payload: &Value) -> Result<(), String> {
             "env": env,
             "env_remove": env_remove,
             "cwd": working_dir,
+            "close_stdin": true,
         }),
-    )
-    .map_err(|e| format!("{e}. {SPAWN_HINT}"))?;
+    );
+    if let Err(e) = spawned {
+        emit_started(session_id, model, None, &mut started)?;
+        return Err(format!("{e}. {SPAWN_HINT}"));
+    }
 
+    let launched = std::time::Instant::now();
+    let mut saw_output = false;
     let mut state = TurnState::default();
     loop {
         if should_stop(session_id) {
@@ -155,17 +166,30 @@ pub fn run(payload: &Value) -> Result<(), String> {
         }
         let line = read_line(session_id, 200)?;
         if line
-            .get("timeout")
+            .get("stopped")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
-            || line
-                .get("stopped")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
         {
             continue;
         }
+        if line
+            .get("timeout")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            // A CLI that has printed nothing this long is wedged, not
+            // thinking: kill it and crash with its stderr instead of
+            // leaving the session "running" until someone notices.
+            if !saw_output && launched.elapsed() >= STARTUP_STALL {
+                let reaped = kill(session_id).unwrap_or(Value::Null);
+                emit_started(session_id, model, None, &mut started)?;
+                emit(session_id, &stall_crash(&reaped))?;
+                return Ok(());
+            }
+            continue;
+        }
         if line.get("eof").and_then(|v| v.as_bool()).unwrap_or(false) {
+            emit_started(session_id, model, None, &mut started)?;
             let exit_code = line
                 .get("exit_code")
                 .and_then(|v| v.as_i64())
@@ -233,6 +257,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
         let Some(raw) = line.get("line").and_then(|v| v.as_str()) else {
             continue;
         };
+        saw_output = true;
         let raw = raw.trim();
         if raw.is_empty() {
             continue;
@@ -241,9 +266,72 @@ pub fn run(payload: &Value) -> Result<(), String> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        for ev in parser::parse_stream_json(&json_line, &mut state, Some(model)) {
+        let events = parser::parse_stream_json(&json_line, &mut state, Some(model));
+        if state.conversation_id.is_some() || !events.is_empty() {
+            emit_started(
+                session_id,
+                model,
+                state.conversation_id.clone(),
+                &mut started,
+            )?;
+        }
+        for ev in events {
             emit(session_id, &ev)?;
         }
+    }
+}
+
+/// How long a freshly launched `codex exec` may stay silent on stdout
+/// before it is treated as wedged. It prints `thread.started` within
+/// seconds of launch; a long tool call comes later and never trips this.
+const STARTUP_STALL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// The turn's `Started`, emitted at most once per turn.
+fn emit_started(
+    session_id: &str,
+    model: &str,
+    conversation_id: Option<String>,
+    started: &mut bool,
+) -> Result<(), String> {
+    if *started {
+        return Ok(());
+    }
+    *started = true;
+    emit(
+        session_id,
+        &ProviderEvent::Started {
+            model: model.to_string(),
+            conversation_id,
+            metadata: json!({ "provider": "codex" }),
+        },
+    )
+}
+
+/// The crash for a CLI killed by the [`STARTUP_STALL`] watchdog. `reaped`
+/// is the host's kill reply: the child's exit code and stderr tail, which
+/// usually say why it hung.
+fn stall_crash(reaped: &Value) -> ProviderEvent {
+    let stderr = reaped
+        .get("stderr")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    ProviderEvent::Crashed {
+        reason: format!(
+            "codex printed nothing for {} minutes after launch and was stopped{}",
+            STARTUP_STALL.as_secs() / 60,
+            match &stderr {
+                Some(tail) => format!(". stderr: {tail}"),
+                None => " (no stderr)".into(),
+            }
+        ),
+        error_kind: CrashKind::NoOutput,
+        exit_code: reaped
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32),
+        stderr,
     }
 }
 
@@ -406,8 +494,10 @@ fn read_line(session_id: &str, timeout_ms: u64) -> Result<Value, String> {
     )
 }
 
-fn kill(session_id: &str) -> Result<(), String> {
-    host::call_host(HostFn::ProviderKill, &json!({ "session_id": session_id })).map(|_| ())
+/// Kill the turn's CLI child; the reply carries its `exit_code` and
+/// `stderr` tail.
+fn kill(session_id: &str) -> Result<Value, String> {
+    host::call_host(HostFn::ProviderKill, &json!({ "session_id": session_id }))
 }
 
 fn should_stop(session_id: &str) -> bool {
@@ -467,6 +557,34 @@ mod tests {
         assert_eq!(kind, CrashKind::Unknown);
         assert_eq!(reason, "segfault");
     }
+
+    #[test]
+    fn stall_crash_carries_the_stderr_tail() {
+        let ev = stall_crash(&serde_json::json!({
+            "ok": true,
+            "exit_code": null,
+            "stderr": "Reading additional input from stdin...\n",
+        }));
+        let ProviderEvent::Crashed {
+            reason,
+            error_kind,
+            stderr,
+            ..
+        } = ev
+        else {
+            panic!("not a crash");
+        };
+        assert_eq!(error_kind, CrashKind::NoOutput);
+        assert!(
+            reason.ends_with("stderr: Reading additional input from stdin..."),
+            "{reason}"
+        );
+        assert_eq!(
+            stderr.as_deref(),
+            Some("Reading additional input from stdin...")
+        );
+    }
+
     #[test]
     fn signal_kill_reason_names_the_signal() {
         let reason = killed_by_signal_reason("codex", 9);

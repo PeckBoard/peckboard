@@ -332,6 +332,33 @@ enum StdOutMsg {
 fn error_json(msg: impl std::fmt::Display) -> String {
     serde_json::json!({ "error": msg.to_string() }).to_string()
 }
+/// `{exit_code, signal, stderr}` for a reaped CLI child. A child that died
+/// to a signal (SIGKILL from the OOM killer, service shutdown) has no exit
+/// code and usually no stderr; the signal lets the plugin name the real
+/// cause instead of "exited without a result".
+fn reaped_child_json(
+    status: &std::io::Result<std::process::ExitStatus>,
+    stderr: &std::sync::Mutex<Vec<u8>>,
+) -> serde_json::Value {
+    let exit_code = status.as_ref().ok().and_then(|s| s.code());
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.as_ref().ok().and_then(|s| s.signal())
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    let stderr = stderr
+        .lock()
+        .ok()
+        .map(|b| String::from_utf8_lossy(b.as_slice()).into_owned())
+        .unwrap_or_default();
+    serde_json::json!({
+        "exit_code": exit_code,
+        "stderr": stderr,
+        "signal": signal,
+    })
+}
 
 #[derive(Deserialize)]
 struct SessionIdRequest {
@@ -572,17 +599,19 @@ impl PluginProviderRuntime {
     }
 
     /// Kill and drop the CLI child for `session_id`, if any. Idempotent.
-    fn kill_child(&self, session_id: &str) {
+    /// Returns the reaped child's `{exit_code, signal, stderr}` (see
+    /// [`reaped_child_json`]), `None` when no child was running.
+    fn kill_child(&self, session_id: &str) -> Option<serde_json::Value> {
         let Ok(mut children) = self.children.lock() else {
-            return;
+            return None;
         };
-        if let Some(mut child) = children.remove(session_id) {
-            let _ = child.child.kill();
-            let _ = child.child.wait();
-            if let Some(handle) = child.stderr_thread.take() {
-                let _ = handle.join();
-            }
+        let mut child = children.remove(session_id)?;
+        let _ = child.child.kill();
+        let status = child.child.wait();
+        if let Some(handle) = child.stderr_thread.take() {
+            let _ = handle.join();
         }
+        Some(reaped_child_json(&status, &child.stderr))
     }
 
     /// Write `text` to the CLI child's stdin for `session_id`. Used by both
@@ -652,6 +681,12 @@ impl PluginProviderRuntime {
             env_remove: Vec<String>,
             #[serde(default)]
             cwd: Option<String>,
+            /// Give the child an empty, already-closed stdin instead of a
+            /// pipe. A one-shot CLI that reads piped stdin to EOF before
+            /// starting (`codex exec` appends it to the prompt) otherwise
+            /// blocks forever on the pipe the host holds open.
+            #[serde(default)]
+            close_stdin: bool,
         }
         let req: SpawnRequest = match serde_json::from_str(input) {
             Ok(r) => r,
@@ -695,7 +730,11 @@ impl PluginProviderRuntime {
         let mut cmd = crate::sandbox::SandboxedCommand::new(&command, &scope);
         cmd.args(&req.args)
             .current_dir(cwd)
-            .stdin(Stdio::piped())
+            .stdin(if req.close_stdin {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for k in &req.env_remove {
@@ -876,31 +915,9 @@ impl PluginProviderRuntime {
                     if let Some(handle) = child.stderr_thread.take() {
                         let _ = handle.join();
                     }
-                    let exit_code = status.as_ref().ok().and_then(|s| s.code());
-                    // A child that died to a signal (SIGKILL from the OOM
-                    // killer, service shutdown) has no exit code and usually
-                    // no stderr; surface the signal so the plugin can name
-                    // the real cause instead of "exited without a result".
-                    #[cfg(unix)]
-                    let signal = {
-                        use std::os::unix::process::ExitStatusExt;
-                        status.as_ref().ok().and_then(|s| s.signal())
-                    };
-                    #[cfg(not(unix))]
-                    let signal: Option<i32> = None;
-                    let stderr = child
-                        .stderr
-                        .lock()
-                        .ok()
-                        .map(|b| String::from_utf8_lossy(b.as_slice()).into_owned())
-                        .unwrap_or_default();
-                    return serde_json::json!({
-                        "eof": true,
-                        "exit_code": exit_code,
-                        "stderr": stderr,
-                        "signal": signal,
-                    })
-                    .to_string();
+                    let mut out = reaped_child_json(&status, &child.stderr);
+                    out["eof"] = serde_json::json!(true);
+                    return out.to_string();
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -976,8 +993,9 @@ impl PluginProviderRuntime {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-
-    /// `peckboard_provider_kill {session_id}`.
+    /// `peckboard_provider_kill {session_id}` — `{ok, exit_code?, signal?,
+    /// stderr?}`: the reaped child's status and stderr tail ride back so a
+    /// plugin that kills a stalled CLI can still say why it stalled.
     pub fn kill_json(&self, plugin_id: &str, input: &str) -> String {
         let req: SessionIdRequest = match serde_json::from_str(input) {
             Ok(r) => r,
@@ -986,8 +1004,11 @@ impl PluginProviderRuntime {
         if let Err(e) = self.owned_turn(plugin_id, &req.session_id) {
             return error_json(e);
         }
-        self.kill_child(&req.session_id);
-        serde_json::json!({ "ok": true }).to_string()
+        let mut out = self
+            .kill_child(&req.session_id)
+            .unwrap_or_else(|| serde_json::json!({}));
+        out["ok"] = serde_json::json!(true);
+        out.to_string()
     }
 
     /// `peckboard_emit_provider_event {session_id, event}` — validate the
@@ -2518,6 +2539,53 @@ mod tests {
         assert_eq!(eof["eof"], true, "eof: {eof}");
         assert!(eof["exit_code"].is_null(), "eof: {eof}");
         assert_eq!(eof["signal"], 9, "eof: {eof}");
+
+        runtime.end_turn("s1");
+    }
+
+    /// Regression: `codex exec` reads piped stdin to EOF before starting,
+    /// so a held-open pipe hung every Codex turn with no output. With
+    /// `close_stdin` the child sees EOF at once; a later kill of a stalled
+    /// child still hands back its stderr and signal.
+    #[cfg(unix)]
+    #[test]
+    fn close_stdin_gives_eof_and_kill_returns_stderr() {
+        let folder = std::env::temp_dir().to_string_lossy().into_owned();
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, &folder);
+
+        let spawn: serde_json::Value = serde_json::from_str(
+            &runtime.spawn_json(
+                "p1",
+                &serde_json::json!({
+                    "session_id": "s1",
+                    "command": "/bin/sh",
+                    "args": ["-c", "cat; echo stdin-closed; echo stalled >&2; exec sleep 30"],
+                    "cwd": folder,
+                    "close_stdin": true,
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(spawn["ok"], true, "spawn: {spawn}");
+
+        let line: serde_json::Value = serde_json::from_str(&runtime.read_line_json(
+            "p1",
+            &serde_json::json!({ "session_id": "s1", "timeout_ms": 5000 }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(line["line"], "stdin-closed", "line: {line}");
+
+        // The stderr reader runs on its own thread; give it the line.
+        std::thread::sleep(Duration::from_millis(200));
+        let killed: serde_json::Value = serde_json::from_str(
+            &runtime.kill_json("p1", &serde_json::json!({ "session_id": "s1" }).to_string()),
+        )
+        .unwrap();
+        assert_eq!(killed["ok"], true, "kill: {killed}");
+        assert_eq!(killed["signal"], 9, "kill: {killed}");
+        assert_eq!(killed["stderr"], "stalled\n", "kill: {killed}");
 
         runtime.end_turn("s1");
     }
