@@ -80,8 +80,8 @@ test('folder page → repo list → per-repo diff viewer', async ({ page, baseUR
   await page.locator('.rail-btn[title="Folders"]').click()
   await expect(page).toHaveURL(/\/folders$/)
 
-  // Folder row → Repos button → repo list.
-  await page.getByTestId(`folder-repos-${folderName}`).click()
+  // Folder row → repo list (clicking a row opens its repo browser).
+  await page.getByTestId(`folder-row-${folderName}`).click()
   await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/repos$`))
   await expect(page.getByTestId('repo-list-view')).toBeVisible()
   await expect(page.getByRole('heading', { name: `Repos — ${folderName}` })).toBeVisible()

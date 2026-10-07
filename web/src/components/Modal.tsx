@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
-import useDialogFocus from '../hooks/useDialogFocus'
+import useDialogFocus, { isTopDialog } from '../hooks/useDialogFocus'
 
 interface ModalProps {
   /**
@@ -84,11 +84,13 @@ export default function Modal({
   useEffect(() => {
     if (!handleEscape || !onClose) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      // Stacked modals (e.g. New Folder over New Session) each listen on
+      // `document`; only the top-most one should close.
+      if (e.key === 'Escape' && isTopDialog(panelRef.current)) onClose()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [handleEscape, onClose])
+  }, [handleEscape, onClose, panelRef])
 
   // Name the dialog from whatever heading it already renders, so every
   // existing consumer gets `aria-labelledby` without touching its markup.

@@ -194,9 +194,14 @@ test('the folder delete button names the folder it deletes', async ({ request, p
 
   await loadAt(page, token, '/folders')
   // Item 4: announced as "Delete folder <name>", not "times, button".
-  await expect(page.getByRole('button', { name: `Delete folder ${name}` })).toBeVisible({
-    timeout: 10_000,
-  })
+  await loadAt(page, token, '/folders')
+  // Item 4: Delete lives in the row's menu and its confirmation names the
+  // folder, so it's never an anonymous "times, button".
+  const row = page.locator('.list-view-row').filter({ has: page.getByTestId(`folder-row-${name}`) })
+  await expect(row).toBeVisible({ timeout: 10_000 })
+  await row.locator('.list-view-menu').click()
+  await page.getByRole('menuitem', { name: 'Delete' }).click()
+  await expect(page.getByTestId('folder-delete-confirm')).toContainText(name)
 })
 
 test('a stale plugin-page URL explains itself and offers a way back', async ({ request, page }) => {

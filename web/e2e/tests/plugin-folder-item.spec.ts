@@ -4,8 +4,8 @@ import { test, expect, type APIRequestContext } from '../harness'
  * UI e2e for folder-scoped plugin pages (manifest `folder_items`).
  *
  * A plugin holding `contribute_sidebar` declares `folder_items`; core surfaces
- * them in the `GET /api/plugins` catalog, and the Folders page renders one
- * button per entry on every registered folder row. Clicking opens the plugin's
+ * them in the `GET /api/plugins` catalog, and the Folders page offers one
+ * menu item per entry on every registered folder row. Clicking opens the plugin's
  * `/plugin-api/*` page at `/folders/<folderId>/plugin/<itemId>`, and the page's
  * authed `/api/plugin-ui/*` calls carry `x-peckboard-folder-id` so the plugin's
  * folder-scoped host functions run in THAT folder.
@@ -103,13 +103,18 @@ test('a folder row opens its plugin page scoped to that folder', async ({
   }, token)
   await page.goto('/folders')
 
-  // One button per folder row, for every declared folder item.
-  const betaBtn = page.getByTestId('folder-plugin-demo-graph-Beta')
-  await expect(page.getByTestId('folder-plugin-demo-graph-Alpha')).toBeVisible({ timeout: 10_000 })
-  await expect(betaBtn).toBeVisible()
-  await page.screenshot({ path: 'e2e/test-results/folders-plugin-items.png' })
+  // Every declared folder item is offered in each folder row's menu.
+  const rowFor = (name: string) =>
+    page.locator('.list-view-row').filter({ has: page.getByTestId(`folder-row-${name}`) })
+  await expect(rowFor('Alpha')).toBeVisible({ timeout: 10_000 })
+  await rowFor('Alpha').locator('.list-view-menu').click()
+  await expect(page.getByRole('menuitem', { name: 'Demo Graph' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('menuitem', { name: 'Demo Graph' })).toHaveCount(0)
 
-  await betaBtn.click()
+  await rowFor('Beta').locator('.list-view-menu').click()
+  await page.screenshot({ path: 'e2e/test-results/folders-plugin-items.png' })
+  await page.getByRole('menuitem', { name: 'Demo Graph' }).click()
 
   // Deep-linkable route, same shape as the project/session plugin pages.
   await expect(page).toHaveURL(/\/folders\/folder-b\/plugin\/demo-graph$/)
@@ -125,5 +130,6 @@ test('a folder row opens its plugin page scoped to that folder', async ({
   // Back returns to the folder list, with the folder settings still there.
   await page.getByRole('button', { name: '← Back' }).click()
   await expect(page).toHaveURL(/\/folders$/)
-  await expect(page.getByRole('heading', { name: 'Registered Folders' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Folders', exact: true })).toBeVisible()
+  await expect(rowFor('Alpha')).toBeVisible()
 })

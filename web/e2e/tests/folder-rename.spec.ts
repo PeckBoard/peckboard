@@ -60,11 +60,14 @@ test('renaming a folder updates the list and rejects a duplicate name', async ({
   const b = await createFolder(request, auth, 'rename-b')
 
   await loadAt(page, token, '/folders')
-  const renameBtn = page.locator(`[data-testid="folder-rename-${a.name}"]`)
-  await expect(renameBtn).toBeVisible({ timeout: 10_000 })
+  const rowFor = (name: string) =>
+    page.locator('.list-view-row').filter({ has: page.getByTestId(`folder-row-${name}`) })
+  const row = rowFor(a.name)
+  await expect(row).toBeVisible({ timeout: 10_000 })
 
   // Duplicate name (case-insensitive) is rejected inline, dialog stays open.
-  await renameBtn.click()
+  await row.locator('.list-view-menu').click()
+  await page.getByRole('menuitem', { name: 'Rename' }).click()
   const modal = page.locator('[data-testid="rename-modal"]')
   await expect(modal).toBeVisible()
   await page.locator('[data-testid="rename-input"]').fill(b.name.toUpperCase())
@@ -78,6 +81,6 @@ test('renaming a folder updates the list and rejects a duplicate name', async ({
   await page.locator('[data-testid="rename-input"]').fill(newName)
   await page.locator('[data-testid="rename-submit"]').click()
   await expect(modal).toHaveCount(0)
-  await expect(page.locator(`[data-testid="folder-rename-${newName}"]`)).toBeVisible()
-  await expect(page.locator(`[data-testid="folder-rename-${a.name}"]`)).toHaveCount(0)
+  await expect(rowFor(newName)).toBeVisible()
+  await expect(rowFor(a.name)).toHaveCount(0)
 })

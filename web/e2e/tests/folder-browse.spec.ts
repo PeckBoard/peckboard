@@ -31,12 +31,15 @@ async function authenticate(
   return cachedAuth
 }
 
-/** Plant a token in localStorage and load the SPA at the given route. */
-async function loadAt(page: Page, token: string, route: string) {
+/** Plant a token in localStorage, load the Folders page, and open the
+ *  New Folder dialog. */
+async function openNewFolder(page: Page, token: string) {
   await page.addInitScript((t) => {
     localStorage.setItem('peckboard_token', t)
   }, token)
-  await page.goto(route)
+  await page.goto('/folders')
+  await page.getByTestId('folders-new-folder').click()
+  await expect(page.getByTestId('new-folder-modal')).toBeVisible()
 }
 
 test('typing a path suggests subdirectories and picking one validates + registers it', async ({
@@ -49,8 +52,8 @@ test('typing a path suggests subdirectories and picking one validates + register
     mkdirSync(path.join(root, sub))
   }
 
-  await loadAt(page, token, '/folders')
-  const input = page.locator('[data-testid="folder-path-input"]')
+  await openNewFolder(page, token)
+  const input = page.getByTestId('new-folder-path')
   await expect(input).toBeVisible({ timeout: 10_000 })
 
   // A partial final segment prefix-filters the suggestions.
@@ -70,9 +73,9 @@ test('typing a path suggests subdirectories and picking one validates + register
 
   // The informed create goes through without the create-directory checkbox.
   const name = `e2e-browse-${Date.now()}`
-  await page.locator('input[placeholder^="Name"]').fill(name)
-  await page.getByRole('button', { name: 'Add Folder' }).click()
-  await expect(page.locator('.folder-row', { hasText: name })).toBeVisible()
+  await page.getByTestId('new-folder-name').fill(name)
+  await page.getByTestId('new-folder-submit').click()
+  await expect(page.getByTestId(`folder-row-${name}`)).toBeVisible()
 
   const list = await request.get('/api/folders', { headers: auth })
   expect(list.ok()).toBeTruthy()
@@ -80,7 +83,7 @@ test('typing a path suggests subdirectories and picking one validates + register
   expect(folders.find((f) => f.name === name)?.path).toBe(path.join(root, 'apples'))
 })
 
-test('a nonexistent path is flagged, and checking create-directory makes it an informed create', async ({
+test('a nonexistent path is flagged, and create-directory defaults on until toggled', async ({
   request,
   page,
 }) => {
@@ -88,23 +91,28 @@ test('a nonexistent path is flagged, and checking create-directory makes it an i
   const root = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-browse2-'))
   const target = path.join(root, 'brand-new-dir')
 
-  await loadAt(page, token, '/folders')
-  const input = page.locator('[data-testid="folder-path-input"]')
+  await openNewFolder(page, token)
+  const input = page.getByTestId('new-folder-path')
   await expect(input).toBeVisible({ timeout: 10_000 })
 
-  // Typed path doesn't exist: the status warns and points at the checkbox.
+  // Typed path doesn't exist: create-directory is pre-checked and the
+  // status says the directory will be created.
   await input.fill(target)
   const status = page.locator('[data-testid="folder-path-status"]')
+  const createDir = page.getByTestId('new-folder-create-dir')
+  await expect(status).toContainText('will be created')
+  await expect(createDir).toBeChecked()
+
+  // Unticking turns it back into a warning pointing at the checkbox.
+  await createDir.uncheck()
   await expect(status).toContainText("doesn't exist")
   await expect(status).toContainText('Create directory')
-
-  // Ticking the checkbox turns the warning into a will-be-created notice.
-  await page.locator('.form-checkbox-label input[type="checkbox"]').check()
+  await createDir.check()
   await expect(status).toContainText('will be created')
 
   const name = `e2e-browse-new-${Date.now()}`
-  await page.locator('input[placeholder^="Name"]').fill(name)
-  await page.getByRole('button', { name: 'Add Folder' }).click()
-  await expect(page.locator('.folder-row', { hasText: name })).toBeVisible()
+  await page.getByTestId('new-folder-name').fill(name)
+  await page.getByTestId('new-folder-submit').click()
+  await expect(page.getByTestId(`folder-row-${name}`)).toBeVisible()
   expect(existsSync(target)).toBe(true)
 })

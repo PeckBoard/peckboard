@@ -30,6 +30,12 @@ const PORTALLED_POPUPS = '.dropdown-menu, [role="menu"], [role="listbox"]'
  *  so a ConfirmDialog stacked on a Modal cycles within itself. */
 const openPanels: HTMLElement[] = []
 
+/** Whether `panel` is the top-most open dialog — lets a stacked dialog's
+ *  Escape close only itself, not every dialog underneath it. */
+export function isTopDialog(panel: HTMLElement | null): boolean {
+  return !!panel && openPanels[openPanels.length - 1] === panel
+}
+
 /**
  * The last few elements to hold focus, most recent first.
  *

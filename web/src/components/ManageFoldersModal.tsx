@@ -4,9 +4,11 @@ import { authedFetch, useAuthStore } from '../store/auth'
 import type { Folder } from '../types/api'
 import Modal from './Modal'
 import ConfirmDialog from './ConfirmDialog'
-import PathAutocomplete from './PathAutocomplete'
 import RenameModal from './RenameModal'
-import { PluginIcon } from './PluginIcon'
+import List from './List'
+import ListViewHeader from './ListViewHeader'
+import NewFolderModal from './NewFolderModal'
+import type { MenuItem } from './Dropdown'
 
 /** A plugin-contributed Folders-page entry (manifest `folder_items`). */
 export interface FolderPluginItem {
@@ -28,12 +30,19 @@ interface Props {
   onOpenPlugin?: (folderId: string, itemId: string) => void
   /** Open the folder's repo browser (`/folders/<id>/repos`). */
   onOpenRepos?: (folderId: string) => void
+  /** Rendered inside another dialog (New Project's "Manage folders"): a
+   *  compact heading instead of the page-level list header. */
+  embedded?: boolean
 }
 
-export default function FoldersPage({ pluginItems = [], onOpenPlugin, onOpenRepos }: Props = {}) {
+export default function FoldersPage({
+  pluginItems = [],
+  onOpenPlugin,
+  onOpenRepos,
+  embedded = false,
+}: Props = {}) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
-  const createFolder = useFoldersStore((s) => s.createFolder)
   const renameFolder = useFoldersStore((s) => s.renameFolder)
   // Registering a folder hands out host file access (it becomes the cwd and
   // file scope of every agent spawned inside it) and deleting one destroys
@@ -41,14 +50,8 @@ export default function FoldersPage({ pluginItems = [], onOpenPlugin, onOpenRepo
   // so the UI never offers what the server will refuse.
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
 
-  const [name, setName] = useState('')
-  const [path, setPath] = useState('')
-  const [createDir, setCreateDir] = useState(false)
-  // Server verdict on the typed path (null until it's an absolute path):
-  // drives the exists / will-be-created status line under the field.
-  const [pathExists, setPathExists] = useState<boolean | null>(null)
+  const [showNew, setShowNew] = useState(false)
   const [error, setError] = useState('')
-  const [creating, setCreating] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Folder | null>(null)
   const [deleteSessionCount, setDeleteSessionCount] = useState<number | null>(null)
   const [moveTargetId, setMoveTargetId] = useState('')
@@ -64,23 +67,6 @@ export default function FoldersPage({ pluginItems = [], onOpenPlugin, onOpenRepo
   useEffect(() => {
     fetchFolders()
   }, [fetchFolders])
-
-  const handleCreate = async () => {
-    if (!name.trim() || !path.trim()) return
-    setCreating(true)
-    setError('')
-    try {
-      await createFolder(name.trim(), path.trim(), createDir)
-      setName('')
-      setPath('')
-      setCreateDir(false)
-      setPathExists(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create folder')
-    } finally {
-      setCreating(false)
-    }
-  }
 
   const performDelete = async (folder: Folder) => {
     setError('')
@@ -146,156 +132,104 @@ export default function FoldersPage({ pluginItems = [], onOpenPlugin, onOpenRepo
   }
 
   const otherFolders = folders.filter((f) => f.id !== deleteTarget?.id)
+  const openNew = isAdmin ? () => setShowNew(true) : undefined
+
+  // One list feeds both the 3-dot menu and the right-click menu.
+  const buildMenu = (f: Folder): MenuItem[] => {
+    const items: MenuItem[] = []
+    // Repo browser — read-only, so not admin-gated: any authenticated user
+    // may already call /api/repos.
+    if (onOpenRepos) items.push({ label: 'Repos', onSelect: () => onOpenRepos(f.id) })
+    // Folder-scoped plugin pages (manifest `folder_items`). Deliberately
+    // outside the isAdmin gate: these are the same pages a non-admin already
+    // reaches from a project or session, only aimed at the folder itself.
+    // Items marked repo_scoped act on ONE repo and live on the repo browser
+    // rows instead — never here.
+    for (const item of pluginItems) {
+      if (item.repo_scoped) continue
+      items.push({ label: item.label, onSelect: () => onOpenPlugin?.(f.id, item.id) })
+    }
+    if (isAdmin) {
+      items.push(
+        { divider: true },
+        { label: 'Rename', onSelect: () => setRenameTarget(f) },
+        {
+          label: 'Delete',
+          danger: true,
+          onSelect: () => {
+            setConfirmError(null)
+            setConfirmFolder(f)
+          },
+        },
+      )
+    }
+    return items
+  }
+
+  const hint = (
+    <p className="form-hint folders-hint" data-testid="folders-hint">
+      Folders map to directories on disk. Sessions and projects live inside folders.
+      {!isAdmin && ' Only an admin can add or remove them.'}
+    </p>
+  )
 
   return (
-    <div className="settings-page">
-      <h2>Folders</h2>
-
-      <section className="settings-section">
-        <h3>Registered Folders</h3>
-        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text2)', marginBottom: 16 }}>
-          Folders map to directories on disk. Sessions and projects live inside folders.
-          {!isAdmin && ' Only an admin can add or remove them.'}
-        </p>
-
-        <div className="folder-list">
-          {folders.map((f) => (
-            <div key={f.id} className="folder-row">
-              <div className="folder-info">
-                <strong>{f.name}</strong>
-                <span className="folder-path">{f.path}</span>
-              </div>
-              {(pluginItems.length > 0 || isAdmin || onOpenRepos) && (
-                <div className="folder-row-actions">
-                  {/* Repo browser — read-only, so not admin-gated: any
-                      authenticated user may already call /api/repos. */}
-                  {onOpenRepos && (
-                    <button
-                      className="btn-secondary"
-                      onClick={() => onOpenRepos(f.id)}
-                      title={`Browse git repos in ${f.name}`}
-                      aria-label={`Browse repos in folder ${f.name}`}
-                      data-testid={`folder-repos-${f.name}`}
-                    >
-                      Repos
-                    </button>
-                  )}
-                  {/* Folder-scoped plugin pages (manifest `folder_items`).
-                      Deliberately outside the isAdmin gate: these are the same
-                      pages a non-admin already reaches from a project or
-                      session, only aimed at the folder itself. Items marked
-                      repo_scoped act on ONE repo and live on the repo browser
-                      rows instead — never here. */}
-                  {pluginItems
-                    .filter((item) => !item.repo_scoped)
-                    .map((item) => (
-                      <button
-                        key={`${item.plugin}:${item.id}`}
-                        className="btn-secondary folder-plugin-btn"
-                        onClick={() => onOpenPlugin?.(f.id, item.id)}
-                        title={`${item.label} — ${f.name}`}
-                        aria-label={`${item.label} for folder ${f.name}`}
-                        data-testid={`folder-plugin-${item.id}-${f.name}`}
-                      >
-                        <PluginIcon icon={item.icon} />
-                        <span>{item.label}</span>
-                      </button>
-                    ))}
-                  {isAdmin && (
-                    <>
-                      <button
-                        className="btn-secondary"
-                        onClick={() => setRenameTarget(f)}
-                        title="Rename folder"
-                        aria-label={`Rename folder ${f.name}`}
-                        data-testid={`folder-rename-${f.name}`}
-                      >
-                        Rename
-                      </button>
-                      <button
-                        className="folder-delete"
-                        onClick={() => {
-                          setConfirmError(null)
-                          setConfirmFolder(f)
-                        }}
-                        title="Delete folder"
-                        aria-label={`Delete folder ${f.name}`}
-                        data-testid={`folder-delete-${f.name}`}
-                      >
-                        &times;
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
-          {folders.length === 0 && (
-            <p style={{ color: 'var(--text3)', fontSize: 'var(--text-sm)', padding: '12px 0' }}>
-              {isAdmin
-                ? 'No folders yet. Add one below to get started.'
-                : 'No folders yet. Ask an admin to add one.'}
-            </p>
+    <div className={embedded ? 'folders-embedded' : 'list-view'}>
+      {embedded ? (
+        <div className="folders-embedded-header">
+          <h2>Folders</h2>
+          {openNew && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={openNew}
+              data-testid="folders-new-folder"
+            >
+              New Folder
+            </button>
           )}
         </div>
-      </section>
-
-      {isAdmin && (
-        <section className="settings-section">
-          <h3>Add Folder</h3>
-          <div className="folder-create-fields">
-            <input
-              className="form-input"
-              placeholder="Name (e.g. My Workspace)"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-            <PathAutocomplete
-              value={path}
-              onChange={setPath}
-              onSubmit={handleCreate}
-              onExistsChange={setPathExists}
-              placeholder="Path (e.g. /Users/me/projects)"
-              testId="folder-path-input"
-            />
-            {path.trim().startsWith('/') && pathExists !== null && (
-              <p
-                className="form-hint"
-                data-testid="folder-path-status"
-                role="status"
-                style={{ margin: 0 }}
-              >
-                {pathExists
-                  ? 'Directory exists on the server.'
-                  : createDir
-                    ? "Directory doesn't exist yet — it will be created."
-                    : "Directory doesn't exist — check 'Create directory' below or fix the path."}
-              </p>
-            )}
-            <label className="form-checkbox-label" style={{ fontSize: 'var(--text-sm)' }}>
-              <input
-                type="checkbox"
-                checked={createDir}
-                onChange={(e) => setCreateDir(e.target.checked)}
-              />
-              <span>Create directory if it doesn't exist</span>
-            </label>
-            <button
-              className="btn-primary"
-              onClick={handleCreate}
-              disabled={creating || !name.trim() || !path.trim()}
-              style={{ alignSelf: 'flex-start' }}
-            >
-              {creating ? 'Adding...' : 'Add Folder'}
-            </button>
-          </div>
-          {error && (
-            <p className="form-error" style={{ marginTop: 8 }}>
-              {error}
-            </p>
-          )}
-        </section>
+      ) : (
+        <ListViewHeader
+          title="Folders"
+          actionLabel={openNew ? '+ New Folder' : undefined}
+          onAction={openNew}
+          actionTestId="folders-new-folder"
+        />
       )}
+      {error && (
+        <p className="form-error" role="alert" data-testid="folders-error">
+          {error}
+        </p>
+      )}
+      <List<Folder>
+        items={folders}
+        getKey={(f) => f.id}
+        bodyClassName={embedded ? 'list-view-rows' : undefined}
+        onActivate={(f) => onOpenRepos?.(f.id)}
+        getMenuItems={buildMenu}
+        renderItem={(f) => (
+          <span className="folder-info" data-testid={`folder-row-${f.name}`}>
+            <strong>{f.name}</strong>
+            <span className="folder-path">{f.path}</span>
+          </span>
+        )}
+        emptyState={
+          <div className="list-view-empty" data-testid="folders-empty">
+            <p>No folders yet.</p>
+            {openNew ? (
+              <button type="button" className="list-view-empty-action" onClick={openNew}>
+                New Folder
+              </button>
+            ) : (
+              <p>Ask an admin to add one.</p>
+            )}
+          </div>
+        }
+        footer={folders.length > 0 ? hint : undefined}
+      />
+
+      {showNew && <NewFolderModal onClose={() => setShowNew(false)} />}
 
       {renameTarget && (
         <RenameModal

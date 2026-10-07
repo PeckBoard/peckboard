@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useProjectsStore } from '../store/projects'
 import { useFoldersStore } from '../store/folders'
 import { effortOptionsForModel, useResourcesStore } from '../store/resources'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import PickerLoadError from './PickerLoadError'
@@ -11,6 +11,7 @@ import WorkflowInstructionsModal, {
   type WorkflowInstructionsDraft,
 } from './WorkflowInstructionsModal'
 import FolderManager from './ManageFoldersModal'
+import NewFolderModal from './NewFolderModal'
 import FieldError from './FieldError'
 
 interface Props {
@@ -56,6 +57,9 @@ export default function NewProjectModal({ onClose }: Props) {
   // Folder manager stacked on top of this modal, so a first-run user with
   // no folders can create one without losing the form they started.
   const [showFolders, setShowFolders] = useState(false)
+  // POST /api/folders is admin-only, so only admins get the New Folder entry.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
+  const [showNewFolder, setShowNewFolder] = useState(false)
 
   useEffect(() => {
     fetchFolders()
@@ -191,18 +195,30 @@ export default function NewProjectModal({ onClose }: Props) {
               Folder
             </label>
             {folders.length > 0 ? (
-              <select
-                id="new-project-folder"
-                className="form-input"
-                value={folderId}
-                onChange={(e) => setChosenFolderId(e.target.value)}
-              >
-                {folders.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.name} — {f.path}
-                  </option>
-                ))}
-              </select>
+              <>
+                <select
+                  id="new-project-folder"
+                  className="form-input"
+                  value={folderId}
+                  onChange={(e) => setChosenFolderId(e.target.value)}
+                >
+                  {folders.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name} — {f.path}
+                    </option>
+                  ))}
+                </select>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="form-link-btn"
+                    onClick={() => setShowNewFolder(true)}
+                    data-testid="new-project-new-folder"
+                  >
+                    + New Folder
+                  </button>
+                )}
+              </>
             ) : (
               <>
                 <button
@@ -448,7 +464,7 @@ export default function NewProjectModal({ onClose }: Props) {
       )}
       {showFolders && (
         <Modal onClose={() => setShowFolders(false)} maxWidth={560}>
-          <FolderManager />
+          <FolderManager embedded />
           <div className="form-actions">
             <button
               type="button"
@@ -460,6 +476,12 @@ export default function NewProjectModal({ onClose }: Props) {
             </button>
           </div>
         </Modal>
+      )}
+      {showNewFolder && (
+        <NewFolderModal
+          onClose={() => setShowNewFolder(false)}
+          onCreated={(folder) => setChosenFolderId(folder.id)}
+        />
       )}
     </>
   )

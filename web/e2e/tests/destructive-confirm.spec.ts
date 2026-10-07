@@ -142,14 +142,20 @@ test('deleting a folder is confirmed first, including an empty one', async ({ re
   const folder = await createFolder(request, auth, 'folderdel')
 
   await loadAt(page, token, '/folders')
-  const deleteBtn = page.locator(`[data-testid="folder-delete-${folder.name}"]`)
-  await expect(deleteBtn).toBeVisible({ timeout: 10_000 })
+  const row = page.locator('.list-view-row').filter({
+    has: page.getByTestId(`folder-row-${folder.name}`),
+  })
+  await expect(row).toBeVisible({ timeout: 10_000 })
+  const openDelete = async () => {
+    await row.locator('.list-view-menu').click()
+    await page.getByRole('menuitem', { name: 'Delete' }).click()
+  }
 
   const dialog = page.locator('[data-testid="folder-delete-confirm"]')
 
   // Cancel → the folder is still registered (this is the case that used
   // to vanish on a single click, because an empty folder never hit 409).
-  await deleteBtn.click()
+  await openDelete()
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText(folder.name)
   await dialog.locator('[data-testid="confirm-dialog-cancel"]').click()
@@ -157,11 +163,11 @@ test('deleting a folder is confirmed first, including an empty one', async ({ re
   expect(await folderExists(request, auth, folder.id)).toBe(true)
 
   // Confirm → gone.
-  await deleteBtn.click()
+  await openDelete()
   await expect(dialog).toBeVisible()
   await dialog.locator('[data-testid="confirm-dialog-confirm"]').click()
   await expect(dialog).toHaveCount(0)
-  await expect(deleteBtn).toHaveCount(0)
+  await expect(row).toHaveCount(0)
   await expect.poll(() => folderExists(request, auth, folder.id)).toBe(false)
 })
 

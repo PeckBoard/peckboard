@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { RepeatingScheduleKind, RepeatingTask } from '../types/api'
 import { useFoldersStore } from '../store/folders'
+import { useAuthStore } from '../store/auth'
 import { useRepeatingTasksStore, type UpdateRepeatingTaskInput } from '../store/repeatingTasks'
 import {
   effortOptionsForModel,
@@ -10,6 +11,7 @@ import {
   type ModelInfo,
 } from '../store/resources'
 import Modal from './Modal'
+import NewFolderModal from './NewFolderModal'
 import ModelPicker from './ModelPicker'
 import PickerLoadError from './PickerLoadError'
 import ModelGoneNotice from './ModelGoneNotice'
@@ -25,6 +27,9 @@ interface Props {
 export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Props) {
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
+  // POST /api/folders is admin-only, so only admins get the New Folder entry.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
+  const [showNewFolder, setShowNewFolder] = useState(false)
   const createTask = useRepeatingTasksStore((s) => s.createTask)
   const updateTask = useRepeatingTasksStore((s) => s.updateTask)
   const models = useResourcesStore((s) => s.models)
@@ -217,7 +222,19 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
               ))}
             </select>
           ) : (
-            <p className="form-help">No folders yet. Create one from the folder manager first.</p>
+            <p className="form-help">
+              {isAdmin ? 'No folders yet.' : 'No folders yet. Ask an admin to add one.'}
+            </p>
+          )}
+          {!editing && isAdmin && (
+            <button
+              type="button"
+              className="form-link-btn"
+              onClick={() => setShowNewFolder(true)}
+              data-testid="repeating-task-new-folder"
+            >
+              + New Folder
+            </button>
           )}
         </div>
 
@@ -316,6 +333,14 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           </button>
         </div>
       </form>
+      {/* Outside the <form>: React bubbles synthetic events through portals,
+          so the nested dialog's submit would otherwise reach handleSubmit. */}
+      {showNewFolder && (
+        <NewFolderModal
+          onClose={() => setShowNewFolder(false)}
+          onCreated={(folder) => setChosenFolderId(folder.id)}
+        />
+      )}
     </Modal>
   )
 }

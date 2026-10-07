@@ -169,6 +169,26 @@
 .folder-list {
   margin-bottom: 20px;
 }
+/* Folders page embedded in another dialog (New Project → Manage folders). */
+.folders-embedded-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.folders-embedded-header h2 {
+  margin: 0;
+}
+.folders-hint {
+  margin: 4px 2px 0;
+}
+.list-view-item .folder-info {
+  min-width: 0;
+}
+.list-view-item .folder-path {
+  overflow-wrap: anywhere;
+}
 .folder-row {
   display: flex;
   align-items: center;

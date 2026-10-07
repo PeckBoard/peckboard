@@ -94,12 +94,17 @@ test('slideshow page: start → thinking → watchdog verdict on a tool-less run
   await loginUi(page, baseURL!)
   await page.locator('.rail-btn[title="Folders"]').click()
 
-  // NO folder-level button: the planner is repo_scoped, so the Folders row
-  // must not offer it — the launch lives on the repo browser's repo rows.
-  await expect(page.getByTestId(`folder-repos-${folderName}`)).toBeVisible()
-  await expect(page.getByTestId(`folder-plugin-project-planner-${folderName}`)).toHaveCount(0)
+  // NO folder-level entry: the planner is repo_scoped, so the Folders row
+  // menu must not offer it — the launch lives on the repo browser's repo rows.
+  const folderRow = page
+    .locator('.list-view-row')
+    .filter({ has: page.getByTestId(`folder-row-${folderName}`) })
+  await folderRow.locator('.list-view-menu').click()
+  await expect(page.getByRole('menuitem', { name: 'Repos' })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: 'Project Planner' })).toHaveCount(0)
+  await page.keyboard.press('Escape')
 
-  await page.getByTestId(`folder-repos-${folderName}`).click()
+  await page.getByTestId(`folder-row-${folderName}`).click()
   await expect(page.getByTestId('repo-list-view')).toBeVisible()
   await page.locator('.list-view-row .list-view-menu').first().click()
   await page.getByRole('menuitem', { name: 'Project Planner' }).click()
@@ -170,7 +175,7 @@ test('repo rows offer the repo-scoped Project Planner; header does not', async (
   await loginUi(page, baseURL!)
   await loginUi(page, baseURL!)
   await page.locator('.rail-btn[title="Folders"]').click()
-  await page.getByTestId(`folder-repos-${folderName}`).click()
+  await page.getByTestId(`folder-row-${folderName}`).click()
   await expect(page).toHaveURL(new RegExp(`/folders/${folder.id}/repos$`))
   await expect(page.getByTestId('repo-list-view')).toBeVisible()
 

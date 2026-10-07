@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useSessionsStore } from '../store/sessions'
-import { authedFetch } from '../store/auth'
+import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import {
   effortOptionsForModel,
@@ -8,6 +8,7 @@ import {
   useResourcesStore,
 } from '../store/resources'
 import Modal from './Modal'
+import NewFolderModal from './NewFolderModal'
 import ModelPicker from './ModelPicker'
 import ModelGoneNotice from './ModelGoneNotice'
 import SystemPromptPicker from './SystemPromptPicker'
@@ -29,7 +30,8 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   const setDraft = useSessionsStore((s) => s.setDraft)
   const folders = useFoldersStore((s) => s.folders)
   const fetchFolders = useFoldersStore((s) => s.fetchFolders)
-  const createFolder = useFoldersStore((s) => s.createFolder)
+  // POST /api/folders is admin-only, so only admins get the New Folder entry.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const models = useResourcesStore((s) => s.models)
   const providers = useResourcesStore((s) => s.providers)
   const fetchModels = useResourcesStore((s) => s.fetchModels)
@@ -63,8 +65,6 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   // True once /api/plugins confirms the playwright-video plugin is active —
   // gates the browser bug-hunt preset on its replay UI existing.
   const [playwrightVideoActive, setPlaywrightVideoActive] = useState(false)
-  const [newFolderName, setNewFolderName] = useState('')
-  const [newFolderPath, setNewFolderPath] = useState('')
   const [showNewFolder, setShowNewFolder] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -113,19 +113,6 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
     (p) => !p.requiresPlaywrightVideo || playwrightVideoActive,
   )
   const preset = availablePresets.find((p) => p.id === presetId)
-
-  const handleCreateFolder = async () => {
-    if (!newFolderName.trim() || !newFolderPath.trim()) return
-    try {
-      const folder = await createFolder(newFolderName.trim(), newFolderPath.trim())
-      setChosenFolderId(folder.id)
-      setShowNewFolder(false)
-      setNewFolderName('')
-      setNewFolderPath('')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create folder')
-    }
-  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -217,43 +204,20 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
             </select>
           ) : (
             <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text3)' }}>
-              No folders yet. Create one below.
+              {isAdmin ? 'No folders yet.' : 'No folders yet. Ask an admin to add one.'}
             </p>
           )}
-          <button
-            type="button"
-            className="form-link-btn"
-            onClick={() => setShowNewFolder(!showNewFolder)}
-          >
-            {showNewFolder ? 'Cancel' : '+ Add folder'}
-          </button>
-        </div>
-        {showNewFolder && (
-          <div className="form-inline-card">
-            <input
-              aria-label="New folder name"
-              className="form-input"
-              placeholder="Folder name"
-              value={newFolderName}
-              onChange={(e) => setNewFolderName(e.target.value)}
-            />
-            <input
-              aria-label="New folder path"
-              className="form-input"
-              placeholder="/path/to/folder"
-              value={newFolderPath}
-              onChange={(e) => setNewFolderPath(e.target.value)}
-            />
+          {isAdmin && (
             <button
               type="button"
-              className="btn-secondary"
-              onClick={handleCreateFolder}
-              disabled={!newFolderName.trim() || !newFolderPath.trim()}
+              className="form-link-btn"
+              onClick={() => setShowNewFolder(true)}
+              data-testid="new-session-new-folder"
             >
-              Create Folder
+              + New Folder
             </button>
-          </div>
-        )}
+          )}
+        </div>
         <div className="form-field">
           <label className="form-label" htmlFor="new-session-model">
             Model
@@ -375,6 +339,14 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
           </button>
         </div>
       </form>
+      {/* Outside the <form>: React bubbles synthetic events through portals,
+          so the nested dialog's submit would otherwise reach handleSubmit. */}
+      {showNewFolder && (
+        <NewFolderModal
+          onClose={() => setShowNewFolder(false)}
+          onCreated={(folder) => setChosenFolderId(folder.id)}
+        />
+      )}
     </Modal>
   )
 }

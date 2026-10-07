@@ -75,10 +75,11 @@ test('no-folder first run creates a folder and a project without leaving the mod
   await page.getByTestId('new-project-add-folder').click()
   const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-first-run-'))
   const folderName = `e2e-first-run-${Date.now()}`
-  await page.getByPlaceholder('Name (e.g. My Workspace)').fill(folderName)
-  await page.getByPlaceholder('Path (e.g. /Users/me/projects)').fill(folderPath)
-  await page.getByRole('button', { name: 'Add Folder' }).click()
-  await expect(page.locator('.folder-row', { hasText: folderName })).toBeVisible({
+  await page.getByTestId('folders-new-folder').click()
+  await page.getByTestId('new-folder-name').fill(folderName)
+  await page.getByTestId('new-folder-path').fill(folderPath)
+  await page.getByTestId('new-folder-submit').click()
+  await expect(page.getByTestId(`folder-row-${folderName}`)).toBeVisible({
     timeout: 10_000,
   })
   await page.getByTestId('new-project-folders-done').click()
