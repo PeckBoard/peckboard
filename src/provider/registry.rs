@@ -491,6 +491,40 @@ impl ProviderRegistry {
         best.map(|(id, _)| id)
     }
 
+    /// The most capable model `provider_id` offers whose base model differs
+    /// from `avoid` — how a card review lands on a DIFFERENT model than the
+    /// one that did the work. Ranked by tier, thinking models first on a
+    /// tie; entries on `account` win over the rest, as in
+    /// [`Self::cheapest_model`]. `avoid` may be any id form
+    /// [`same_base_model`] accepts. Returns a full `provider:model` id;
+    /// `None` when the provider is unknown or offers no other ranked model.
+    /// Only tiered models count: a provider that leaves every tier at `0`
+    /// (mock scenarios, unranked catalogs) has no meaningful "other model",
+    /// and guessing one could land the review on something unrunnable.
+    pub async fn strongest_model_other_than(
+        &self,
+        provider_id: &str,
+        account: Option<&str>,
+        avoid: &str,
+    ) -> Option<String> {
+        let (info, provider) = {
+            let providers = self.providers.lock().await;
+            let r = providers.get(provider_id)?;
+            (r.info.clone(), r.provider.clone())
+        };
+        let models = self.effective_models(&info, &provider).await;
+        let on_account = |id: &str| account.is_some() && split_model_account(id).1 == account;
+        let prefer_account = models.iter().any(|m| on_account(&m.id));
+        models
+            .iter()
+            .filter(|m| !prefer_account || on_account(&m.id))
+            .filter(|m| m.tier > 0 && !same_base_model(&m.id, avoid))
+            // max_by_key keeps the LAST maximum; reversing keeps the
+            // catalog's earlier entry on a tie.
+            .rev()
+            .max_by_key(|m| (m.tier, m.is_thinking()))
+            .map(|m| format!("{provider_id}:{}", m.id))
+    }
     /// Parse a model ID. Returns (provider_id, model_id).
     /// If no prefix, uses the default provider.
     pub fn parse_model_id(model_id: &str, default_provider: &str) -> (String, String) {
@@ -543,6 +577,19 @@ pub fn split_model_account(model_id: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Whether two model ids name the same underlying model, ignoring the
+/// provider prefix, the `@account` suffix, a `[1m]`-style context-window
+/// suffix, and case: `claude:claude-opus-5-5@acc_1` and the CLI-reported
+/// `claude-opus-5-5[1m]` are the same model.
+pub fn same_base_model(a: &str, b: &str) -> bool {
+    fn base(id: &str) -> String {
+        let (_, rest) = ProviderRegistry::parse_model_id(id, "claude");
+        let (model, _) = split_model_account(&rest);
+        let model = model.split('[').next().unwrap_or(model);
+        model.trim().to_ascii_lowercase()
+    }
+    base(a) == base(b)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +634,55 @@ mod tests {
 
         let missing = registry.get_info("openai").await;
         assert!(missing.is_none());
+    }
+    #[tokio::test]
+    async fn strongest_model_other_than_skips_the_implementers_model() {
+        let model = |id: &str, tier: i32| ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            capabilities: vec!["reasoning".into()],
+            tier,
+        };
+        let registry = ProviderRegistry::new();
+        registry
+            .register(
+                Arc::new(NoopProvider::new()),
+                ProviderInfo {
+                    id: "claude".into(),
+                    display_name: "Claude".into(),
+                    models: vec![
+                        model("claude-sonnet-5@a1", 2),
+                        model("claude-opus-5-5@a1", 3),
+                        model("claude-fable-5-1@a2", 4),
+                        model("claude-fable-5-1@a1", 4),
+                    ],
+                    effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+
+        // The CLI reports the model it ran with a context suffix and no
+        // account; it still matches the catalog entry, so it is skipped.
+        let pick = registry
+            .strongest_model_other_than("claude", Some("a1"), "claude-fable-5-1[1m]")
+            .await;
+        assert_eq!(pick.as_deref(), Some("claude:claude-opus-5-5@a1"));
+        let pick = registry
+            .strongest_model_other_than("claude", Some("a1"), "claude:claude-opus-5-5@a1")
+            .await;
+        assert_eq!(pick.as_deref(), Some("claude:claude-fable-5-1@a1"));
+        assert!(
+            registry
+                .strongest_model_other_than("nope", None, "x")
+                .await
+                .is_none()
+        );
+        assert!(same_base_model(
+            "claude:claude-opus-5-5@a1",
+            "Claude-Opus-5-5[1m]"
+        ));
+        assert!(!same_base_model("claude-opus-5-5", "claude-opus-4-8"));
     }
 
     #[tokio::test]

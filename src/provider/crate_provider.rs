@@ -196,6 +196,7 @@ impl AgentProvider for CrateAgentProvider {
                     plugin_id: self.plugin_id.clone(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    end_linger: AtomicBool::new(false),
                     lingering: AtomicBool::new(false),
                     linger_signal: Some(LingerSignal {
                         tx: ctx.completion_tx.clone(),
@@ -337,6 +338,13 @@ impl AgentProvider for CrateAgentProvider {
         // the orchestrator's is_running sibling check
         // (`spawn_worker_for_card`), not here.
         self.runtime.retire_turn(session_id);
+    }
+
+    async fn finish_after_turn(&self, session_id: &str) {
+        // As `shutdown_after_turn`, but the settled run must not linger for
+        // background work: the worker is done, and a lingering run would
+        // keep `is_running` true and hold back the card's reviewer.
+        self.runtime.retire_turn_ending_linger(session_id);
     }
 
     async fn write_stdin(&self, session_id: &str, text: &str) -> bool {

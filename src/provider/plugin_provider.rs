@@ -246,6 +246,13 @@ pub(crate) struct TurnState {
     /// plugin's send returns at this turn's `result` instead of starting
     /// another turn on the same child.
     pub(crate) retire: AtomicBool,
+    /// Set by [`PluginProviderRuntime::retire_turn_ending_linger`]: like
+    /// `retire`, and once the turn settles it must NOT linger for background
+    /// work — the run is stopped instead. A worker that finished its card
+    /// has nothing left to wait for, and a lingering run still reports
+    /// `is_running`, which holds back the card's reviewer for up to the
+    /// plugin's linger cap (an hour for Claude).
+    pub(crate) end_linger: AtomicBool,
     /// Set when the plugin reports (via a `System` event with subtype
     /// [`BACKGROUND_LINGER_SUBTYPE`]) that its turn has settled but the
     /// child stays alive for in-flight background work. Core treats such a
@@ -557,6 +564,23 @@ impl PluginProviderRuntime {
     pub fn retire_turn(&self, session_id: &str) {
         if let Some(turn) = self.turn(session_id) {
             turn.retire.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// [`Self::retire_turn`] for a worker whose card already moved on
+    /// (`finish_card` / `complete_step` / `wont_do_card`): the turn still
+    /// settles naturally, but the run then ends instead of lingering for
+    /// background tasks (see [`TurnState::end_linger`]). A run already
+    /// lingering is stopped now — its turn has settled, so this is a clean
+    /// exit, not an interrupt.
+    pub fn retire_turn_ending_linger(&self, session_id: &str) {
+        let Some(turn) = self.turn(session_id) else {
+            return;
+        };
+        turn.retire.store(true, Ordering::SeqCst);
+        turn.end_linger.store(true, Ordering::SeqCst);
+        if turn.lingering.load(Ordering::SeqCst) {
+            self.request_stop(session_id);
         }
     }
 
@@ -1081,7 +1105,11 @@ impl PluginProviderRuntime {
             &req.session_id,
             event,
         ));
-        if starts_linger {
+        if starts_linger && turn.end_linger.load(Ordering::SeqCst) {
+            // A finished worker: end the run rather than keep its child up
+            // for background work (see `TurnState::end_linger`).
+            self.request_stop(&req.session_id);
+        } else if starts_linger {
             turn.lingering.store(true, Ordering::SeqCst);
             // Drain-only: the run is still alive and owns its child; the
             // listener just delivers anything queued during the settled
@@ -1867,6 +1895,7 @@ impl AgentProvider for PluginProviderAdapter {
                     plugin_id: self.plugin_id.clone(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    end_linger: AtomicBool::new(false),
                     lingering: AtomicBool::new(false),
                     linger_signal: None,
                     terminal: std::sync::Mutex::new(None),
@@ -2155,6 +2184,7 @@ mod tests {
                     plugin_id: "p1".into(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    end_linger: AtomicBool::new(false),
                     lingering: AtomicBool::new(false),
                     linger_signal: None,
                     terminal: std::sync::Mutex::new(None),
@@ -2185,6 +2215,7 @@ mod tests {
                         plugin_id: "p1".into(),
                         stop: AtomicBool::new(false),
                         retire: AtomicBool::new(false),
+                        end_linger: AtomicBool::new(false),
                         lingering: AtomicBool::new(false),
                         linger_signal: None,
                         terminal: std::sync::Mutex::new(None),
@@ -2324,6 +2355,7 @@ mod tests {
                         plugin_id: "p1".into(),
                         stop: AtomicBool::new(false),
                         retire: AtomicBool::new(false),
+                        end_linger: AtomicBool::new(false),
                         lingering: AtomicBool::new(false),
                         linger_signal: Some(LingerSignal { tx, run_id: 7 }),
                         terminal: std::sync::Mutex::new(None),
@@ -2422,6 +2454,7 @@ mod tests {
                     plugin_id: "p1".into(),
                     stop: AtomicBool::new(false),
                     retire: AtomicBool::new(false),
+                    end_linger: AtomicBool::new(false),
                     lingering: AtomicBool::new(false),
                     linger_signal: None,
                     terminal: std::sync::Mutex::new(None),
@@ -2443,6 +2476,44 @@ mod tests {
             )
             .unwrap();
         rt
+    }
+
+    /// A worker retired by a terminal card tool must not linger for
+    /// background work once its turn settles: the run is stopped (and so
+    /// stops reporting `is_running`), where a plain retire keeps lingering.
+    #[test]
+    fn finished_worker_turn_does_not_linger() {
+        let linger = serde_json::json!({
+            "session_id": "s1",
+            "event": ProviderEvent::System {
+                text: Some("1 background task(s) still running".into()),
+                subtype: BACKGROUND_LINGER_SUBTYPE.into(),
+                detail: serde_json::json!({ "ids": ["b1"] }),
+            },
+        })
+        .to_string();
+        let stopped = |runtime: &PluginProviderRuntime| {
+            runtime
+                .should_stop_json("p1", r#"{"session_id":"s1"}"#)
+                .contains("true")
+        };
+
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, "/tmp");
+        runtime.retire_turn("s1");
+        assert!(runtime.emit_from_plugin("p1", &linger).contains("ok"));
+        assert!(!stopped(&runtime), "a plain retire may linger");
+
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, "/tmp");
+        runtime.retire_turn_ending_linger("s1");
+        assert!(!stopped(&runtime), "the in-flight turn still settles");
+        assert!(runtime.emit_from_plugin("p1", &linger).contains("ok"));
+        assert!(
+            stopped(&runtime),
+            "finished worker ends instead of lingering"
+        );
+        assert!(!runtime.is_lingering("s1"));
     }
 
     #[test]

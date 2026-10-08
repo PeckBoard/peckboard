@@ -182,6 +182,16 @@ pub trait AgentProvider: Send + Sync + 'static {
     /// UI even though the transition itself succeeded.
     async fn shutdown_after_turn(&self, _session_id: &str) {}
 
+    /// [`Self::shutdown_after_turn`] for a worker whose card the MCP
+    /// terminal-step tools already transitioned: the same graceful turn end,
+    /// and the run must then exit rather than linger for background work
+    /// (nothing will resume it, and a lingering run still reports
+    /// `is_running`, which blocks the card's next worker). Default: the
+    /// plain graceful shutdown, for providers that never linger.
+    async fn finish_after_turn(&self, session_id: &str) {
+        self.shutdown_after_turn(session_id).await;
+    }
+
     /// Stop the in-flight run for `session_id`. Implementations MUST actually
     /// terminate the run (kill the process / abort the task) — there is no
     /// "soft interrupt" path because the Claude CLI in stream-json mode does

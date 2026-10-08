@@ -77,7 +77,7 @@ fn broadcast_card_update(ctx: &ToolCallContext, card: &Card) {
 /// next step with a clean context window.
 async fn shutdown_worker_after_turn(ctx: &ToolCallContext) {
     if let Some(registry) = ctx.provider_registry.as_ref() {
-        crate::provider::manager::shutdown_after_turn_via_registry(registry, &ctx.session_id).await;
+        crate::provider::manager::finish_after_turn_via_registry(registry, &ctx.session_id).await;
     }
 }
 

@@ -1536,6 +1536,19 @@ pub async fn shutdown_after_turn_via_registry(registry: &ProviderRegistry, sessi
     }
 }
 
+/// [`shutdown_after_turn_via_registry`] for the MCP terminal-step handlers
+/// (`finish_card`, `complete_step`, `wont_do_card`): the run also skips any
+/// background linger once its turn settles (see
+/// `AgentProvider::finish_after_turn`), so the card's next worker — its
+/// reviewer — is not held back by the finished one.
+pub async fn finish_after_turn_via_registry(registry: &ProviderRegistry, session_id: &str) {
+    for info in registry.list_providers().await {
+        if let Some(p) = registry.get_provider(&info.id).await {
+            p.finish_after_turn(session_id).await;
+        }
+    }
+}
+
 /// Wind `session_id`'s child down and wait for it to actually be gone.
 ///
 /// Graceful (`shutdown_after_turn`) rather than [`cancel_via_registry`]:

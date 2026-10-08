@@ -325,6 +325,12 @@ pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::Date
             }
         }
         available.retain(|c| !backing_off.contains(c.id.as_str()));
+        // Finish before starting: a card waiting on its independent review
+        // takes a free slot ahead of new backlog work. Ordering by priority
+        // alone let a steady backlog starve every review, so finished work
+        // sat in `review` with no reviewer ever spawned. Stable sort, so
+        // priority order still holds within each group.
+        available.sort_by_key(|c| c.step != crate::workflow::REVIEW_STEP);
 
         let slots = cap.saturating_sub(active_workers);
         tracing::debug!(
@@ -485,6 +491,110 @@ pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::Date
                     tracing::error!(session_id = %ws.id, "Failed to resume for pending message: {e}");
                 }
             }
+        }
+    }
+}
+
+/// The session whose work a reviewer verifies: the one that most recently
+/// handed the card INTO review (its `step-change` event, which stays in that
+/// session's log even after the card moves on and `sever_worker_resume_link`
+/// nulls its `worker_step`). `reviewer` excludes the reviewer's own session.
+async fn reviewed_session_id(
+    state: &Arc<AppState>,
+    card_id: &str,
+    reviewer: Option<&str>,
+) -> Option<String> {
+    state
+        .db
+        .card_lifecycle_events(card_id, 256)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .find(|e| {
+            e.kind == "step-change"
+                && Some(e.session_id.as_str()) != reviewer
+                && serde_json::from_str::<serde_json::Value>(&e.data)
+                    .ok()
+                    .and_then(|d| d.get("to").and_then(|t| t.as_str()).map(str::to_owned))
+                    .as_deref()
+                    == Some(crate::workflow::REVIEW_STEP)
+        })
+        .map(|e| e.session_id)
+}
+
+/// Model for a card's review session. The review must run on a DIFFERENT
+/// model than the one that did the work, or it is the author grading its
+/// own homework. An explicit project reviewer model is the user's call and
+/// always wins. Otherwise the project model is used when it differs from
+/// what the implementer actually ran (its newest `agent-start`, which
+/// reflects auto-switches and resolved defaults), and failing that the
+/// strongest other model on the implementer's provider and account. Falls
+/// back to the project model when no alternative exists.
+async fn reviewer_model(state: &Arc<AppState>, project: &Project, card: &Card) -> Option<String> {
+    use crate::provider::registry::{ProviderRegistry, same_base_model, split_model_account};
+
+    let not_auto = |m: &String| !crate::provider::is_auto_model(m);
+    if let Some(explicit) = project.review_model.clone().filter(not_auto) {
+        return Some(explicit);
+    }
+    let configured = project.model.clone().filter(not_auto);
+    let Some(reviewed) = reviewed_session_id(state, &card.id, None).await else {
+        return configured;
+    };
+    let session = state.db.get_session(&reviewed).await.ok().flatten();
+    let session_model = session
+        .as_ref()
+        .and_then(|s| s.model.clone())
+        .filter(not_auto);
+    let ran = state
+        .db
+        .latest_event_of_kind(&reviewed, "agent-start")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .and_then(|d| d.get("model").and_then(|m| m.as_str()).map(str::to_owned))
+        .or_else(|| session_model.clone());
+    let Some(ran) = ran else {
+        return configured;
+    };
+    if let Some(c) = &configured
+        && !same_base_model(c, &ran)
+    {
+        return configured;
+    }
+    // Stay on the implementer's provider and account (else the configured
+    // model's) so the review bills where the work did.
+    let (provider, account) = match session_model.as_deref().or(configured.as_deref()) {
+        Some(m) => {
+            let (p, rest) = ProviderRegistry::parse_model_id(m, "claude");
+            let account = split_model_account(&rest).1.map(str::to_owned);
+            (p, account)
+        }
+        None => ("claude".to_string(), None),
+    };
+    match state
+        .provider_registry
+        .strongest_model_other_than(&provider, account.as_deref(), &ran)
+        .await
+    {
+        Some(alt) => {
+            tracing::info!(
+                card_id = %card.id,
+                implementer_model = %ran,
+                reviewer_model = %alt,
+                "Review runs on a different model than the implementer"
+            );
+            Some(alt)
+        }
+        None => {
+            tracing::warn!(
+                card_id = %card.id,
+                implementer_model = %ran,
+                "No other model available for review; reviewing on the same model"
+            );
+            configured
         }
     }
 }
@@ -684,10 +794,7 @@ async fn spawn_worker_for_card(
                 let (name, model, effort) = if is_review {
                     (
                         format!("review: {}", card.title),
-                        project
-                            .review_model
-                            .clone()
-                            .or_else(|| project.model.clone()),
+                        reviewer_model(state, project, card).await,
                         project
                             .review_effort
                             .clone()
@@ -897,29 +1004,9 @@ async fn spawn_worker_for_card(
             }
             ctx
         };
-        // A reviewer is pointed at the session whose work it verifies: the
-        // one that most recently handed the card INTO review (its
-        // `step-change` event, which stays in that session's log even after
-        // the card moves on and `sever_worker_resume_link` nulls its
-        // `worker_step`).
+        // A reviewer is pointed at the session whose work it verifies.
         let reviewed_session_id = if effective_step == crate::workflow::REVIEW_STEP {
-            state
-                .db
-                .card_lifecycle_events(&card.id, 256)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .rev()
-                .find(|e| {
-                    e.kind == "step-change"
-                        && e.session_id != session_id
-                        && serde_json::from_str::<serde_json::Value>(&e.data)
-                            .ok()
-                            .and_then(|d| d.get("to").and_then(|t| t.as_str()).map(str::to_owned))
-                            .as_deref()
-                            == Some(crate::workflow::REVIEW_STEP)
-                })
-                .map(|e| e.session_id)
+            reviewed_session_id(state, &card.id, Some(session_id.as_str())).await
         } else {
             None
         };
@@ -2525,5 +2612,76 @@ mod crash_block_tests {
             !events.iter().any(|e| e.kind == pipeline::NO_PROGRESS_KIND),
             "waiting on a background task is not a no-progress turn"
         );
+    }
+
+    /// A finished card waiting in `review` takes the only free slot ahead
+    /// of a higher-priority card that has not started: reviews must not
+    /// starve behind a backlog, and the reviewer is a fresh `review:` session.
+    #[tokio::test]
+    async fn review_card_gets_the_free_slot_before_new_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        seed_project(&state.db, None).await;
+        let ts = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_card(NewCard {
+                id: "c2".into(),
+                project_id: "p1".into(),
+                title: "Finished work".into(),
+                description: "".into(),
+                step: crate::workflow::REVIEW_STEP.into(),
+                priority: 9,
+                workflow: "task".into(),
+                model: None,
+                effort: None,
+                blocked: false,
+                block_reason: None,
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+                system_prompt_name: None,
+            })
+            .await
+            .unwrap();
+        // The implementer that handed c2 into review.
+        state
+            .db
+            .create_session(NewSession {
+                id: "impl".into(),
+                name: "worker: Finished work".into(),
+                folder_id: "f1".into(),
+                is_worker: true,
+                project_id: Some("p1".into()),
+                card_id: Some("c2".into()),
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .append_event(
+                "impl",
+                "step-change",
+                serde_json::json!({ "cardId": "c2", "from": "in_progress", "to": "review" }),
+            )
+            .await
+            .unwrap();
+
+        check_and_spawn_workers_at(&state, chrono::Utc::now()).await;
+
+        let spawned: Vec<_> = state
+            .db
+            .list_worker_sessions_by_project("p1")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.id != "impl")
+            .collect();
+        assert_eq!(spawned.len(), 1, "one slot, one spawn");
+        assert_eq!(spawned[0].card_id.as_deref(), Some("c2"));
+        assert_eq!(spawned[0].name, "review: Finished work");
+        assert_eq!(spawned[0].worker_step.as_deref(), Some("review"));
     }
 }
