@@ -491,17 +491,19 @@ impl ProviderRegistry {
         best.map(|(id, _)| id)
     }
 
-    /// The most capable model `provider_id` offers whose base model differs
-    /// from `avoid` — how a card review lands on a DIFFERENT model than the
-    /// one that did the work. Ranked by tier, thinking models first on a
-    /// tie; entries on `account` win over the rest, as in
-    /// [`Self::cheapest_model`]. `avoid` may be any id form
+    /// A model `provider_id` offers whose base model differs from `avoid` —
+    /// how a card review lands on a DIFFERENT model than the one that did
+    /// the work. Picks the strongest such model at or below `avoid`'s tier
+    /// (a peer, not an escalation: the top tier costs more and can run out
+    /// of credits on its own), and only reaches above it when nothing at or
+    /// below exists. Thinking models win a tie; entries on `account` win over
+    /// the rest, as in [`Self::cheapest_model`]. `avoid` may be any id form
     /// [`same_base_model`] accepts. Returns a full `provider:model` id;
     /// `None` when the provider is unknown or offers no other ranked model.
     /// Only tiered models count: a provider that leaves every tier at `0`
     /// (mock scenarios, unranked catalogs) has no meaningful "other model",
     /// and guessing one could land the review on something unrunnable.
-    pub async fn strongest_model_other_than(
+    pub async fn alternate_model(
         &self,
         provider_id: &str,
         account: Option<&str>,
@@ -513,17 +515,31 @@ impl ProviderRegistry {
             (r.info.clone(), r.provider.clone())
         };
         let models = self.effective_models(&info, &provider).await;
+        let avoid_tier = models
+            .iter()
+            .find(|m| same_base_model(&m.id, avoid))
+            .map(|m| m.tier);
         let on_account = |id: &str| account.is_some() && split_model_account(id).1 == account;
         let prefer_account = models.iter().any(|m| on_account(&m.id));
-        models
+        let candidates: Vec<&ModelInfo> = models
             .iter()
             .filter(|m| !prefer_account || on_account(&m.id))
             .filter(|m| m.tier > 0 && !same_base_model(&m.id, avoid))
-            // max_by_key keeps the LAST maximum; reversing keeps the
-            // catalog's earlier entry on a tie.
-            .rev()
-            .max_by_key(|m| (m.tier, m.is_thinking()))
-            .map(|m| format!("{provider_id}:{}", m.id))
+            .collect();
+        // max_by_key keeps the LAST maximum; reversing keeps the catalog's
+        // earlier entry on a tie.
+        let strongest = |within: &dyn Fn(&ModelInfo) -> bool| {
+            candidates
+                .iter()
+                .filter(|m| within(m))
+                .rev()
+                .max_by_key(|m| (m.tier, m.is_thinking()))
+                .map(|m| format!("{provider_id}:{}", m.id))
+        };
+        match avoid_tier {
+            Some(cap) => strongest(&|m| m.tier <= cap).or_else(|| strongest(&|_| true)),
+            None => strongest(&|_| true),
+        }
     }
     /// Parse a model ID. Returns (provider_id, model_id).
     /// If no prefix, uses the default provider.
@@ -635,8 +651,9 @@ mod tests {
         let missing = registry.get_info("openai").await;
         assert!(missing.is_none());
     }
+
     #[tokio::test]
-    async fn strongest_model_other_than_skips_the_implementers_model() {
+    async fn alternate_model_picks_a_peer_not_the_implementers_model() {
         let model = |id: &str, tier: i32| ModelInfo {
             id: id.into(),
             display_name: id.into(),
@@ -653,6 +670,7 @@ mod tests {
                     models: vec![
                         model("claude-sonnet-5@a1", 2),
                         model("claude-opus-5-5@a1", 3),
+                        model("claude-opus-4-8@a1", 3),
                         model("claude-fable-5-1@a2", 4),
                         model("claude-fable-5-1@a1", 4),
                     ],
@@ -664,20 +682,22 @@ mod tests {
 
         // The CLI reports the model it ran with a context suffix and no
         // account; it still matches the catalog entry, so it is skipped.
-        let pick = registry
-            .strongest_model_other_than("claude", Some("a1"), "claude-fable-5-1[1m]")
-            .await;
-        assert_eq!(pick.as_deref(), Some("claude:claude-opus-5-5@a1"));
-        let pick = registry
-            .strongest_model_other_than("claude", Some("a1"), "claude:claude-opus-5-5@a1")
-            .await;
-        assert_eq!(pick.as_deref(), Some("claude:claude-fable-5-1@a1"));
-        assert!(
-            registry
-                .strongest_model_other_than("nope", None, "x")
-                .await
-                .is_none()
+        let pick = |avoid: &'static str| registry.alternate_model("claude", Some("a1"), avoid);
+        assert_eq!(
+            pick("claude-fable-5-1[1m]").await.as_deref(),
+            Some("claude:claude-opus-5-5@a1")
         );
+        // A peer at the same tier, never an escalation to the top tier.
+        assert_eq!(
+            pick("claude:claude-opus-5-5@a1").await.as_deref(),
+            Some("claude:claude-opus-4-8@a1")
+        );
+        // Nothing other at or below the bottom tier: reach up.
+        assert_eq!(
+            pick("claude-sonnet-5").await.as_deref(),
+            Some("claude:claude-fable-5-1@a1")
+        );
+        assert!(registry.alternate_model("nope", None, "x").await.is_none());
         assert!(same_base_model(
             "claude:claude-opus-5-5@a1",
             "Claude-Opus-5-5[1m]"

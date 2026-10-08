@@ -528,9 +528,10 @@ async fn reviewed_session_id(
 /// own homework. An explicit project reviewer model is the user's call and
 /// always wins. Otherwise the project model is used when it differs from
 /// what the implementer actually ran (its newest `agent-start`, which
-/// reflects auto-switches and resolved defaults), and failing that the
-/// strongest other model on the implementer's provider and account. Falls
-/// back to the project model when no alternative exists.
+/// reflects auto-switches and resolved defaults), and failing that a peer
+/// model on the implementer's provider and account (see
+/// `ProviderRegistry::alternate_model`). Falls back to the project model
+/// when no alternative exists.
 async fn reviewer_model(state: &Arc<AppState>, project: &Project, card: &Card) -> Option<String> {
     use crate::provider::registry::{ProviderRegistry, same_base_model, split_model_account};
 
@@ -576,7 +577,7 @@ async fn reviewer_model(state: &Arc<AppState>, project: &Project, card: &Card) -
     };
     match state
         .provider_registry
-        .strongest_model_other_than(&provider, account.as_deref(), &ran)
+        .alternate_model(&provider, account.as_deref(), &ran)
         .await
     {
         Some(alt) => {
@@ -848,6 +849,35 @@ async fn spawn_worker_for_card(
                 (session, false, true)
             }
         },
+    };
+    // A review session picked up again re-checks its model: the pick it
+    // was created with may be unusable (e.g. that account ran out of
+    // credits for the model, so every resume ends without progress), and
+    // `reviewer_model` is where that policy lives. Same mechanism as
+    // `switch_session_model`: write the row, the resume reads it.
+    let session = if !created_now && effective_step == crate::workflow::REVIEW_STEP {
+        match reviewer_model(state, project, card).await {
+            Some(pick) if session.model.as_deref() != Some(pick.as_str()) => {
+                tracing::info!(
+                    session_id = %session.id,
+                    card_id = %card.id,
+                    from = ?session.model,
+                    to = %pick,
+                    "Moving review session to the current reviewer model"
+                );
+                let update = crate::db::models::UpdateSession {
+                    model: Some(Some(pick)),
+                    ..Default::default()
+                };
+                match state.db.update_session(&session.id, update).await {
+                    Ok(Some(updated)) => updated,
+                    _ => session,
+                }
+            }
+            _ => session,
+        }
+    } else {
+        session
     };
     let session_id = session.id.clone();
 
