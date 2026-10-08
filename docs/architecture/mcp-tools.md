@@ -109,7 +109,7 @@ Flow (`src/subagent.rs`):
    `[subagent "<name>" finished] …` to the parent like a user message
    (spawn if idle, queue/inject if running). Crashes deliver the error.
 
-Guards: depth 1 (a subagent may not spawn subagents), max 5 in flight per
+Guards: depth 1 (a subagent may not spawn subagents), max 25 in flight per
 parent, blocked for pre-hatcher sessions by the read-only allowlist.
 Subagent sessions are ordinary sessions — readable with
 `read_worker_session`/`search_sessions`, terminable via session-control.

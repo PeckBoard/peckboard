@@ -35,7 +35,7 @@ pub const SUBAGENT_EXPERT_KIND: &str = "subagent";
 /// Default max subagents a parent may have in flight at once (rows with
 /// `subagent_completed_at IS NULL`), when no `subagent_limits` override is
 /// stored. See [`load_limits`].
-pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: i64 = 5;
+pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: i64 = 25;
 
 /// Prefix for subagent session names, so they read as children in listings.
 pub const SUBAGENT_NAME_PREFIX: &str = "sub: ";

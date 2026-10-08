@@ -981,7 +981,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "spawn_subagent".into(),
-            description: "Spawn a subagent: a child session (works on every provider) that runs the given task in the background and posts its final message back into THIS session automatically when it finishes. Use it to split large tasks and run independent parts in parallel (max 5 in flight). Pick the child's model deliberately (model routing rules apply) and a task-matched system_prompt_name. Subagents cannot spawn subagents. Results arrive on their own — do not poll; peek with read_worker_session if needed.".into(),
+            description: "Spawn a subagent: a child session (works on every provider) that runs the given task in the background and posts its final message back into THIS session automatically when it finishes. Use it to split large tasks and run independent parts in parallel (max 25 in flight). Pick the child's model deliberately (model routing rules apply) and a task-matched system_prompt_name. Subagents cannot spawn subagents. Results arrive on their own — do not poll; peek with read_worker_session if needed.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
