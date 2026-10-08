@@ -524,49 +524,49 @@ async fn reviewed_session_id(
 }
 
 /// Model for a card's review session. The review must run on a DIFFERENT
-/// model than the one that did the work, or it is the author grading its
-/// own homework. An explicit project reviewer model is the user's call and
-/// always wins. Otherwise the project model is used when it differs from
-/// what the implementer actually ran (its newest `agent-start`, which
-/// reflects auto-switches and resolved defaults), and failing that a peer
-/// model on the implementer's provider and account (see
-/// `ProviderRegistry::alternate_model`). Falls back to the project model
-/// when no alternative exists.
+/// model than the one that did the work (else it is the author grading its
+/// own homework), and on a mid-tier model, never a provider's top tier: a
+/// review re-checks finished work and the top tier is the most expensive.
+/// An explicit project reviewer model is the user's call and always wins.
+/// Otherwise the pick comes from the review pool
+/// (`ProviderRegistry::review_model`), skipping the model the implementer
+/// actually ran (its newest `agent-start`, which reflects auto-switches and
+/// resolved defaults); then a non-top peer on the implementer's provider
+/// (`ProviderRegistry::alternate_model`); then the project model.
 async fn reviewer_model(state: &Arc<AppState>, project: &Project, card: &Card) -> Option<String> {
-    use crate::provider::registry::{ProviderRegistry, same_base_model, split_model_account};
+    use crate::provider::registry::{ProviderRegistry, split_model_account};
+    use std::hash::{Hash, Hasher};
 
     let not_auto = |m: &String| !crate::provider::is_auto_model(m);
     if let Some(explicit) = project.review_model.clone().filter(not_auto) {
         return Some(explicit);
     }
     let configured = project.model.clone().filter(not_auto);
-    let Some(reviewed) = reviewed_session_id(state, &card.id, None).await else {
-        return configured;
+    let (session_model, ran) = match reviewed_session_id(state, &card.id, None).await {
+        Some(reviewed) => {
+            let session_model = state
+                .db
+                .get_session(&reviewed)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.model)
+                .filter(not_auto);
+            let ran = state
+                .db
+                .latest_event_of_kind(&reviewed, "agent-start")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+                .and_then(|d| d.get("model").and_then(|m| m.as_str()).map(str::to_owned))
+                .or_else(|| session_model.clone());
+            (session_model, ran)
+        }
+        None => (None, None),
     };
-    let session = state.db.get_session(&reviewed).await.ok().flatten();
-    let session_model = session
-        .as_ref()
-        .and_then(|s| s.model.clone())
-        .filter(not_auto);
-    let ran = state
-        .db
-        .latest_event_of_kind(&reviewed, "agent-start")
-        .await
-        .ok()
-        .flatten()
-        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
-        .and_then(|d| d.get("model").and_then(|m| m.as_str()).map(str::to_owned))
-        .or_else(|| session_model.clone());
-    let Some(ran) = ran else {
-        return configured;
-    };
-    if let Some(c) = &configured
-        && !same_base_model(c, &ran)
-    {
-        return configured;
-    }
-    // Stay on the implementer's provider and account (else the configured
-    // model's) so the review bills where the work did.
+    // The implementer's provider and account (else the project model's):
+    // a reviewer on the same provider stays on that account.
     let (provider, account) = match session_model.as_deref().or(configured.as_deref()) {
         Some(m) => {
             let (p, rest) = ProviderRegistry::parse_model_id(m, "claude");
@@ -575,31 +575,56 @@ async fn reviewer_model(state: &Arc<AppState>, project: &Project, card: &Card) -
         }
         None => ("claude".to_string(), None),
     };
-    match state
-        .provider_registry
-        .alternate_model(&provider, account.as_deref(), &ran)
-        .await
-    {
-        Some(alt) => {
+    let avoid = ran
+        .clone()
+        .or_else(|| configured.clone())
+        .unwrap_or_default();
+    // Stable per card, so a resumed review keeps the same pick.
+    let seed = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        card.id.hash(&mut h);
+        h.finish()
+    };
+    let hidden = crate::routes::settings::hidden_providers_for_db(state.db.clone()).await;
+    let registry = &state.provider_registry;
+    // Work driven by the scripted `mock` provider (tests, demos) is never
+    // reviewed on a real, billed model.
+    let pool_pick = if provider == "mock" {
+        None
+    } else {
+        registry
+            .review_model(&hidden, &avoid, account.as_deref(), seed)
+            .await
+    };
+    let pick = match pool_pick {
+        Some(pick) => Some(pick),
+        None if !avoid.is_empty() => {
+            registry
+                .alternate_model(&provider, account.as_deref(), &avoid)
+                .await
+        }
+        None => None,
+    };
+    match pick {
+        Some(pick) => {
             tracing::info!(
                 card_id = %card.id,
-                implementer_model = %ran,
-                reviewer_model = %alt,
-                "Review runs on a different model than the implementer"
+                implementer_model = %avoid,
+                reviewer_model = %pick,
+                "Review runs on a different, mid-tier model"
             );
-            Some(alt)
+            Some(pick)
         }
         None => {
             tracing::warn!(
                 card_id = %card.id,
-                implementer_model = %ran,
-                "No other model available for review; reviewing on the same model"
+                implementer_model = %avoid,
+                "No review-pool model available; reviewing on the project model"
             );
             configured
         }
     }
 }
-
 /// Spawn a worker agent for a specific card.
 ///
 /// 1. Resolve the project folder.

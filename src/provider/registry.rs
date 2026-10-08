@@ -491,18 +491,62 @@ impl ProviderRegistry {
         best.map(|(id, _)| id)
     }
 
+    /// The model a card review runs on: one of [`REVIEW_MODELS`] (else
+    /// [`REVIEW_MODELS_FALLBACK`]) that the catalog offers, minus hidden
+    /// providers and minus `avoid` (the model that did the work, any id form
+    /// [`same_base_model`] accepts). Reviews spread across the pool by
+    /// `seed` (stable per card, so a resumed review keeps its pick). Among a
+    /// model's account-scoped entries, one on `account` wins, keeping the
+    /// review on the implementer's account when it stays on that provider.
+    /// `None` when the catalog offers none of the pool.
+    pub async fn review_model(
+        &self,
+        exclude: &std::collections::HashSet<String>,
+        avoid: &str,
+        account: Option<&str>,
+        seed: u64,
+    ) -> Option<String> {
+        let providers = self.list_providers_with_models_except(exclude).await;
+        let resolve = |base: &str| -> Option<String> {
+            if same_base_model(base, avoid) {
+                return None;
+            }
+            let hits: Vec<(&str, &str)> = providers
+                .iter()
+                .flat_map(|p| {
+                    p.models
+                        .iter()
+                        .filter(|m| same_base_model(&m.id, base))
+                        .map(move |m| (p.id.as_str(), m.id.as_str()))
+                })
+                .collect();
+            let (provider, model) = hits
+                .iter()
+                .find(|(_, m)| account.is_some() && split_model_account(m).1 == account)
+                .or(hits.first())?;
+            Some(format!("{provider}:{model}"))
+        };
+        for pool in [REVIEW_MODELS, REVIEW_MODELS_FALLBACK] {
+            let picks: Vec<String> = pool.iter().filter_map(|b| resolve(b)).collect();
+            if !picks.is_empty() {
+                return Some(picks[(seed % picks.len() as u64) as usize].clone());
+            }
+        }
+        None
+    }
+
     /// A model `provider_id` offers whose base model differs from `avoid` —
-    /// how a card review lands on a DIFFERENT model than the one that did
-    /// the work. Picks the strongest such model at or below `avoid`'s tier
-    /// (a peer, not an escalation: the top tier costs more and can run out
-    /// of credits on its own), and only reaches above it when nothing at or
-    /// below exists. Thinking models win a tie; entries on `account` win over
-    /// the rest, as in [`Self::cheapest_model`]. `avoid` may be any id form
-    /// [`same_base_model`] accepts. Returns a full `provider:model` id;
-    /// `None` when the provider is unknown or offers no other ranked model.
-    /// Only tiered models count: a provider that leaves every tier at `0`
-    /// (mock scenarios, unranked catalogs) has no meaningful "other model",
-    /// and guessing one could land the review on something unrunnable.
+    /// the review fallback when the catalog has none of [`REVIEW_MODELS`].
+    /// Picks the strongest such model at or below `avoid`'s tier (a peer,
+    /// not an escalation), reaching above only when nothing at or below
+    /// exists, and never the provider's top tier (the most expensive, and
+    /// it runs out of credits on its own). Thinking models win a tie;
+    /// entries on `account` win over the rest, as in
+    /// [`Self::cheapest_model`]. Returns a full `provider:model` id; `None`
+    /// when the provider is unknown or offers no other ranked model. Only
+    /// tiered models count: a provider that leaves every tier at `0` (mock
+    /// scenarios, unranked catalogs) has no meaningful "other model", and
+    /// guessing one could land the review on something unrunnable.
     pub async fn alternate_model(
         &self,
         provider_id: &str,
@@ -515,6 +559,7 @@ impl ProviderRegistry {
             (r.info.clone(), r.provider.clone())
         };
         let models = self.effective_models(&info, &provider).await;
+        let top_tier = models.iter().map(|m| m.tier).max().unwrap_or(0);
         let avoid_tier = models
             .iter()
             .find(|m| same_base_model(&m.id, avoid))
@@ -524,7 +569,7 @@ impl ProviderRegistry {
         let candidates: Vec<&ModelInfo> = models
             .iter()
             .filter(|m| !prefer_account || on_account(&m.id))
-            .filter(|m| m.tier > 0 && !same_base_model(&m.id, avoid))
+            .filter(|m| m.tier > 0 && m.tier < top_tier && !same_base_model(&m.id, avoid))
             .collect();
         // max_by_key keeps the LAST maximum; reversing keeps the catalog's
         // earlier entry on a tie.
@@ -541,7 +586,6 @@ impl ProviderRegistry {
             None => strongest(&|_| true),
         }
     }
-    /// Parse a model ID. Returns (provider_id, model_id).
     /// If no prefix, uses the default provider.
     pub fn parse_model_id(model_id: &str, default_provider: &str) -> (String, String) {
         match model_id.split_once(':') {
@@ -550,6 +594,26 @@ impl ProviderRegistry {
         }
     }
 }
+
+/// Models card reviews run on (see [`ProviderRegistry::review_model`]):
+/// capable mid-tier models across providers, never a provider's top tier —
+/// a review re-checks finished work and does not need the most expensive
+/// model. Base ids, matched against the catalog with [`same_base_model`].
+pub const REVIEW_MODELS: &[&str] = &[
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "grok-4.7",
+    "gpt-5.6-sol",
+];
+
+/// Mid-tier reviewers used only when the catalog offers none of
+/// [`REVIEW_MODELS`] (other than the implementer's own model).
+pub const REVIEW_MODELS_FALLBACK: &[&str] = &[
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "gpt-5.6-terra",
+    "grok-4.6",
+];
 /// Providers whose catalogs list only account-scoped `model@acct` ids.
 const ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok", "kimi", "codex"];
 
@@ -692,10 +756,11 @@ mod tests {
             pick("claude:claude-opus-5-5@a1").await.as_deref(),
             Some("claude:claude-opus-4-8@a1")
         );
-        // Nothing other at or below the bottom tier: reach up.
+        // Nothing other at or below the bottom tier: reach up, but never to
+        // the top tier.
         assert_eq!(
             pick("claude-sonnet-5").await.as_deref(),
-            Some("claude:claude-fable-5-1@a1")
+            Some("claude:claude-opus-5-5@a1")
         );
         assert!(registry.alternate_model("nope", None, "x").await.is_none());
         assert!(same_base_model(
@@ -703,6 +768,75 @@ mod tests {
             "Claude-Opus-5-5[1m]"
         ));
         assert!(!same_base_model("claude-opus-5-5", "claude-opus-4-8"));
+    }
+
+    #[tokio::test]
+    async fn review_model_rotates_the_mid_tier_pool_never_the_top_tier() {
+        let model = |id: &str, tier: i32| ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            capabilities: vec![],
+            tier,
+        };
+        let provider = |id: &str, models: Vec<ModelInfo>| ProviderInfo {
+            id: id.into(),
+            display_name: id.into(),
+            models,
+            effort_levels: vec![],
+            capabilities: ProviderCapabilities::default(),
+        };
+        let registry = ProviderRegistry::new();
+        for info in [
+            provider(
+                "claude",
+                vec![
+                    model("claude-fable-5-1@a1", 4),
+                    model("claude-opus-5-5@a1", 3),
+                    model("claude-sonnet-5-5@a1", 0),
+                    model("claude-sonnet-5-5@a2", 0),
+                ],
+            ),
+            provider("grok", vec![model("grok-4.7@g1", 0)]),
+            provider("codex", vec![model("gpt-5.6-sol@c1", 1)]),
+        ] {
+            registry.register(Arc::new(NoopProvider::new()), info).await;
+        }
+        let none = std::collections::HashSet::new();
+
+        // The implementer's model is skipped; the rest rotate by seed, and
+        // a model's entry on the implementer's account wins.
+        let mut picks = Vec::new();
+        for seed in 0..3 {
+            let pick = registry
+                .review_model(&none, "claude-opus-5-5[1m]", Some("a2"), seed)
+                .await;
+            picks.push(pick.unwrap());
+        }
+        assert_eq!(
+            picks,
+            [
+                "claude:claude-sonnet-5-5@a2",
+                "grok:grok-4.7@g1",
+                "codex:gpt-5.6-sol@c1"
+            ]
+        );
+
+        // Hidden providers are skipped; the top tier is never chosen.
+        let hidden: std::collections::HashSet<String> =
+            ["grok".to_string(), "codex".to_string()].into();
+        let pick = registry
+            .review_model(&hidden, "claude-sonnet-5-5", None, 7)
+            .await;
+        assert_eq!(pick.as_deref(), Some("claude:claude-opus-5-5@a1"));
+
+        let only_top = ProviderRegistry::new();
+        only_top
+            .register(
+                Arc::new(NoopProvider::new()),
+                provider("claude", vec![model("claude-fable-5-1@a1", 4)]),
+            )
+            .await;
+        assert!(only_top.review_model(&none, "x", None, 0).await.is_none());
     }
 
     #[tokio::test]
