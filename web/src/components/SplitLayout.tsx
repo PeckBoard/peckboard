@@ -53,6 +53,9 @@ export interface PaneContext {
   focused: boolean
   /** True whenever the pane shows chrome (more than one pane on screen). */
   compact: boolean
+  /** False while another pane is maximized / chosen in the narrow switcher
+   *  — heavy content (a terminal's xterm) can unmount until it's back. */
+  visible: boolean
 }
 
 interface SplitLayoutProps {
@@ -482,7 +485,11 @@ export default function SplitLayout({
                   </div>
                 )}
                 <div className="split-pane-body">
-                  {renderPane(entry, { focused: entry.key === focusedKey, compact: !bare })}
+                  {renderPane(entry, {
+                    focused: entry.key === focusedKey,
+                    compact: !bare,
+                    visible: !hidden,
+                  })}
                 </div>
                 {showDrop && (
                   <div className="split-drop-overlay" data-testid="split-drop-overlay">

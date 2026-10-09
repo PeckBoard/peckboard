@@ -1,5 +1,6 @@
 /** Pure tree model behind `SplitLayout`: a pane layout is a tree of splits
- *  (row = side by side, col = stacked) whose leaves each show one session.
+ *  (row = side by side, col = stacked) whose leaves each show one session or
+ *  one SSH terminal (never both; neither = an empty pane).
  *  Every op here is immutable and never clones a leaf object, so callers
  *  (and `moveLeaf`) can track a leaf by reference across edits. The shape is
  *  also what `/api/me/views` persists, so keep it JSON-plain. */
@@ -8,7 +9,7 @@ export type SplitDir = 'row' | 'col'
 
 export type LayoutNode =
   | { kind: 'split'; dir: SplitDir; children: LayoutNode[]; ratios: number[] }
-  | { kind: 'leaf'; sessionId: string | null }
+  | { kind: 'leaf'; sessionId: string | null; terminalId?: string | null }
 
 export type LeafNode = Extract<LayoutNode, { kind: 'leaf' }>
 export type SplitNode = Extract<LayoutNode, { kind: 'split' }>
@@ -32,6 +33,7 @@ export interface LeafEntry {
   key: string
   leaf: LeafNode
   sessionId: string | null
+  terminalId: string | null
   path: Path
   rect: Rect
   /** Split edge a freshly inserted pane grows out of. */
@@ -54,10 +56,29 @@ export function leaf(sessionId: string | null): LeafNode {
   return { kind: 'leaf', sessionId }
 }
 
+export function terminalLeaf(terminalId: string): LeafNode {
+  return { kind: 'leaf', sessionId: null, terminalId }
+}
+
+// Terminal leaves may repeat (two panes mirroring one shell), so they key by
+// leaf object identity — stable because no op here ever clones a leaf.
+const terminalLeafIds = new WeakMap<LeafNode, number>()
+let nextTerminalLeafId = 1
+
 /** Stable identity for a leaf. Session leaves key by session id (views keep
- *  ids unique); empty leaves fall back to their path. */
+ *  ids unique); terminal leaves by terminal id + leaf identity; empty leaves
+ *  fall back to their path. */
 export function leafKey(node: LeafNode, path: Path): string {
-  return node.sessionId ?? `empty:${path.join('.')}`
+  if (node.sessionId) return node.sessionId
+  if (node.terminalId) {
+    let n = terminalLeafIds.get(node)
+    if (n === undefined) {
+      n = nextTerminalLeafId++
+      terminalLeafIds.set(node, n)
+    }
+    return `term:${node.terminalId}:${n}`
+  }
+  return `empty:${path.join('.')}`
 }
 
 export function equalRatios(n: number): number[] {
@@ -91,6 +112,12 @@ export function sessionIds(node: LayoutNode | null): string[] {
     .filter((id): id is string => id !== null)
 }
 
+export function terminalIds(node: LayoutNode | null): string[] {
+  return leafEntries(node)
+    .map((l) => l.terminalId)
+    .filter((id): id is string => id !== null)
+}
+
 /** Drop single-child splits and merge a child split into a parent of the
  *  same direction, renormalising ratios. Leaf objects pass through as-is. */
 export function collapse(node: LayoutNode): LayoutNode {
@@ -121,7 +148,9 @@ export function sanitizeLayout(raw: unknown): LayoutNode | null {
     if (!v || typeof v !== 'object' || depth > MAX_DEPTH) return null
     const o = v as Record<string, unknown>
     if (o.kind === 'leaf') {
-      return leaf(typeof o.sessionId === 'string' && o.sessionId ? o.sessionId : null)
+      if (typeof o.sessionId === 'string' && o.sessionId) return leaf(o.sessionId)
+      if (typeof o.terminalId === 'string' && o.terminalId) return terminalLeaf(o.terminalId)
+      return leaf(null)
     }
     if (o.kind === 'split' && Array.isArray(o.children)) {
       const kids: LayoutNode[] = []
@@ -171,7 +200,15 @@ export function layoutGeometry(root: LayoutNode | null): {
   const dividers: DividerEntry[] = []
   const walk = (n: LayoutNode, path: Path, rect: Rect, enterFrom: DropEdge) => {
     if (n.kind === 'leaf') {
-      leaves.push({ key: leafKey(n, path), leaf: n, sessionId: n.sessionId, path, rect, enterFrom })
+      leaves.push({
+        key: leafKey(n, path),
+        leaf: n,
+        sessionId: n.sessionId,
+        terminalId: n.terminalId ?? null,
+        path,
+        rect,
+        enterFrom,
+      })
       return
     }
     const ratios = normRatios(n.ratios, n.children.length)
@@ -282,7 +319,15 @@ export function insertAuto(
   sessionId: string | null,
   aspect = 16 / 9,
 ): LayoutNode {
-  const newLeaf = leaf(sessionId)
+  return insertLeafAuto(root, leaf(sessionId), aspect)
+}
+
+/** `insertAuto` for an arbitrary leaf (e.g. a terminal pane). */
+export function insertLeafAuto(
+  root: LayoutNode | null,
+  newLeaf: LeafNode,
+  aspect = 16 / 9,
+): LayoutNode {
   if (!root) return newLeaf
   if (countLeaves(root) >= MAX_LEAVES) return root
   const entries = leafEntries(root)
@@ -358,8 +403,13 @@ export function replaceLeafSession(
   key: string,
   sessionId: string | null,
 ): LayoutNode {
+  return replaceLeaf(root, key, leaf(sessionId))
+}
+
+/** Swap the leaf `key` for `next` (a session, terminal, or empty leaf). */
+export function replaceLeaf(root: LayoutNode, key: string, next: LeafNode): LayoutNode {
   const path = findLeafPath(root, key)
-  return path ? setNode(root, path, leaf(sessionId)) : root
+  return path ? setNode(root, path, next) : root
 }
 
 /** Blank every leaf showing `sessionId` (the session was deleted). */

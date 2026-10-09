@@ -35,7 +35,9 @@ impl SplitDir {
 }
 
 /// Wire layout of a saved view: `{"kind":"split","dir","children","ratios"}`
-/// or `{"kind":"leaf","sessionId"}`. `ratios[i]` is `children[i]`'s share.
+/// or `{"kind":"leaf","sessionId"}` / `{"kind":"leaf","terminalId"}`.
+/// `ratios[i]` is `children[i]`'s share. A leaf with neither id is an empty
+/// pane; one with both is rejected by [`ViewLayout::validate`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ViewLayout {
@@ -47,13 +49,19 @@ pub enum ViewLayout {
     Leaf {
         #[serde(rename = "sessionId", default)]
         session_id: Option<String>,
+        #[serde(
+            rename = "terminalId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        terminal_id: Option<String>,
     },
 }
 
 impl ViewLayout {
     /// Structural limits: splits have ≥ 2 children and one positive,
     /// finite ratio per child; depth ≤ [`MAX_VIEW_DEPTH`]; leaves ≤
-    /// [`MAX_VIEW_LEAVES`].
+    /// [`MAX_VIEW_LEAVES`]; no leaf names both a session and a terminal.
     pub fn validate(&self) -> Result<(), String> {
         let mut leaves = 0usize;
         self.validate_at(1, &mut leaves)?;
@@ -68,6 +76,10 @@ impl ViewLayout {
             return Err(format!("layout is nested deeper than {MAX_VIEW_DEPTH}"));
         }
         match self {
+            ViewLayout::Leaf {
+                session_id: Some(_),
+                terminal_id: Some(_),
+            } => Err("a pane can show a session or a terminal, not both".into()),
             ViewLayout::Leaf { .. } => {
                 *leaves += 1;
                 Ok(())
@@ -90,6 +102,22 @@ impl ViewLayout {
             }
         }
     }
+
+    /// Every terminal id the layout's leaves reference, in tree order.
+    pub fn terminal_ids(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        self.collect_terminal_ids(&mut out);
+        out
+    }
+
+    fn collect_terminal_ids<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            ViewLayout::Leaf { terminal_id, .. } => out.extend(terminal_id.as_deref()),
+            ViewLayout::Split { children, .. } => {
+                children.iter().for_each(|c| c.collect_terminal_ids(out))
+            }
+        }
+    }
 }
 
 /// Trim and bound a view name; `Err` carries the user-facing reason.
@@ -107,8 +135,9 @@ pub fn validate_view_name(name: &str) -> Result<String, String> {
 }
 
 /// Insert `layout` as the node rooted under `parent`. A leaf pointing at a
-/// session that no longer exists is stored blank — the same state
-/// `ON DELETE SET NULL` leaves behind when the session goes later.
+/// session or terminal that no longer exists is stored blank — the same
+/// state `ON DELETE SET NULL` leaves behind when the row goes later. A
+/// soft-closed terminal keeps its id so the pane can offer to reopen it.
 fn insert_layout(
     conn: &mut SqliteConnection,
     view_id: &str,
@@ -118,10 +147,13 @@ fn insert_layout(
     layout: &ViewLayout,
 ) -> anyhow::Result<()> {
     let id = uuid::Uuid::new_v4().to_string();
-    let (kind, dir, session_id) = match layout {
-        ViewLayout::Split { dir, .. } => ("split", Some(dir.as_str().to_string()), None),
-        ViewLayout::Leaf { session_id } => {
-            let existing = match session_id {
+    let (kind, dir, session_id, terminal_id) = match layout {
+        ViewLayout::Split { dir, .. } => ("split", Some(dir.as_str().to_string()), None, None),
+        ViewLayout::Leaf {
+            session_id,
+            terminal_id,
+        } => {
+            let session = match session_id {
                 Some(sid) => sessions::table
                     .find(sid)
                     .select(sessions::id)
@@ -129,7 +161,15 @@ fn insert_layout(
                     .optional()?,
                 None => None,
             };
-            ("leaf", None, existing)
+            let terminal = match terminal_id {
+                Some(tid) => terminals::table
+                    .find(tid)
+                    .select(terminals::id)
+                    .first::<String>(conn)
+                    .optional()?,
+                None => None,
+            };
+            ("leaf", None, session, terminal)
         }
     };
     diesel::insert_into(session_view_nodes::table)
@@ -142,6 +182,7 @@ fn insert_layout(
             dir,
             ratio,
             session_id,
+            terminal_id,
         })
         .execute(conn)?;
     if let ViewLayout::Split {
@@ -177,6 +218,7 @@ fn load_layout(conn: &mut SqliteConnection, view_id: &str) -> anyhow::Result<Vie
         if node.kind != "split" {
             return ViewLayout::Leaf {
                 session_id: node.session_id.clone(),
+                terminal_id: node.terminal_id.clone(),
             };
         }
         let kids = by_parent
@@ -195,7 +237,10 @@ fn load_layout(conn: &mut SqliteConnection, view_id: &str) -> anyhow::Result<Vie
     }
     Ok(match by_parent.get(&None).and_then(|roots| roots.first()) {
         Some(root) => build(root, &by_parent),
-        None => ViewLayout::Leaf { session_id: None },
+        None => ViewLayout::Leaf {
+            session_id: None,
+            terminal_id: None,
+        },
     })
 }
 

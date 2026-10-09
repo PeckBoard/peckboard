@@ -273,6 +273,7 @@ diesel::table! {
         dir -> Nullable<Text>,
         ratio -> Double,
         session_id -> Nullable<Text>,
+        terminal_id -> Nullable<Text>,
     }
 }
 

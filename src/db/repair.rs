@@ -83,6 +83,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_cards_review_summary_columns(conn)?;
     ensure_card_sessions_table(conn)?;
     backfill_session_owners(conn)?;
+    ensure_session_view_nodes_terminal_column(conn)?;
     Ok(())
 }
 
@@ -315,6 +316,26 @@ fn ensure_auth_sessions_remote_device_column(conn: &mut SqliteConnection) -> any
          ON auth_sessions (remote_device_id)",
     )
     .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1791640000_session_view_terminals`, whose
+/// `ALTER TABLE … ADD COLUMN` can't be made idempotent. Same nullable FK
+/// clause as the migration (`terminals` is ensured earlier).
+fn ensure_session_view_nodes_terminal_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(session_view_nodes)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "terminal_id") {
+        tracing::info!("Repairing schema: adding session_view_nodes.terminal_id");
+        sql_query(
+            "ALTER TABLE session_view_nodes ADD COLUMN terminal_id TEXT NULL \
+             REFERENCES terminals(id) ON DELETE SET NULL",
+        )
+        .execute(conn)?;
+    }
     Ok(())
 }
 

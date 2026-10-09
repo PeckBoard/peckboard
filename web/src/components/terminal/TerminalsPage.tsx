@@ -4,7 +4,7 @@ import List from '../List'
 import ListViewHeader from '../ListViewHeader'
 import RenameModal from '../RenameModal'
 import type { MenuItem } from '../Dropdown'
-import { NotPersistentBadge, TerminalStatusPill } from './TerminalView'
+import { NotPersistentBadge, TerminalStatusPill } from './TerminalBadges'
 import { popOutTerminal, useTerminalsStore, type TerminalInfo } from '../../store/terminals'
 import { formatRelativeTime } from '../../lib/review'
 import { describeActionError } from '../../utils/actionError'
@@ -16,10 +16,12 @@ interface Props {
   onNew: () => void
   /** A terminal was closed for good — drop its tab. */
   onClosed: (id: string) => void
+  /** "Add to view…" — put the terminal in a saved view's pane. */
+  onAddToView: (id: string) => void
 }
 
 /** Every open terminal: name, host, live state, last activity. */
-export default function TerminalsPage({ activeId, onOpen, onNew, onClosed }: Props) {
+export default function TerminalsPage({ activeId, onOpen, onNew, onClosed, onAddToView }: Props) {
   const terminals = useTerminalsStore((s) => s.terminals)
   const loaded = useTerminalsStore((s) => s.loaded)
   const fetchTerminals = useTerminalsStore((s) => s.fetchTerminals)
@@ -52,6 +54,7 @@ export default function TerminalsPage({ activeId, onOpen, onNew, onClosed }: Pro
   const menu = (t: TerminalInfo): MenuItem[] => [
     { label: 'Open', onSelect: () => onOpen(t.id) },
     { label: 'Pop out', onSelect: () => popOutTerminal(t.id) },
+    { label: 'Add to view…', onSelect: () => onAddToView(t.id), testId: 'terminal-add-to-view' },
     { label: 'Rename', onSelect: () => setRenaming(t) },
     { divider: true },
     { label: 'Close terminal', danger: true, onSelect: () => setConfirmClose(t) },

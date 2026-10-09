@@ -2,6 +2,30 @@ import { create } from 'zustand'
 import { authedFetch } from './auth'
 import { sanitizeLayout, type LayoutNode } from '../lib/layoutTree'
 
+/** Display identity of a terminal a view references. `closed` = soft-closed:
+ *  the shell is gone but its pane can reopen one on the same host. */
+export interface ViewTerminalMeta {
+  name: string
+  host_label: string
+  plugin_id: string
+  host_id: string
+  closed: boolean
+}
+export function terminalMeta(t: {
+  name: string
+  host_label: string
+  plugin_id: string
+  host_id: string
+}): ViewTerminalMeta {
+  return {
+    name: t.name,
+    host_label: t.host_label,
+    plugin_id: t.plugin_id,
+    host_id: t.host_id,
+    closed: false,
+  }
+}
+
 /** A saved multi-session View as listed by `GET /api/me/views`. */
 export interface ViewSummary {
   id: string
@@ -10,9 +34,11 @@ export interface ViewSummary {
   updated_at: string
 }
 
-/** Full view shape (`GET/POST/PUT /api/me/views[/:id]`). */
+/** Full view shape (`GET/POST/PUT /api/me/views[/:id]`). `terminals` maps
+ *  each terminal a pane references to its display identity. */
 export interface SavedView extends ViewSummary {
   layout: LayoutNode | null
+  terminals?: Record<string, ViewTerminalMeta>
 }
 
 async function errorOf(res: Response, fallback: string): Promise<Error> {

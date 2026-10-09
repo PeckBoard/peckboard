@@ -173,3 +173,30 @@
     display: none;
   }
 }
+
+/* A terminal inside a saved view's split pane. */
+.view-terminal-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: #0f1115;
+}
+
+.view-terminal-host {
+  color: var(--text3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.view-terminal-closed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}

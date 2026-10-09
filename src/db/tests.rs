@@ -3902,6 +3902,7 @@ mod tests {
 
         let leaf = |s: &str| ViewLayout::Leaf {
             session_id: Some(s.into()),
+            terminal_id: None,
         };
         let layout = ViewLayout::Split {
             dir: SplitDir::Row,
@@ -3909,7 +3910,7 @@ mod tests {
                 leaf("a"),
                 ViewLayout::Split {
                     dir: SplitDir::Col,
-                    children: vec![leaf("b"), ViewLayout::Leaf { session_id: None }],
+                    children: vec![leaf("b"), empty_leaf()],
                     ratios: vec![2.0, 1.0],
                 },
             ],
@@ -3981,7 +3982,7 @@ mod tests {
             after,
             ViewLayout::Split {
                 dir: SplitDir::Col,
-                children: vec![ViewLayout::Leaf { session_id: None }, leaf("a")],
+                children: vec![empty_leaf(), leaf("a")],
                 ratios: vec![1.0, 1.0],
             }
         );
@@ -3993,7 +3994,7 @@ mod tests {
     #[test]
     fn view_layout_validation_limits() {
         use crate::db::crud::{SplitDir, ViewLayout};
-        let leaf = || ViewLayout::Leaf { session_id: None };
+        let leaf = empty_leaf;
         let split = |children: Vec<ViewLayout>| ViewLayout::Split {
             dir: SplitDir::Row,
             ratios: vec![1.0; children.len()],
@@ -4017,6 +4018,103 @@ mod tests {
         assert!(deep.validate().is_err(), "depth 9 rejected");
         assert!(crate::db::crud::validate_view_name("  ").is_err());
         assert!(crate::db::crud::validate_view_name(&"x".repeat(101)).is_err());
+    }
+
+    fn empty_leaf() -> crate::db::crud::ViewLayout {
+        crate::db::crud::ViewLayout::Leaf {
+            session_id: None,
+            terminal_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_views_terminal_leaves_round_trip_close_and_delete() {
+        use crate::db::crud::{SplitDir, ViewLayout};
+        let db = test_db();
+        seed_user_folder_sessions(&db, &[("a", None)]).await;
+        for id in ["t1", "t2"] {
+            let now = chrono::Utc::now().to_rfc3339();
+            db.insert_terminal(Terminal {
+                id: id.into(),
+                user_id: "u1".into(),
+                plugin_id: "ssh".into(),
+                host_id: "h".into(),
+                name: id.into(),
+                host_label: "me@box:22".into(),
+                tmux_session: format!("peck-{id}"),
+                persistent: false,
+                created_at: now.clone(),
+                last_active_at: now,
+                closed_at: None,
+            })
+            .await
+            .unwrap();
+        }
+        let term = |t: &str| ViewLayout::Leaf {
+            session_id: None,
+            terminal_id: Some(t.into()),
+        };
+        let layout = ViewLayout::Split {
+            dir: SplitDir::Row,
+            children: vec![
+                ViewLayout::Leaf {
+                    session_id: Some("a".into()),
+                    terminal_id: None,
+                },
+                term("t1"),
+                term("t2"),
+                term("t1"),
+            ],
+            ratios: vec![1.0; 4],
+        };
+        assert!(layout.validate().is_ok());
+        assert_eq!(layout.terminal_ids(), ["t1", "t2", "t1"]);
+        let wire = serde_json::to_value(&layout).unwrap();
+        assert_eq!(wire["children"][1]["terminalId"], "t1");
+        assert!(wire["children"][0].get("terminalId").is_none());
+
+        let (view, got) = db
+            .create_session_view("u1", "Mixed", layout.clone())
+            .await
+            .unwrap();
+        assert_eq!(got, layout);
+
+        // Soft-close keeps the id so the pane can offer "Reopen".
+        assert!(db.close_terminal("t1").await.unwrap());
+        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
+        assert_eq!(after, layout);
+
+        // A hard delete blanks the leaf; the layout survives.
+        db.with_conn(|conn| {
+            use crate::db::schema::terminals;
+            use diesel::prelude::*;
+            diesel::delete(terminals::table.find("t2"))
+                .execute(conn)
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
+        let ViewLayout::Split { children, .. } = after else {
+            panic!("split expected");
+        };
+        assert_eq!(children[2], empty_leaf());
+        assert_eq!(children[1], term("t1"));
+
+        // Saving a leaf for a terminal that doesn't exist stores it blank.
+        let (_, got) = db
+            .update_session_view("u1", &view.id, None, Some(term("gone")))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, empty_leaf());
+
+        // Both ids on one leaf is rejected.
+        let both = ViewLayout::Leaf {
+            session_id: Some("a".into()),
+            terminal_id: Some("t1".into()),
+        };
+        assert!(both.validate().is_err());
     }
 
     #[tokio::test]

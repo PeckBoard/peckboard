@@ -40,6 +40,7 @@ import { popOutTerminal, useTerminalsStore } from './store/terminals'
 const TerminalsPage = lazy(() => import('./components/terminal/TerminalsPage'))
 const TerminalView = lazy(() => import('./components/terminal/TerminalView'))
 const NewTerminalModal = lazy(() => import('./components/terminal/NewTerminalModal'))
+const AddToViewModal = lazy(() => import('./components/terminal/AddToViewModal'))
 import RepeatingTasksView from './components/RepeatingTasksView'
 import AgentsView from './components/AgentsView'
 import UsageDashboard from './components/UsageDashboard'
@@ -455,6 +456,7 @@ function App() {
   const [showNewTerminal, setShowNewTerminal] = useState(false)
   const [renameTerminalId, setRenameTerminalId] = useState<string | null>(null)
   const [confirmCloseTerminalId, setConfirmCloseTerminalId] = useState<string | null>(null)
+  const [addToViewTerminalId, setAddToViewTerminalId] = useState<string | null>(null)
   const terminals = useTerminalsStore((s) => s.terminals)
   const openTabs = useTabsStore((s) => s.tabs)
   // Saved multi-session view open at `/views/<id>`; null on the list.
@@ -1466,6 +1468,11 @@ function App() {
   }
   const terminalMenuItems = (id: string): MenuItem[] => [
     { label: 'Pop out', onSelect: () => popOutTerminal(id) },
+    {
+      label: 'Add to view…',
+      onSelect: () => setAddToViewTerminalId(id),
+      testId: 'terminal-add-to-view',
+    },
     { label: 'Rename', onSelect: () => setRenameTerminalId(id) },
     { divider: true },
     { label: 'Close terminal', danger: true, onSelect: () => setConfirmCloseTerminalId(id) },
@@ -2118,6 +2125,7 @@ function App() {
                 }}
                 getSessionMenuItems={(id) => sessionMenuItemsFor(id)}
                 onOpenSessionTab={openSessionTab}
+                onOpenTerminalTab={openTerminal}
               />
             )}
             {view === 'usage' && <UsageDashboard />}
@@ -2278,6 +2286,7 @@ function App() {
                   onOpen={openTerminal}
                   onNew={() => setShowNewTerminal(true)}
                   onClosed={(id) => useTabsStore.getState().removeTabsForItem('terminal', id)}
+                  onAddToView={setAddToViewTerminalId}
                 />
               )}
               {mountedTerminalIds.map((id) => (
@@ -2351,6 +2360,19 @@ function App() {
             onCreated={(t) => {
               setShowNewTerminal(false)
               openTerminal(t.id)
+            }}
+          />
+        </Suspense>
+      )}
+      {addToViewTerminalId && (
+        <Suspense fallback={null}>
+          <AddToViewModal
+            terminalId={addToViewTerminalId}
+            onClose={() => setAddToViewTerminalId(null)}
+            onAdded={(viewId) => {
+              setAddToViewTerminalId(null)
+              setActiveViewId(viewId)
+              navigate('views', viewId)
             }}
           />
         </Suspense>

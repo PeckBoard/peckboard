@@ -1,17 +1,34 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Session } from '../types/api'
 import { useSessionsStore } from '../store/sessions'
-import { useViewsStore, type ViewSummary } from '../store/views'
+import {
+  terminalMeta,
+  useViewsStore,
+  type ViewSummary,
+  type ViewTerminalMeta,
+} from '../store/views'
+import {
+  popOutTerminal,
+  useTerminalsStore,
+  type TerminalInfo,
+  type TerminalPhase,
+} from '../store/terminals'
+import { useTabsStore } from '../store/tabs'
 import {
   MAX_LEAVES,
   clearSession,
   countLeaves,
   insertAuto,
-  replaceLeafSession,
+  insertLeafAuto,
+  leaf,
+  leafEntries,
+  replaceLeaf,
   sessionIds,
   starterLayout,
+  terminalLeaf,
   type LayoutNode,
   type LeafEntry,
+  type LeafNode,
   type StarterLayout,
 } from '../lib/layoutTree'
 import List from './List'
@@ -24,6 +41,11 @@ import ChatView from './ChatView'
 import SplitLayout, { type PaneInfo } from './SplitLayout'
 import { MenuButton, type MenuItem } from './Dropdown'
 import { SessionPaneStatus } from './panes'
+import TerminalPicker from './terminal/TerminalPicker'
+import { TerminalStatusPill } from './terminal/TerminalBadges'
+import { describeActionError } from '../utils/actionError'
+// xterm is heavy: only load it once a view actually shows a terminal.
+const ViewTerminalPane = lazy(() => import('./terminal/ViewTerminalPane'))
 
 const STARTERS: { value: StarterLayout; label: string }[] = [
   { value: 'columns', label: 'Columns' },
@@ -45,6 +67,7 @@ interface ViewsPageProps {
   onNavigate: (id: string | null) => void
   getSessionMenuItems: (sessionId: string) => MenuItem[]
   onOpenSessionTab: (sessionId: string) => void
+  onOpenTerminalTab: (terminalId: string) => void
 }
 
 /** Top-level "Views" page: the saved-view list, or one view's split layout. */
@@ -53,6 +76,7 @@ export default function ViewsPage({
   onNavigate,
   getSessionMenuItems,
   onOpenSessionTab,
+  onOpenTerminalTab,
 }: ViewsPageProps) {
   if (activeViewId) {
     return (
@@ -62,6 +86,7 @@ export default function ViewsPage({
         onBack={() => onNavigate(null)}
         getSessionMenuItems={getSessionMenuItems}
         onOpenSessionTab={onOpenSessionTab}
+        onOpenTerminalTab={onOpenTerminalTab}
       />
     )
   }
@@ -407,19 +432,40 @@ function SessionPicker({
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
+/** Header status for a terminal pane: host label + live / reconnecting /
+ *  ended pill. */
+function TerminalPaneStatus({
+  meta,
+  phase,
+}: {
+  meta: ViewTerminalMeta | undefined
+  phase: TerminalPhase
+}) {
+  return (
+    <>
+      {meta && <span className="view-terminal-host">{meta.host_label}</span>}
+      <TerminalStatusPill phase={meta?.closed ? 'ended' : phase} />
+    </>
+  )
+}
+
 function ViewEditor({
   viewId,
   onBack,
   getSessionMenuItems,
   onOpenSessionTab,
+  onOpenTerminalTab,
 }: {
   viewId: string
   onBack: () => void
   getSessionMenuItems: (sessionId: string) => MenuItem[]
   onOpenSessionTab: (sessionId: string) => void
+  onOpenTerminalTab: (terminalId: string) => void
 }) {
   const getView = useViewsStore((s) => s.getView)
   const updateView = useViewsStore((s) => s.updateView)
+  const createTerminal = useTerminalsStore((s) => s.create)
+  const closeTerminal = useTerminalsStore((s) => s.close)
   const sessions = useChatSessions()
   const allSessions = useSessionsStore((s) => s.sessions)
   const [name, setName] = useState('')
@@ -427,6 +473,12 @@ function ViewEditor({
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [loadError, setLoadError] = useState('')
   const [save, setSave] = useState<SaveState>('idle')
+  const [termMeta, setTermMeta] = useState<Record<string, ViewTerminalMeta>>({})
+  const [termPhase, setTermPhase] = useState<Record<string, TerminalPhase>>({})
+  const [replacingKey, setReplacingKey] = useState<string | null>(null)
+  const [closingTerminal, setClosingTerminal] = useState<string | null>(null)
+  const [closeBusy, setCloseBusy] = useState(false)
+  const [closeError, setCloseError] = useState<string | null>(null)
   const saveTimer = useRef<number | null>(null)
   const pending = useRef<LayoutNode | null | undefined>(undefined)
 
@@ -436,8 +488,11 @@ function ViewEditor({
       .then((v) => {
         if (cancelled) return
         setName(v.name)
+        setTermMeta(v.terminals ?? {})
         // The API requires a layout; an empty view round-trips as one blank leaf.
-        setLayout(v.layout?.kind === 'leaf' && v.layout.sessionId === null ? null : v.layout)
+        const blank =
+          v.layout?.kind === 'leaf' && v.layout.sessionId === null && !v.layout.terminalId
+        setLayout(blank ? null : v.layout)
         setStatus('ready')
       })
       .catch((e: unknown) => {
@@ -503,9 +558,49 @@ function ViewEditor({
   const nameOf = (id: string) => allSessions.find((s) => s.id === id)?.name ?? 'Session'
   const aspect = () => (window.innerHeight > 0 ? window.innerWidth / window.innerHeight : 16 / 9)
 
+  const rememberTerminal = (t: TerminalInfo) =>
+    setTermMeta((m) => ({ ...m, [t.id]: terminalMeta(t) }))
+  const markClosed = (id: string) =>
+    setTermMeta((m) => (m[id] && !m[id].closed ? { ...m, [id]: { ...m[id], closed: true } } : m))
+
   const addSession = (id: string) => {
     if (inView.has(id) || full) return
     change(insertAuto(layout, id, aspect()))
+  }
+  const addTerminal = (t: TerminalInfo) => {
+    if (full) return
+    rememberTerminal(t)
+    change(insertLeafAuto(layout, terminalLeaf(t.id), aspect()))
+  }
+  const fillLeaf = (key: string, next: LeafNode) => {
+    if (layout) change(replaceLeaf(layout, key, next))
+  }
+  /** Open a fresh shell on a closed terminal's host and point every pane
+   *  that showed the old one at it (mirrors stay mirrors). */
+  const reopenTerminal = async (oldId: string) => {
+    const meta = termMeta[oldId]
+    if (!meta) return
+    const t = await createTerminal(meta.plugin_id, meta.host_id)
+    rememberTerminal(t)
+    let next = layoutRef.current
+    for (const e of leafEntries(next)) {
+      if (next && e.terminalId === oldId) next = replaceLeaf(next, e.key, terminalLeaf(t.id))
+    }
+    change(next)
+  }
+  const confirmCloseTerminal = () => {
+    const id = closingTerminal
+    if (!id) return
+    setCloseBusy(true)
+    setCloseError(null)
+    closeTerminal(id)
+      .then(() => {
+        markClosed(id)
+        useTabsStore.getState().removeTabsForItem('terminal', id)
+        setClosingTerminal(null)
+      })
+      .catch((e: unknown) => setCloseError(describeActionError(e, "Couldn't close the terminal.")))
+      .finally(() => setCloseBusy(false))
   }
 
   if (status === 'loading') {
@@ -531,7 +626,29 @@ function ViewEditor({
   }
 
   const getPaneInfo = (entry: LeafEntry): PaneInfo => {
-    if (!entry.sessionId) return { title: 'Session deleted' }
+    if (entry.terminalId) {
+      const id = entry.terminalId
+      const meta = termMeta[id]
+      const closed = !!meta?.closed
+      return {
+        title: meta?.name ?? 'Terminal',
+        statusSlot: <TerminalPaneStatus meta={meta} phase={termPhase[entry.key] ?? 'connecting'} />,
+        menuItems: [
+          { label: 'Pop out', onSelect: () => popOutTerminal(id), hidden: closed },
+          { label: 'Replace…', onSelect: () => setReplacingKey(entry.key) },
+          { divider: true },
+          {
+            label: 'Close terminal',
+            danger: true,
+            hidden: closed,
+            testId: 'view-terminal-close',
+            onSelect: () => setClosingTerminal(id),
+          },
+        ],
+        canOpenAsTab: !closed,
+      }
+    }
+    if (!entry.sessionId) return { title: 'Empty pane' }
     return {
       title: nameOf(entry.sessionId),
       statusSlot: <SessionPaneStatus sessionId={entry.sessionId} />,
@@ -539,6 +656,31 @@ function ViewEditor({
       canOpenAsTab: true,
     }
   }
+
+  /** Session + terminal pickers that fill (or replace) the leaf `key`. */
+  const fillPickers = (key: string, testPrefix: string, after?: () => void) => (
+    <>
+      <SessionPicker
+        sessions={sessions}
+        exclude={inView}
+        onPick={(id) => {
+          fillLeaf(key, leaf(id))
+          after?.()
+        }}
+        label="Session…"
+        testId={`${testPrefix}-session`}
+      />
+      <TerminalPicker
+        onPick={(t) => {
+          rememberTerminal(t)
+          fillLeaf(key, terminalLeaf(t.id))
+          after?.()
+        }}
+        label="Terminal…"
+        testId={`${testPrefix}-terminal`}
+      />
+    </>
+  )
 
   return (
     <div className="view-editor" data-testid="view-editor" data-view-id={viewId}>
@@ -580,6 +722,12 @@ function ViewEditor({
               testId="view-add-session"
               disabled={full}
             />
+            <TerminalPicker
+              onPick={addTerminal}
+              label="Add terminal"
+              testId="view-add-terminal"
+              disabled={full}
+            />
             <button type="button" className="btn-secondary btn-sm" onClick={onBack}>
               All views
             </button>
@@ -592,7 +740,10 @@ function ViewEditor({
         rearrangeable
         testId="view-split-layout"
         getPaneInfo={getPaneInfo}
-        onOpenAsTab={(entry) => entry.sessionId && onOpenSessionTab(entry.sessionId)}
+        onOpenAsTab={(entry) => {
+          if (entry.sessionId) onOpenSessionTab(entry.sessionId)
+          else if (entry.terminalId) onOpenTerminalTab(entry.terminalId)
+        }}
         emptyState={
           <div className="split-empty-leaf" data-testid="view-empty">
             <p>This view has no panes.</p>
@@ -603,25 +754,92 @@ function ViewEditor({
               label="Add session"
               testId="view-empty-add-session"
             />
+            <TerminalPicker
+              onPick={addTerminal}
+              label="Add terminal"
+              testId="view-empty-add-terminal"
+            />
           </div>
         }
-        renderPane={(entry, ctx) =>
-          entry.sessionId ? (
-            <ChatView sessionId={entry.sessionId} compact shortcutsEnabled={ctx.focused} />
-          ) : (
+        renderPane={(entry, ctx) => {
+          if (entry.sessionId) {
+            return <ChatView sessionId={entry.sessionId} compact shortcutsEnabled={ctx.focused} />
+          }
+          if (entry.terminalId) {
+            const id = entry.terminalId
+            return (
+              <Suspense fallback={null}>
+                <ViewTerminalPane
+                  terminalId={id}
+                  meta={termMeta[id]}
+                  focused={ctx.focused && ctx.visible}
+                  visible={ctx.visible}
+                  onStatus={(s) => {
+                    setTermPhase((p) =>
+                      p[entry.key] === s.phase ? p : { ...p, [entry.key]: s.phase },
+                    )
+                    // Closed elsewhere (another tab, the Terminals page).
+                    if (s.phase === 'ended' && s.message === 'Terminal closed') markClosed(id)
+                  }}
+                  onReopen={() => reopenTerminal(id)}
+                  replaceSlot={
+                    <button
+                      type="button"
+                      className="btn-secondary btn-sm"
+                      data-testid="view-terminal-replace"
+                      onClick={() => setReplacingKey(entry.key)}
+                    >
+                      Replace…
+                    </button>
+                  }
+                />
+              </Suspense>
+            )
+          }
+          return (
             <div className="split-empty-leaf" data-testid="view-deleted-leaf">
-              <p>Session deleted — pick another</p>
-              <SessionPicker
-                sessions={sessions}
-                exclude={inView}
-                onPick={(id) => layout && change(replaceLeafSession(layout, entry.key, id))}
-                label="Pick a session"
-                testId="view-pick-session"
-              />
+              <p>Empty pane — pick a session or a terminal</p>
+              <div className="view-terminal-closed-actions">
+                {fillPickers(entry.key, 'view-pick')}
+              </div>
             </div>
           )
-        }
+        }}
       />
+      {replacingKey && (
+        <Modal
+          onClose={() => setReplacingKey(null)}
+          maxWidth={420}
+          data-testid="view-replace-modal"
+        >
+          <h2>Replace pane</h2>
+          <p className="form-hint">Show a session or a terminal in this pane instead.</p>
+          <div className="form-actions">
+            {fillPickers(replacingKey, 'view-replace', () => setReplacingKey(null))}
+            <button type="button" className="btn-secondary" onClick={() => setReplacingKey(null)}>
+              Cancel
+            </button>
+          </div>
+        </Modal>
+      )}
+      {closingTerminal && (
+        <ConfirmDialog
+          title="Close terminal"
+          message={`Close “${termMeta[closingTerminal]?.name ?? 'this terminal'}”? The remote shell is ended and anything running in it stops. Panes showing it offer to reopen one on the same host.`}
+          confirmLabel="Close"
+          cancelLabel="Cancel"
+          danger
+          busy={closeBusy}
+          error={closeError}
+          testId="view-terminal-close-confirm"
+          onConfirm={confirmCloseTerminal}
+          onCancel={() => {
+            if (closeBusy) return
+            setClosingTerminal(null)
+            setCloseError(null)
+          }}
+        />
+      )}
     </div>
   )
 }

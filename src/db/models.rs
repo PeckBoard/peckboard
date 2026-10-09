@@ -741,8 +741,9 @@ pub struct SessionView {
 }
 
 /// One node of a saved view's layout tree. `kind` is `split` (with `dir`)
-/// or `leaf` (with an optional `session_id`); `ratio` is this node's share
-/// of its parent split and `position` orders siblings.
+/// or `leaf` (with an optional `session_id` or `terminal_id`, never both);
+/// `ratio` is this node's share of its parent split and `position` orders
+/// siblings.
 #[derive(Queryable, Selectable, Insertable, Debug, Clone)]
 #[diesel(table_name = session_view_nodes)]
 pub struct SessionViewNode {
@@ -754,6 +755,7 @@ pub struct SessionViewNode {
     pub dir: Option<String>,
     pub ratio: f64,
     pub session_id: Option<String>,
+    pub terminal_id: Option<String>,
 }
 
 // ── Project workflow instructions ────────────────────────────────────
