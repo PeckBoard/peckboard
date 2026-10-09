@@ -164,6 +164,25 @@ const tempSessionIcon: ReactNode = (
     </svg>
   </span>
 )
+// Sealed-session marker: a padlock on the chip says the card run finished
+// and the transcript is read-only.
+const sealedSessionIcon: ReactNode = (
+  <span className="tab-icon tab-icon-sealed-session" aria-hidden="true">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  </span>
+)
 
 export const tabIcons = {
   project: projectIcon,
@@ -172,6 +191,7 @@ export const tabIcons = {
   doc_review: docReviewIcon,
   terminal: terminalIcon,
   tempSession: tempSessionIcon,
+  sealedSession: sealedSessionIcon,
 }
 
 /** The default fallback label used when the live store has no name and

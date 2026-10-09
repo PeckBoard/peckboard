@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.78"
+version = "0.1.79"
 edition = "2024"
 
 [dependencies]
@@ -22,8 +22,9 @@ tower-http = { version = "0.6", features = ["fs", "cors", "trace", "set-header",
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 
-# Database (Diesel ORM + embedded migrations)
-diesel = { version = "2", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
+# Database (Diesel ORM + embedded migrations). `64-column-tables`: the
+# `sessions` table outgrew diesel's default 32-column cap.
+diesel = { version = "2", features = ["sqlite", "returning_clauses_for_sqlite_3_35", "64-column-tables"] }
 diesel_migrations = "2"
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 

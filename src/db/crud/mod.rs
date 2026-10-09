@@ -5,6 +5,7 @@ mod account_refs;
 mod agent_vars;
 mod announcements;
 mod auth_sessions;
+mod card_sessions;
 mod cards;
 mod cascades;
 mod claude_accounts;
@@ -48,6 +49,7 @@ mod voice_relay_queue;
 mod workflow_instructions;
 
 pub use account_refs::AccountModelRefs;
+pub use card_sessions::{CardRunStart, CardSessionEntry, SealOutcome};
 pub use claude_accounts::AccountModelUsage;
 pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;

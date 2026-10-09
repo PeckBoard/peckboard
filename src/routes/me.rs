@@ -53,6 +53,11 @@ pub struct TabView {
     /// chip and offers a "Keep session" action. Always false for
     /// non-session tabs.
     pub is_temp: bool,
+    /// When the session tab's session was sealed (its card moved on; no
+    /// agent runs in it again). `None` for live sessions and non-session tabs.
+    pub sealed_at: Option<String>,
+    /// Why it was sealed (`advanced`, `reviewed`, `moved`, `superseded`, …).
+    pub sealed_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,14 +160,18 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
 
     let mut out: Vec<TabView> = Vec::with_capacity(tabs.len());
     for t in tabs {
+        let mut seal: (Option<String>, Option<String>) = (None, None);
         let (name, is_worker, is_repeating_task_session, is_temp) = match t.item_type.as_str() {
             "session" => match state.db.get_session(&t.item_id).await.ok().flatten() {
-                Some(s) => (
-                    Some(s.name),
-                    s.is_worker,
-                    s.repeating_task_id.is_some(),
-                    s.is_temp,
-                ),
+                Some(s) => {
+                    seal = (s.sealed_at, s.sealed_reason);
+                    (
+                        Some(s.name),
+                        s.is_worker,
+                        s.repeating_task_id.is_some(),
+                        s.is_temp,
+                    )
+                }
                 None => (None, false, false, false),
             },
             "project" => (
@@ -225,6 +234,8 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                 is_worker,
                 is_repeating_task_session,
                 is_temp,
+                sealed_at: seal.0,
+                sealed_reason: seal.1,
             });
         }
     }
@@ -299,15 +310,19 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
             // upsert path has already verified the item exists, so a
             // missing name here would be a TOCTOU race — fall back to
             // empty rather than 500ing.
+            let mut seal: (Option<String>, Option<String>) = (None, None);
             let (name, is_worker, is_repeating_task_session, is_temp) = match tab.item_type.as_str()
             {
                 "session" => match state.db.get_session(&tab.item_id).await.ok().flatten() {
-                    Some(s) => (
-                        s.name,
-                        s.is_worker,
-                        s.repeating_task_id.is_some(),
-                        s.is_temp,
-                    ),
+                    Some(s) => {
+                        seal = (s.sealed_at, s.sealed_reason);
+                        (
+                            s.name,
+                            s.is_worker,
+                            s.repeating_task_id.is_some(),
+                            s.is_temp,
+                        )
+                    }
                     None => (String::new(), false, false, false),
                 },
                 "project" => (
@@ -375,6 +390,8 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                 is_worker,
                 is_repeating_task_session,
                 is_temp,
+                sealed_at: seal.0,
+                sealed_reason: seal.1,
             }))
         }
         // Item doesn't exist — refuse to create the tab. Stops phantom

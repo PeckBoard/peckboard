@@ -390,7 +390,7 @@ async fn ssh_fleet_plugin_end_to_end() {
     let run = invoke(
         &plugins,
         "ssh_run",
-        json!({"host": "local", "command": "echo hi-from-fleet"}),
+        json!({"host": "local", "command": "echo hi-from-fleet", "reason": "smoke test"}),
         &ctx,
     )
     .await;
@@ -417,7 +417,7 @@ async fn ssh_fleet_plugin_end_to_end() {
         let w = invoke(
             &plugins,
             "ssh_write_file",
-            json!({"host": "local", "path": remote, "content": "hello-fleet\n"}),
+            json!({"host": "local", "path": remote, "content": "hello-fleet\n", "reason": "smoke test"}),
             &ctx,
         )
         .await;
@@ -436,7 +436,7 @@ async fn ssh_fleet_plugin_end_to_end() {
         let e = invoke(
             &plugins,
             "ssh_edit_file",
-            json!({"host": "local", "path": remote, "find": "hello", "replace": "goodbye"}),
+            json!({"host": "local", "path": remote, "find": "hello", "replace": "goodbye", "reason": "smoke test"}),
             &ctx,
         )
         .await;
@@ -503,7 +503,7 @@ async fn ssh_fleet_plugin_end_to_end() {
     let run = invoke(
         &plugins,
         "ssh_run",
-        json!({"host": "local-vault", "command": "echo hi-from-vault"}),
+        json!({"host": "local-vault", "command": "echo hi-from-vault", "reason": "smoke test"}),
         &ctx,
     )
     .await;

@@ -990,3 +990,133 @@
 .close-btn:hover {
   background: var(--surface2);
 }
+
+/* Review verdict: chip in the card detail's Review section and the small
+   badge on the card tile. Same muted chip shape as the blocked chip. */
+.card-verdict-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.card-verdict-chip--pass {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  color: color-mix(in srgb, var(--success) 60%, var(--text));
+}
+.card-verdict-chip--changes_requested {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  color: color-mix(in srgb, var(--warning) 55%, var(--text));
+}
+.card-review-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.card-review-when {
+  color: var(--text3);
+  font-size: var(--text-xs);
+  cursor: help;
+}
+.card-detail-description.card-review-body {
+  min-height: 0;
+}
+
+/* CardSessionsModal — one row per agent run on the card. */
+.card-sessions-modal {
+  max-width: 720px;
+  width: 100%;
+}
+.card-sessions-list {
+  margin: 12px 0;
+}
+.card-run {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+  text-align: left;
+}
+.card-run--gone {
+  opacity: 0.65;
+}
+.card-run-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.card-run-step {
+  font-weight: 600;
+}
+.card-run-role,
+.card-run-outcome,
+.card-run-sealed {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--text2);
+  background: var(--surface2);
+}
+.card-run-role--review {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+}
+.card-run-model {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.card-run-outcome--good {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  color: color-mix(in srgb, var(--success) 60%, var(--text));
+}
+.card-run-outcome--warn {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  color: color-mix(in srgb, var(--warning) 55%, var(--text));
+}
+.card-run-outcome--bad {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: color-mix(in srgb, var(--danger) 75%, var(--text));
+}
+.card-run-outcome--live {
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+}
+.card-run-sealed {
+  background: transparent;
+  color: var(--text3);
+}
+.card-run-time {
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+.card-run-summary {
+  font-size: var(--text-sm);
+  color: var(--text2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+.card-run-summary.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}

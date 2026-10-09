@@ -5,8 +5,10 @@ import { useWsStore } from '../store/ws'
 import { useUiStore } from '../store/ui'
 import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
-import type { Card, Event, Project } from '../types/api'
+import type { Card, Event, Project, ReviewVerdict } from '../types/api'
 import CardFormModal from './CardFormModal'
+import CardSessionsModal from './CardSessionsModal'
+import { formatRelativeTime } from '../lib/review'
 import EditProjectModal from './EditProjectModal'
 import Dropdown, { MenuButton, type MenuItem } from './Dropdown'
 import ConfirmDialog from './ConfirmDialog'
@@ -35,6 +37,7 @@ import {
 import { useVoiceNavStore } from '../voice/navigation'
 import PriorityChevron from './kanban/PriorityChevron'
 
+const verdictLabel = (v: ReviewVerdict) => (v === 'pass' ? 'Passed' : 'Changes requested')
 interface KanbanBoardProps {
   projectId: string
   /** Navigate to the dedicated project-todos view. */
@@ -88,6 +91,9 @@ export default function KanbanBoard({
   const [cardFilter, setCardFilter] = useState('')
   const todosByCard = useProjectTodos(cards)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null)
+  // The card whose run history (CardSessionsModal) is open, stacked over
+  // the card detail.
+  const [sessionsCard, setSessionsCard] = useState<Card | null>(null)
   // A card the voice assistant asked to show (voice/navigation.ts): open it
   // once this board's cards are loaded. Via a timer so the effect body never
   // setStates synchronously (react-hooks/set-state-in-effect).
@@ -1287,6 +1293,15 @@ export default function KanbanBoard({
                                 Blocked
                               </span>
                             )}
+                            {card.review_verdict && (
+                              <span
+                                className={`card-verdict-chip card-verdict-chip--${card.review_verdict}`}
+                                data-testid="card-verdict-badge"
+                                title={`Review: ${verdictLabel(card.review_verdict)}`}
+                              >
+                                {card.review_verdict === 'pass' ? 'Passed' : 'Changes'}
+                              </span>
+                            )}
                             <div className="kanban-card-actions" data-no-toggle>
                               {workerErr && (
                                 <span
@@ -1795,12 +1810,51 @@ export default function KanbanBoard({
                 </SafeMarkdown>
               </div>
             )}
-            {selectedCard.handoff_context && (
-              <div className="card-detail-row">
-                <span className="card-detail-label">Handoff Context</span>
-                <span>{selectedCard.handoff_context}</span>
+            {selectedCard.review_verdict && (
+              <div
+                className="card-detail-row card-detail-row-description"
+                data-testid="card-review-summary"
+              >
+                <span className="card-detail-label">Review</span>
+                <span className="card-review-meta">
+                  <span
+                    className={`card-verdict-chip card-verdict-chip--${selectedCard.review_verdict}`}
+                    data-testid="card-review-verdict"
+                  >
+                    {verdictLabel(selectedCard.review_verdict)}
+                  </span>
+                  {selectedCard.reviewer_model && (
+                    <span className="card-run-model">{selectedCard.reviewer_model}</span>
+                  )}
+                  {selectedCard.reviewed_at && (
+                    <span
+                      className="card-review-when"
+                      title={new Date(selectedCard.reviewed_at).toLocaleString()}
+                    >
+                      {formatRelativeTime(selectedCard.reviewed_at)}
+                    </span>
+                  )}
+                </span>
+                {selectedCard.review_summary && (
+                  <SafeMarkdown
+                    className="card-detail-description card-review-body"
+                    rehypePlugins={highlightPlugins}
+                    components={chatMarkdownComponents}
+                  >
+                    {selectedCard.review_summary}
+                  </SafeMarkdown>
+                )}
               </div>
             )}
+            {/* A passing review's summary doubles as the handoff context;
+                the Review section above already shows it. */}
+            {selectedCard.handoff_context &&
+              selectedCard.handoff_context !== selectedCard.review_summary && (
+                <div className="card-detail-row">
+                  <span className="card-detail-label">Handoff Context</span>
+                  <span>{selectedCard.handoff_context}</span>
+                </div>
+              )}
             {cardReports.length > 0 && (
               <div className="card-detail-row" style={{ flexDirection: 'column', gap: 6 }}>
                 <span className="card-detail-label">Reports ({cardReports.length})</span>
@@ -1821,6 +1875,13 @@ export default function KanbanBoard({
             )}
           </div>
           <div className="card-detail-actions">
+            <button
+              className="btn-secondary"
+              data-testid="card-sessions-btn"
+              onClick={() => setSessionsCard(selectedCard)}
+            >
+              Sessions ({selectedCard.session_count ?? 0})
+            </button>
             {(selectedCard.worker_session_id || selectedCard.last_worker_session_id) &&
               normalizeStep(selectedCard.step) !== 'backlog' && (
                 <button
@@ -1839,6 +1900,18 @@ export default function KanbanBoard({
             </button>
           </div>
         </Modal>
+      )}
+
+      {sessionsCard && (
+        <CardSessionsModal
+          projectId={projectId}
+          card={sessionsCard}
+          onClose={() => setSessionsCard(null)}
+          onOpenSession={(sid) => {
+            setSessionsCard(null)
+            handleViewSession(sid)
+          }}
+        />
       )}
 
       {editingCard && (

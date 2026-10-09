@@ -562,6 +562,10 @@ impl Db {
             let rows: Vec<(String, Option<String>, String)> = sessions::table
                 .filter(sessions::repeating_task_id.is_not_null())
                 .filter(sessions::is_worker.eq(false))
+                // A session in a card's run history is never pruned.
+                .filter(diesel::dsl::not(diesel::dsl::exists(
+                    card_sessions::table.filter(card_sessions::session_id.eq(sessions::id)),
+                )))
                 .filter(sessions::is_permanent.eq(false))
                 .order((
                     sessions::repeating_task_id.asc(),
@@ -596,6 +600,9 @@ impl Db {
         self.with_conn(move |conn| {
             sessions::table
                 .filter(sessions::is_worker.eq(false))
+                .filter(diesel::dsl::not(diesel::dsl::exists(
+                    card_sessions::table.filter(card_sessions::session_id.eq(sessions::id)),
+                )))
                 .filter(sessions::last_activity.lt(&before))
                 .select(sessions::id)
                 .load(conn)
@@ -628,6 +635,9 @@ impl Db {
             sessions::table
                 .inner_join(events::table.on(events::session_id.eq(sessions::id)))
                 .filter(sessions::is_worker.eq(false))
+                .filter(diesel::dsl::not(diesel::dsl::exists(
+                    card_sessions::table.filter(card_sessions::session_id.eq(sessions::id)),
+                )))
                 .group_by(sessions::id)
                 .having(diesel::dsl::count(events::id).gt(min_count))
                 .select(sessions::id)

@@ -269,6 +269,8 @@ mod tests {
             is_temp: false,
             parent_session_id: None,
             subagent_completed_at: None,
+            sealed_at: None,
+            sealed_reason: None,
         }
     }
 

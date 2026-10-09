@@ -1016,6 +1016,11 @@ mod tests {
             system_prompt_name: None,
             worktree_unmerged_reason: None,
             worktree_unmerged_detail: None,
+            review_summary: None,
+            review_verdict: None,
+            reviewed_at: None,
+            reviewer_model: None,
+            session_count: 0,
         }
     }
 

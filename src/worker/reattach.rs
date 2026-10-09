@@ -50,6 +50,12 @@ pub async fn reattach_worker(
     if !session.is_worker {
         anyhow::bail!("session {session_id} is not a worker session");
     }
+    if session.sealed_at.is_some() {
+        return Err(crate::provider::manager::SessionSealed {
+            session_id: session_id.to_string(),
+        }
+        .into());
+    }
     if session.project_id.as_deref() != Some(project.as_str()) {
         anyhow::bail!("session {session_id} is not a worker of this card's project");
     }

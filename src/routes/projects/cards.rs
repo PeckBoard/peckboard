@@ -546,6 +546,9 @@ pub(super) async fn update_card(
                 worktree_unmerged_detail: None,
                 // prev_step from the read it already did.
                 completed_at: None,
+                review_summary: None,
+                review_verdict: None,
+                reviewed_at: None,
             })
         })
         .await;
@@ -634,6 +637,7 @@ pub(super) async fn update_card(
     // Done after the broadcast so the UI sees the new state immediately
     // and the (slower) `cancel_and_wait` doesn't gate the HTTP response.
     if let Some(sid) = stale_sid {
+        let _ = state.db.close_card_run(&card_id, &sid, "moved", None).await;
         tracing::info!(
             card_id = %card_id,
             session_id = %sid,
@@ -694,6 +698,10 @@ pub(super) async fn stop_card_worker(
     let card = load_scoped_card(&state, &project_id, &card_id).await?;
 
     if let Some(session_id) = &card.worker_session_id {
+        let _ = state
+            .db
+            .close_card_run(&card_id, session_id, "stopped", None)
+            .await;
         state.session_manager.cancel(session_id).await;
         state
             .db
@@ -727,6 +735,10 @@ pub(super) async fn restart_card_worker(
 
     // Stop existing worker if running
     if let Some(session_id) = &card.worker_session_id {
+        let _ = state
+            .db
+            .close_card_run(&card_id, session_id, "stopped", None)
+            .await;
         state.session_manager.cancel(session_id).await;
         state
             .db
@@ -789,6 +801,10 @@ pub(super) async fn cancel_card_wont_do(
 
     // Stop existing worker
     if let Some(session_id) = &card.worker_session_id {
+        let _ = state
+            .db
+            .close_card_run(&card_id, session_id, "wont_do", None)
+            .await;
         state.session_manager.cancel(session_id).await;
     }
 
@@ -950,7 +966,23 @@ pub(super) async fn list_card_reports(
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({ "reports": reports })))
 }
-
+/// GET /api/projects/:id/cards/:card_id/sessions -- the card's run history
+/// (one row per worker claim), newest first, joined with each run's session.
+pub(super) async fn list_card_sessions(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, card_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    load_scoped_card(&state, &project_id, &card_id).await?;
+    let sessions = state.db.list_card_sessions(&card_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+        serde_json::json!({ "sessions": sessions }),
+    ))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -271,6 +271,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(cards::list_card_reports),
         )
         .route(
+            "/api/projects/{id}/cards/{card_id}/sessions",
+            get(cards::list_card_sessions),
+        )
+        .route(
             "/api/projects/{id}/pending-questions",
             get(list_pending_questions),
         )

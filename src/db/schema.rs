@@ -44,6 +44,8 @@ diesel::table! {
         pending_doc_review -> Nullable<Text>,
         handover_run_id -> Nullable<BigInt>,
         subagent_completed_at -> Nullable<Text>,
+        sealed_at -> Nullable<Text>,
+        sealed_reason -> Nullable<Text>,
     }
 }
 
@@ -128,6 +130,24 @@ diesel::table! {
         system_prompt_name -> Nullable<Text>,
         worktree_unmerged_reason -> Nullable<Text>,
         worktree_unmerged_detail -> Nullable<Text>,
+        review_summary -> Nullable<Text>,
+        review_verdict -> Nullable<Text>,
+        reviewed_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    card_sessions (id) {
+        id -> Text,
+        card_id -> Text,
+        session_id -> Text,
+        step -> Text,
+        role -> Text,
+        model -> Nullable<Text>,
+        started_at -> Text,
+        ended_at -> Nullable<Text>,
+        outcome -> Nullable<Text>,
+        summary -> Nullable<Text>,
     }
 }
 
@@ -764,6 +784,7 @@ diesel::joinable!(session_memories -> sessions (session_id));
 diesel::joinable!(agent_vars -> folders (folder_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
+diesel::joinable!(card_sessions -> cards (card_id));
 diesel::joinable!(terminals -> users (user_id));
 diesel::joinable!(mfa_methods -> users (user_id));
 diesel::joinable!(mfa_recovery_codes -> users (user_id));
@@ -778,6 +799,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     projects,
     cards,
     card_dependencies,
+    card_sessions,
     events,
     users,
     auth_sessions,

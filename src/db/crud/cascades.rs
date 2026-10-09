@@ -132,10 +132,11 @@ impl Db {
         .await
     }
 
-    /// Delete a project along with every card it owns, every worker
-    /// session referenced by those cards, and those sessions' events
-    /// and queued messages. Atomic; an early failure aborts the whole
-    /// cascade rather than leaving partial state.
+    /// Delete a project along with every card it owns, every session that
+    /// ever worked one of those cards (sealed predecessors included), those
+    /// sessions' events and queued messages, and the cards' run history.
+    /// Atomic; an early failure aborts the whole cascade rather than
+    /// leaving partial state.
     pub async fn delete_project_cascade(&self, id: &str) -> anyhow::Result<CascadeReport> {
         let id = id.to_string();
         self.with_conn(move |conn| {
@@ -144,7 +145,11 @@ impl Db {
                 .filter(cards::project_id.eq(&id))
                 .select(Card::as_select())
                 .load(conn)?;
-            let mut session_ids: Vec<String> = Vec::new();
+            let card_ids: Vec<String> = cards_in_project.iter().map(|c| c.id.clone()).collect();
+            let mut session_ids: Vec<String> = sessions::table
+                .filter(sessions::card_id.eq_any(card_ids.clone()))
+                .select(sessions::id)
+                .load(conn)?;
             for c in &cards_in_project {
                 if let Some(ref sid) = c.worker_session_id {
                     session_ids.push(sid.clone());
@@ -165,13 +170,12 @@ impl Db {
                 ))
                 .execute(conn)?;
 
-            let card_ids: Vec<String> = cards_in_project.iter().map(|c| c.id.clone()).collect();
             let plan_ids: Vec<String> = plans::table
                 .filter(
                     plans::project_id
                         .eq(&id)
                         .or(plans::session_id.eq_any(session_ids.clone()))
-                        .or(plans::card_id.eq_any(card_ids)),
+                        .or(plans::card_id.eq_any(card_ids.clone())),
                 )
                 .select(plans::id)
                 .load(conn)?;
@@ -182,18 +186,9 @@ impl Db {
             purge_doc_reviews(conn, review_ids)?;
             detach_doc_review_sessions(conn, &session_ids)?;
             purge_plans(conn, plan_ids)?;
-            let mut events_deleted = 0usize;
-            for sid in &session_ids {
-                events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
-                    .execute(conn)?;
-                diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(sid)))
-                    .execute(conn)?;
-                diesel::delete(todos::table.filter(todos::session_id.eq(sid))).execute(conn)?;
-            }
-            let mut sessions_deleted = 0usize;
-            for sid in &session_ids {
-                sessions_deleted += diesel::delete(sessions::table.find(sid)).execute(conn)?;
-            }
+            let (events_deleted, sessions_deleted) = purge_sessions(conn, &session_ids)?;
+            diesel::delete(card_sessions::table.filter(card_sessions::card_id.eq_any(card_ids)))
+                .execute(conn)?;
             let cards_deleted =
                 diesel::delete(cards::table.filter(cards::project_id.eq(&id))).execute(conn)?;
             let project_deleted = diesel::delete(projects::table.find(&id)).execute(conn)?;
@@ -209,8 +204,9 @@ impl Db {
         .await
     }
 
-    /// Delete a card along with every worker session it owns and those
-    /// sessions' events and queued messages. Atomic.
+    /// Delete a card along with every session that ever worked it (sealed
+    /// predecessors included), those sessions' events and queued messages,
+    /// and the card's run history. Atomic.
     pub async fn delete_card_cascade(&self, id: &str) -> anyhow::Result<CascadeReport> {
         let id = id.to_string();
         self.with_conn(move |conn| {
@@ -222,7 +218,10 @@ impl Db {
             let Some(card) = card else {
                 anyhow::bail!("card not found: {id}");
             };
-            let mut session_ids: Vec<String> = Vec::new();
+            let mut session_ids: Vec<String> = sessions::table
+                .filter(sessions::card_id.eq(&id))
+                .select(sessions::id)
+                .load(conn)?;
             if let Some(ref sid) = card.worker_session_id {
                 session_ids.push(sid.clone());
             }
@@ -252,18 +251,9 @@ impl Db {
             // one — sever the link rather than deleting the document.
             detach_doc_review_sessions(conn, &session_ids)?;
             purge_plans(conn, plan_ids)?;
-            let mut events_deleted = 0usize;
-            for sid in &session_ids {
-                events_deleted += diesel::delete(events::table.filter(events::session_id.eq(sid)))
-                    .execute(conn)?;
-                diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(sid)))
-                    .execute(conn)?;
-                diesel::delete(todos::table.filter(todos::session_id.eq(sid))).execute(conn)?;
-            }
-            let mut sessions_deleted = 0usize;
-            for sid in &session_ids {
-                sessions_deleted += diesel::delete(sessions::table.find(sid)).execute(conn)?;
-            }
+            let (events_deleted, sessions_deleted) = purge_sessions(conn, &session_ids)?;
+            diesel::delete(card_sessions::table.filter(card_sessions::card_id.eq(&id)))
+                .execute(conn)?;
             let card_deleted = diesel::delete(cards::table.find(&id)).execute(conn)?;
             if card_deleted == 0 {
                 anyhow::bail!("card not found: {id}");
@@ -276,6 +266,31 @@ impl Db {
         })
         .await
     }
+}
+
+/// Delete the given sessions with their events, queued messages, todos and
+/// tab chips. Returns `(events_deleted, sessions_deleted)`.
+fn purge_sessions(
+    conn: &mut SqliteConnection,
+    session_ids: &[String],
+) -> anyhow::Result<(usize, usize)> {
+    let mut events_deleted = 0usize;
+    let mut sessions_deleted = 0usize;
+    for sid in session_ids {
+        events_deleted +=
+            diesel::delete(events::table.filter(events::session_id.eq(sid))).execute(conn)?;
+        diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(sid)))
+            .execute(conn)?;
+        diesel::delete(todos::table.filter(todos::session_id.eq(sid))).execute(conn)?;
+        diesel::delete(
+            user_tabs::table
+                .filter(user_tabs::item_type.eq("session"))
+                .filter(user_tabs::item_id.eq(sid)),
+        )
+        .execute(conn)?;
+        sessions_deleted += diesel::delete(sessions::table.find(sid)).execute(conn)?;
+    }
+    Ok((events_deleted, sessions_deleted))
 }
 
 /// Delete the given plans. Plans carry no FK constraints, so cascade callers

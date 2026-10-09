@@ -48,6 +48,11 @@ export interface Session {
   /** Subagent sessions only: when its completion was reported to the
    *  parent. null while the subagent is still running. */
   subagent_completed_at?: string | null
+  /** Set when the session's card run finished — the transcript is kept
+   *  read-only and new messages are rejected (HTTP 409 `session_sealed`). */
+  sealed_at?: string | null
+  /** Why the run was sealed (e.g. the card advanced or was reviewed). */
+  sealed_reason?: string | null
 }
 
 /** Token/cost preview for a recovery-mode account/provider switch.
@@ -191,6 +196,47 @@ export interface Card {
   worktree_unmerged_reason?: string | null
   /** Git stderr / status output behind `worktree_unmerged_reason`. */
   worktree_unmerged_detail?: string | null
+  /** Latest review run's summary (markdown); null until a review finishes. */
+  review_summary?: string | null
+  review_verdict?: ReviewVerdict | null
+  reviewed_at?: string | null
+  /** Model of the latest review run; null until a review has run. */
+  reviewer_model?: string | null
+  /** Number of agent runs (work + review) recorded for this card. */
+  session_count?: number
+}
+
+export type ReviewVerdict = 'pass' | 'changes_requested'
+
+export type CardRunOutcome =
+  | 'advanced'
+  | 'finished'
+  | 'reviewed'
+  | 'changes_requested'
+  | 'stopped'
+  | 'moved'
+  | 'wont_do'
+  | 'crashed'
+  | 'superseded'
+
+/** One agent run on a card — GET /api/projects/:pid/cards/:cid/sessions. */
+export interface CardSessionRun {
+  id: string
+  card_id: string
+  session_id: string
+  session_name: string | null
+  /** False when the session (and its transcript) was deleted. */
+  session_exists: boolean
+  sealed: boolean
+  step: string
+  role: 'work' | 'review'
+  model: string | null
+  started_at: string
+  ended_at: string | null
+  /** A `CardRunOutcome`; null while the run is live. Typed loosely so a
+   *  newer backend outcome still renders (as a neutral chip). */
+  outcome: string | null
+  summary: string | null
 }
 
 export interface Event {

@@ -79,6 +79,9 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_remote_devices_table(conn)?;
     ensure_remote_device_enrollments_table(conn)?;
     ensure_auth_sessions_remote_device_column(conn)?;
+    ensure_sessions_sealed_columns(conn)?;
+    ensure_cards_review_summary_columns(conn)?;
+    ensure_card_sessions_table(conn)?;
     backfill_session_owners(conn)?;
     Ok(())
 }
@@ -983,6 +986,69 @@ fn ensure_cards_worktree_unmerged_columns(conn: &mut SqliteConnection) -> anyhow
             sql_query(format!("ALTER TABLE cards ADD COLUMN {col} TEXT")).execute(conn)?;
         }
     }
+    Ok(())
+}
+/// Heal DBs that predate `1791579609_card_session_history`: the two
+/// non-idempotent `ALTER TABLE sessions ADD COLUMN`s for sealing. Nullable
+/// TEXT (NULL = live session), mirroring the migration.
+fn ensure_sessions_sealed_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(sessions)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    for col in ["sealed_at", "sealed_reason"] {
+        if !existing.iter().any(|c| c == col) {
+            tracing::info!("Repairing schema: adding sessions.{col}");
+            sql_query(format!("ALTER TABLE sessions ADD COLUMN {col} TEXT")).execute(conn)?;
+        }
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1791579609_card_session_history`: the review
+/// summary columns on cards. Nullable TEXT, mirroring the migration.
+fn ensure_cards_review_summary_columns(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(cards)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    for col in ["review_summary", "review_verdict", "reviewed_at"] {
+        if !existing.iter().any(|c| c == col) {
+            tracing::info!("Repairing schema: adding cards.{col}");
+            sql_query(format!("ALTER TABLE cards ADD COLUMN {col} TEXT")).execute(conn)?;
+        }
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1791579609_card_session_history`. Idempotent
+/// CREATE TABLE IF NOT EXISTS + indexes; DDL mirrors the migration.
+fn ensure_card_sessions_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "card_sessions")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS card_sessions (
+            id          TEXT PRIMARY KEY NOT NULL,
+            card_id     TEXT NOT NULL REFERENCES cards(id),
+            session_id  TEXT NOT NULL,
+            step        TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            model       TEXT,
+            started_at  TEXT NOT NULL,
+            ended_at    TEXT,
+            outcome     TEXT,
+            summary     TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_card_sessions_card \
+         ON card_sessions (card_id, started_at)",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_card_sessions_session ON card_sessions (session_id)")
+        .execute(conn)?;
     Ok(())
 }
 /// Heal DBs that predate `1783700001_system_prompts`. `CREATE TABLE IF NOT
@@ -2141,6 +2207,39 @@ mod tests {
             after,
         );
         assert!(after.iter().any(|c| c == "worker_communication"));
+    }
+
+    /// DBs that missed `1791579609_card_session_history` get the sealing and
+    /// review columns plus the run-history table; a second pass is a no-op.
+    #[test]
+    fn ensure_card_session_history_schema_heals_and_is_idempotent() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("CREATE TABLE cards (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        for _ in 0..2 {
+            ensure_sessions_sealed_columns(&mut conn).unwrap();
+            ensure_cards_review_summary_columns(&mut conn).unwrap();
+            ensure_card_sessions_table(&mut conn).unwrap();
+        }
+        let cols = |conn: &mut SqliteConnection, t: &str| -> Vec<String> {
+            sql_query(format!("PRAGMA table_info({t})"))
+                .load::<PragmaColumn>(conn)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.name)
+                .collect()
+        };
+        let s = cols(&mut conn, "sessions");
+        assert!(s.contains(&"sealed_at".into()) && s.contains(&"sealed_reason".into()));
+        let c = cols(&mut conn, "cards");
+        for col in ["review_summary", "review_verdict", "reviewed_at"] {
+            assert!(c.iter().any(|x| x == col), "missing cards.{col}");
+        }
+        assert!(table_exists(&mut conn, "card_sessions").unwrap());
     }
 
     /// Pre-existing DB has no `todos` table and a session whose latest

@@ -43,6 +43,12 @@ export interface Tab {
    *  is closed. The strip marks the chip with an hourglass icon and the
    *  context menu offers "Keep session" to clear the flag. */
   isTemp: boolean
+  /** Denormalized `sessions.sealed_at` for session tabs (worker sessions
+   *  included — they aren't in the sessions list). A sealed session is a
+   *  finished card run: its menus hide the agent controls. null otherwise. */
+  sealedAt: string | null
+  /** Why the session was sealed (`advanced`, `reviewed`, …). */
+  sealedReason: string | null
 }
 
 interface TabsState {
@@ -77,6 +83,8 @@ interface ApiTab {
   is_worker?: boolean
   is_repeating_task_session?: boolean
   is_temp?: boolean
+  sealed_at?: string | null
+  sealed_reason?: string | null
 }
 
 function fromApi(t: ApiTab): Tab {
@@ -88,6 +96,8 @@ function fromApi(t: ApiTab): Tab {
     isWorker: t.is_worker ?? false,
     isRepeatingTaskSession: t.is_repeating_task_session ?? false,
     isTemp: t.is_temp ?? false,
+    sealedAt: t.sealed_at ?? null,
+    sealedReason: t.sealed_reason ?? null,
   }
 }
 
@@ -204,6 +214,8 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           isWorker: false,
           isRepeatingTaskSession: false,
           isTemp: false,
+          sealedAt: null,
+          sealedReason: null,
         },
         ...s.tabs,
       ],

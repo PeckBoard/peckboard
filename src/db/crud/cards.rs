@@ -352,6 +352,12 @@ impl Db {
     pub async fn delete_cards_by_project(&self, project_id: &str) -> anyhow::Result<usize> {
         let project_id = project_id.to_string();
         self.with_conn(move |conn| {
+            // Run-history rows FK onto their card.
+            let ids = cards::table
+                .filter(cards::project_id.eq(&project_id))
+                .select(cards::id);
+            diesel::delete(card_sessions::table.filter(card_sessions::card_id.eq_any(ids)))
+                .execute(conn)?;
             diesel::delete(cards::table.filter(cards::project_id.eq(&project_id)))
                 .execute(conn)
                 .map_err(Into::into)
@@ -362,6 +368,8 @@ impl Db {
     pub async fn delete_card(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();
         self.with_conn(move |conn| {
+            diesel::delete(card_sessions::table.filter(card_sessions::card_id.eq(&id)))
+                .execute(conn)?;
             let count = diesel::delete(cards::table.find(&id)).execute(conn)?;
             Ok(count > 0)
         })

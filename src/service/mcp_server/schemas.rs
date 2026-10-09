@@ -265,13 +265,18 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "finish_card".into(),
-                description: "Mark the ENTIRE card's work complete. From a working step (even `backlog`/`in_progress`) the card moves to the shared `review` step, where a DIFFERENT session independently verifies it before `done` (projects with review turned off, and the reviewer itself, land straight on `done`, unblocking dependent cards). Use whenever all the card's work is complete. Do NOT use `complete_step` to finish a card.".into(),
+                description: "Mark the ENTIRE card's work complete. From a working step (even `backlog`/`in_progress`) the card moves to the shared `review` step, where a DIFFERENT session independently verifies it before `done` (projects with review turned off, and the reviewer itself, land straight on `done`, unblocking dependent cards). Use whenever all the card's work is complete. Do NOT use `complete_step` to finish a card. A reviewer's summary is kept as the card's review summary, with its `verdict`.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "summary": {
                             "type": "string",
                             "description": "Final summary: what was done, where (files, branch, commits), and how it was verified — the reviewer starts from this"
+                        },
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["pass", "changes_requested"],
+                            "description": "Review step only: `pass` when every requirement checks out, `changes_requested` when you filed gap cards. Omitted: `changes_requested` if you filed gap cards for this card during the review, else `pass`."
                         }
                     },
                     "additionalProperties": false

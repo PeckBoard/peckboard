@@ -16,6 +16,9 @@ interface InputBarProps {
    *  button is disabled with this text as its tooltip and pasted files
    *  are refused with an error chip. */
   attachDisabledReason?: string | null
+  /** A send raced the session being sealed (HTTP 409 `session_sealed`):
+   *  the parent swaps the composer for the read-only banner. */
+  onSealed?: () => void
 }
 
 interface PendingAttachment {
@@ -41,6 +44,7 @@ export default function InputBar({
   sessionId,
   handoverActive = false,
   attachDisabledReason = null,
+  onSealed,
 }: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
@@ -339,7 +343,21 @@ export default function InputBar({
         if (res.ok) {
           playSound('messageSent')
         } else {
-          const detail = (await res.json().catch(() => null))?.error
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: unknown
+            message?: unknown
+          } | null
+          if (res.status === 409 && errBody?.error === 'session_sealed') {
+            rollbackFailedSend(
+              pendingId,
+              typeof errBody.message === 'string'
+                ? errBody.message
+                : 'This run is sealed. Start a new session to continue.',
+            )
+            onSealed?.()
+            return
+          }
+          const detail = errBody?.error
           rollbackFailedSend(
             pendingId,
             describeActionError(
@@ -382,7 +400,15 @@ export default function InputBar({
         setSendError({ message, text: trimmed, attachments: atts })
       }
     },
-    [sending, handoverActive, sessionId, setDraft, addPendingUserMessage, removePendingUserMessage],
+    [
+      sending,
+      handoverActive,
+      sessionId,
+      setDraft,
+      addPendingUserMessage,
+      removePendingUserMessage,
+      onSealed,
+    ],
   )
 
   const handleSend = useCallback(() => {

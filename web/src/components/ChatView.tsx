@@ -899,6 +899,11 @@ type ConfirmActionState = {
   run: () => Promise<void>
 }
 
+/** Human text for the backend's `sealed_reason` codes; unknown codes render
+ *  verbatim. */
+const SEALED_REASONS: Record<string, string> = {
+  superseded: 'The card moved on — a newer run picked it up.',
+}
 export default function ChatView({
   sessionId,
   onOpenTodos,
@@ -1030,6 +1035,10 @@ export default function ChatView({
   const terminateAgent = useSessionsStore((s) => s.terminateAgent)
   const bgPanel = useBackgroundPanel(sessionId)
 
+  // A sealed session is a finished card run: its transcript is read-only,
+  // so the composer and every agent control (model / effort / clear /
+  // terminate) give way to a banner.
+  const sealed = !!sessionDetail?.sealed_at
   // Fetch session detail on mount
   useEffect(() => {
     let cancelled = false
@@ -2068,9 +2077,12 @@ export default function ChatView({
       ],
       testId: 'chat-menu-plugin-evals',
     },
-    { divider: true },
+    // The agent-control groups below are hidden on a sealed session; drop
+    // their dividers too so the menu doesn't end in stacked rules.
+    { divider: true, hidden: sealed },
     {
       label: 'Model',
+      hidden: sealed,
       hint: modelDisplayName(sessionDetail?.model),
       // Long catalogue (Cursor alone exposes 100+ models) — filter by
       // display name or id, whose provider:model@account shape lets the
@@ -2094,6 +2106,7 @@ export default function ChatView({
     },
     {
       label: 'System prompt',
+      hidden: sealed,
       hint: sessionDetail?.system_prompt_name || '(none)',
       searchable: true,
       searchPlaceholder: 'Search system prompts…',
@@ -2112,6 +2125,7 @@ export default function ChatView({
     },
     {
       label: 'Effort',
+      hidden: sealed,
       hint: sessionDetail?.effort ?? 'default',
       // A stored effort the current provider doesn't offer (provider
       // switched or removed) shows as an explicit disabled "(unavailable)"
@@ -2126,13 +2140,15 @@ export default function ChatView({
     },
     {
       label: 'Auto-switch model',
+      hidden: sealed,
       hint: autoswitchOn ? 'On' : 'Off',
       onSelect: () => patchSession({ model_autoswitch: !autoswitchOn }),
       testId: 'chat-menu-autoswitch',
     },
-    { divider: true },
+    { divider: true, hidden: sealed && !!sessionDetail?.is_worker && !sessionDetail?.is_temp },
     {
       label: 'Compact context',
+      hidden: sealed,
       onSelect: handleCompact,
       testId: 'chat-menu-compact',
     },
@@ -2144,10 +2160,11 @@ export default function ChatView({
       // sessions are a schedule's run history. Both have their
       // transcript guarded server-side (POST /clear → 409). Hide
       // rather than render an always-erroring control.
-      hidden: !!sessionDetail?.is_worker || !!sessionDetail?.repeating_task_id,
+      hidden: sealed || !!sessionDetail?.is_worker || !!sessionDetail?.repeating_task_id,
     },
     {
       label: 'Terminate agent',
+      hidden: sealed,
       onSelect: handleTerminateAgent,
       testId: 'chat-toolbar-terminate',
     },
@@ -2217,23 +2234,29 @@ export default function ChatView({
         {/* The session name is this view's `h1` — one per view. A compact
             (split) pane shows it in the pane header instead. */}
         {!compact && <h1 className="chat-toolbar-name">{sessionDetail?.name ?? 'Session'}</h1>}
-        <ModelPicker
-          value={sessionDetail?.model ?? ''}
-          onChange={(id) => requestModelChange(id)}
-          models={availableModels}
-          valueLabel={modelDisplayName(sessionDetail?.model)}
-          triggerClassName="chat-toolbar-model"
-          showChevron={false}
-          align="left"
-          ariaLabel="Change model"
-          emptyHint={modelsError ? 'Failed to load models — reopen to retry' : 'Loading models…'}
-          onOpen={() => {
-            // Reopening after a failed fetch clears the error flag, which
-            // re-arms the load effect (it bails while `modelsError` is set).
-            if (modelsError) setModelsError(false)
-          }}
-          testId="chat-toolbar-model"
-        />
+        {sealed ? (
+          <span className="chat-toolbar-model" data-testid="chat-toolbar-model">
+            {modelDisplayName(sessionDetail?.model)}
+          </span>
+        ) : (
+          <ModelPicker
+            value={sessionDetail?.model ?? ''}
+            onChange={(id) => requestModelChange(id)}
+            models={availableModels}
+            valueLabel={modelDisplayName(sessionDetail?.model)}
+            triggerClassName="chat-toolbar-model"
+            showChevron={false}
+            align="left"
+            ariaLabel="Change model"
+            emptyHint={modelsError ? 'Failed to load models — reopen to retry' : 'Loading models…'}
+            onOpen={() => {
+              // Reopening after a failed fetch clears the error flag, which
+              // re-arms the load effect (it bails while `modelsError` is set).
+              if (modelsError) setModelsError(false)
+            }}
+            testId="chat-toolbar-model"
+          />
+        )}
         <span className="chat-toolbar-status" data-testid="chat-toolbar-status">
           <span className={getStatusDotClass(agentStatus)} aria-hidden="true" />
           {getStatusLabel(agentStatus)}
@@ -2682,13 +2705,25 @@ export default function ChatView({
       {/* `key` forces a fresh InputBar per session — drafts and any
           pending attachments belong to the session that started them
           and shouldn't bleed across switches. */}
-      <InputBar
-        key={sessionId}
-        sessionId={sessionId}
-        agentWorking={agentWorking}
-        handoverActive={!!sessionDetail?.handover_to_model}
-        attachDisabledReason={attachDisabledReason}
-      />
+      {sealed ? (
+        <div className="chat-sealed-banner" role="status" data-testid="chat-sealed-banner">
+          <strong>Sealed</strong> — this run is finished. Start a new session to continue.
+          {sessionDetail?.sealed_reason && (
+            <span className="chat-sealed-reason">
+              {SEALED_REASONS[sessionDetail.sealed_reason] ?? sessionDetail.sealed_reason}
+            </span>
+          )}
+        </div>
+      ) : (
+        <InputBar
+          key={sessionId}
+          sessionId={sessionId}
+          agentWorking={agentWorking}
+          handoverActive={!!sessionDetail?.handover_to_model}
+          attachDisabledReason={attachDisabledReason}
+          onSealed={() => setMetaRetryNonce((n) => n + 1)}
+        />
+      )}
       {showQuestionModal && openQuestion && (
         <QuestionModal
           sessionId={sessionId}

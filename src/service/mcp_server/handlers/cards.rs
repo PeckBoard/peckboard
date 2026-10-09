@@ -286,6 +286,15 @@ impl McpToolRegistry {
         let card = updated.ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
         let prev_step = prev_step_cell.lock().unwrap().clone().unwrap_or_default();
 
+        let outcome = if card.step == "done" {
+            "finished"
+        } else {
+            "advanced"
+        };
+        let _ = ctx
+            .db
+            .close_card_run(card_id, &ctx.session_id, outcome, handoff_context.clone())
+            .await;
         append_step_change(ctx, card_id, &prev_step, &card.step).await?;
         crate::plugin::notify::fire_card_step_after(
             &ctx.db,
@@ -346,6 +355,14 @@ impl McpToolRegistry {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // Reviewer's verdict (review step only): `pass` | `changes_requested`.
+        let explicit_verdict = match args.get("verdict").and_then(|v| v.as_str()).map(str::trim) {
+            None | Some("") => None,
+            Some(v @ ("pass" | "changes_requested")) => Some(v.to_string()),
+            Some(other) => anyhow::bail!(
+                "invalid verdict `{other}` — use `pass` or `changes_requested` (or omit it)"
+            ),
+        };
 
         ctx.db
             .append_event(
@@ -357,6 +374,36 @@ impl McpToolRegistry {
                 }),
             )
             .await?;
+
+        // From the review step, record the review apart from the handoff:
+        // the verdict defaults to `pass`, or `changes_requested` when this
+        // review run filed gap cards for the origin card.
+        let pre = ctx.db.get_card(card_id).await?;
+        let verdict = match pre {
+            Some(ref c) if c.step == crate::workflow::REVIEW_STEP => match explicit_verdict {
+                Some(v) => Some(v),
+                None => {
+                    let gaps = match ctx.db.latest_card_run(card_id, &ctx.session_id).await {
+                        Ok(Some(run)) => ctx
+                            .db
+                            .count_gap_cards_since(&c.project_id, card_id, &run.started_at)
+                            .await
+                            .unwrap_or(0),
+                        _ => 0,
+                    };
+                    Some(
+                        if gaps > 0 {
+                            "changes_requested"
+                        } else {
+                            "pass"
+                        }
+                        .to_string(),
+                    )
+                }
+            },
+            _ => None,
+        };
+        let verdict_for_update = verdict.clone();
 
         // `finish_card` from a working step lands on the shared review step
         // (a fresh session verifies the work) unless the project turned
@@ -384,6 +431,12 @@ impl McpToolRegistry {
                     crate::workflow::steps_for_card(&card.workflow, &card.step, review_enabled);
                 let target = crate::workflow::finish_target(&card.step, &steps);
                 *target_writer.lock().unwrap() = target.clone();
+                let review = if card.step == crate::workflow::REVIEW_STEP {
+                    verdict_for_update.clone()
+                } else {
+                    None
+                };
+                let now = chrono::Utc::now().to_rfc3339();
                 Ok(UpdateCard {
                     step: Some(target),
                     handoff_context: Some(if summary_for_update.is_empty() {
@@ -393,7 +446,12 @@ impl McpToolRegistry {
                     }),
                     worker_session_id: Some(None),
                     last_worker_session_id: Some(Some(session_id.clone())),
-                    updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                    updated_at: Some(now.clone()),
+                    review_summary: review.as_ref().map(|_| {
+                        (!summary_for_update.is_empty()).then(|| summary_for_update.clone())
+                    }),
+                    review_verdict: review.clone().map(Some),
+                    reviewed_at: review.as_ref().map(|_| Some(now)),
                     ..Default::default()
                 })
             })
@@ -404,6 +462,32 @@ impl McpToolRegistry {
         let target = target_cell.lock().unwrap().clone();
 
         append_step_change(ctx, card_id, &prev_step, &target).await?;
+        let outcome = match (
+            prev_step == crate::workflow::REVIEW_STEP,
+            verdict.as_deref(),
+        ) {
+            (true, Some("changes_requested")) => "changes_requested",
+            (true, _) => "reviewed",
+            (false, _) => "finished",
+        };
+        let _ = ctx
+            .db
+            .close_card_run(card_id, &ctx.session_id, outcome, Some(summary.clone()))
+            .await;
+        // A finished review is a dead end: seal the reviewer now. Its current
+        // turn still ends normally (only NEW dispatches are refused), and
+        // `shutdown_worker_after_turn` below winds it down.
+        if prev_step == crate::workflow::REVIEW_STEP
+            && let Ok(crate::db::crud::SealOutcome::Sealed { .. }) =
+                ctx.db.seal_session(&ctx.session_id, Some("reviewed")).await
+            && let Ok(Some(s)) = ctx.db.get_session(&ctx.session_id).await
+        {
+            ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "session-updated".into(),
+                session_id: ctx.session_id.clone(),
+                data: serde_json::to_value(&s).unwrap_or(serde_json::Value::Null),
+            });
+        }
         crate::plugin::notify::fire_card_step_after(
             &ctx.db,
             card_id,
@@ -446,6 +530,7 @@ impl McpToolRegistry {
             "message": "Card finished",
             "from": prev_step,
             "to": "done",
+            "verdict": verdict,
         }))
     }
 
@@ -504,6 +589,10 @@ impl McpToolRegistry {
         let prev_step = prev_step_cell.lock().unwrap().clone().unwrap_or_default();
 
         append_step_change(ctx, card_id, &prev_step, "wont_do").await?;
+        let _ = ctx
+            .db
+            .close_card_run(card_id, &ctx.session_id, "wont_do", Some(reason.clone()))
+            .await;
         crate::plugin::notify::fire_card_step_after(
             &ctx.db,
             card_id,
@@ -1081,7 +1170,9 @@ impl McpToolRegistry {
             data: serde_json::json!({ "card": card_value }),
         });
 
-        if let Some(sid) = stale_worker_cell.lock().unwrap().take() {
+        let stale_sid = stale_worker_cell.lock().unwrap().take();
+        if let Some(sid) = stale_sid {
+            let _ = ctx.db.close_card_run(card_id, &sid, "moved", None).await;
             cancel_stale_worker(ctx, &sid);
         }
 
@@ -1247,6 +1338,7 @@ async fn move_card_to_terminal_step(
         }
     }
     if let Some(sid) = stale_sid {
+        let _ = ctx.db.close_card_run(card_id, &sid, "moved", None).await;
         cancel_stale_worker(ctx, &sid);
     }
 

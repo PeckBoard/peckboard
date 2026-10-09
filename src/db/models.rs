@@ -121,6 +121,13 @@ pub struct Session {
     /// parent. `None` while running — such rows count toward the parent's
     /// concurrent-subagent cap. Always `None` for non-subagent sessions.
     pub subagent_completed_at: Option<String>,
+    /// When (RFC3339) this session was sealed: its card moved on, so the
+    /// transcript stays readable but no agent may ever run in it again —
+    /// `SessionManager::send_message_locked` refuses it with
+    /// [`crate::provider::manager::SessionSealed`]. `None` = live.
+    pub sealed_at: Option<String>,
+    /// Why the session was sealed (e.g. `superseded`, `card-moved`).
+    pub sealed_reason: Option<String>,
 }
 
 #[derive(Insertable, Deserialize, Debug, Default)]
@@ -385,6 +392,28 @@ pub struct Card {
     pub worktree_unmerged_reason: Option<String>,
     /// Git stderr / explanation behind `worktree_unmerged_reason`.
     pub worktree_unmerged_detail: Option<String>,
+    /// The reviewer's `finish_card` summary, kept apart from
+    /// `handoff_context` (which later steps overwrite). `None` = not reviewed.
+    pub review_summary: Option<String>,
+    /// `pass` | `changes_requested`.
+    pub review_verdict: Option<String>,
+    /// When (RFC3339) the review finished.
+    pub reviewed_at: Option<String>,
+    /// Model the card's most recent review run used (newest `review` row in
+    /// `card_sessions`). Derived at query time; `None` = never reviewed.
+    #[diesel(select_expression = diesel::dsl::sql::<diesel::sql_types::Nullable<diesel::sql_types::Text>>(
+        "(SELECT model FROM card_sessions WHERE card_sessions.card_id = cards.id \
+          AND card_sessions.role = 'review' ORDER BY card_sessions.started_at DESC LIMIT 1)"
+    ))]
+    #[diesel(select_expression_type = diesel::expression::SqlLiteral<diesel::sql_types::Nullable<diesel::sql_types::Text>>)]
+    pub reviewer_model: Option<String>,
+    /// Number of `card_sessions` rows (worker runs) recorded for this card.
+    /// Derived at query time by a correlated subquery, never stored.
+    #[diesel(select_expression = diesel::dsl::sql::<diesel::sql_types::BigInt>(
+        "(SELECT COUNT(*) FROM card_sessions WHERE card_sessions.card_id = cards.id)"
+    ))]
+    #[diesel(select_expression_type = diesel::expression::SqlLiteral<diesel::sql_types::BigInt>)]
+    pub session_count: i64,
 }
 
 #[derive(Insertable, Deserialize, Debug)]
@@ -427,6 +456,32 @@ pub struct UpdateCard {
     pub worktree_unmerged_reason: Option<Option<String>>,
     pub worktree_unmerged_detail: Option<Option<String>>,
     pub model_autoswitch: Option<Option<bool>>,
+    pub review_summary: Option<Option<String>>,
+    pub review_verdict: Option<Option<String>>,
+    pub reviewed_at: Option<Option<String>>,
+}
+
+// ── Card sessions (run history) ──────────────────────────────────────
+
+/// One worker run on a card: written when a worker session claims the card,
+/// closed with an outcome + summary when the run ends. `session_id` has no
+/// FK — the row outlives a deleted session.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = card_sessions)]
+pub struct CardSession {
+    pub id: String,
+    pub card_id: String,
+    pub session_id: String,
+    pub step: String,
+    /// `work` | `review`.
+    pub role: String,
+    pub model: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    /// advanced | finished | reviewed | changes_requested | stopped | moved |
+    /// wont_do | crashed | superseded. `None` while the run is open.
+    pub outcome: Option<String>,
+    pub summary: Option<String>,
 }
 
 // ── Card dependencies ────────────────────────────────────────────────

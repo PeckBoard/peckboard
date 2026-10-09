@@ -634,6 +634,12 @@ pub async fn run_server(
                                             .db
                                             .clear_card_worker_if_matches(card_id, &sid)
                                             .await;
+                                        // Close the run (no-op when a user
+                                        // stop / move already closed it).
+                                        let _ = orchestrator_state
+                                            .db
+                                            .close_card_run(card_id, &sid, "crashed", None)
+                                            .await;
 
                                         // Crash-loop defense: if this card has
                                         // been crashing in a tight loop (e.g.

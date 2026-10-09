@@ -170,6 +170,9 @@ pub async fn sweep_stale_card_refs(
             match db.clear_card_worker_if_matches(&card.id, session_id).await {
                 Ok(Some(_)) => {
                     cleared += 1;
+                    let _ = db
+                        .close_card_run(&card.id, session_id, "crashed", None)
+                        .await;
                     tracing::warn!(
                         card_id = %card.id,
                         session_id = %session_id,
@@ -197,8 +200,22 @@ pub async fn sweep_stale_card_refs(
     }
 }
 
-/// Scan all worker sessions and remove those whose cards no longer reference
-/// them, gated by two safety checks to avoid racing live handlers:
+/// What the orphan sweep does with a worker session.
+enum OrphanAction {
+    /// The card still names it (current or last worker) — leave it.
+    Keep,
+    /// Its card exists but moved on to another session: seal it, so the
+    /// transcript stays in the card's history but no agent runs in it again.
+    Seal,
+    /// No card (gone, or never had one): delete it outright.
+    Delete,
+}
+
+/// Scan all worker sessions and retire those whose cards no longer reference
+/// them: a session whose card still exists is SEALED (kept for the card's
+/// run history, never runnable again — see `Db::seal_session`); one whose
+/// card is gone, or that never had a card, is deleted. Gated by two safety
+/// checks to avoid racing live handlers:
 ///
 /// 1. **Grace period**: sessions whose `last_activity` is within
 ///    `ORPHAN_GRACE_SECS` are skipped. This covers the window between
@@ -209,7 +226,9 @@ pub async fn sweep_stale_card_refs(
 /// 2. **Per-session lock**: sessions whose `SessionManager` lock cannot
 ///    be acquired right now are skipped — a `send_or_queue` /
 ///    `drain_queued` / orchestrator respawn is mid-flight. Sweeping
-///    while a handler runs would race on the event log.
+///    while a handler runs would race on the event log. Holding the lock
+///    across the seal is also what makes the seal airtight against a
+///    concurrent dispatch (see `SessionSealed`).
 async fn sweep_orphans(db: &Db, session_manager: &SessionManager) {
     let worker_sessions = match db.list_worker_sessions().await {
         Ok(sessions) => sessions,
@@ -224,8 +243,13 @@ async fn sweep_orphans(db: &Db, session_manager: &SessionManager) {
     }
 
     let mut cleaned = 0u32;
+    let mut sealed = 0u32;
 
     for session in &worker_sessions {
+        // Already a dead end; nothing left to do until its card goes.
+        if session.sealed_at.is_some() {
+            continue;
+        }
         // Grace period: skip sessions that were active recently.
         if let Some(secs) = seconds_since(&session.last_activity)
             && secs < ORPHAN_GRACE_SECS
@@ -238,36 +262,35 @@ async fn sweep_orphans(db: &Db, session_manager: &SessionManager) {
             continue;
         }
 
-        let is_orphan = match &session.card_id {
-            Some(card_id) => {
-                match db.get_card(card_id).await {
-                    Ok(Some(card)) => {
-                        // Card exists but doesn't reference this session
-                        // (check both current and last worker session)
-                        card.worker_session_id.as_deref() != Some(&session.id)
-                            && card.last_worker_session_id.as_deref() != Some(&session.id)
-                    }
-                    Ok(None) => {
-                        // Card doesn't exist
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Watchdog: failed to get card {} for session {}: {e}",
-                            card_id,
-                            session.id
-                        );
-                        false // Don't clean up on error
+        let action = match &session.card_id {
+            Some(card_id) => match db.get_card(card_id).await {
+                Ok(Some(card)) => {
+                    // Card exists: it keeps the session it still names
+                    // (current or last worker, i.e. resumable); any other
+                    // is superseded.
+                    if card.worker_session_id.as_deref() == Some(&session.id)
+                        || card.last_worker_session_id.as_deref() == Some(&session.id)
+                    {
+                        OrphanAction::Keep
+                    } else {
+                        OrphanAction::Seal
                     }
                 }
-            }
-            None => {
-                // Worker session with no card_id is orphaned
-                true
-            }
+                Ok(None) => OrphanAction::Delete,
+                Err(e) => {
+                    tracing::warn!(
+                        "Watchdog: failed to get card {} for session {}: {e}",
+                        card_id,
+                        session.id
+                    );
+                    OrphanAction::Keep // Don't clean up on error
+                }
+            },
+            // Worker session with no card_id is orphaned
+            None => OrphanAction::Delete,
         };
 
-        if !is_orphan {
+        if matches!(action, OrphanAction::Keep) {
             continue;
         }
 
@@ -285,6 +308,25 @@ async fn sweep_orphans(db: &Db, session_manager: &SessionManager) {
 
         // Cancel any running process for this session
         session_manager.cancel(&session.id).await;
+
+        if matches!(action, OrphanAction::Seal) {
+            match db.seal_session(&session.id, None).await {
+                Ok(crate::db::crud::SealOutcome::Sealed { dropped_queued }) => {
+                    sealed += 1;
+                    tracing::info!(
+                        session_id = %session.id,
+                        card_id = ?session.card_id,
+                        dropped_queued,
+                        "Watchdog: sealed superseded worker session"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Watchdog: failed to seal session {}: {e}", session.id);
+                }
+            }
+            continue;
+        }
 
         // Delete events for this session
         match db.delete_events_by_session(&session.id).await {
@@ -323,8 +365,10 @@ async fn sweep_orphans(db: &Db, session_manager: &SessionManager) {
         }
     }
 
-    if cleaned > 0 {
-        tracing::info!("Watchdog: cleaned up {cleaned} orphaned worker session(s)");
+    if cleaned > 0 || sealed > 0 {
+        tracing::info!(
+            "Watchdog: cleaned up {cleaned} orphaned and sealed {sealed} superseded worker session(s)"
+        );
     }
 }
 
@@ -549,7 +593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sweep_orphans_cleans_mismatched_session() {
+    async fn test_sweep_orphans_seals_superseded_session() {
         let db = setup().await;
         let sm = SessionManager::new(std::sync::Arc::new(
             crate::provider::registry::ProviderRegistry::new(),
@@ -644,12 +688,55 @@ mod tests {
         .await
         .unwrap();
 
+        // ws1 has a transcript, a queued message and an open run.
+        db.append_event("ws1", "user", serde_json::json!({ "text": "hi" }))
+            .await
+            .unwrap();
+        db.enqueue_message(crate::db::models::NewQueuedMessage {
+            session_id: "ws1".into(),
+            text: "later".into(),
+            queued_at: ts.clone(),
+            model: None,
+            effort: None,
+            attachment_ids: None,
+            user_event_appended: false,
+        })
+        .await
+        .unwrap();
+        db.open_card_run(
+            "c1",
+            "ws1",
+            crate::db::crud::CardRunStart {
+                step: "in_progress".into(),
+                role: "work".into(),
+                model: None,
+            },
+            &ts,
+        )
+        .await
+        .unwrap();
+
+        sweep_orphans(&db, &sm).await;
+        // Idempotent: a second pass leaves the sealed session alone.
         sweep_orphans(&db, &sm).await;
 
-        // ws1 should be cleaned up (card references ws2, not ws1)
-        assert!(db.get_session("ws1").await.unwrap().is_none());
-        // ws2 should still exist (card references it)
-        assert!(db.get_session("ws2").await.unwrap().is_some());
+        // ws1 is sealed, not deleted (card references ws2, not ws1): its
+        // transcript stays readable, its queue is dropped, its run closed.
+        let ws1 = db.get_session("ws1").await.unwrap().expect("ws1 kept");
+        assert!(ws1.sealed_at.is_some());
+        assert_eq!(ws1.sealed_reason.as_deref(), Some("superseded"));
+        assert_eq!(
+            db.list_events_by_session("ws1", None).await.unwrap().len(),
+            1
+        );
+        assert!(db.list_queued_messages("ws1").await.unwrap().is_empty());
+        let runs = db.list_card_sessions("c1").await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].outcome.as_deref(), Some("superseded"));
+        assert!(runs[0].sealed);
+        // ws2 should still exist, unsealed (card references it)
+        let ws2 = db.get_session("ws2").await.unwrap().unwrap();
+        assert!(ws2.sealed_at.is_none());
     }
 
     /// Make a card whose `worker_session_id` points at the given session.

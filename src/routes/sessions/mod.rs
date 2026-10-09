@@ -386,6 +386,13 @@ async fn update_session(
     let requested_model = body.model.clone().flatten();
     let requested_effort = body.effort.clone();
     let prior = state.db.get_session(&id).await.ok().flatten();
+    // A sealed session runs no agent again, so there is nothing to switch
+    // or hand over; renaming it is still fine.
+    if prior.as_ref().is_some_and(|s| s.sealed_at.is_some())
+        && (body.model.is_some() || body.effort.is_some())
+    {
+        return Err(dispatch::sealed_conflict());
+    }
 
     let app_default = crate::routes::settings::default_model_setting(&state).await;
     let current = effective_model(
@@ -1162,6 +1169,9 @@ async fn delete_memory(
 /// todos, drops the attachments dir, resets `conversation_id`, and stamps
 /// `context_reset_ts` so the reported occupancy drops to 0.
 pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Result<()> {
+    // A sealed session is kept for its card's history and never reused:
+    // clearing it would both wipe that record and make it look runnable.
+    crate::provider::manager::ensure_not_sealed(&state.db, id).await?;
     if state.session_manager.is_running(id).await {
         if let Ok(event) = state
             .db

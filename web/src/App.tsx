@@ -1275,7 +1275,12 @@ function App() {
   // tab when there is one (worker sessions aren't in the sessions list).
   const sessionMenuItemsFor = (
     id: string,
-    flags?: { isTemp: boolean; isWorker: boolean; isRepeatingTaskSession: boolean },
+    flags?: {
+      isTemp: boolean
+      isWorker: boolean
+      isRepeatingTaskSession: boolean
+      sealedAt: string | null
+    },
   ): MenuItem[] => {
     const s = sessionMap.get(id)
     const tab = flags
@@ -1285,6 +1290,9 @@ function App() {
     const isWorker = flags?.isWorker ?? tab?.isWorker ?? s?.is_worker ?? false
     const isRepeating =
       flags?.isRepeatingTaskSession ?? tab?.isRepeatingTaskSession ?? !!s?.repeating_task_id
+    // A sealed session is a finished card run: no agent controls. Worker
+    // sessions aren't in the sessions list, so the tab's copy is the source.
+    const isSealed = !!(flags?.sealedAt ?? tab?.sealedAt ?? s?.sealed_at)
     return [
       { label: 'Rename', onSelect: () => handleRenameItem('session', id) },
       {
@@ -1297,6 +1305,7 @@ function App() {
         hint: sessionAutoswitchOn(id) ? 'On' : 'Off',
         active: sessionAutoswitchOn(id),
         onSelect: () => void setSessionAutoswitch(id, !sessionAutoswitchOn(id)),
+        hidden: isSealed,
         testId: 'session-menu-autoswitch',
       },
       // Temp sessions delete themselves when their last tab closes;
@@ -1314,9 +1323,13 @@ function App() {
       {
         label: 'Clear session',
         onSelect: () => setConfirmClearSessionId(id),
-        hidden: isWorker || isRepeating,
+        hidden: isSealed || isWorker || isRepeating,
       },
-      { label: 'Terminate agent', onSelect: () => setConfirmTerminateSessionId(id) },
+      {
+        label: 'Terminate agent',
+        onSelect: () => setConfirmTerminateSessionId(id),
+        hidden: isSealed,
+      },
       // Same reasoning for delete on worker sessions: backend refuses
       // DELETE /api/sessions/:id with 409. Repeating-task sessions
       // delete fine (just removes the run from the task's history),
@@ -1341,7 +1354,12 @@ function App() {
       running: processing.has(tab.itemId),
       unread: !active && unreadSessions.has(tab.itemId),
     }),
-    getIcon: (tab) => (tab.isTemp ? tabIcons.tempSession : null),
+    getIcon: (tab) =>
+      tab.isTemp
+        ? tabIcons.tempSession
+        : (tab.sealedAt ?? sessionMap.get(tab.itemId)?.sealed_at)
+          ? tabIcons.sealedSession
+          : null,
     // Signpost the destructive close: for temp sessions the × deletes
     // the session, not just the chip.
     getCloseTitle: (tab) => (tab.isTemp ? 'Close tab & delete session' : null),
@@ -1986,6 +2004,14 @@ function App() {
                         <span className="list-view-name">{s.name}</span>
                         <span className="list-view-meta">
                           {s.is_temp && <span className="list-view-tag">temp</span>}
+                          {s.sealed_at && (
+                            <span
+                              className="list-view-tag"
+                              title={s.sealed_reason ?? 'Finished run — read-only'}
+                            >
+                              Sealed
+                            </span>
+                          )}
                           {folderMap.get(s.folder_id) && (
                             <span className="list-view-tag">{folderMap.get(s.folder_id)}</span>
                           )}

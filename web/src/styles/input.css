@@ -109,6 +109,22 @@
   background: var(--surface);
   position: relative;
 }
+/* Replaces the composer on a sealed (finished) card run: the transcript
+   stays readable, nothing can be sent. Sits where `.input-bar` would. */
+.chat-sealed-banner {
+  border-top: 1px solid var(--border);
+  padding: 12px 24px;
+  padding-bottom: calc(12px + var(--safe-bottom));
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: var(--text-sm);
+  .chat-sealed-reason {
+    display: block;
+    margin-top: 2px;
+    color: var(--text3);
+    font-size: var(--text-xs);
+  }
+}
 
 /* Drop-to-attach cue while files are dragged over the window. Covers the
    composer (`.input-bar` is the positioning context) with a dashed accent

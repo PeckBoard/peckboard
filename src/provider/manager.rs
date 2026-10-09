@@ -18,6 +18,58 @@ use crate::ws::broadcaster::{Broadcaster, WsEvent};
 
 /// Default provider id used when a model string has no `provider:` prefix.
 pub const DEFAULT_PROVIDER: &str = "claude";
+/// User-facing explanation for a refused dispatch into a sealed session.
+pub const SESSION_SEALED_MESSAGE: &str =
+    "This session is sealed (its card moved on). Start a new session.";
+
+/// Dispatch refused: the session is sealed (`sessions.sealed_at` is set).
+///
+/// INVARIANT: no agent ever runs in a sealed session. A sealed session is a
+/// dead end — its transcript stays readable, but every agent call (HTTP
+/// send, MCP `send_message`, the queue drain, worker dispatch, boot resume,
+/// background-task wakes, keepalive, handover) is refused. Enforced at the
+/// single dispatch chokepoint, [`SessionManager::send_message_locked`] — the
+/// only place a `SendMessageContext` is built and `AgentProvider::
+/// send_message` called — by re-reading the row under the per-session
+/// [`SessionLock`]. Sealing (`Db::seal_session`) writes under that same
+/// lock, so a dispatcher either sees the seal or finished spawning before it
+/// (and the sealer terminates that run). `send_or_queue` also refuses before
+/// it can park a message in the queue. Callers downcast to this type to map
+/// it (HTTP returns 409 `session_sealed`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSealed {
+    pub session_id: String,
+}
+
+impl std::fmt::Display for SessionSealed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session {} is sealed: {SESSION_SEALED_MESSAGE}",
+            self.session_id
+        )
+    }
+}
+
+impl std::error::Error for SessionSealed {}
+
+/// `Err(SessionSealed)` when `session_id` is sealed. Lets callers that do
+/// work before dispatching (clear, model switch, appending the user event)
+/// refuse up front; the authoritative check is in `send_message_locked`.
+pub async fn ensure_not_sealed(db: &Db, session_id: &str) -> anyhow::Result<()> {
+    match db.get_session(session_id).await? {
+        Some(s) if s.sealed_at.is_some() => Err(SessionSealed {
+            session_id: session_id.to_string(),
+        }
+        .into()),
+        _ => Ok(()),
+    }
+}
+
+/// True when `err` is (or wraps) a [`SessionSealed`] refusal.
+pub fn is_session_sealed(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<SessionSealed>().is_some()
+}
 
 /// Outcome of `SessionManager::send_or_queue`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +404,9 @@ impl SessionManager {
     /// reach for this directly only when you've already locked because
     /// you needed a custom check (e.g. the route handler that appends a
     /// user event before dispatching).
+    ///
+    /// Refuses with [`SessionSealed`] when the session is sealed — the
+    /// enforcement point of the sealed-session invariant (see there).
     pub async fn send_message_locked(
         &self,
         lock: &SessionLock,
@@ -365,6 +420,13 @@ impl SessionManager {
             .get_session(session_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
+        if session.sealed_at.is_some() {
+            tracing::warn!(session_id = %session_id, "Refusing dispatch into a sealed session");
+            return Err(SessionSealed {
+                session_id: session_id.to_string(),
+            }
+            .into());
+        }
 
         // If a finalized handover/compaction left a doc waiting, prepend it
         // If a finalized handover/compaction left a doc waiting, or a review
@@ -868,6 +930,9 @@ impl SessionManager {
         user_event_appended: bool,
     ) -> anyhow::Result<SendOutcome> {
         let lock = self.lock_session(session_id).await;
+        // A sealed session takes no new turn — not even into the queue,
+        // where the message would only sit until it was dropped.
+        ensure_not_sealed(db, session_id).await?;
         let was_running = self.is_running(session_id).await;
         let supports_mid_stream = was_running
             && self
@@ -1034,6 +1099,19 @@ impl SessionManager {
         data_dir: &std::path::Path,
     ) -> anyhow::Result<bool> {
         let lock = self.lock_session(session_id).await;
+        if let Ok(Some(s)) = db.get_session(session_id).await
+            && s.sealed_at.is_some()
+        {
+            let dropped = db.clear_queued_messages(session_id).await.unwrap_or(0);
+            if dropped > 0 {
+                tracing::info!(
+                    session_id = %session_id,
+                    dropped,
+                    "Dropped queued messages for a sealed session"
+                );
+            }
+            return Ok(false);
+        }
 
         // A lingering run (settled turn, child kept alive for background
         // work) takes the message as its next turn via injection.
@@ -2142,6 +2220,103 @@ mod tests {
             .filter(|e| e.kind == "user")
             .collect();
         assert_eq!(user_events.len(), 1, "only the unrecorded row appends");
+    }
+
+    /// A sealed session is a dead end: direct dispatch, send-or-queue and
+    /// the queue drain all refuse it, and nothing is left parked in the queue.
+    #[tokio::test]
+    async fn sealed_session_refuses_every_dispatch_path() {
+        let m = manager_with(vec![claude_stub(false), mock_stub(false)]).await;
+        let db = crate::db::Db::in_memory().unwrap();
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "s1".into(),
+            name: "s1".into(),
+            folder_id: "f1".into(),
+            is_worker: true,
+            created_at: now.clone(),
+            last_activity: now.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        db.enqueue_message(crate::db::models::NewQueuedMessage {
+            session_id: "s1".into(),
+            text: "parked".into(),
+            queued_at: now.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let sealed = db.seal_session("s1", Some("superseded")).await.unwrap();
+        assert_eq!(
+            sealed,
+            crate::db::crud::SealOutcome::Sealed { dropped_queued: 1 }
+        );
+        let config = || SpawnConfig {
+            model: "mock:echo".into(),
+            ..Default::default()
+        };
+
+        let lock = m.lock_session("s1").await;
+        let err = m
+            .send_message_locked(
+                &lock,
+                UserMessage::from_text("hi"),
+                &db,
+                &broadcaster,
+                config(),
+            )
+            .await
+            .unwrap_err();
+        assert!(is_session_sealed(&err), "{err}");
+        drop(lock);
+
+        let err = m
+            .send_or_queue(
+                "s1",
+                UserMessage::from_text("hi"),
+                &db,
+                &broadcaster,
+                config(),
+                MidTurnPolicy::Queue,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(is_session_sealed(&err), "{err}");
+
+        // A row that slipped into the queue anyway is dropped, not delivered.
+        db.enqueue_message(crate::db::models::NewQueuedMessage {
+            session_id: "s1".into(),
+            text: "late".into(),
+            queued_at: now.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let drained = m
+            .drain_queued(
+                "s1",
+                &db,
+                &broadcaster,
+                config(),
+                std::path::Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+        assert!(!drained);
+        assert!(db.list_queued_messages("s1").await.unwrap().is_empty());
+        assert!(m.last_dispatched_turn("s1").await.is_none());
     }
 
     /// The incident this guard exists for: a handover from Claude to Codex

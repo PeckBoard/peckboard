@@ -162,6 +162,11 @@ pub(super) async fn send_message(
             ));
         }
     };
+    // Sealed: the card this worker served moved on, so the session is a
+    // dead end — refuse before recording a user turn that can never run.
+    if session.sealed_at.is_some() {
+        return Err(sealed_conflict());
+    }
 
     // A model-switch handover or context compaction is mid-flight: the
     // outgoing model is still writing its doc. Refuse new user turns until
@@ -520,6 +525,9 @@ pub(super) async fn send_message(
 
     let outcome = match outcome {
         Ok(o) => o,
+        Err(e) if crate::provider::manager::is_session_sealed(&e) => {
+            return Err(sealed_conflict());
+        }
         Err(e) => {
             tracing::error!(session_id = %id, "Failed to dispatch message: {}", e);
             let crash_event = state
@@ -564,6 +572,17 @@ pub(super) async fn send_message(
         "status": status_str,
         "session_id": id,
     })))
+}
+
+/// 409 body for a send into a sealed session.
+pub(crate) fn sealed_conflict() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "session_sealed",
+            "message": crate::provider::manager::SESSION_SEALED_MESSAGE,
+        })),
+    )
 }
 
 /// POST /api/sessions/:id/cancel -- kill the running process, append agent-end

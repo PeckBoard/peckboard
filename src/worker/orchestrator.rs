@@ -715,6 +715,8 @@ async fn spawn_worker_for_card(
                 prev.is_worker
                     && prev.card_id.as_deref() == Some(card.id.as_str())
                     && prev.worker_step.as_deref() == Some(effective_step.as_str())
+                    // A sealed session is a dead end: never resumed.
+                    && prev.sealed_at.is_none()
                     // A live conversation resumes via the provider; after an
                     // auto-compaction the conversation_id is cleared but the
                     // continuation doc is parked in pending_handover_doc —
@@ -745,6 +747,7 @@ async fn spawn_worker_for_card(
                     prev.is_worker
                         && prev.card_id.as_deref() == Some(card.id.as_str())
                         && prev.worker_step.as_deref() == Some(effective_step.as_str())
+                        && prev.sealed_at.is_none()
                         && prev.conversation_id.is_none()
                         && prev.pending_handover_doc.is_none()
                 }),
@@ -1152,6 +1155,32 @@ async fn spawn_worker_for_card(
         release_claim("resume target has a running background task").await;
         return Ok(());
     }
+    // Record this run in the card's history. Opened only now — every
+    // early return above released the claim without running anything —
+    // and closed by whatever ends the run (terminal MCP tool, completion
+    // listener, user stop/move). Opening also closes any run on the card
+    // whose end was never observed, as `superseded`.
+    let role = if effective_step == crate::workflow::REVIEW_STEP {
+        "review"
+    } else {
+        "work"
+    };
+    if let Err(e) = state
+        .db
+        .open_card_run(
+            &card.id,
+            &session_id,
+            crate::db::crud::CardRunStart {
+                step: effective_step.clone(),
+                role: role.to_string(),
+                model: session.model.clone(),
+            },
+            &now,
+        )
+        .await
+    {
+        tracing::warn!(card_id = %card.id, session_id = %session_id, "Failed to record card run: {e}");
+    }
     let dispatched = state
         .session_manager
         .send_message_locked(
@@ -1194,6 +1223,10 @@ async fn spawn_worker_for_card(
                 }),
             });
         }
+        let _ = state
+            .db
+            .close_card_run(&card.id, &session_id, "crashed", Some(e.to_string()))
+            .await;
         release_claim("dispatch failure").await;
         maybe_block_card_after_crash(state, &card.id, Some(&e.to_string())).await;
         broadcast_card_update(state, &card.id, &project.id);
@@ -1205,6 +1238,31 @@ async fn spawn_worker_for_card(
         card_id = %card.id,
         "Worker spawned and card assigned"
     );
+
+    // The card's previous worker session worked a different step (or was
+    // otherwise not resumable — a resumable one would BE this session), so
+    // nothing can ever run in it for this card again: seal it. Background
+    // task: sealing waits for that session's lock, which its completion
+    // handler may still hold.
+    if let Some(prev) = card.last_worker_session_id.clone()
+        && prev != session_id
+    {
+        let state = state.clone();
+        let card_id = card.id.clone();
+        let step = effective_step.clone();
+        tokio::spawn(async move {
+            let Ok(Some(prev_session)) = state.db.get_session(&prev).await else {
+                return;
+            };
+            if prev_session.is_worker
+                && prev_session.sealed_at.is_none()
+                && prev_session.card_id.as_deref() == Some(card_id.as_str())
+                && prev_session.worker_step.as_deref() != Some(step.as_str())
+            {
+                seal_worker_session(&state, &prev, None).await;
+            }
+        });
+    }
 
     // Broadcast card update to project page
     broadcast_card_update(state, &card.id, &project.id);
@@ -1238,6 +1296,44 @@ pub async fn cancel_worker_for_card_move(state: &Arc<AppState>, session_id: &str
     // because the card moved, not because the user wants their last input
     // delivered to a fresh run.
     let _ = state.db.clear_queued_messages(session_id).await;
+}
+
+/// Seal a worker session whose card has moved on: terminate its agent, then
+/// — under its per-session lock, so no dispatcher can be mid-decision —
+/// stamp `sealed_at`, drop its queued messages and close its open run (see
+/// `Db::seal_session`). From then on `send_message_locked` refuses every
+/// dispatch into it. Broadcasts `session-updated` so open tabs show it.
+/// `reason = None` derives it from the session's last run (see
+/// `Db::seal_session`).
+pub async fn seal_worker_session(state: &Arc<AppState>, session_id: &str, reason: Option<&str>) {
+    state.session_manager.cancel_and_wait(session_id).await;
+    let lock = state.session_manager.lock_session(session_id).await;
+    let outcome = state.db.seal_session(session_id, reason).await;
+    drop(lock);
+    // A run that slipped in between the cancel and the seal is the last
+    // one this session will ever have; end it too.
+    if state.session_manager.is_running(session_id).await {
+        state.session_manager.cancel_and_wait(session_id).await;
+    }
+    match outcome {
+        Ok(crate::db::crud::SealOutcome::Sealed { dropped_queued }) => {
+            tracing::info!(
+                session_id = %session_id,
+                reason = ?reason,
+                dropped_queued,
+                "Sealed worker session (its card moved on)"
+            );
+            if let Ok(Some(s)) = state.db.get_session(session_id).await {
+                state.broadcaster.broadcast(WsEvent {
+                    event_type: "session-updated".into(),
+                    session_id: session_id.to_string(),
+                    data: serde_json::to_value(&s).unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!(session_id = %session_id, "Failed to seal session: {e}"),
+    }
 }
 
 /// Handle a worker session completing (called after `stream_events` finishes
@@ -1415,6 +1511,10 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                     to = %next_step,
                     "Worker completed step, advancing"
                 );
+                let _ = state
+                    .db
+                    .close_card_run(&card_id, session_id, "advanced", handoff_context.clone())
+                    .await;
             } else if !workflow_steps.iter().any(|s| s == &card.step) {
                 // The card's step isn't in its workflow at all — the
                 // workflow was edited underneath it (see the guard in
@@ -1437,7 +1537,7 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                         &card_id,
                         UpdateCard {
                             step: Some("done".into()),
-                            handoff_context: Some(handoff_context),
+                            handoff_context: Some(handoff_context.clone()),
                             worker_session_id: Some(None),
                             updated_at: Some(now),
                             ..Default::default()
@@ -1445,6 +1545,10 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                     )
                     .await;
                 clear_session_todos(&state.db, &state.broadcaster, session_id).await;
+                let _ = state
+                    .db
+                    .close_card_run(&card_id, session_id, "finished", handoff_context)
+                    .await;
 
                 tracing::info!(card_id = %card_id, "Worker completed final step, card done");
             }
@@ -1458,6 +1562,20 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                 &card.step,
                 &crate::workflow::steps_for_card(&card.workflow, &card.step, review_enabled),
             );
+            let outcome = if card.step == crate::workflow::REVIEW_STEP {
+                "reviewed"
+            } else {
+                "finished"
+            };
+            let _ = state
+                .db
+                .close_card_run(&card_id, session_id, outcome, summary.clone())
+                .await;
+            // A finished review is a dead end. The completion listener holds
+            // this session's lock around us, so seal directly.
+            if card.step == crate::workflow::REVIEW_STEP {
+                let _ = state.db.seal_session(session_id, Some("reviewed")).await;
+            }
             let _ = state
                 .db
                 .update_card(
@@ -1490,6 +1608,10 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                         ..Default::default()
                     },
                 )
+                .await;
+            let _ = state
+                .db
+                .close_card_run(&card_id, session_id, "wont_do", Some(reason.clone()))
                 .await;
             clear_session_todos(&state.db, &state.broadcaster, session_id).await;
 
@@ -1546,6 +1668,11 @@ pub async fn handle_worker_done(state: &Arc<AppState>, session_id: &str) {
                         ..Default::default()
                     },
                 )
+                .await;
+            // This run is over; a re-spawn resumes the session as a new run.
+            let _ = state
+                .db
+                .close_card_run(&card_id, session_id, "stopped", None)
                 .await;
 
             tracing::debug!(
