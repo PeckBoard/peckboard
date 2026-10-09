@@ -55,6 +55,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_system_prompt_name_columns(conn)?;
     ensure_system_prompts_table(conn)?;
     ensure_plans_tables(conn)?;
+    ensure_terminals_table(conn)?;
     ensure_session_memories_table(conn)?;
     ensure_projects_review_columns(conn)?;
     ensure_projects_worktree_isolation_column(conn)?;
@@ -1697,15 +1698,15 @@ fn log_if_healing_table(conn: &mut SqliteConnection, table: &str) -> anyhow::Res
     Ok(())
 }
 
-/// Heal DBs that predate `1781202566_user_tabs_more_kinds` or
-/// `1785100001_user_tabs_doc_review`. Those migrations widen the
-/// `user_tabs.item_type` CHECK constraint to allow `'report'`,
-/// `'repeating_task'` and `'doc_review'` in addition to `'session'`
-/// and `'project'`. CHECK constraints can only be changed by recreating
-/// the table, and SQLite has no IF-CHECK-IS-RELAXED guard, so this
-/// detect-then-recreate path heals data dirs that somehow skipped a
-/// migration — or where the table-recreate half failed midway and left
-/// an older CHECK in place.
+/// Heal DBs that predate `1781202566_user_tabs_more_kinds`,
+/// `1785100001_user_tabs_doc_review` or `1791568456_terminals`. Those
+/// migrations widen the `user_tabs.item_type` CHECK constraint to allow
+/// `'report'`, `'repeating_task'`, `'doc_review'` and `'terminal'` in
+/// addition to `'session'` and `'project'`. CHECK constraints can only be
+/// changed by recreating the table, and SQLite has no IF-CHECK-IS-RELAXED
+/// guard, so this detect-then-recreate path heals data dirs that somehow
+/// skipped a migration — or where the table-recreate half failed midway and
+/// left an older CHECK in place.
 fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     #[derive(QueryableByName)]
     struct MasterRow {
@@ -1723,7 +1724,7 @@ fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Res
         None => return Ok(()),
     };
     // Already at the widest CHECK (or never had one) — nothing to do.
-    if sql.contains("'doc_review'") || !sql.contains("CHECK") {
+    if sql.contains("'terminal'") || !sql.contains("CHECK") {
         return Ok(());
     }
     // CHECK predates one of the widening migrations. Recreate the table
@@ -1732,7 +1733,7 @@ fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Res
     sql_query(
         "CREATE TABLE IF NOT EXISTS user_tabs_new (
             user_id     TEXT    NOT NULL REFERENCES users(id),
-            item_type   TEXT    NOT NULL CHECK (item_type IN ('session', 'project', 'report', 'repeating_task', 'doc_review')),
+            item_type   TEXT    NOT NULL CHECK (item_type IN ('session', 'project', 'report', 'repeating_task', 'doc_review', 'terminal')),
             item_id     TEXT    NOT NULL,
             last_active TEXT    NOT NULL,
             PRIMARY KEY (user_id, item_type, item_id)
@@ -1748,6 +1749,34 @@ fn ensure_user_tabs_check_constraint(conn: &mut SqliteConnection) -> anyhow::Res
     sql_query("ALTER TABLE user_tabs_new RENAME TO user_tabs").execute(conn)?;
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_user_tabs_user_active ON user_tabs (user_id, last_active DESC)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1791568456_terminals`. Idempotent CREATE TABLE IF
+/// NOT EXISTS + index; DDL mirrors the migration.
+fn ensure_terminals_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "terminals")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS terminals (
+            id             TEXT    PRIMARY KEY NOT NULL,
+            user_id        TEXT    NOT NULL REFERENCES users(id),
+            plugin_id      TEXT    NOT NULL,
+            host_id        TEXT    NOT NULL,
+            name           TEXT    NOT NULL,
+            host_label     TEXT    NOT NULL,
+            tmux_session   TEXT    NOT NULL,
+            persistent     BOOLEAN NOT NULL DEFAULT 0,
+            created_at     TEXT    NOT NULL,
+            last_active_at TEXT    NOT NULL,
+            closed_at      TEXT
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_terminals_user_open \
+         ON terminals (user_id, closed_at, last_active_at DESC)",
     )
     .execute(conn)?;
     Ok(())
@@ -2287,13 +2316,19 @@ mod tests {
         )
         .execute(&mut conn)
         .expect("repeating_task-kind insert should succeed after heal");
+        sql_query(
+            "INSERT INTO user_tabs (user_id, item_type, item_id, last_active) \
+             VALUES ('u1', 'terminal', 't1', '2026-06-11T00:00:00Z')",
+        )
+        .execute(&mut conn)
+        .expect("terminal-kind insert should succeed after heal");
 
         // Idempotent: second run is a no-op on the relaxed schema.
         ensure_schema(&mut conn).unwrap();
         let count2: CountRow = sql_query("SELECT count(*) AS n FROM user_tabs")
             .get_result(&mut conn)
             .unwrap();
-        assert_eq!(count2.n, 3);
+        assert_eq!(count2.n, 4);
     }
 
     /// A DB created before `1786400000_repeating_task_run_status_widen`

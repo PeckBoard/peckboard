@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
+import { lazy, Suspense, useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useAuthStore, authedFetch } from './store/auth'
 import type { Announcement } from './types/api'
@@ -35,6 +35,11 @@ import ReportView from './components/ReportView'
 import PlanView from './components/PlanView'
 import ReviewListView from './components/review/ReviewListView'
 import ReviewView from './components/review/ReviewView'
+import { popOutTerminal, useTerminalsStore } from './store/terminals'
+// Terminals pull in xterm.js; load them on first use, not with the app.
+const TerminalsPage = lazy(() => import('./components/terminal/TerminalsPage'))
+const TerminalView = lazy(() => import('./components/terminal/TerminalView'))
+const NewTerminalModal = lazy(() => import('./components/terminal/NewTerminalModal'))
 import RepeatingTasksView from './components/RepeatingTasksView'
 import AgentsView from './components/AgentsView'
 import UsageDashboard from './components/UsageDashboard'
@@ -74,6 +79,7 @@ type View =
   | 'docReview'
   | 'agents'
   | 'views'
+  | 'terminals'
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -201,6 +207,9 @@ function parseRoute(): {
     case 'review':
       // `/review` — the index; `/review/<id>` — one document review.
       return { view: 'docReview', activeId: id, sub: 'chat' }
+    case 'terminals':
+      // `/terminals` — the list; `/terminals/<id>` — one terminal's tab.
+      return { view: 'terminals', activeId: id, sub: 'chat' }
     case 'users':
       // User management moved into Settings; the old URL keeps working.
       return { view: 'settings', activeId: null, sub: 'chat', settingsSub: 'users' }
@@ -439,6 +448,15 @@ function App() {
   const [activeReviewId, setActiveReviewId] = useState<string | null>(
     initialRoute.view === 'docReview' ? initialRoute.activeId : null,
   )
+  // Terminal shown at `/terminals/<id>`; null on the Terminals list.
+  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(
+    initialRoute.view === 'terminals' ? initialRoute.activeId : null,
+  )
+  const [showNewTerminal, setShowNewTerminal] = useState(false)
+  const [renameTerminalId, setRenameTerminalId] = useState<string | null>(null)
+  const [confirmCloseTerminalId, setConfirmCloseTerminalId] = useState<string | null>(null)
+  const terminals = useTerminalsStore((s) => s.terminals)
+  const openTabs = useTabsStore((s) => s.tabs)
   // Saved multi-session view open at `/views/<id>`; null on the list.
   const [activeViewId, setActiveViewId] = useState<string | null>(
     initialRoute.view === 'views' ? initialRoute.activeId : null,
@@ -543,6 +561,28 @@ function App() {
     [],
   )
 
+  // Terminals: load the list once signed in, and let a plugin page (SSH
+  // Fleet's per-host "Terminal" button) open a shell on one of its hosts —
+  // created here, shown as a tab straight away.
+  useEffect(() => {
+    if (!authenticated) return
+    void useTerminalsStore.getState().fetchTerminals()
+    const onOpenTerminal = (e: Event) => {
+      const detail = (e as CustomEvent<{ plugin_id: string; host_id: string }>).detail
+      if (!detail) return
+      useTerminalsStore
+        .getState()
+        .create(detail.plugin_id, detail.host_id)
+        .then((t) => {
+          setActiveTerminalId(t.id)
+          navigate('terminals', t.id)
+          void useTabsStore.getState().openTab('terminal', t.id)
+        })
+        .catch(() => {})
+    }
+    window.addEventListener('peckboard:open-terminal', onOpenTerminal)
+    return () => window.removeEventListener('peckboard:open-terminal', onOpenTerminal)
+  }, [authenticated, navigate])
   // Sync active IDs from initial URL once authenticated
   useEffect(() => {
     if (authenticated && initialRoute.activeId) {
@@ -579,6 +619,8 @@ function App() {
         setActivePlanId(route.activeId)
       } else if (route.view === 'docReview') {
         setActiveReviewId(route.activeId)
+      } else if (route.view === 'terminals') {
+        setActiveTerminalId(route.activeId)
       } else if (route.view === 'views') {
         setActiveViewId(route.activeId)
       }
@@ -598,6 +640,9 @@ function App() {
   // open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Keys typed into a terminal belong to the remote shell (Ctrl+K is
+      // readline kill-line there), never to app shortcuts.
+      if ((e.target as HTMLElement | null)?.closest?.('.terminal-pane')) return
       const mod = e.metaKey || e.ctrlKey
       if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
         e.preventDefault()
@@ -631,6 +676,11 @@ function App() {
       if (e.key === 'n') {
         e.preventDefault()
         setShowNewSession(true)
+        return
+      }
+      if (e.key === 't') {
+        e.preventDefault()
+        setShowNewTerminal(true)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -695,6 +745,22 @@ function App() {
       }
     }
   }, [view, activeReviewId])
+  // When the active terminal changes, update URL.
+  useEffect(() => {
+    if (view === 'terminals') {
+      const path = buildPath('terminals', activeTerminalId)
+      if (window.location.pathname !== path) {
+        history.pushState(null, '', path)
+      }
+    }
+  }, [view, activeTerminalId])
+  // A terminal shown by URL (reload, bookmark, link) gets its tab, like a
+  // session does. Idempotent for one that already has one.
+  useEffect(() => {
+    if (authenticated && view === 'terminals' && activeTerminalId) {
+      void useTabsStore.getState().openTab('terminal', activeTerminalId)
+    }
+  }, [authenticated, view, activeTerminalId])
 
   // Track the on-screen keyboard via `visualViewport` and shrink the app
   // to the visible region so the top of the UI doesn't scroll off when
@@ -1375,13 +1441,62 @@ function App() {
     // version and annotation), so the strip menu stays at "Close tab".
     getMenuItems: () => [],
   }
+  const openTerminal = (id: string) => {
+    setActiveTerminalId(id)
+    navigate('terminals', id)
+    void useTabsStore.getState().openTab('terminal', id)
+  }
+  const terminalMenuItems = (id: string): MenuItem[] => [
+    { label: 'Pop out', onSelect: () => popOutTerminal(id) },
+    { label: 'Rename', onSelect: () => setRenameTerminalId(id) },
+    { divider: true },
+    { label: 'Close terminal', danger: true, onSelect: () => setConfirmCloseTerminalId(id) },
+  ]
+  const terminalKind: TabKindHandler = {
+    isActive: (tab) => view === 'terminals' && activeTerminalId === tab.itemId,
+    getLiveName: (tab) => terminals.find((t) => t.id === tab.itemId)?.name ?? null,
+    getBadges: () => ({ running: false, unread: false }),
+    getIcon: () => tabIcons.terminal,
+    onActivate: (tab) => openTerminal(tab.itemId),
+    // Closing the tab only hides it — the shell keeps running on the host
+    // and reopens from the Terminals page. "Close terminal" ends it.
+    onClose: (tab) => {
+      if (activeTerminalId !== tab.itemId) return
+      setActiveTerminalId(null)
+      if (view === 'terminals') navigate('terminals', null)
+    },
+    getMenuItems: (tab) => terminalMenuItems(tab.itemId),
+  }
   const tabKindRegistry: TabKindRegistry = {
     session: sessionKind,
     project: projectKind,
     repeating_task: repeatingTaskKind,
     report: reportKind,
     doc_review: docReviewKind,
+    terminal: terminalKind,
   }
+  const confirmCloseTerminal = async () => {
+    const id = confirmCloseTerminalId
+    setConfirmCloseTerminalId(null)
+    if (!id) return
+    try {
+      await useTerminalsStore.getState().close(id)
+    } catch {
+      /* the list shows the terminal again on its next refresh */
+    }
+    useTabsStore.getState().removeTabsForItem('terminal', id)
+    if (activeTerminalId === id) {
+      setActiveTerminalId(null)
+      if (view === 'terminals') navigate('terminals', null)
+    }
+  }
+  // Terminal tabs stay mounted while open (hidden when not shown), so
+  // switching tabs never drops the socket or the scroll position.
+  const terminalTabIds = openTabs.filter((t) => t.itemType === 'terminal').map((t) => t.itemId)
+  const mountedTerminalIds =
+    activeTerminalId && !terminalTabIds.includes(activeTerminalId)
+      ? [...terminalTabIds, activeTerminalId]
+      : terminalTabIds
   const confirmDeleteRepeatingTask = async () => {
     if (!confirmDeleteRepeatingTaskId) return
     const id = confirmDeleteRepeatingTaskId
@@ -1427,6 +1542,31 @@ function App() {
               strokeLinejoin="round"
             >
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </button>
+          <button
+            className={`rail-btn ${view === 'terminals' && !activeTerminalId ? 'active' : ''}`}
+            onClick={() => {
+              setActiveTerminalId(null)
+              navigate('terminals', null)
+            }}
+            title="Terminals (t: new terminal)"
+            aria-label="Terminals"
+            data-testid="rail-terminals"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="2" y="3" width="20" height="18" rx="2" />
+              <polyline points="6 9 10 12 6 15" />
+              <line x1="12" y1="16" x2="17" y2="16" />
             </svg>
           </button>
           {/* Plugin-contributed pages (from /api/plugins), directly below
@@ -2095,6 +2235,33 @@ function App() {
                 }}
               />
             )}
+            <Suspense
+              fallback={
+                view === 'terminals' ? (
+                  <div className="list-view">
+                    <div className="chat-loading">
+                      <div className="loading-spinner" />
+                    </div>
+                  </div>
+                ) : null
+              }
+            >
+              {view === 'terminals' && !activeTerminalId && (
+                <TerminalsPage
+                  activeId={activeTerminalId}
+                  onOpen={openTerminal}
+                  onNew={() => setShowNewTerminal(true)}
+                  onClosed={(id) => useTabsStore.getState().removeTabsForItem('terminal', id)}
+                />
+              )}
+              {mountedTerminalIds.map((id) => (
+                <TerminalView
+                  key={id}
+                  terminalId={id}
+                  active={view === 'terminals' && activeTerminalId === id}
+                />
+              ))}
+            </Suspense>
             {view === 'docReview' &&
               (activeReviewId ? (
                 <ReviewView
@@ -2150,6 +2317,37 @@ function App() {
       )}
       {setupCompleted === false && user?.role === 'admin' && (
         <SetupWizard onDone={() => setSetupCompleted(true)} />
+      )}
+      {showNewTerminal && (
+        <Suspense fallback={null}>
+          <NewTerminalModal
+            onClose={() => setShowNewTerminal(false)}
+            onCreated={(t) => {
+              setShowNewTerminal(false)
+              openTerminal(t.id)
+            }}
+          />
+        </Suspense>
+      )}
+      {renameTerminalId && (
+        <RenameModal
+          title="Rename terminal"
+          label="Terminal name"
+          initialValue={terminals.find((t) => t.id === renameTerminalId)?.name ?? ''}
+          onSubmit={(name) => useTerminalsStore.getState().rename(renameTerminalId, name)}
+          onClose={() => setRenameTerminalId(null)}
+        />
+      )}
+      {confirmCloseTerminalId && (
+        <ConfirmDialog
+          title="Close terminal"
+          message="Close this terminal? The remote shell is ended and anything running in it stops."
+          confirmLabel="Close"
+          cancelLabel="Cancel"
+          danger
+          onConfirm={confirmCloseTerminal}
+          onCancel={() => setConfirmCloseTerminalId(null)}
+        />
       )}
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} />}
       {showChangePassword && (

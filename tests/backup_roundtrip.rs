@@ -92,6 +92,7 @@ async fn build_state_with_dir(dir: &std::path::Path, role: &str) -> (Arc<AppStat
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
         remote_access: peckboard::service::remote_access::RemoteAccess::inert(),
+        terminals: peckboard::terminal::TerminalManager::inert(),
         tls: Arc::new(peckboard::state::TlsState::new()),
     });
     (state, token)

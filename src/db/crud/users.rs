@@ -97,6 +97,8 @@ impl Db {
                     .execute(conn)?;
                 diesel::delete(user_tabs::table.filter(user_tabs::user_id.eq(&id)))
                     .execute(conn)?;
+                diesel::delete(terminals::table.filter(terminals::user_id.eq(&id)))
+                    .execute(conn)?;
                 diesel::delete(
                     session_view_nodes::table.filter(
                         session_view_nodes::view_id.eq_any(

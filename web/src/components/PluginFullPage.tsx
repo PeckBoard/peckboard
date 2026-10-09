@@ -79,6 +79,23 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
         )
         return
       }
+      // A plugin page asking to open an interactive terminal on one of its
+      // OWN hosts (SSH Fleet's per-host "Terminal" button). The plugin id is
+      // this frame's (the `plugin` prop), never the message's, so a page can
+      // only point at hosts its plugin serves; the app creates the terminal
+      // and opens it as a tab.
+      if (
+        msg.type === 'plugin-ui-open-terminal' &&
+        typeof msg.hostId === 'string' &&
+        /^[A-Za-z0-9_.:-]{1,128}$/.test(msg.hostId)
+      ) {
+        window.dispatchEvent(
+          new CustomEvent('peckboard:open-terminal', {
+            detail: { plugin_id: plugin, host_id: msg.hostId },
+          }),
+        )
+        return
+      }
       // A plugin page handing the user off to ANOTHER plugin's page, with an
       // optional query (graphify's "Install from App Manager" button). It has
       // to be an in-app navigation: these iframes are sandboxed without

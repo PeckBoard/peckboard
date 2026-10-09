@@ -73,6 +73,15 @@ impl Db {
                     .first::<String>(conn)
                     .optional()?
                     .is_some(),
+                // Only an OPEN terminal can be a tab; a closed one has had
+                // its tabs cascaded away already.
+                "terminal" => terminals::table
+                    .find(&tab.item_id)
+                    .filter(terminals::closed_at.is_null())
+                    .select(terminals::id)
+                    .first::<String>(conn)
+                    .optional()?
+                    .is_some(),
                 // Reports live on disk, not in the DB. The caller validates
                 // existence; the DB layer trusts the route to have done so.
                 "report" => true,

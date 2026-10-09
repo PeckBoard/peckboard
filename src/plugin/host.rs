@@ -2314,7 +2314,7 @@ fn caller_may_read_session(
 // orchestrating plugin acts on sessions the user configured, not on a
 // caller's behalf — so there is no per-call cross-folder gate; the
 // permission itself is the approval surface. Deliberately a separate,
-// minimal quartet rather than a relaxation of the existing gates: the
+// minimal set rather than a relaxation of the existing gates: the
 // context-checked functions stay context-checked.
 
 #[derive(Deserialize)]
@@ -2474,6 +2474,36 @@ pub(crate) fn orchestrate_session_state_impl(db: &Db, input: &str) -> String {
         Err(e) => error_json(e.to_string()),
     }
 }
+
+#[derive(Deserialize)]
+struct OrchestrateTerminateRequest {
+    session_id: String,
+}
+
+/// `peckboard_orchestrate_terminate` — stop a session's agent process (the
+/// transcript stays), e.g. an orchestrator's brain when the orchestrator is
+/// deleted. Fire-and-forget like `terminate_agent`; a session with no running
+/// agent is a no-op.
+pub(crate) fn orchestrate_terminate_impl(
+    db: &Db,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    let req: OrchestrateTerminateRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let target = match require_session(db, &req.session_id) {
+        Ok(s) => s,
+        Err(e) => return error_json(e),
+    };
+    let Some(live) = live else {
+        return error_json("live control unavailable");
+    };
+    live.terminate_agent(target.id.clone());
+    serde_json::json!({ "ok": true, "session_id": target.id }).to_string()
+}
+
 // ── Outbound HTTP fetch (gated, SSRF-contained) ───────────────────────
 //
 // `peckboard_http_fetch` lets a plugin tool pull a public web page. The host
@@ -4083,7 +4113,7 @@ host_fn!(peckboard_list_all_sessions(user_data: HostState; input: String) -> Str
     Ok(list_all_sessions_impl(&db, &input))
 });
 
-// The orchestrate quartet — see the impls' section comment: standing grant,
+// The orchestrate set — see the impls' section comment: standing grant,
 // context-free on purpose, so lifecycle dispatches (timer.tick,
 // session.agent.ended) can act. Only the permission gates them.
 host_fn!(peckboard_orchestrate_send(user_data: HostState; input: String) -> String {
@@ -4108,6 +4138,11 @@ host_fn!(peckboard_orchestrate_session_state(user_data: HostState; input: String
     let (db, _plugin_id, ok) = state_and_permission(&user_data, "session_orchestrate")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_orchestrate' permission")); }
     Ok(orchestrate_session_state_impl(&db, &input))
+});
+host_fn!(peckboard_orchestrate_terminate(user_data: HostState; input: String) -> String {
+    let (db, _plugin_id, ok, _inv, live) = state_permission_invocation_and_live(&user_data, "session_orchestrate")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_orchestrate' permission")); }
+    Ok(orchestrate_terminate_impl(&db, &input, live))
 });
 host_fn!(peckboard_http_fetch(user_data: HostState; input: String) -> String {
     let (_db, _plugin_id, ok) = state_and_permission(&user_data, "http_fetch")?;
@@ -4233,38 +4268,26 @@ host_fn!(peckboard_ssh_write_file(user_data: HostState; input: String) -> String
     Ok(super::ssh::write_file_impl(&db, &data_dir, has_ssh_keys, &input))
 });
 
-/// The calling plugin's id, for the per-plugin terminal registry
-/// (`peckboard_ssh_term_*`): a plugin only ever lists, attaches to, or
-/// closes terminals it opened itself.
-fn state_plugin_id(user_data: &UserData<HostState>) -> Result<String, Error> {
-    let state = user_data.get()?;
-    let state = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
-    Ok(state.plugin_id.clone())
-}
+/// Retired `peckboard_ssh_term_*` host functions (ssh-fleet 0.4.0's
+/// in-iframe terminals). Interactive terminals are now a core feature
+/// (`crate::terminal`) that resolves hosts through the
+/// `terminal.host.resolve` hook instead. The imports stay registered as
+/// stubs because extism refuses to instantiate a module whose imports are
+/// missing — removing them outright would stop an older installed
+/// ssh-fleet from loading at all (and with it its agent ssh tools).
+const SSH_TERM_RETIRED: &str =
+    "interactive terminals moved into Peckboard core; upgrade the ssh-fleet plugin";
 
-host_fn!(peckboard_ssh_term_open(user_data: HostState; input: String) -> String {
-    let (db, has_ssh, has_ssh_keys, data_dir) = state_ssh_context(&user_data)?;
-    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
-    let plugin_id = state_plugin_id(&user_data)?;
-    // Opens a PTY shell that outlives this call; see `plugin::ssh_term`.
-    // Credentials are consumed here and never echoed back.
-    Ok(super::ssh_term::open_impl(&db, &data_dir, &plugin_id, has_ssh_keys, &input))
+host_fn!(peckboard_ssh_term_open(_user_data: HostState; _input: String) -> String {
+    Ok(error_json(SSH_TERM_RETIRED))
 });
 
-host_fn!(peckboard_ssh_term_list(user_data: HostState; _input: String) -> String {
-    let (_db, has_ssh, _has_ssh_keys, _data_dir) = state_ssh_context(&user_data)?;
-    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
-    let plugin_id = state_plugin_id(&user_data)?;
-    Ok(super::ssh_term::list_impl(&plugin_id))
+host_fn!(peckboard_ssh_term_list(_user_data: HostState; _input: String) -> String {
+    Ok(serde_json::json!({ "terminals": [] }).to_string())
 });
 
-host_fn!(peckboard_ssh_term_close(user_data: HostState; input: String) -> String {
-    let (_db, has_ssh, _has_ssh_keys, _data_dir) = state_ssh_context(&user_data)?;
-    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
-    let plugin_id = state_plugin_id(&user_data)?;
-    Ok(super::ssh_term::close_impl(&plugin_id, &input))
+host_fn!(peckboard_ssh_term_close(_user_data: HostState; _input: String) -> String {
+    Ok(error_json(SSH_TERM_RETIRED))
 });
 
 host_fn!(peckboard_ask_user(user_data: HostState; input: String) -> String {
@@ -4986,6 +5009,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_orchestrate_session_state,
+        ),
+        Function::new(
+            "peckboard_orchestrate_terminate",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_orchestrate_terminate,
         ),
         Function::new(
             "peckboard_http_fetch",
@@ -6576,6 +6606,12 @@ mod tests {
                 .unwrap()
                 .push(format!("send:{session_id}:{text}"));
         }
+        fn terminate_agent(&self, session_id: String) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("terminate:{session_id}"));
+        }
     }
 
     #[tokio::test]
@@ -7882,5 +7918,15 @@ mod tests {
         assert!(r.contains("\"folder_id\":\"fO\""), "state folder: {r}");
         let r = orchestrate_session_state_impl(&db, r#"{"session_id":"gone"}"#);
         assert!(r.contains("\"exists\":false"), "miss: {r}");
+
+        // terminate: unknown target / no live refuse; the happy path records.
+        let rec = std::sync::Arc::new(RecordingLive::default());
+        let r = orchestrate_terminate_impl(&db, r#"{"session_id":"nope"}"#, Some(rec.clone()));
+        assert!(r.contains("error"), "unknown target: {r}");
+        let r = orchestrate_terminate_impl(&db, r#"{"session_id":"sO"}"#, None);
+        assert!(r.contains("live control unavailable"), "no live: {r}");
+        let r = orchestrate_terminate_impl(&db, r#"{"session_id":"sO"}"#, Some(rec.clone()));
+        assert!(r.contains("\"ok\":true"), "terminate ok: {r}");
+        assert_eq!(rec.calls.lock().unwrap().as_slice(), ["terminate:sO"]);
     }
 }

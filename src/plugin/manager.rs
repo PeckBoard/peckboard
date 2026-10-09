@@ -143,6 +143,8 @@ pub const ALLOWED_HOOKS: &[&str] = &[
     "session.prehatch.cancel",
     "session.reference.resolve",
     "session.user.answer",
+    "terminal.host.resolve",
+    "terminal.hosts.list",
     "timer.tick",
     "todo",
     "worker.blocked",
@@ -170,11 +172,11 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "project_files_write", // peckboard_write_file — write a file under the session/project folder
     "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config / _provider_spawn / _read_line / _write_stdin / _read_stdin / _kill / _account_env / _write_file / _probe / _list_accounts / _invoke_mcp / _take_message — register an AI provider and drive its turns (HTTP, CLI, or MCP tools)
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
-    "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file / _term_open / _term_list / _term_close — connect to remote SSH hosts, run commands, transfer files, open interactive PTY shells
+    "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file — connect to remote SSH hosts, run commands, transfer files; and answer terminal.host.resolve / terminal.hosts.list so core can open interactive shells on the plugin's hosts
     "ssh_keys", // peckboard_ssh_key_list, and Auth::KeyRef in peckboard_ssh_* — list vault-key METADATA and use a vault key by id; never exposes private key material, ciphertext, nonce, or passphrase
     "session_dispatch", // peckboard_dispatch_capture / resume_session
     "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — same-folder free; cross-folder needs Always/Once
-    "session_orchestrate", // peckboard_orchestrate_send / _create_session / _set_prompt / _session_state — unattended session control from lifecycle dispatches (timer.tick, session.agent.ended): folder-blind, no per-call approval; the user grants it once at plugin approval
+    "session_orchestrate", // peckboard_orchestrate_send / _create_session / _set_prompt / _session_state / _terminate — unattended session control from lifecycle dispatches (timer.tick, session.agent.ended): folder-blind, no per-call approval; the user grants it once at plugin approval
     "session_read",        // peckboard_get_session / list_sessions
     "session_write",       // peckboard_create_session / update_session
     "session_prompt_write", // peckboard_set_session_system_prompt — set/clear a visible session's standing instructions
@@ -1886,6 +1888,101 @@ impl PluginManager {
         }
         Some(models)
     }
+    /// Call `hook` on exactly one plugin and return the payload it answered
+    /// with. For request/response hooks addressed to a known owner (the
+    /// terminal host resolver): `Err` when the plugin is not active, does
+    /// not declare the hook, lacks `required_permission`, fails, cancels
+    /// (the reason is returned), or answers without a payload.
+    pub async fn call_plugin_hook(
+        &self,
+        plugin_id: &str,
+        hook: &str,
+        required_permission: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let pool = {
+            let plugins = self.plugins.lock().await;
+            let Some(p) = plugins.iter().find(|p| p.name == plugin_id) else {
+                return Err(format!("plugin '{plugin_id}' is not installed"));
+            };
+            if !p.is_active() {
+                return Err(format!("plugin '{plugin_id}' is not active"));
+            }
+            if !p.manifest.hooks.iter().any(|h| h == hook) {
+                return Err(format!("plugin '{plugin_id}' does not handle {hook}"));
+            }
+            if !p
+                .manifest
+                .permissions
+                .iter()
+                .any(|x| x == required_permission)
+            {
+                return Err(format!(
+                    "plugin '{plugin_id}' lacks the '{required_permission}' permission"
+                ));
+            }
+            p.pool.clone()
+        };
+        let input = serde_json::json!({ "hook": hook, "payload": payload }).to_string();
+        let output = with_instance_blocking(pool, move |_inst, cell| cell.call_handle(input))
+            .await
+            .map_err(|e| format!("plugin '{plugin_id}' failed on {hook}: {e}"))?;
+        match serde_json::from_str::<Verdict>(&output) {
+            Ok(Verdict::Allow {
+                payload: Some(payload),
+            }) => Ok(payload),
+            Ok(Verdict::Cancel { reason, .. }) => Err(reason),
+            Ok(_) => Err(format!("plugin '{plugin_id}' gave no answer to {hook}")),
+            Err(e) => Err(format!("plugin '{plugin_id}' answered {hook} badly: {e}")),
+        }
+    }
+
+    /// Call `hook` on every active plugin that declares it and holds
+    /// `required_permission`, collecting each `(plugin_id, payload)` answer.
+    /// Plugins that fail, skip, or cancel are left out (failures logged).
+    pub async fn collect_hook(
+        &self,
+        hook: &str,
+        required_permission: &str,
+        payload: serde_json::Value,
+    ) -> Vec<(String, serde_json::Value)> {
+        let targets: Vec<String> = {
+            let plugins = self.plugins.lock().await;
+            plugins
+                .iter()
+                .filter(|p| {
+                    p.is_active()
+                        && p.manifest.hooks.iter().any(|h| h == hook)
+                        && p.manifest
+                            .permissions
+                            .iter()
+                            .any(|x| x == required_permission)
+                })
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        let mut out = Vec::new();
+        for name in targets {
+            match self
+                .call_plugin_hook(&name, hook, required_permission, payload.clone())
+                .await
+            {
+                Ok(answer) => out.push((name, answer)),
+                Err(e) => warn!("{e}"),
+            }
+        }
+        out
+    }
+
+    /// Whether `plugin_id` is active and was granted `permission`.
+    pub async fn plugin_has_permission(&self, plugin_id: &str, permission: &str) -> bool {
+        let plugins = self.plugins.lock().await;
+        plugins.iter().any(|p| {
+            p.name == plugin_id
+                && p.is_active()
+                && p.manifest.permissions.iter().any(|x| x == permission)
+        })
+    }
 
     /// Tell `plugin_id` that the user interrupted the turn running on
     /// `provider_id` for `session_id`, through the optional
@@ -3460,6 +3557,8 @@ mod tests {
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_MODELS_HOOK));
         assert!(ALLOWED_HOOKS.contains(&crate::plugin::hooks::TIMER_TICK_HOOK));
         assert!(ALLOWED_HOOKS.contains(&PROVIDER_INTERRUPT_HOOK));
+        assert!(ALLOWED_HOOKS.contains(&crate::plugin::hooks::TERMINAL_HOST_RESOLVE_HOOK));
+        assert!(ALLOWED_HOOKS.contains(&crate::plugin::hooks::TERMINAL_HOSTS_LIST_HOOK));
     }
 
     #[test]

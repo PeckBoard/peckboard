@@ -124,6 +124,24 @@ const docReviewIcon: ReactNode = (
     </svg>
   </span>
 )
+// Terminal: a prompt chevron + cursor — the same glyph as the rail button.
+const terminalIcon: ReactNode = (
+  <span className="tab-icon tab-icon-terminal" aria-hidden="true">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" y1="19" x2="20" y2="19" />
+    </svg>
+  </span>
+)
 
 // Temp-session marker: an hourglass on the chip warns that closing this
 // tab deletes the session (server-side, on last-tab-close).
@@ -152,6 +170,7 @@ export const tabIcons = {
   report: reportIcon,
   repeating_task: repeatingTaskIcon,
   doc_review: docReviewIcon,
+  terminal: terminalIcon,
   tempSession: tempSessionIcon,
 }
 
@@ -164,6 +183,7 @@ export const tabDefaultLabel: Record<TabType, string> = {
   report: 'Report',
   repeating_task: 'Task',
   doc_review: 'Review',
+  terminal: 'Terminal',
 }
 
 /** Compose the encoded item_id for a report tab. The server splits this

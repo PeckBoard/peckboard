@@ -102,8 +102,7 @@ impl PluginWsTickets {
 
     /// Redeem a ticket: removes it (single-use) and returns its scope when it
     /// is still live. An unknown, reused, or expired token returns `None` —
-    /// indistinguishable on purpose. Shared with `/ws/terminal`
-    /// ([`crate::ws::terminal`]), which redeems the same plugin-scoped ticket.
+    /// indistinguishable on purpose.
     pub(crate) fn redeem(&self, token: &str) -> Option<(String, String)> {
         let mut inner = self.inner.lock().unwrap();
         let ticket = inner.remove(token)?;

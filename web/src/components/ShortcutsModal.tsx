@@ -10,6 +10,7 @@ const MOD = isApple ? '⌘' : 'Ctrl'
 const SHORTCUTS: { keys: string[]; action: string; sep?: string }[] = [
   { keys: [MOD, 'K'], action: 'Search sessions' },
   { keys: ['N'], action: 'New session' },
+  { keys: ['T'], action: 'New terminal' },
   // NOT Cmd/Ctrl+1…9 — browsers reserve those for their own tab strip and
   // never deliver the keydown to the page. See the note in TabBar.tsx.
   { keys: ['G', '1…9'], sep: 'then', action: 'Switch to the nth open tab' },

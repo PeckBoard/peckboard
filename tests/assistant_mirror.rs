@@ -95,6 +95,7 @@ async fn build_state() -> (Arc<AppState>, String, String) {
         mcp_tokens: McpTokenRegistry::new(),
         push_service: PushService::new(&config.data_dir),
         remote_access: peckboard::service::remote_access::RemoteAccess::inert(),
+        terminals: peckboard::terminal::TerminalManager::inert(),
         tls: Arc::new(peckboard::state::TlsState::new()),
         jwt_secret,
         config,

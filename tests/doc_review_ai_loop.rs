@@ -66,6 +66,7 @@ async fn build_state() -> Arc<AppState> {
         tls: Arc::new(peckboard::state::TlsState::new()),
         push_service: PushService::new(&std::env::temp_dir()),
         remote_access: peckboard::service::remote_access::RemoteAccess::inert(),
+        terminals: peckboard::terminal::TerminalManager::inert(),
     })
 }
 

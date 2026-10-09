@@ -76,14 +76,28 @@ fn auth_user(req: &Request<Body>) -> &AuthUser {
 
 fn validate_item_type(s: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     match s {
-        "session" | "project" | "report" | "repeating_task" | "doc_review" => Ok(()),
+        "session" | "project" | "report" | "repeating_task" | "doc_review" | "terminal" => Ok(()),
         _ => Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": "item_type must be 'session', 'project', 'report', 'repeating_task', or 'doc_review'"
+                "error": "item_type must be 'session', 'project', 'report', 'repeating_task', 'doc_review', or 'terminal'"
             })),
         )),
     }
+}
+
+/// A terminal tab's label: the terminal's name, but only for the user's own
+/// open terminal — a terminal is a private shell, so another user's id
+/// resolves to `None` (tab refused / filtered) like a deleted item.
+async fn terminal_name(state: &AppState, user_id: &str, id: &str) -> Option<String> {
+    state
+        .db
+        .get_terminal(id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|t| t.closed_at.is_none() && t.user_id == user_id)
+        .map(|t| t.name)
 }
 
 /// Reports are file-backed, identified by `<folder>/<file>` (the same
@@ -187,6 +201,12 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
                 false,
                 false,
             ),
+            "terminal" => (
+                terminal_name(&state, &user.user_id, &t.item_id).await,
+                false,
+                false,
+                false,
+            ),
             "report" => (
                 split_report_id(&t.item_id)
                     .and_then(|(folder, file)| report_label(&state, &folder, &file)),
@@ -257,6 +277,16 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
             ));
         }
     }
+    if req_body.item_type == "terminal"
+        && terminal_name(&state, &user_id, &req_body.item_id)
+            .await
+            .is_none()
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "referenced item does not exist" })),
+        ));
+    }
 
     match state
         .db
@@ -314,6 +344,14 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
                         .ok()
                         .flatten()
                         .map(|r| r.title)
+                        .unwrap_or_default(),
+                    false,
+                    false,
+                    false,
+                ),
+                "terminal" => (
+                    terminal_name(&state, &user_id, &tab.item_id)
+                        .await
                         .unwrap_or_default(),
                     false,
                     false,

@@ -246,13 +246,6 @@ fn pool() -> &'static Pool {
     })
 }
 
-/// The process-global SSH runtime, for long-lived SSH tasks that must
-/// outlive any single host call (interactive terminals in
-/// [`super::ssh_term`]). Pooled connections and their russh driver tasks
-/// already live here, so a shell spawned on it survives between calls too.
-pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
-    &pool().rt
-}
 /// Get (or create) the slot for a pool key, opportunistically reaping idle and
 /// over-cap entries. Never holds the map lock across `.await`.
 fn get_slot(key: &str) -> Arc<Slot> {
@@ -321,13 +314,19 @@ async fn connect_with(conn: &Conn, config: client::Config) -> Result<Live, Strin
         observed: observed.clone(),
     };
     let config = Arc::new(config);
-    let mut handle = tokio::time::timeout(
-        conn.connect_timeout(),
-        client::connect(config, (conn.host.as_str(), conn.port), handler),
-    )
+    let mut handle = tokio::time::timeout(conn.connect_timeout(), async {
+        let stream = tokio::net::TcpStream::connect((conn.host.as_str(), conn.port))
+            .await
+            .map_err(|e| format!("connect failed: {e}"))?;
+        // Interactive shells send one keystroke per packet; never let Nagle
+        // hold one back waiting for the previous ACK.
+        let _ = stream.set_nodelay(true);
+        client::connect_stream(config, stream, handler)
+            .await
+            .map_err(|e| format!("connect failed: {e}"))
+    })
     .await
-    .map_err(|_| "connect timed out".to_string())?
-    .map_err(|e| format!("connect failed: {e}"))?;
+    .map_err(|_| "connect timed out".to_string())??;
 
     let ok = match &conn.auth {
         Auth::Password { password } => handle
@@ -1434,7 +1433,7 @@ mod tests {
 /// Shared test fixture: a throwaway OpenSSH `sshd` on an ephemeral loopback
 /// port, with host/client keys and config confined to a temp dir, accepting
 /// the current user by key. Used by the exec/SFTP test above and by the PTY
-/// terminal test in [`super::ssh_term`].
+/// terminal tests in [`crate::terminal`].
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::fs;

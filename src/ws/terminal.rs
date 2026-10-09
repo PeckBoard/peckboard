@@ -1,152 +1,160 @@
-//! `/ws/terminal` — a plugin page's live view of an interactive SSH
-//! terminal ([`crate::plugin::ssh_term`]).
+//! `/ws/terminal/{id}` — a browser's live view of an interactive SSH
+//! terminal ([`crate::terminal`]).
 //!
-//! Authentication is the `/ws/plugin-ui` ticket model ([`super::plugin_ui`]):
-//! the parent app mints a one-time, plugin-scoped ticket over its authed
-//! fetch and hands it into the sandboxed iframe, which redeems it here
-//! together with the terminal id. The socket attaches only when the
-//! terminal was opened by **that plugin** — a ticket for plugin A can never
-//! reach plugin B's shells — and closes when the minting auth session is
-//! revoked.
+//! Authenticated like the main `/ws`: the first frame must be
+//! `{"type":"auth","token":"<JWT>","cols":N,"rows":N}` within 10 s. Only the
+//! terminal's owner (or an admin) may attach, and the socket closes when the
+//! auth session is revoked.
 //!
 //! Wire protocol (one terminal per socket):
 //!
-//! - server → client, text: `{"type":"hello","terminal":{…}}` first, then
-//!   `{"type":"exited","code":<n|null>,"reason":"…"}` when the shell ends,
-//!   and `{"type":"resync"}` if this viewer fell behind (the page reconnects
-//!   to replay from the scrollback);
-//! - server → client, binary: raw PTY output — the scrollback replay as the
-//!   first binary frame(s), then live output as it arrives;
-//! - client → server, binary: raw keystrokes for the shell;
-//! - client → server, text: `{"type":"resize","cols":N,"rows":N}`, or
-//!   `{"type":"input","data":"…"}` as a text alternative to a binary frame.
+//! - server → client, text: `{"type":"status","phase":…,"persistent":…,
+//!   "message":…}` after auth and on every change; `{"type":"replay",
+//!   "bytes":N}` right after the first status (the next binary frame, when
+//!   N > 0, is the scrollback snapshot); `{"type":"resync"}` when this
+//!   viewer fell behind (reconnect to replay);
+//! - server → client, binary: raw PTY output — the scrollback snapshot
+//!   first, then live output as it arrives;
+//! - client → server, binary: raw keystrokes (sent per keystroke, unbuffered);
+//! - client → server, text: `{"type":"resize","cols":N,"rows":N}`,
+//!   `{"type":"restart"}` (start a fresh shell after `ended` / `error`).
 //!
-//! Several viewers may attach to one terminal (two browser tabs); each gets
-//! the full stream and all of them may type.
+//! Several viewers (tabs, a pop-out window, other devices) may attach to one
+//! terminal; each gets the full stream and all of them may type.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::extract::{Path, State};
+use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::time::Instant as TokioInstant;
+use tokio::time::{Instant, timeout};
 
-use crate::plugin::ssh_term::{self, Terminal};
+use crate::auth::token::validate_token;
 use crate::state::AppState;
+use crate::terminal::{MAX_COLS, MAX_ROWS, Status, TermSession};
 
-/// Mirrors `/ws` and `/ws/plugin-ui`: ping idle sockets, drop half-open ones.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
-/// Largest single input frame accepted from a viewer (a paste).
+/// Largest single input frame accepted (a big paste).
 const MAX_INPUT_FRAME: usize = 256 * 1024;
 
-#[derive(serde::Deserialize)]
-pub struct TerminalWsQuery {
-    #[serde(default)]
-    ticket: String,
-    #[serde(default)]
-    term: String,
-}
-
-/// Upgrade handler. Ticket redeemed and ownership checked BEFORE the
-/// upgrade, so a bad token or a foreign terminal costs one error response
-/// and never allocates a socket.
 pub async fn terminal_ws_handler(
     ws: WebSocketUpgrade,
-    Query(query): Query<TerminalWsQuery>,
+    Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> Response {
-    let Some((plugin_id, auth_session_id)) = state.plugin_ws_tickets.redeem(query.ticket.trim())
-    else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(json!({ "error": "invalid or expired ticket" })),
-        )
-            .into_response();
-    };
-    let Some(term) = ssh_term::registry()
-        .get(query.term.trim())
-        .filter(|t| t.plugin_id == plugin_id)
-    else {
-        return (
-            StatusCode::NOT_FOUND,
-            axum::Json(json!({ "error": "no such terminal" })),
-        )
-            .into_response();
-    };
-    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, term, auth_session_id))
-        .into_response()
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, id))
 }
 
-/// Apply one client text frame. Returns `false` when the frame is not a
-/// recognised command (ignored, but still counts as liveness).
-fn apply_text_command(term: &Terminal, text: &str) -> bool {
+fn status_frame(s: &Status) -> Message {
+    let mut v = serde_json::to_value(s).unwrap_or_default();
+    v["type"] = json!("status");
+    Message::Text(v.to_string().into())
+}
+
+fn geometry(v: &Value) -> Option<(u16, u16)> {
+    let cols = v.get("cols").and_then(Value::as_u64)?;
+    let rows = v.get("rows").and_then(Value::as_u64)?;
+    if (2..=u64::from(MAX_COLS)).contains(&cols) && (1..=u64::from(MAX_ROWS)).contains(&rows) {
+        Some((cols as u16, rows as u16))
+    } else {
+        None
+    }
+}
+
+/// Apply one client text frame. `true` = restart requested.
+fn apply_text_command(term: &TermSession, text: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return false;
     };
     match v.get("type").and_then(Value::as_str) {
         Some("resize") => {
-            let cols = v.get("cols").and_then(Value::as_u64).unwrap_or(0);
-            let rows = v.get("rows").and_then(Value::as_u64).unwrap_or(0);
-            if (2..=1000).contains(&cols) && (1..=500).contains(&rows) {
-                term.resize(cols as u16, rows as u16);
+            if let Some((cols, rows)) = geometry(&v) {
+                term.resize(cols, rows);
             }
-            true
+            false
         }
-        Some("input") => {
-            if let Some(data) = v.get("data").and_then(Value::as_str)
-                && data.len() <= MAX_INPUT_FRAME
-            {
-                term.input(Bytes::copy_from_slice(data.as_bytes()));
-            }
-            true
-        }
+        Some("restart") => true,
         _ => false,
     }
 }
 
-fn exited_frame(info: &ssh_term::ExitInfo) -> String {
-    json!({ "type": "exited", "code": info.code, "reason": info.reason }).to_string()
+async fn close_with(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    code: u16,
+    reason: &str,
+) {
+    let _ = sender
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code,
+            reason: reason.to_string().into(),
+        })))
+        .await;
 }
 
-async fn handle_terminal_socket(
-    socket: WebSocket,
-    state: Arc<AppState>,
-    term: Arc<Terminal>,
-    auth_session_id: String,
-) {
+async fn handle_terminal_socket(socket: WebSocket, state: Arc<AppState>, id: String) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Subscribe to the exit signal BEFORE reading the current state, so an
-    // exit landing in between is seen exactly once (as the current value).
-    let mut exit_rx = term.exit_rx();
-    let already_exited = exit_rx.borrow_and_update().clone();
-    let (snapshot, mut out_rx) = term.attach();
+    // Auth handshake: first frame must be auth within 10 seconds.
+    let auth = timeout(Duration::from_secs(10), async {
+        let Message::Text(text) = receiver.next().await?.ok()? else {
+            return None;
+        };
+        let v: Value = serde_json::from_str(&text).ok()?;
+        if v.get("type").and_then(Value::as_str) != Some("auth") {
+            return None;
+        }
+        let token = v.get("token").and_then(Value::as_str)?;
+        let claims = validate_token(&state.jwt_secret, token).ok()?;
+        Some((claims.sub, claims.jti, claims.role, geometry(&v)))
+    })
+    .await;
+    let Ok(Some((user_id, auth_session_id, role, geom))) = auth else {
+        close_with(&mut sender, 4001, "auth required").await;
+        return;
+    };
+    let session_alive = state
+        .db
+        .get_auth_session(&auth_session_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !session_alive {
+        close_with(&mut sender, 4001, "session revoked").await;
+        return;
+    }
+    // Owner (or admin) of an open terminal only. Unknown, closed, and
+    // foreign terminals are indistinguishable.
+    let row = match state.db.get_terminal(&id).await {
+        Ok(Some(row)) if row.closed_at.is_none() && (row.user_id == user_id || role == "admin") => {
+            row
+        }
+        _ => {
+            close_with(&mut sender, 4004, "no such terminal").await;
+            return;
+        }
+    };
 
-    let hello = json!({ "type": "hello", "terminal": term.info() }).to_string();
-    if sender.send(Message::Text(hello.into())).await.is_err() {
+    let (cols, rows) = geom.unwrap_or((80, 24));
+    let (term, _viewer) = state.terminals.attach(&row, cols, rows);
+    let mut status_rx = term.status_rx();
+    let current = status_rx.borrow_and_update().clone();
+    let (snapshot, mut out_rx) = term.attach_output();
+    if sender.send(status_frame(&current)).await.is_err() {
         return;
     }
-    if !snapshot.is_empty()
-        && sender
-            .send(Message::Binary(Bytes::from(snapshot)))
-            .await
-            .is_err()
-    {
+    // Announce the replay so the client resets its screen and ignores the
+    // replies xterm generates for terminal queries recorded in it.
+    let replay = json!({ "type": "replay", "bytes": snapshot.len() }).to_string();
+    if sender.send(Message::Text(replay.into())).await.is_err() {
         return;
     }
-    if let Some(info) = &already_exited
-        && sender
-            .send(Message::Text(exited_frame(info).into()))
-            .await
-            .is_err()
-    {
+    if !snapshot.is_empty() && sender.send(Message::Binary(snapshot.into())).await.is_err() {
         return;
     }
 
@@ -154,8 +162,7 @@ async fn handle_terminal_socket(
     auth_check.tick().await;
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await;
-    let mut last_seen = TokioInstant::now();
-    let mut exit_seen = already_exited.is_some();
+    let mut last_seen = Instant::now();
 
     loop {
         tokio::select! {
@@ -168,12 +175,7 @@ async fn handle_terminal_socket(
                     .flatten()
                     .is_some();
                 if !alive {
-                    let _ = sender
-                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                            code: 4001,
-                            reason: "session revoked".into(),
-                        })))
-                        .await;
+                    close_with(&mut sender, 4001, "session revoked").await;
                     break;
                 }
             }
@@ -189,17 +191,18 @@ async fn handle_terminal_socket(
                 match msg {
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     Some(Ok(Message::Binary(data))) => {
-                        last_seen = TokioInstant::now();
-                        if data.len() <= MAX_INPUT_FRAME {
-                            term.input(data);
+                        last_seen = Instant::now();
+                        if data.len() <= MAX_INPUT_FRAME && term.input(data) {
+                            state.terminals.note_activity(&term);
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        last_seen = TokioInstant::now();
-                        apply_text_command(&term, text.as_str());
+                        last_seen = Instant::now();
+                        if apply_text_command(&term, text.as_str()) {
+                            state.terminals.restart(&term);
+                        }
                     }
-                    // Pongs (tungstenite auto-answers our pings) and pings.
-                    Some(Ok(_)) => { last_seen = TokioInstant::now(); }
+                    Some(Ok(_)) => { last_seen = Instant::now(); }
                 }
             }
             out = out_rx.recv() => {
@@ -209,9 +212,6 @@ async fn handle_terminal_socket(
                             break;
                         }
                     }
-                    // This viewer fell behind the shell's output. The lost
-                    // bytes are gone from the channel but still in the
-                    // scrollback: tell the page to reconnect and replay.
                     Err(RecvError::Lagged(_)) => {
                         let nudge = json!({ "type": "resync" }).to_string();
                         let _ = sender.send(Message::Text(nudge.into())).await;
@@ -220,20 +220,14 @@ async fn handle_terminal_socket(
                     Err(RecvError::Closed) => break,
                 }
             }
-            changed = exit_rx.changed(), if !exit_seen => {
-                exit_seen = true;
+            changed = status_rx.changed() => {
                 if changed.is_err() {
                     break;
                 }
-                let info = exit_rx.borrow_and_update().clone();
-                if let Some(info) = info
-                    && sender.send(Message::Text(exited_frame(&info).into())).await.is_err()
-                {
+                let s = status_rx.borrow_and_update().clone();
+                if sender.send(status_frame(&s)).await.is_err() {
                     break;
                 }
-                // Stay attached: the page keeps showing the final screen
-                // until the user closes the terminal (which ends the socket
-                // from the client side).
             }
         }
     }
@@ -244,41 +238,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_commands_resize_and_type_into_the_shell() {
-        let reg = ssh_term::Registry::new();
-        let (term, mut cmd_rx) = reg.insert_detached("ssh-fleet", "t");
-
-        assert!(apply_text_command(
-            &term,
-            r#"{"type":"resize","cols":132,"rows":40}"#
-        ));
-        assert!(apply_text_command(
-            &term,
-            r#"{"type":"input","data":"ls\n"}"#
-        ));
-        // Out-of-range geometry is dropped, not clamped, so a bogus client
-        // can't make the PTY unusable for the other viewers.
-        assert!(apply_text_command(
-            &term,
-            r#"{"type":"resize","cols":0,"rows":9999}"#
-        ));
-        assert!(!apply_text_command(&term, "not json"));
-        assert!(!apply_text_command(&term, r#"{"type":"bogus"}"#));
-
-        assert_eq!(
-            cmd_rx.try_recv().unwrap(),
-            ssh_term::TermCmd::Resize {
-                cols: 132,
-                rows: 40
-            }
-        );
-        assert_eq!(
-            cmd_rx.try_recv().unwrap(),
-            ssh_term::TermCmd::Input(Bytes::from_static(b"ls\n"))
-        );
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "bad resize never reached the shell"
-        );
+    fn geometry_accepts_only_sane_sizes() {
+        assert_eq!(geometry(&json!({"cols": 132, "rows": 40})), Some((132, 40)));
+        assert_eq!(geometry(&json!({"cols": 0, "rows": 40})), None);
+        assert_eq!(geometry(&json!({"cols": 80, "rows": 9999})), None);
+        assert_eq!(geometry(&json!({"rows": 40})), None);
     }
 }

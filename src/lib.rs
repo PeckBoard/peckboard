@@ -22,6 +22,7 @@ pub mod server;
 pub mod service;
 pub mod state;
 pub mod subagent;
+pub mod terminal;
 pub mod todo;
 pub mod worker;
 pub mod workflow;

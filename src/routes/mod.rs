@@ -34,6 +34,7 @@ pub mod sessions;
 pub mod settings;
 pub mod ssh_keys;
 pub mod system_prompts;
+pub mod terminals;
 pub mod tool_images;
 pub mod update;
 pub mod usage;
@@ -63,10 +64,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // not by JWT — the sandboxed iframe holding the socket never sees
         // the user's token. See src/ws/plugin_ui.rs.
         .route("/ws/plugin-ui", get(plugin_ws_handler))
-        // Interactive SSH terminal WS: same one-time plugin-scoped ticket as
-        // /ws/plugin-ui, attaching a plugin page to a PTY shell its own
-        // plugin opened. See src/ws/terminal.rs + src/plugin/ssh_term.rs.
-        .route("/ws/terminal", get(terminal_ws_handler))
+        // Interactive SSH terminal WS: JWT in the first frame (like /ws),
+        // owner-only. See src/ws/terminal.rs + src/terminal/.
+        .route("/ws/terminal/{id}", get(terminal_ws_handler))
         // Remote-control daemon WS: authenticated by the device's enrollment
         // token (hashed against devices.secret_hash) BEFORE the upgrade —
         // never by JWT. Daemons send no Origin, so origin_check passes them.
@@ -110,6 +110,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(remote_access::router(state.clone()))
         .merge(devices::router(state.clone()))
         .merge(settings::router(state.clone()))
+        .merge(terminals::router(state.clone()))
         .merge(system_prompts::router(state.clone()))
         .merge(ollama::router(state.clone()))
         .merge(plugins::router(state.clone()))

@@ -479,6 +479,24 @@ pub const PROVIDER_MODELS_HOOK: &str = "provider.models";
 /// cleanup/notification signal, not as a way to abort the turn. Payload:
 /// `{ session_id, provider_id }`; the verdict is ignored.
 pub const PROVIDER_INTERRUPT_HOOK: &str = "provider.interrupt";
+
+/// Resolve one of the plugin's SSH hosts into connection details for an
+/// interactive core terminal (`crate::terminal`). Dispatched to ONE plugin
+/// — the one that owns the host — at every terminal connect and every
+/// automatic reconnect, so core never stores a credential. Payload:
+/// `{ host_id }`. The plugin answers `Verdict::Allow` with
+/// `{ label, conn: { host, port, username, auth, known_host? } }` (the same
+/// connection shape the `peckboard_ssh_*` host functions take) or
+/// `Verdict::Cancel` with a reason. Only plugins holding the `ssh`
+/// permission are asked.
+pub const TERMINAL_HOST_RESOLVE_HOOK: &str = "terminal.host.resolve";
+
+/// List the hosts a plugin offers for interactive terminals (the "New
+/// terminal" host picker). Identity only — no credentials. Payload: `{}`.
+/// Answer: `Verdict::Allow` with `{ hosts: [{ id, label, hostname,
+/// username, port, tags? }] }`. Only plugins holding the `ssh` permission
+/// are asked.
+pub const TERMINAL_HOSTS_LIST_HOOK: &str = "terminal.hosts.list";
 /// The request a plugin receives for a plugin-served HTTP route.
 ///
 /// Serialized as the `payload` of the [`HTTP_REQUEST_HOOK`] hook call.

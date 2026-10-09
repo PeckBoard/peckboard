@@ -648,6 +648,31 @@ pub struct UserTab {
     pub last_active: String,
 }
 
+// ── Interactive terminals ───────────────────────────────────────────
+
+/// One interactive SSH terminal the user opened (see `crate::terminal`).
+/// Carries the host REFERENCE (owning plugin + its host record id) and the
+/// remote tmux session name it reattaches to — never a credential.
+/// `closed_at` set = the user closed it; such rows are hidden from the list.
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Debug, Clone)]
+#[diesel(table_name = terminals)]
+pub struct Terminal {
+    pub id: String,
+    pub user_id: String,
+    pub plugin_id: String,
+    pub host_id: String,
+    pub name: String,
+    /// `user@host:port` — identity only, for display.
+    pub host_label: String,
+    pub tmux_session: String,
+    /// Whether the remote shell runs inside tmux (survives restarts and
+    /// network drops). Learned on the first connect.
+    pub persistent: bool,
+    pub created_at: String,
+    pub last_active_at: String,
+    pub closed_at: Option<String>,
+}
+
 // ── Saved multi-session views ───────────────────────────────────────────
 
 #[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Debug, Clone)]

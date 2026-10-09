@@ -128,6 +128,7 @@ async fn build_fixture() -> Fixture {
         mcp_tokens: McpTokenRegistry::new(),
         push_service,
         remote_access: peckboard::service::remote_access::RemoteAccess::inert(),
+        terminals: peckboard::terminal::TerminalManager::inert(),
         tls: Arc::new(peckboard::state::TlsState::new()),
     });
     // The data dir has to outlive the state; the process is short-lived.

@@ -217,6 +217,21 @@ diesel::table! {
         last_active -> Text,
     }
 }
+diesel::table! {
+    terminals (id) {
+        id -> Text,
+        user_id -> Text,
+        plugin_id -> Text,
+        host_id -> Text,
+        name -> Text,
+        host_label -> Text,
+        tmux_session -> Text,
+        persistent -> Bool,
+        created_at -> Text,
+        last_active_at -> Text,
+        closed_at -> Nullable<Text>,
+    }
+}
 
 diesel::table! {
     session_views (id) {
@@ -749,6 +764,7 @@ diesel::joinable!(session_memories -> sessions (session_id));
 diesel::joinable!(agent_vars -> folders (folder_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
+diesel::joinable!(terminals -> users (user_id));
 diesel::joinable!(mfa_methods -> users (user_id));
 diesel::joinable!(mfa_recovery_codes -> users (user_id));
 diesel::joinable!(mfa_challenges -> users (user_id));
@@ -768,6 +784,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     push_subscriptions,
     queued_messages,
     announcements,
+    terminals,
     user_tabs,
     todos,
     repeating_tasks,

@@ -199,7 +199,14 @@ pub(crate) mod tests {
     ) -> Arc<AppState> {
         let provider_registry = Arc::new(crate::provider::registry::ProviderRegistry::new());
         let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        let plugins = Arc::new(crate::plugin::manager::PluginManager::empty());
+        let terminals = crate::terminal::TerminalManager::new(
+            db.clone(),
+            dir.to_path_buf(),
+            Arc::new(crate::terminal::PluginHostResolver::new(plugins.clone())),
+        );
         Arc::new(AppState {
+            terminals,
             background: Default::default(),
             plugin_ws_tickets: Default::default(),
             device_registry: Default::default(),
@@ -213,7 +220,7 @@ pub(crate) mod tests {
                 provider_send_timeout_secs: 300,
             },
             db,
-            plugins: Arc::new(crate::plugin::manager::PluginManager::empty()),
+            plugins,
             builtin_plugins: Arc::new(crate::plugin::builtin::BuiltinPluginRegistry::new()),
             jwt_secret: generate_jwt_secret(),
             ssh_vault_key: vec![0u8; 32],

@@ -230,7 +230,14 @@ pub async fn run_server(
         Arc::new(crate::service::remote_access::relay::RelayBackend),
     );
 
+    let terminals = crate::terminal::TerminalManager::new(
+        db.clone(),
+        config.data_dir.clone(),
+        Arc::new(crate::terminal::PluginHostResolver::new(plugins.clone())),
+    );
+
     let state = Arc::new(AppState {
+        terminals,
         background,
         plugin_ws_tickets: Default::default(),
         device_registry: Default::default(),

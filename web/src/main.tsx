@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
@@ -13,13 +13,25 @@ initAppearance()
 // "more content" indicators on every scroll container.
 initScrollIndicators()
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ErrorBoundary label="app">
-      <App />
-    </ErrorBoundary>
-  </StrictMode>,
-)
+const root = createRoot(document.getElementById('root')!)
+const render = (node: ReactNode) =>
+  root.render(
+    <StrictMode>
+      <ErrorBoundary label="app">{node}</ErrorBoundary>
+    </StrictMode>,
+  )
+
+// `/terminal/<id>` is a terminal's pop-out window: the shell alone, no app
+// chrome (see components/terminal/TerminalPopout.tsx). Loaded on demand so
+// xterm.js never weighs on the main app bundle.
+const popout = /^\/terminal\/([^/]+)\/?$/.exec(window.location.pathname)
+if (popout) {
+  void import('./components/terminal/TerminalPopout.tsx').then(({ default: TerminalPopout }) =>
+    render(<TerminalPopout terminalId={decodeURIComponent(popout[1])} />),
+  )
+} else {
+  render(<App />)
+}
 
 // Browsers refuse service workers on an untrusted cert (the self-signed
 // HTTPS port reached by IP), even after the user clicks through the

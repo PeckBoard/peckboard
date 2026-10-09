@@ -167,6 +167,9 @@ pub struct AppState {
     /// Remote access through the relay: per-device rendezvous loops and
     /// tunnel status. See [`crate::service::remote_access`].
     pub remote_access: Arc<crate::service::remote_access::RemoteAccess>,
+    /// Interactive SSH terminals' live state (connections, scrollback,
+    /// reconnect drivers). See [`crate::terminal`].
+    pub terminals: Arc<crate::terminal::TerminalManager>,
 }
 
 #[cfg(test)]

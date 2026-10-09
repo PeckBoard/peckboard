@@ -8,7 +8,6 @@ pub mod registry;
 pub mod session_control_auth;
 pub mod settings;
 pub mod ssh;
-pub mod ssh_term;
 pub mod todo_hook;
 
 // Untrusted plugins are WASM (Extism) from `<dataDir>/plugins/`.

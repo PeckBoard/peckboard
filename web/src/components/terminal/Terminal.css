@@ -1,0 +1,175 @@
+/* Interactive SSH terminals. The pane is the shell itself: it fills every
+   pixel it is given, no padding chrome, no input box. */
+
+.terminal-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  background: #0f1115;
+}
+
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0 8px 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--text2);
+  min-width: 0;
+}
+
+.terminal-bar-name {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.terminal-bar-host {
+  color: var(--text3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.terminal-bar-spacer {
+  flex: 1;
+}
+
+.terminal-bar-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.terminal-bar-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* Status pill: live / reconnecting / ended … */
+.terminal-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  color: var(--text3);
+}
+
+.terminal-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text3);
+}
+
+.terminal-status[data-phase='live']::before {
+  background: var(--success);
+}
+
+.terminal-status[data-phase='connecting']::before,
+.terminal-status[data-phase='reconnecting']::before {
+  background: var(--warning);
+}
+
+.terminal-status[data-phase='error']::before {
+  background: var(--danger);
+}
+
+.terminal-badge {
+  font-size: var(--text-xs);
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  white-space: nowrap;
+}
+
+.terminal-pane {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: #0f1115;
+}
+
+.terminal-pane-xterm {
+  position: absolute;
+  inset: 4px 0 0 6px;
+}
+
+.terminal-pane-xterm .xterm {
+  height: 100%;
+}
+
+.terminal-pane-xterm .xterm-viewport {
+  /* The app hides scrollbars globally; a terminal needs its own visible. */
+  scrollbar-width: thin;
+  scrollbar-color: #3b4252 transparent;
+}
+
+.terminal-pane-overlay {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(30, 33, 40, 0.94);
+  border: 1px solid #3b4252;
+  color: #e5e9f0;
+  font-size: var(--text-sm);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 5;
+  max-width: calc(100% - 32px);
+}
+
+.terminal-pane-overlay .btn-primary {
+  white-space: nowrap;
+}
+
+/* Pop-out window: the shell and nothing else. */
+.terminal-popout {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0f1115;
+}
+
+.terminal-popout .terminal-pane-xterm {
+  inset: 2px 0 0 4px;
+}
+
+.terminal-host-option-meta {
+  color: var(--text3);
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 768px) {
+  .terminal-bar-host {
+    display: none;
+  }
+}
