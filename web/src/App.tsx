@@ -29,6 +29,7 @@ import FoldersPage from './components/ManageFoldersModal'
 import RepoBrowserPage from './components/RepoBrowserPage'
 import ConfirmDialog from './components/ConfirmDialog'
 import RenameModal from './components/RenameModal'
+import SessionMemoryModal from './components/SessionMemoryModal'
 import ReportBrowser from './components/ReportBrowser'
 import ReportView from './components/ReportView'
 import PlanView from './components/PlanView'
@@ -394,6 +395,7 @@ function App() {
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null)
   const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
   const [confirmTerminateSessionId, setConfirmTerminateSessionId] = useState<string | null>(null)
+  const [memorySessionId, setMemorySessionId] = useState<string | null>(null)
   const [confirmDeleteRepeatingTaskId, setConfirmDeleteRepeatingTaskId] = useState<string | null>(
     null,
   )
@@ -1219,6 +1221,11 @@ function App() {
       flags?.isRepeatingTaskSession ?? tab?.isRepeatingTaskSession ?? !!s?.repeating_task_id
     return [
       { label: 'Rename', onSelect: () => handleRenameItem('session', id) },
+      {
+        label: 'Memory',
+        onSelect: () => setMemorySessionId(id),
+        testId: 'session-menu-memory',
+      },
       {
         label: 'Auto-switch model',
         hint: sessionAutoswitchOn(id) ? 'On' : 'Off',
@@ -2210,6 +2217,9 @@ function App() {
           onConfirm={confirmDeleteRepeatingTask}
           onCancel={() => setConfirmDeleteRepeatingTaskId(null)}
         />
+      )}
+      {memorySessionId && (
+        <SessionMemoryModal sessionId={memorySessionId} onClose={() => setMemorySessionId(null)} />
       )}
       {renameSpec && (
         <RenameModal

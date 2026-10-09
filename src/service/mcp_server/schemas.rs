@@ -156,6 +156,7 @@ fn read_only_tool_names() -> &'static [&'static str] {
         "web_get_part",
         "parse_web",
         "search_web",
+        "memory_list",
         "search_files",
         "list_files",
         "read_file",
@@ -179,6 +180,8 @@ fn read_only_tool_names() -> &'static [&'static str] {
 fn destructive_tool_names() -> &'static [&'static str] {
     &[
         "delete_plan",
+        "memory_remove",
+        "memory_compact",
         "delete_card",
         "delete_project",
         "delete_repeating_task",
@@ -246,1809 +249,1878 @@ pub fn tool_annotations(name: &str) -> serde_json::Value {
 
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
-        McpToolDef {
-            name: "complete_step".into(),
-            description: "Finish the CURRENT workflow step and hand off to the next step's worker. Advances the card EXACTLY ONE step — does NOT finish the card. Use ONLY when real work remains for a later step. If ALL the card's work is done, call `finish_card` instead; `complete_step` then would strand the card in an early step and block every dependent card.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "handoff_context": {
-                        "type": "string",
-                        "description": "Context for the next step's worker"
-                    }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "finish_card".into(),
-            description: "Mark the ENTIRE card's work complete. From a working step (even `backlog`/`in_progress`) the card moves to the shared `review` step, where a DIFFERENT session independently verifies it before `done` (projects with review turned off, and the reviewer itself, land straight on `done`, unblocking dependent cards). Use whenever all the card's work is complete. Do NOT use `complete_step` to finish a card.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "Final summary: what was done, where (files, branch, commits), and how it was verified — the reviewer starts from this"
-                    }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "wont_do_card".into(),
-            description: "Mark the card won't-do. Stops all work on it.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Why the card can't or shouldn't be done"
-                    }
-                },
-                "required": ["reason"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "ask_user".into(),
-            description: "Ask the user questions (multiple choice or fill-in-the-blank). UI renders interactive controls; returns when the user submits.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "questions": {
-                        "type": "array",
-                        "description": "Questions to ask",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "question": { "type": "string", "description": "The question text" },
-                                "header": { "type": "string", "description": "Category label (e.g. Setup, Input, Configuration)" },
-                                "multiSelect": { "type": "boolean", "description": "true = checkboxes (multi), false = radio (single). Default false." },
-                                "options": {
-                                    "type": "array",
-                                    "description": "Provide for multiple choice; omit for free-form text.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "label": { "type": "string", "description": "Option text" },
-                                            "description": { "type": "string", "description": "Help text below the label" }
-                                        },
-                                        "required": ["label", "description"]
+            McpToolDef {
+                name: "complete_step".into(),
+                description: "Finish the CURRENT workflow step and hand off to the next step's worker. Advances the card EXACTLY ONE step — does NOT finish the card. Use ONLY when real work remains for a later step. If ALL the card's work is done, call `finish_card` instead; `complete_step` then would strand the card in an early step and block every dependent card.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "handoff_context": {
+                            "type": "string",
+                            "description": "Context for the next step's worker"
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "finish_card".into(),
+                description: "Mark the ENTIRE card's work complete. From a working step (even `backlog`/`in_progress`) the card moves to the shared `review` step, where a DIFFERENT session independently verifies it before `done` (projects with review turned off, and the reviewer itself, land straight on `done`, unblocking dependent cards). Use whenever all the card's work is complete. Do NOT use `complete_step` to finish a card.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Final summary: what was done, where (files, branch, commits), and how it was verified — the reviewer starts from this"
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "wont_do_card".into(),
+                description: "Mark the card won't-do. Stops all work on it.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": "Why the card can't or shouldn't be done"
+                        }
+                    },
+                    "required": ["reason"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "ask_user".into(),
+                description: "Ask the user questions (multiple choice or fill-in-the-blank). UI renders interactive controls; returns when the user submits.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "description": "Questions to ask",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": { "type": "string", "description": "The question text" },
+                                    "header": { "type": "string", "description": "Category label (e.g. Setup, Input, Configuration)" },
+                                    "multiSelect": { "type": "boolean", "description": "true = checkboxes (multi), false = radio (single). Default false." },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "Provide for multiple choice; omit for free-form text.",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": { "type": "string", "description": "Option text" },
+                                                "description": { "type": "string", "description": "Help text below the label" }
+                                            },
+                                            "required": ["label", "description"]
+                                        }
                                     }
-                                }
-                            },
-                            "required": ["question", "header"]
+                                },
+                                "required": ["question", "header"]
+                            }
                         }
-                    }
-                },
-                "required": ["questions"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "propose_plan".into(),
-            description: "Save (or revise) your plan for the current work as Markdown (may include ```mermaid diagrams and other visuals). The plan persists across model switches, termination, and session clears, and is viewable from the 3-dots menu. Call again to revise it (bumps the version).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Short plan title (optional; defaults to 'Plan')."
                     },
-                    "markdown": {
-                        "type": "string",
-                        "description": "The plan body in Markdown. Include diagrams as ```mermaid fenced blocks and other visuals for human review."
-                    }
-                },
-                "required": ["markdown"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "delete_plan".into(),
-            description: "Delete the calling session's plan. Use ONLY once the plan has served its purpose — you verified the implementation covers every plan item — or the user asks to discard it. Errors if the session has no plan.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "get_review_doc".into(),
-            description: "Re-read the document under review: its current version, the FULL markdown, and every annotation still open. Only review sessions have this tool. The same content is injected ahead of each pass, so call this when you need it again — after your own revision, or when the injected copy may be stale.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "submit_review_revision".into(),
-            description: "Revise the document under review. `markdown` is the COMPLETE replacement document — never a patch or a fragment; anything omitted is deleted. Keep every line the annotations did not ask you to change byte-identical. This is the ONLY way to change the document: never edit the source file directly. Saves a new version (the user sees a diff) and resolves the annotations you report.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "markdown": {
-                        "type": "string",
-                        "description": "The COMPLETE revised document in Markdown. Full replacement text, not a diff or excerpt."
+                    "required": ["questions"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "propose_plan".into(),
+                description: "Save (or revise) your plan for the current work as Markdown (may include ```mermaid diagrams and other visuals). The plan persists across model switches, termination, and session clears, and is viewable from the 3-dots menu. Call again to revise it (bumps the version).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Short plan title (optional; defaults to 'Plan')."
+                        },
+                        "markdown": {
+                            "type": "string",
+                            "description": "The plan body in Markdown. Include diagrams as ```mermaid fenced blocks and other visuals for human review."
+                        }
                     },
-                    "note": {
-                        "type": "string",
-                        "description": "One short line naming what changed, shown in the version history (e.g. 'tightened the intro, fixed the port number')."
+                    "required": ["markdown"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "delete_plan".into(),
+                description: "Delete the calling session's plan. Use ONLY once the plan has served its purpose — you verified the implementation covers every plan item — or the user asks to discard it. Errors if the session has no plan.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "memory_add".into(),
+                description: "Save one durable note to this session's memory pool. The pool is injected into your system prompt (as a 'Session memory' section listing every entry with its id) whenever the session starts fresh — after a clear, a resume, or a context compaction — so it is the ONLY thing that survives those. Use it for facts you will need again and cannot re-derive cheaply: user preferences and conventions, decisions and their reasons, project facts (ports, paths, accounts, names), and open commitments. Do NOT store transient progress, tool output, or anything already in the repo. Keep each entry a short self-contained sentence or two; one fact per entry. Call memory_compact when the pool grows past a dozen entries or starts repeating itself.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The note to remember (short, self-contained, one fact)."
+                        }
                     },
-                    "resolutions": {
-                        "type": "array",
-                        "description": "How you handled each open annotation. Report every one you addressed; anything left out stays open for the next pass.",
-                        "items": {
+                    "required": ["content"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "memory_list".into(),
+                description: "List this session's memory pool: every entry with its id, plus counts and size limits. Use it to find ids for memory_update / memory_remove, or to re-read the pool when the injected 'Session memory' section may be stale (you added entries this conversation).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "memory_update".into(),
+                description: "Rewrite one memory entry in place (same id, new content). Use when a remembered fact changed — a preference flipped, a decision was revised — instead of adding a contradicting entry. Ids come from the injected 'Session memory' section or memory_list; only this session's ids are accepted.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Id of the entry to rewrite." },
+                        "content": { "type": "string", "description": "The replacement note." }
+                    },
+                    "required": ["id", "content"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "memory_remove".into(),
+                description: "Delete memory entries by id. Use for notes that are no longer true or no longer needed. All-or-nothing: an id that is not in this session's pool fails the call and nothing is removed.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Ids of the entries to delete."
+                        }
+                    },
+                    "required": ["ids"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "memory_compact".into(),
+                description: "Replace the ENTIRE memory pool with a condensed set of entries, atomically (one transaction: either every new entry is saved and every old one is gone, or nothing changes). Use when the pool has grown large, repeats itself, or holds stale notes: read it (memory_list), merge related facts, drop obsolete ones, and pass the result. Every old entry not restated here is lost, so carry forward everything still true. Pass an empty array to forget everything.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "entries": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "The complete new pool, one note per string, in the order they should be listed."
+                        }
+                    },
+                    "required": ["entries"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "get_review_doc".into(),
+                description: "Re-read the document under review: its current version, the FULL markdown, and every annotation still open. Only review sessions have this tool. The same content is injected ahead of each pass, so call this when you need it again — after your own revision, or when the injected copy may be stale.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "submit_review_revision".into(),
+                description: "Revise the document under review. `markdown` is the COMPLETE replacement document — never a patch or a fragment; anything omitted is deleted. Keep every line the annotations did not ask you to change byte-identical. This is the ONLY way to change the document: never edit the source file directly. Saves a new version (the user sees a diff) and resolves the annotations you report.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "markdown": {
+                            "type": "string",
+                            "description": "The COMPLETE revised document in Markdown. Full replacement text, not a diff or excerpt."
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "One short line naming what changed, shown in the version history (e.g. 'tightened the intro, fixed the port number')."
+                        },
+                        "resolutions": {
+                            "type": "array",
+                            "description": "How you handled each open annotation. Report every one you addressed; anything left out stays open for the next pass.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "comment_id": {
+                                        "type": "string",
+                                        "description": "Id of the annotation, as given in the injected list or by get_review_doc."
+                                    },
+                                    "action": {
+                                        "type": "string",
+                                        "enum": ["fixed", "declined", "answered"],
+                                        "description": "fixed = the document now satisfies it; declined = you deliberately did not change it; answered = it was a question, answered in the note."
+                                    },
+                                    "note": {
+                                        "type": "string",
+                                        "description": "Why you declined, or the answer to the question. Optional for 'fixed'."
+                                    }
+                                },
+                                "required": ["comment_id", "action"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["markdown", "note"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "create_card".into(),
+                description: "Create a card. Uses current project context, or pass project_id explicitly.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Project ID (optional if session has project context)"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Card title"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Card description / instructions"
+                        },
+                        "priority": {
+                            "type": "integer",
+                            "description": "Priority (lower = higher)"
+                        },
+                        "workflow": {
+                            "type": "string",
+                            "description": "Optional workflow override"
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Optional model override (e.g. claude-opus-4-8)"
+                        },
+                        "effort": {
+                            "type": "string",
+                            "description": "Effort level: low, medium, high, xhigh, max"
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Card ids this card depends on. Work starts only once every dependency is 'done'. Must be existing same-project cards."
+                        },
+                        "blocked": {
+                            "type": "boolean",
+                            "description": "Create the card already blocked; no worker picks it up until a human unblocks. Defaults true when `block_reason` is given."
+                        },
+                        "block_reason": {
+                            "type": "string",
+                            "description": "Reason blocked at creation (e.g. 'needs human triage'). Implies blocked=true unless `blocked` is set explicitly."
+                        },
+                        "model_autoswitch": {
+                            "type": "boolean",
+                            "description": "Cost-aware model auto-switch opt-in for workers on this card. Omit to inherit the default (ON — cards spawn workers)."
+                        },
+                        "system_prompt_name": {
+                            "type": "string",
+                            "description": "Name of a library system prompt to attach (empty string clears)."
+                        }
+                    },
+                    "required": ["title", "description"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_cards".into(),
+                description: "List cards in a project. Requires project_id (or worker-session project context) — without it returns NO cards, not every card in PeckBoard. Optional status filter. Cards include a description summary, not full text.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": { "type": "string", "description": "Project ID. Required unless the session has project context; without it, no cards returned." },
+                        "status": { "type": "string", "description": "Workflow step filter (e.g. backlog, in_progress, done, wont_do)." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_card_dependencies".into(),
+                description: "List a card's direct dependencies — cards it must wait on before pickup. Each entry reports whether it is 'done'.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": { "type": "string", "description": "Card whose dependencies to list" }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "get_card_dependency_tree".into(),
+                description: "Resolve a card's full transitive dependency tree (nested), plus whether every transitive prerequisite is 'done'.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": { "type": "string", "description": "Card to resolve the tree for" }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_projects".into(),
+                description: "List all projects.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_workflows".into(),
+                description: "List workflow definitions. Each step includes built-in `instructions`. With `project_id`, steps with project overrides also include `project_instructions` — text the project appends to the built-in prompt.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Optional project id; merges in that project's per-step `project_instructions` overrides."
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "set_workflow_instructions".into(),
+                description: "Set (or clear) the project-specific instructions appended below a workflow step's built-in prompt (both apply). Empty `instructions` clears the override.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Project to edit (optional if session has project context)."
+                        },
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Workflow id (must exist in `list_workflows`)."
+                        },
+                        "step": {
+                            "type": "string",
+                            "description": "Step name (e.g. `in_progress`). Must run a worker — terminal steps (`done`/`backlog`) rejected."
+                        },
+                        "instructions": {
+                            "type": "string",
+                            "description": "Text appended to the built-in step prompt. Empty string clears."
+                        }
+                    },
+                    "required": ["workflow_id", "step", "instructions"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "write_report".into(),
+                description: "Write a report or note to the event log for human review.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Report title"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Report body (markdown)"
+                        }
+                    },
+                    "required": ["title", "body"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "attach_report_file".into(),
+                description: "Attach a file to a report folder. Base64 data, allowlisted extensions, 10MB cap.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "folder": {
+                            "type": "string",
+                            "description": "Report folder name (e.g. date string)"
+                        },
+                        "file": {
+                            "type": "string",
+                            "description": "File base name (without extension)"
+                        },
+                        "data": {
+                            "type": "string",
+                            "description": "Base64-encoded file content"
+                        },
+                        "extension": {
+                            "type": "string",
+                            "description": "File extension (e.g. png, pdf, csv, json, txt, md, html, svg, jpg, jpeg, gif, webp)"
+                        }
+                    },
+                    "required": ["folder", "file", "data", "extension"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "update_card".into(),
+                description: "Update card fields. Only passed fields change; omit to leave as-is.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "Card ID"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "New card title"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "New card description"
+                        },
+                        "priority": {
+                            "type": "integer",
+                            "description": "New priority value"
+                        },
+                        "step": {
+                            "type": "string",
+                            "description": "New workflow step"
+                        },
+                        "workflow": {
+                            "type": "string",
+                            "description": "New workflow id (must be known). Pass `step` too if the current step isn't in the new workflow."
+                        },
+                        "model": {
+                            "type": ["string", "null"],
+                            "description": "Model override (e.g. claude-opus-4-8), or null to clear (falls back to project/host default)."
+                        },
+                        "effort": {
+                            "type": ["string", "null"],
+                            "description": "Effort (low, medium, high, xhigh, max), or null to clear."
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "REPLACES the dependency set (same-project cards, no cycles). Empty array clears all; omit to leave unchanged."
+                        },
+                        "blocked": {
+                            "type": "boolean",
+                            "description": "Whether the card is blocked"
+                        },
+                        "block_reason": {
+                            "type": "string",
+                            "description": "Reason the card is blocked"
+                        },
+                        "model_autoswitch": {
+                            "type": ["boolean", "null"],
+                            "description": "Cost-aware model auto-switch opt-in: true/false to force, null to reset to inherit the default."
+                        },
+                        "system_prompt_name": {
+                            "type": "string",
+                            "description": "Name of a library system prompt to attach (empty string clears)."
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "update_project".into(),
+                description: "Update fields on an existing project.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Project ID"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "New project name"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "New project context"
+                        },
+                        "worker_count": {
+                            "type": "integer",
+                            "description": "New worker count"
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "New project status"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_folders".into(),
+                description: "List all folders (working directories) available for projects.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "create_folder".into(),
+                description: "Register a folder (working directory) for projects. create_if_missing=true also creates the directory on disk.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Display name for the folder"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute filesystem path to the folder"
+                        },
+                        "create_if_missing": {
+                            "type": "boolean",
+                            "description": "Create the directory on disk if missing (default false)"
+                        }
+                    },
+                    "required": ["name", "path"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "create_project".into(),
+                description: "Create a project in a folder. Give folder_id (existing) OR folder_path (looked up by path; registers a new folder if none matches).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Project name"
+                        },
+                        "folder_id": {
+                            "type": "string",
+                            "description": "Folder ID (use this OR folder_path)"
+                        },
+                        "folder_path": {
+                            "type": "string",
+                            "description": "Looked up by path; if none matches, registers a new folder (creates dir on disk if create_folder_if_missing=true)"
+                        },
+                        "folder_name": {
+                            "type": "string",
+                            "description": "Display name for a newly registered folder (default: basename of folder_path)"
+                        },
+                        "create_folder_if_missing": {
+                            "type": "boolean",
+                            "description": "When folder_path is given: create directory on disk if missing (default false)"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Project context / instructions"
+                        },
+                        "worker_count": {
+                            "type": "integer",
+                            "description": "Concurrent workers (default 1)"
+                        }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "pause_project".into(),
+                description: "Pause a project; no new work is scheduled.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Project ID"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "resume_project".into(),
+                description: "Resume a paused project; scheduling restarts.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Project ID"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "delete_project".into(),
+                description: "Delete a project PERMANENTLY. Cascades: removes all cards, worker sessions, and their events.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Project ID"
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "delete_card".into(),
+                description: "Delete a card permanently.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "Card ID"
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "move_card_to_done".into(),
+                description: "Move a card to the done step.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "Card ID"
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "move_card_to_wont_do".into(),
+                description: "Move a card to won't-do, optionally with a reason.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": {
+                            "type": "string",
+                            "description": "Card ID"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Reason the card won't be done"
+                        }
+                    },
+                    "required": ["card_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "notify_workers".into(),
+                description: "Broadcast to all other running workers in the project (file changes, shared state, coordination). Delivered before their next action.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Message to broadcast (e.g. 'Modified src/auth/mod.rs — added JWT middleware')"
+                        },
+                        "files_changed": {
+                            "type": "array",
+                            "description": "File paths modified/created/deleted",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "fetch_url".into(),
+                description: "Fetch a URL via peckboard's server — bypasses bot protection; use when WebFetch is 403/blocked. Returns page text.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "URL to fetch"
+                        },
+                        "max_length": {
+                            "type": "integer",
+                            "description": "Max response length in chars (default 10000)"
+                        }
+                    },
+                    "required": ["url"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_models".into(),
+                description: "List AI models across all providers (incl. plugins) — the valid model IDs for card/project config.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "share_finding".into(),
+                description: "Share a finding with all running workers — anything valuable: research, data patterns, bugs, decisions, constraints. Broadcasts the summary; workers can fetch full detail and ask follow-ups.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": { "type": "string", "description": "Brief summary (broadcast to all workers)" },
+                        "detail": { "type": "string", "description": "Full detail (available on request via get_finding_details)" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags for categorization" }
+                    },
+                    "required": ["summary", "detail"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "get_finding_details".into(),
+                description: "Get the full detail of a finding shared by another worker.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "finding_id": { "type": "string", "description": "Finding event ID" }
+                    },
+                    "required": ["finding_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "send_worker_message".into(),
+                description: "Direct-message another worker session; queued, delivered on their next turn. Good for finding follow-ups.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "target_session_id": { "type": "string", "description": "Target worker's session ID" },
+                        "message": { "type": "string", "description": "Message text" }
+                    },
+                    "required": ["target_session_id", "message"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_project_reports".into(),
+                description: "List reports written by workers in this project (titles, dates, paths).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "read_report".into(),
+                description: "Read a report's full content by folder and file.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "folder": { "type": "string", "description": "Report folder (e.g. 2026-06-07)" },
+                        "file": { "type": "string", "description": "Report filename (e.g. my-report.md)" }
+                    },
+                    "required": ["folder", "file"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "read_worker_session".into(),
+                description: "Read the recent event tail of another same-scope session — see what a worker did and its tool calls. For specific events (errors, a keyword) without the whole transcript, use search_sessions. A session outside your scope reads as not found; reach those with the session-control tool read_session, which asks the user for approval.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "Session ID to read" },
+                        "last_n": { "type": "integer", "description": "Recent events to return (default 50, max 200)" }
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "spawn_subagent".into(),
+                description: "Spawn a subagent: a child session (works on every provider) that runs the given task in the background and posts its final message back into THIS session automatically when it finishes. Use it to split large tasks and run independent parts in parallel (max 25 in flight). Pick the child's model deliberately (model routing rules apply) and a task-matched system_prompt_name. Subagents cannot spawn subagents. Results arrive on their own — do not poll; peek with read_worker_session if needed.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Short label for the subagent (its session shows as \"sub: <name>\")." },
+                        "prompt": { "type": "string", "description": "The task. Make it self-contained: the child shares your project folder but not your conversation." },
+                        "model": { "type": "string", "description": "Model id for the child (see list_models). Default: your model." },
+                        "effort": { "type": "string", "description": "Effort level for the child. Default: your effort." },
+                        "system_prompt_name": { "type": "string", "description": "Library prompt matching the work (see list_system_prompts: research / implement / review / debug / docs …)." }
+                    },
+                    "required": ["name", "prompt"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "upgrade_plugin".into(),
+                description: "Install/upgrade a Peckboard plugin from the registry by id (e.g. \"common-tools\"): downloads the registry version, verifies checksum, swaps it in. If the hook set changed, stays pending until an operator re-approves.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "plugin_id": { "type": "string", "description": "Registry plugin id (e.g. \"common-tools\")." },
+                        "repository": { "type": "string", "description": "Optional registry.json URL to limit to one repository." }
+                    },
+                    "required": ["plugin_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "set_session_system_prompt".into(),
+                description: "Set (or clear) another session's system prompt. FULLY REPLACES the standing prompt; takes effect on its next agent run. Omit / pass null to clear to the default. Works on any reachable session (same folder, or same project for worker tokens).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "Session whose prompt to edit." },
+                        "system_prompt": { "type": "string", "description": "Full prompt text. Omit or pass null to clear to the default." },
+                        "name": { "type": "string", "description": "Name of a saved prompt from the system-prompt library to apply instead of raw text (use list_system_prompts to see options). Ignored when system_prompt is given." }
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_system_prompts".into(),
+                description: "List the named system prompts in the library (name + a one-line summary of each). Use a name with set_session_system_prompt or switch_session_model to steer a session toward a kind of work (implement / research / debug / review / docs / …).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "get_model_guidance".into(),
+                description: "Cost-aware auto-switch guidance for THIS session: your current model + tier, the cheaper same-provider+account candidates you may downgrade to, the account's plan-usage snapshot with a recommendation, the named system prompts, and how many switches you've used. Call it after writing your implementation plan to decide whether a cheaper model can handle the work.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "switch_session_model".into(),
+                description: "Switch THIS session to another model of the SAME provider+account (from get_model_guidance's candidates). Downgrade when the plan is simple enough for the cheaper model to implement without problems; you may also switch UP if the cheap model hits a wall. Requires a `rationale`. Optionally apply a focusing `system_prompt_name` from the library. Set `compact: true` when switching UP after finishing the work: instead of a plain resume, the outgoing model writes a summary and the incoming model resumes on a compacted context (use it with a `review` system_prompt_name so the stronger model reviews the work). Takes effect when the session resumes on the new model — wrap up your turn after calling it. Capped per session.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "model": { "type": "string", "description": "Target model id (provider:model[@account]), same provider+account as now." },
+                        "rationale": { "type": "string", "description": "Why this switch is safe/needed (recorded in the event log and the report)." },
+                        "system_prompt_name": { "type": "string", "description": "Optional: a named library prompt matching the work type (implement/research/debug/review/docs)." },
+                        "compact": { "type": "boolean", "description": "Optional (default false). If true, compact before switching: the outgoing model writes a summary and the new model resumes on that compacted context instead of the full transcript. Use when upgrading back for a review after the work is done." }
+                    },
+                    "required": ["model", "rationale"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_sessions".into(),
+                description: "List every readable session (chat/worker/expert) — folder-wide for chat sessions, project-wide inside a project. Entries: session_id, name, kind, last activity.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "search_sessions".into(),
+                description: "Search session event history WITHOUT reading whole transcripts — keyword grep, errors-only, or event-kind filter. Any session kind; omit session_id to search all readable sessions at once. Returns matching events tagged with session_id/session_name. At least one of query, errors_only, kinds required. list_sessions finds ids; read_worker_session gives a full tail.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "Session to search. Omit to search all readable sessions." },
+                        "query": { "type": "string", "description": "Case-insensitive substring over event text, tool names, inputs, error messages." },
+                        "errors_only": { "type": "boolean", "description": "Only error/failure events: 'error' events, failed tool calls, crashed runs (default false)." },
+                        "kinds": { "type": "array", "items": { "type": "string" }, "description": "Restrict to these event kinds, e.g. [\"agent-tool-end\", \"agent-text\"]." },
+                        "limit": { "type": "integer", "description": "Max matches (default 50, max 200)." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_worker_sessions".into(),
+                description: "List project worker sessions with card titles and status — find sessions to read or message.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_repeating_tasks".into(),
+                description: "List repeating tasks in this session's folder (non-project sessions only). Each has a schedule + prompt that fires a fresh session per tick.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "create_repeating_task".into(),
+                description: "Create a repeating task in this session's folder (non-project sessions only). Schedule: interval ({\"minutes\": N}), daily ({\"hour\": H, \"minute\": M}), weekly ({\"weekday\": 0-6 Mon=0, \"hour\": H, \"minute\": M}).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Display name" },
+                        "description": { "type": "string", "description": "Informational description (optional)" },
+                        "prompt": { "type": "string", "description": "Prompt sent to the new session on each run" },
+                        "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
+                        "schedule_value": { "type": "object", "description": "Schedule parameters per kind" },
+                        "model": { "type": "string", "description": "Override model id (optional)" },
+                        "effort": { "type": "string", "description": "Override effort level (optional)" },
+                        "enabled": { "type": "boolean", "description": "Whether the schedule fires (default true)" }
+                    },
+                    "required": ["name", "prompt", "schedule_kind", "schedule_value"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "update_repeating_task".into(),
+                description: "Edit a repeating task (non-project sessions only). Pass only fields to change.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "prompt": { "type": "string" },
+                        "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
+                        "schedule_value": { "type": "object" },
+                        "model": { "type": ["string", "null"] },
+                        "effort": { "type": ["string", "null"] },
+                        "enabled": { "type": "boolean" }
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "delete_repeating_task".into(),
+                description: "Delete a repeating task (non-project sessions only). Spawned sessions are preserved but detached.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" }
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "math".into(),
+                description: "Evaluate an arithmetic expression; returns the number. Supports + - * / %, ^/** (power), parentheses, unary minus, pi/e/tau, and abs, sqrt, sin, cos, tan, asin, acos, atan, ln, log/log10, log2, exp, floor, ceil, round, sign, min, max, pow.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "expression": {
+                                                    "type": "string",
+                                                    "description": "Expression, e.g. \"sqrt(2) * (3 + 4)^2\"."
+                                    }
+                    },
+                    "required": [
+                                    "expression"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "search_web".into(),
+                description: "Search the public web (DuckDuckGo); returns top results as {title, url, snippet}. Use when you lack a URL, then fetch_web/parse_web a result url. Ranked results only — does NOT fetch pages.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "query": {
+                                                    "type": "string",
+                                                    "description": "Search query."
+                                    },
+                                    "max_results": {
+                                                    "type": "integer",
+                                                    "description": "Result count (default 10, max 25)."
+                                    }
+                    },
+                    "required": [
+                                    "query"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "fetch_web".into(),
+                description: "Fetch a public http(s) URL (GET/HEAD) and STORE the body — returns a compact reference + short preview, not the whole page. Private/loopback hosts blocked; redirects not followed (Location surfaced as redirect_location). Read parts via web_get_part with the reference.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "url": {
+                                                    "type": "string",
+                                                    "description": "Absolute http(s) URL to fetch."
+                                    },
+                                    "method": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                                    "GET",
+                                                                    "HEAD"
+                                                    ],
+                                                    "description": "HTTP method (default GET)."
+                                    },
+                                    "headers": {
+                                                    "type": "object",
+                                                    "description": "Optional extra request headers (string→string).",
+                                                    "additionalProperties": {
+                                                                    "type": "string"
+                                                    }
+                                    }
+                    },
+                    "required": [
+                                    "url"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "web_get_part".into(),
+                description: "Read part of a page stored by fetch_web/parse_web, by reference. Modes: 'info' (url, status, content_type, title, length, line_count), 'lines' (start_line + line_count), 'slice' (offset + length chars), 'search' (query → matching line numbers + snippets).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "reference": {
+                                                    "type": "string",
+                                                    "description": "Reference id returned by fetch_web/parse_web."
+                                    },
+                                    "mode": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                                    "info",
+                                                                    "lines",
+                                                                    "slice",
+                                                                    "search"
+                                                    ],
+                                                    "description": "What to return (default info)."
+                                    },
+                                    "start_line": {
+                                                    "type": "integer",
+                                                    "description": "lines mode: 1-based first line."
+                                    },
+                                    "line_count": {
+                                                    "type": "integer",
+                                                    "description": "lines mode: how many lines (default 100)."
+                                    },
+                                    "offset": {
+                                                    "type": "integer",
+                                                    "description": "slice mode: 0-based character offset."
+                                    },
+                                    "length": {
+                                                    "type": "integer",
+                                                    "description": "slice mode: number of characters (default 4000)."
+                                    },
+                                    "query": {
+                                                    "type": "string",
+                                                    "description": "search mode: substring to find."
+                                    },
+                                    "case_insensitive": {
+                                                    "type": "boolean",
+                                                    "description": "search mode: case-insensitive (default true)."
+                                    },
+                                    "max_matches": {
+                                                    "type": "integer",
+                                                    "description": "search mode: cap on matches (default 30)."
+                                    }
+                    },
+                    "required": [
+                                    "reference"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "parse_web".into(),
+                description: "Convert HTML to readable text; extract title, headings, links. Pass `url` (fetched now) or `reference` from a prior fetch_web. Returns structure inline + a text_reference readable via web_get_part.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "url": {
+                                                    "type": "string",
+                                                    "description": "Absolute http(s) URL to fetch and parse."
+                                    },
+                                    "reference": {
+                                                    "type": "string",
+                                                    "description": "Reference of an already-fetched page to parse instead of fetching."
+                                    }
+                    },
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "search_files".into(),
+                description: "Search project-folder file contents for a literal string or regex; returns matching paths, line numbers, line text. Build/vendor/hidden dirs skipped.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "query": {
+                                                    "type": "string",
+                                                    "description": "Text or regex to search for."
+                                    },
+                                    "regex": {
+                                                    "type": "boolean",
+                                                    "description": "Treat query as regex (default false = literal)."
+                                    },
+                                    "case_insensitive": {
+                                                    "type": "boolean",
+                                                    "description": "Case-insensitive match (default false)."
+                                    },
+                                    "path_contains": {
+                                                    "type": "string",
+                                                    "description": "Only search files whose path contains this substring."
+                                    },
+                                    "max_results": {
+                                                    "type": "integer",
+                                                    "description": "Cap on returned matches (default 200)."
+                                    }
+                    },
+                    "required": [
+                                    "query"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "list_files".into(),
+                description: "List project-folder files (relative path + byte size); optional path-substring filter.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "path_contains": {
+                                                    "type": "string",
+                                                    "description": "Only list files whose path contains this substring."
+                                    },
+                                    "max": {
+                                                    "type": "integer",
+                                                    "description": "Cap on returned files (default 1000)."
+                                    }
+                    },
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "read_file".into(),
+                description: "Read a UTF-8 file in the project folder. Targeted reads ENFORCED: whole-file only ≤400 lines, windows (start_line + line_count) ≤600 lines — larger reads are rejected; locate the range first with file_outline / read_symbol / search_files. Returns the content `hash` — keep it for edit_file's original_hash. Path project-relative, inside the folder.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "path": {
+                                                    "type": "string",
+                                                    "description": "Project-relative file path."
+                                    },
+                                    "start_line": {
+                                                    "type": "integer",
+                                                    "description": "1-based first line of an optional window."
+                                    },
+                                    "line_count": {
+                                                    "type": "integer",
+                                                    "description": "Number of lines to return from start_line (default 200, max 600)."
+                                    }
+                    },
+                    "required": [
+                                    "path"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "write_file".into(),
+                description: "Write (or append) a UTF-8 file in the project folder. For CREATING files or full rewrites — to modify existing, prefer edit_file (targeted, hash-guarded). Overwrites by default; append=true appends. Parent dirs created unless create_dirs=false. Returns `hash` for edit_file. Path project-relative, inside the folder.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "path": {
+                                                    "type": "string",
+                                                    "description": "Project-relative file path to write."
+                                    },
+                                    "content": {
+                                                    "type": "string",
+                                                    "description": "The full text to write (or to append when append=true)."
+                                    },
+                                    "append": {
+                                                    "type": "boolean",
+                                                    "description": "Append to the file instead of overwriting (default false)."
+                                    },
+                                    "create_dirs": {
+                                                    "type": "boolean",
+                                                    "description": "Create missing parent directories (default true)."
+                                    }
+                    },
+                    "required": [
+                                    "path",
+                                    "content"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "edit_file".into(),
+                description: "Modify an existing UTF-8 file with targeted insert/update/delete ops instead of rewriting. Hash-guarded: pass the `hash` from read_file/file_outline/read_symbol/write_file/a prior edit_file as original_hash — on mismatch the edit is rejected and the current hash reported (re-read and retry). Line/column numbers are 1-based and address the file BEFORE this call's edits (ranges must not overlap). Omit columns for whole-line ops; give columns for within-line edits (chars; end_column exclusive). Returns the new `hash` for your next edit.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "path": {
+                                                    "type": "string",
+                                                    "description": "Project-relative path of an existing file."
+                                    },
+                                    "original_hash": {
+                                                    "type": "string",
+                                                    "description": "Content hash as last read; proves you're editing the expected version."
+                                    },
+                                    "edits": {
+                                                    "type": "array",
+                                                    "description": "Ops to apply, each addressed against the original file.",
+                                                    "items": {
+                                                                    "type": "object",
+                                                                    "properties": {
+                                                                                    "op": {
+                                                                                                    "type": "string",
+                                                                                                    "enum": [
+                                                                                                                    "insert",
+                                                                                                                    "update",
+                                                                                                                    "delete"
+                                                                                                    ],
+                                                                                                    "description": "What to do."
+                                                                                    },
+                                                                                    "line": {
+                                                                                                    "type": "integer",
+                                                                                                    "description": "insert: target line. Without `column`, `text` becomes new line(s) BEFORE this line (total_lines+1 appends at EOF). With `column`, inserted inside the line at that character position."
+                                                                                    },
+                                                                                    "column": {
+                                                                                                    "type": "integer",
+                                                                                                    "description": "insert only: 1-based character position within `line`."
+                                                                                    },
+                                                                                    "start_line": {
+                                                                                                    "type": "integer",
+                                                                                                    "description": "update/delete: first line of the range."
+                                                                                    },
+                                                                                    "start_column": {
+                                                                                                    "type": "integer",
+                                                                                                    "description": "update/delete: optional 1-based start character (inclusive). Provide both columns or neither."
+                                                                                    },
+                                                                                    "end_line": {
+                                                                                                    "type": "integer",
+                                                                                                    "description": "update/delete: last line of the range (inclusive in whole-line mode)."
+                                                                                    },
+                                                                                    "end_column": {
+                                                                                                    "type": "integer",
+                                                                                                    "description": "update/delete: optional 1-based end character (exclusive)."
+                                                                                    },
+                                                                                    "text": {
+                                                                                                    "type": "string",
+                                                                                                    "description": "insert/update: the new text. Whole-line mode replaces whole lines; multi-line ok."
+                                                                                    }
+                                                                    },
+                                                                    "required": [
+                                                                                    "op"
+                                                                    ],
+                                                                    "additionalProperties": false
+                                                    }
+                                    }
+                    },
+                    "required": [
+                                    "path",
+                                    "original_hash",
+                                    "edits"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "file_outline".into(),
+                description: "Deterministically parse a source file (no AI) and list its symbols — functions, classes, methods, types — with kind, enclosing parent, 1-based start/end lines, signature, plus the file's `hash`. Supports Rust, TS/JS, Python, Go, Java/Kotlin, C/C++ (by extension). Use FIRST to locate what you need, then read_symbol or a read_file window — don't read whole files.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "path": {
+                                                    "type": "string",
+                                                    "description": "Project-relative path of the source file."
+                                    },
+                                    "name_contains": {
+                                                    "type": "string",
+                                                    "description": "Only list symbols whose name contains this substring (case-insensitive)."
+                                    },
+                                    "max": {
+                                                    "type": "integer",
+                                                    "description": "Cap on returned symbols (default 200, max 1000)."
+                                    }
+                    },
+                    "required": [
+                                    "path"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "read_symbol".into(),
+                description: "Read one named function/class/method from a file (languages as in file_outline); returns content, start/end lines, and the file's `hash` — ready for edit_file. Exact-name match; disambiguate duplicates with `kind` and/or `parent` (enclosing class/impl, or Go receiver type).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "path": {
+                                                    "type": "string",
+                                                    "description": "Project-relative path of the source file."
+                                    },
+                                    "name": {
+                                                    "type": "string",
+                                                    "description": "Exact symbol name, e.g. \"handle_invoke\" or \"Repo\"."
+                                    },
+                                    "kind": {
+                                                    "type": "string",
+                                                    "description": "Optional filter, e.g. fn/function/method/class/struct/impl/trait."
+                                    },
+                                    "parent": {
+                                                    "type": "string",
+                                                    "description": "Optional filter: name of the enclosing container (class, impl, module) or a Go receiver type."
+                                    }
+                    },
+                    "required": [
+                                    "path",
+                                    "name"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "git".into(),
+                description: "Run a READ-ONLY git subcommand in the project folder; returns exit_code, stdout, stderr. Allowed: status, log, diff, show, branch, blame, ls-files, ls-tree, rev-parse, rev-list, describe, shortlog, tag, remote, for-each-ref, cat-file, name-rev, symbolic-ref, whatchanged, reflog. Mutating commands rejected. Args must stay inside the project folder: absolute/`..` paths and jail-escaping flags (--no-index, --output, --git-dir, --work-tree, …) are rejected.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "subcommand": {
+                                                    "type": "string",
+                                                    "description": "Subcommand, e.g. \"log\" or \"diff\"."
+                                    },
+                                    "args": {
+                                                    "type": "array",
+                                                    "items": {
+                                                                    "type": "string"
+                                                    },
+                                                    "description": "argv after the subcommand, e.g. [\"--oneline\", \"-n\", \"10\"]."
+                                    },
+                                    "reason": {
+                                                    "type": "string",
+                                                    "description": "One short sentence, shown to the user in the chat: why you are running this git command."
+                                    },
+                                    "timeout_secs": {
+                                                    "type": "integer",
+                                                    "description": "Optional timeout (default 120, max 600)."
+                                    }
+                    },
+                    "required": [
+                                    "subcommand",
+                                    "reason"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "run_command".into(),
+                description: "Run an arbitrary command in the project folder. Worker sessions run commands immediately, no approval needed (exec is always scoped to the project folder). Chat sessions are gated by USER APPROVAL: allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny \u{2014} their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped. A call returns within ~50s: a command still running then is handed off as a background task (status 'running' + task_id; its exit is reported to you automatically \u{2014} never sleep-poll it). For anything long (builds, test suites, waiting on CI) prefer run_background directly. A process you background inside a shell (`x &`) keeps running but its output is dropped \u{2014} redirect it to a file. Commands receive the configured environment variables, but secret values are masked as ******** in the returned output \u{2014} work with secrets by passing them along to programs, not by reading them. ALWAYS pass `reason` \u{2014} one short sentence, shown to the user in the chat, explaining why you are running this command.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "command": {
+                                                    "type": "string",
+                                                    "description": "Bare executable name (no path, no shell), e.g. \"rg\"."
+                                    },
+                                    "args": {
+                                                    "type": "array",
+                                                    "items": {
+                                                                    "type": "string"
+                                                    },
+                                                    "description": "argv after the command, e.g. [\"-n\", \"TODO\", \"src\"]."
+                                    },
+                                    "reason": {
+                                                    "type": "string",
+                                                    "description": "One short sentence, shown to the user in the chat: why you are running this command."
+                                    },
+                                    "timeout_secs": {
+                                                    "type": "integer",
+                                                    "description": "Optional timeout (default 120, max 600). A call blocks at most 50s: a command still running then continues as a background task (result has status 'running' + task_id) and you are notified automatically when it exits."
+                                    }
+                    },
+                    "required": [
+                                    "command",
+                                    "reason"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "run_background".into(),
+                description: "Start a long-running command (build, test suite, dev server, watcher) as a peckboard-managed background task and return IMMEDIATELY with {task_id, pid, log_path}. PREFER THIS over Bash run_in_background, `nohup`, `&`, or sleep-polling for anything that takes more than a minute or two. When the process exits (success, nonzero exit, timeout, or stop) you are notified AUTOMATICALLY in this session with its status and last output lines \u{2014} even if you are idle, a new turn starts \u{2014} so do NOT poll or wait for it: continue with other work or end your turn. Approval works exactly like run_command (workers and bypass run immediately; chats may get 'awaiting_approval' \u{2014} re-call with the SAME command after the user answers). Args are argv (no shell); cwd = project folder; configured env vars are injected and secrets are masked in captured output. Use background_status to peek at output, stop_background to stop it, list_background to see this session's tasks. ALWAYS pass `reason`.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Bare executable name (no path, no shell), e.g. \"cargo\"."
+                        },
+                        "args": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "argv after the command, e.g. [\"test\", \"--release\"]."
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "Short human-readable name shown in the UI and in the completion report (defaults to the command line)."
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "One short sentence, shown to the user in the chat: why you are running this command."
+                        },
+                        "timeout_secs": {
+                            "type": "integer",
+                            "description": "Kill the task (reported as TIMED OUT) after this many seconds. Default and max 86400 (24h)."
+                        }
+                    },
+                    "required": ["command", "reason"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "background_status".into(),
+                description: "Status and recent output of one of this session's background tasks (started with run_background). You do NOT need this to learn when a task finishes \u{2014} that report arrives automatically; use it to peek at progress or read more output after the report.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "The task_id returned by run_background." },
+                        "lines": { "type": "integer", "description": "How many trailing output lines to return (default 40, max 2000)." }
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_background".into(),
+                description: "List this session's background tasks (running and recently finished) with their status, exit code, and log path.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "stop_background".into(),
+                description: "Stop one of this session's running background tasks: SIGTERM to its whole process group, SIGKILL after 5s. The STOPPED report still arrives automatically.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "The task_id returned by run_background." }
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "run_tests".into(),
+                description: "Run the project's test suite; returns exit_code, passed, stdout, stderr. runner=auto (default) detects from markers: Cargo.toml→cargo, package.json→npm, go.mod→go, pyproject/pytest→pytest, pom.xml→maven, build.gradle→gradle, Gemfile→rspec, composer.json→phpunit. Pass `args` for extras (e.g. a test filter).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                                    "runner": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                                    "auto",
+                                                                    "cargo",
+                                                                    "npm",
+                                                                    "pnpm",
+                                                                    "yarn",
+                                                                    "pytest",
+                                                                    "go",
+                                                                    "gradle",
+                                                                    "maven",
+                                                                    "rspec",
+                                                                    "phpunit",
+                                                                    "dotnet"
+                                                    ],
+                                                    "description": "Which runner to use (default auto)."
+                                    },
+                                    "args": {
+                                                    "type": "array",
+                                                    "items": {
+                                                                    "type": "string"
+                                                    },
+                                                    "description": "Extra arguments forwarded to the runner."
+                                    },
+                                    "reason": {
+                                                    "type": "string",
+                                                    "description": "One short sentence, shown to the user in the chat: why you are running the tests."
+                                    },
+                                    "timeout_secs": {
+                                                    "type": "integer",
+                                                    "description": "Optional timeout (default 300, max 600)."
+                                    }
+                    },
+                    "required": [
+                                    "reason"
+                    ],
+                    "additionalProperties": false
+    }),
+            },
+            McpToolDef {
+                name: "browser_open".into(),
+                description: "Open URL in the managed headless browser for web testing. Returns page_id + compressed page outline (~91% smaller than DOM; elements carry ref=eN handles for browser_act). First call may take a minute (server + browser spin-up).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "URL to open." },
+                        "name": { "type": "string", "description": "Short page label." }
+                    },
+                    "required": ["url"]
+                }),
+            },
+            McpToolDef {
+                name: "browser_outline".into(),
+                description: "Compressed structure of an open page (list-folded, ref=eN handles). Call after actions that change the page. Prefer browser_find for locating specific content.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "page_id": { "type": "string", "description": "From browser_open." }
+                    },
+                    "required": ["page_id"]
+                }),
+            },
+            McpToolDef {
+                name: "browser_find".into(),
+                description: "Regex-search the page snapshot (ripgrep) instead of reading the whole outline — returns matching lines with their ref=eN handles.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "page_id": { "type": "string", "description": "From browser_open." },
+                        "pattern": { "type": "string", "description": "Regex (alternatives OK: `login|sign in`)." },
+                        "ignore_case": { "type": "boolean", "description": "Default true." },
+                        "line_limit": { "type": "integer", "description": "Max result lines (default 50, max 100)." }
+                    },
+                    "required": ["page_id", "pattern"]
+                }),
+            },
+            McpToolDef {
+                name: "browser_act".into(),
+                description: "Interact with an open page. action: click|type|fill|select|hover|press_key|upload|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog. Element actions take `ref` (eN from outline/find); type/fill/select/press_key/navigate/wait_selector put their argument in `text`; multi-select uses `values`, upload uses `files`. Set outline=true to get the fresh page structure in the same call.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "page_id": { "type": "string", "description": "From browser_open." },
+                        "action": { "type": "string", "description": "One of the actions above." },
+                        "ref": { "type": "string", "description": "Element handle, e.g. e12." },
+                        "text": { "type": "string", "description": "Text/value/key/url/selector for the action." },
+                        "values": { "type": "array", "items": { "type": "string" }, "description": "select: multiple option values." },
+                        "files": { "type": "array", "items": { "type": "string" }, "description": "upload: file paths." },
+                        "timeout_ms": { "type": "integer", "description": "wait_ms duration (max 30000)." },
+                        "accept": { "type": "boolean", "description": "dialog: accept or dismiss (default true)." },
+                        "outline": { "type": "boolean", "description": "Also return the post-action outline (default false; costs ~2k tokens)." }
+                    },
+                    "required": ["page_id", "action"]
+                }),
+            },
+            McpToolDef {
+                name: "browser_screenshot".into(),
+                description: "Screenshot an open page (PNG, returned as image). Viewport by default; full_page=true for the whole page.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "page_id": { "type": "string", "description": "From browser_open." },
+                        "full_page": { "type": "boolean", "description": "Default false." }
+                    },
+                    "required": ["page_id"]
+                }),
+            },
+            McpToolDef {
+                name: "browser_pages".into(),
+                description: "List open browser pages (id, name, url, title).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpToolDef {
+                name: "browser_close".into(),
+                description: "Close an open browser page when done testing.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "page_id": { "type": "string", "description": "From browser_open." }
+                    },
+                    "required": ["page_id"]
+                }),
+            },
+            McpToolDef {
+                name: "list_variables".into(),
+                description: "List agent variables visible to this session: globals plus this folder's, a folder variable shadowing a global one with the same name. Full values included — agent variables are shared, non-secret state managed by agents (set_variable / delete_variable) and users (Settings → Agent Variables).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "set_variable".into(),
+                description: "Create or update an agent variable (upsert by name within a scope). scope 'folder' (default) = this session's folder; 'global' = shared across all folders. A folder variable shadows a global one with the same name. Values are plain text visible to users and other agents — NEVER store secrets here (Settings → Environment Variables is for secrets).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Variable name, ^[A-Za-z_][A-Za-z0-9_]*$, max 128 chars." },
+                        "value": { "type": "string", "description": "Value to store (max 32 KB)." },
+                        "scope": { "type": "string", "enum": ["folder", "global"], "description": "Where to write: 'folder' (default) = this session's folder, 'global' = all folders." }
+                    },
+                    "required": ["name", "value"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "delete_variable".into(),
+                description: "Delete an agent variable by name from a scope: 'folder' (default) = this session's folder, 'global' = the shared global scope.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Variable name to delete." },
+                        "scope": { "type": "string", "enum": ["folder", "global"], "description": "Scope to delete from (default 'folder')." }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_list".into(),
+                description: "List YOUR enrolled remote-control devices (peckboard-agent daemons) with live state: online, in-flight request count, platform, status, last seen, and lock state (locked, locked_by_you, lock_expires_in_secs). Use the returned device_id with the other remote_agent_* tools — take remote_agent_lock on it first.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_lock".into(),
+                description: "Take exclusive control of a remote device for THIS session. Required before any other remote_agent_* call on that device (echo/run/server/screenshot/mouse/keyboard) — calls without the lock are rejected. Only one session can hold a device's lock; others are refused until it expires or is released. A lock lasts 30s, and every call you make on the device tops it up to at least 15s remaining; calling remote_agent_lock again while holding it does the same. Release it with remote_agent_unlock when done.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Device to lock (see remote_agent_list)." }
+                    },
+                    "required": ["device_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_unlock".into(),
+                description: "Release this session's lock on a remote device so another session can take control. Fails if this session doesn't hold the lock.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Device to unlock." }
+                    },
+                    "required": ["device_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_echo".into(),
+                description: "Connectivity probe: send a message to a remote device's daemon and get it echoed back. Proves the full session→server→device→result loop without touching the machine. Start here when a device misbehaves.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
+                        "message": { "type": "string", "description": "Text for the daemon to echo back." }
+                    },
+                    "required": ["device_id", "message"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_run".into(),
+                description: "Run a shell command on a remote device via its peckboard-agent daemon. The daemon enforces its own per-capability allow/deny config and kill-switch; a refusal comes back as a tool error. Returns stdout/stderr/exit code.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
+                        "command": { "type": "string", "description": "Command line to execute." },
+                        "cwd": { "type": "string", "description": "Working directory (daemon default if omitted)." },
+                        "timeout_secs": { "type": "integer", "description": "Deadline in seconds, 1–600 (default 120)." }
+                    },
+                    "required": ["device_id", "command"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_server".into(),
+                description: "Manage a long-running server process on a remote device: start / stop / restart / logs / health. The daemon maps 'server' names to its locally configured process definitions.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
+                        "action": { "type": "string", "enum": ["start", "stop", "restart", "logs", "health"], "description": "What to do." },
+                        "server": { "type": "string", "description": "Which configured server to act on." },
+                        "lines": { "type": "integer", "description": "logs: how many trailing lines (daemon default if omitted)." }
+                    },
+                    "required": ["device_id", "action"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_screenshot".into(),
+                description: "Capture the remote device's screen or a single app window (returned as an image). Multi-monitor: call once with list=true to get the monitor table (with each monitor's x/y offset), then pass 'monitor'. One app: call with list_windows=true to get every window's app_name, title, window_id and absolute screen bounds, then pass window_id (or app / title substrings) to capture just that window. A window capture's result carries window.x/y/scale: image pixel (px, py) is at screen (x + px/scale, y + py/scale) — or pass the same window_id to remote_agent_mouse and use image pixels directly. The daemon shows a visible 'being controlled' indicator while serving these.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
+                        "monitor": { "type": "integer", "description": "Monitor index from list mode (default: the primary display). Not combinable with a window target." },
+                        "list": { "type": "boolean", "description": "true = return the monitor table (index, name, size, x, y, scale_factor, is_primary) instead of capturing." },
+                        "list_windows": { "type": "boolean", "description": "true = return the window table (window_id, app_name, title, x, y, width, height, is_focused, is_minimized) instead of capturing." },
+                        "window_id": { "type": "integer", "description": "Capture exactly this window (from list_windows)." },
+                        "app": { "type": "string", "description": "Capture the window whose app name contains this (case-insensitive); the focused match wins." },
+                        "title": { "type": "string", "description": "Capture the window whose title contains this (case-insensitive); combinable with app." }
+                    },
+                    "required": ["device_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_mouse".into(),
+                description: "Control the remote device's mouse: move, click, drag, scroll. Coordinates are absolute screen pixels — or, when window_id / app / title is given, pixels within that window's screenshot (from remote_agent_screenshot with the same target); the agent maps them onto the window's current on-screen position and refuses points outside it. The daemon may refuse if the user disabled the mouse capability locally.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
+                        "action": { "type": "string", "enum": ["move", "click", "drag", "scroll"], "description": "What to do." },
+                        "x": { "type": "integer", "description": "Target X (move/click/drag end)." },
+                        "y": { "type": "integer", "description": "Target Y (move/click/drag end)." },
+                        "from_x": { "type": "integer", "description": "drag: start X." },
+                        "from_y": { "type": "integer", "description": "drag: start Y." },
+                        "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "click/drag button (default left)." },
+                        "delta_x": { "type": "integer", "description": "scroll: horizontal amount." },
+                        "delta_y": { "type": "integer", "description": "scroll: vertical amount." },
+                        "window_id": { "type": "integer", "description": "Make x/y (and from_x/from_y) relative to this window (from remote_agent_screenshot list_windows). Not valid for scroll." },
+                        "app": { "type": "string", "description": "Like window_id, but pick the window whose app name contains this (case-insensitive)." },
+                        "title": { "type": "string", "description": "Like window_id, but pick the window whose title contains this; combinable with app." }
+                    },
+                    "required": ["device_id", "action"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remote_agent_keyboard".into(),
+                description: "Control the remote device's keyboard: type text or press a key combo (e.g. ctrl+shift+t). The daemon may refuse if the user disabled the keyboard capability locally.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
+                        "action": { "type": "string", "enum": ["type", "combo"], "description": "type = literal text; combo = chord like ctrl+shift+t." },
+                        "text": { "type": "string", "description": "type: the text to type." },
+                        "keys": { "type": "string", "description": "combo: '+'-joined chord, e.g. 'ctrl+c'." }
+                    },
+                    "required": ["device_id", "action"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "reattach_worker".into(),
+                description: "Orchestrator repair: put a worker session back on a card it was detached from (e.g. it ended its turn waiting on a long background task, or the card was blocked after repeated no-progress turns). The session must be a worker of the card's project and not bound to another card; the card must be unassigned (or already assigned to that session) and not done/won't-do. unblock (default true) lifts the card's block and resets its crash/no-progress budget; a block from an unanswered worker question only lifts once the question is answered (see answer_question). Use this instead of editing the database.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": { "type": "string", "description": "The card to reattach." },
+                        "session_id": { "type": "string", "description": "The worker session to put back on the card." },
+                        "unblock": { "type": "boolean", "description": "Lift the card's block (default true)." },
+                        "reason": { "type": "string", "description": "Why the worker is being reattached (logged)." }
+                    },
+                    "required": ["card_id", "session_id", "reason"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "answer_question".into(),
+                description: "Answer (or dismiss) a pending question another session asked the user, on the user's behalf. Voice assistant: any session (use the ids from the `[relay] question` message). Orchestrator sessions: worker sessions of projects in your own folder/scope. Key answers by question index, e.g. {\"0\": \"Use Postgres\"}. The target session resumes with the answer and its card's question block is lifted. Never insert question-resolved events into the database by hand.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "The session that asked the question." },
+                        "question_id": { "type": "string", "description": "The question id from the relay message." },
+                        "answers": {
                             "type": "object",
-                            "properties": {
-                                "comment_id": {
-                                    "type": "string",
-                                    "description": "Id of the annotation, as given in the injected list or by get_review_doc."
-                                },
-                                "action": {
-                                    "type": "string",
-                                    "enum": ["fixed", "declined", "answered"],
-                                    "description": "fixed = the document now satisfies it; declined = you deliberately did not change it; answered = it was a question, answered in the note."
-                                },
-                                "note": {
-                                    "type": "string",
-                                    "description": "Why you declined, or the answer to the question. Optional for 'fixed'."
-                                }
-                            },
-                            "required": ["comment_id", "action"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["markdown", "note"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "create_card".into(),
-            description: "Create a card. Uses current project context, or pass project_id explicitly.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID (optional if session has project context)"
+                            "description": "Answers keyed by question index (\"0\", \"1\", …); each value is the chosen option label or free text.",
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "rejected": { "type": "boolean", "description": "true = dismiss the question without answering (answers ignored)." }
                     },
-                    "title": {
-                        "type": "string",
-                        "description": "Card title"
+                    "required": ["session_id", "question_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "show_view".into(),
+                description: "Voice assistant only: switch the user's screen to a project, session, card, or folder (by id or spoken name, fuzzy-matched), or to a top-level page. Call it whenever the conversation turns to a specific project or session. Returns what was opened, or candidates (and opens nothing) when the name is ambiguous or unmatched.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["auto", "project", "session", "card", "folder", "page"],
+                            "description": "What to open. auto (default) searches projects, sessions, and folders by name."
+                        },
+                        "id": { "type": "string", "description": "Exact id, when known (e.g. from a candidates list)." },
+                        "name": { "type": "string", "description": "Name as the user said it, e.g. \"stashify\". For target page: sessions, projects, folders, settings, reports, repeating_tasks, usage, or agents." }
                     },
-                    "description": {
-                        "type": "string",
-                        "description": "Card description / instructions"
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "voice_queue".into(),
+                description: "Voice assistant only: relays (other sessions' updates and questions) held back so you stay on one topic. action list = short summary of what is waiting (session, kind, one line each). action next = hand over the next topic's relays now, to handle like [relay] messages. Call next when the user wraps up the current topic or asks what else is new.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["list", "next"], "description": "list (default) or next." }
                     },
-                    "priority": {
-                        "type": "integer",
-                        "description": "Priority (lower = higher)"
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "voice_pronunciation".into(),
+                description: "Voice assistant only: fix how the text-to-speech voice pronounces a word. action add = save a pronunciation (applies to the next sentence), given a respelling like \"PECK-board\" or \"koh-KOH-roh\" (hyphens split syllables, the ALL-CAPS syllable is stressed, spaces split words, single letters are said as letters) or raw Kokoro phonemes. action list = the saved pronunciations and the words the voice didn't know, most spoken first. action remove = delete a word's pronunciation.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["add", "list", "remove"], "description": "add, list (default), or remove." },
+                        "word": { "type": "string", "description": "The word as written, e.g. \"Peckboard\". Required for add and remove." },
+                        "respelling": { "type": "string", "description": "add: how it sounds, e.g. \"PECK-board\". Give this or phonemes." },
+                        "phonemes": { "type": "string", "description": "add: raw Kokoro/misaki phonemes, e.g. \"pˈɛkbˌɔːɹd\". Give this or respelling." }
                     },
-                    "workflow": {
-                        "type": "string",
-                        "description": "Optional workflow override"
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "voice_prompt".into(),
+                description: "Voice assistant only: read or change your own system prompt (how you behave), live from your next turn. action get = the current prompt and whether it is the built-in default. action update = replace the whole prompt with content. action append = add text to the end. update and append change your behaviour for good: first say out loud exactly what will change; the call is then parked until the user confirms it on screen. Returns a short diff summary once it runs.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["get", "update", "append"], "description": "get (default), update, or append." },
+                        "content": { "type": "string", "description": "update: the complete new prompt." },
+                        "text": { "type": "string", "description": "append: text added on a new line at the end of the prompt." },
+                        "note": { "type": "string", "description": "update/append: one line on why, shown in the prompt history, e.g. \"user asked for shorter answers\"." }
                     },
-                    "model": {
-                        "type": "string",
-                        "description": "Optional model override (e.g. claude-opus-4-8)"
-                    },
-                    "effort": {
-                        "type": "string",
-                        "description": "Effort level: low, medium, high, xhigh, max"
-                    },
-                    "depends_on": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Card ids this card depends on. Work starts only once every dependency is 'done'. Must be existing same-project cards."
-                    },
-                    "blocked": {
-                        "type": "boolean",
-                        "description": "Create the card already blocked; no worker picks it up until a human unblocks. Defaults true when `block_reason` is given."
-                    },
-                    "block_reason": {
-                        "type": "string",
-                        "description": "Reason blocked at creation (e.g. 'needs human triage'). Implies blocked=true unless `blocked` is set explicitly."
-                    },
-                    "model_autoswitch": {
-                        "type": "boolean",
-                        "description": "Cost-aware model auto-switch opt-in for workers on this card. Omit to inherit the default (ON — cards spawn workers)."
-                    },
-                    "system_prompt_name": {
-                        "type": "string",
-                        "description": "Name of a library system prompt to attach (empty string clears)."
-                    }
-                },
-                "required": ["title", "description"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_cards".into(),
-            description: "List cards in a project. Requires project_id (or worker-session project context) — without it returns NO cards, not every card in PeckBoard. Optional status filter. Cards include a description summary, not full text.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": { "type": "string", "description": "Project ID. Required unless the session has project context; without it, no cards returned." },
-                    "status": { "type": "string", "description": "Workflow step filter (e.g. backlog, in_progress, done, wont_do)." }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_card_dependencies".into(),
-            description: "List a card's direct dependencies — cards it must wait on before pickup. Each entry reports whether it is 'done'.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "card_id": { "type": "string", "description": "Card whose dependencies to list" }
-                },
-                "required": ["card_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "get_card_dependency_tree".into(),
-            description: "Resolve a card's full transitive dependency tree (nested), plus whether every transitive prerequisite is 'done'.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "card_id": { "type": "string", "description": "Card to resolve the tree for" }
-                },
-                "required": ["card_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_projects".into(),
-            description: "List all projects.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_workflows".into(),
-            description: "List workflow definitions. Each step includes built-in `instructions`. With `project_id`, steps with project overrides also include `project_instructions` — text the project appends to the built-in prompt.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Optional project id; merges in that project's per-step `project_instructions` overrides."
-                    }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "set_workflow_instructions".into(),
-            description: "Set (or clear) the project-specific instructions appended below a workflow step's built-in prompt (both apply). Empty `instructions` clears the override.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project to edit (optional if session has project context)."
-                    },
-                    "workflow_id": {
-                        "type": "string",
-                        "description": "Workflow id (must exist in `list_workflows`)."
-                    },
-                    "step": {
-                        "type": "string",
-                        "description": "Step name (e.g. `in_progress`). Must run a worker — terminal steps (`done`/`backlog`) rejected."
-                    },
-                    "instructions": {
-                        "type": "string",
-                        "description": "Text appended to the built-in step prompt. Empty string clears."
-                    }
-                },
-                "required": ["workflow_id", "step", "instructions"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "write_report".into(),
-            description: "Write a report or note to the event log for human review.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Report title"
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Report body (markdown)"
-                    }
-                },
-                "required": ["title", "body"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "attach_report_file".into(),
-            description: "Attach a file to a report folder. Base64 data, allowlisted extensions, 10MB cap.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "folder": {
-                        "type": "string",
-                        "description": "Report folder name (e.g. date string)"
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "File base name (without extension)"
-                    },
-                    "data": {
-                        "type": "string",
-                        "description": "Base64-encoded file content"
-                    },
-                    "extension": {
-                        "type": "string",
-                        "description": "File extension (e.g. png, pdf, csv, json, txt, md, html, svg, jpg, jpeg, gif, webp)"
-                    }
-                },
-                "required": ["folder", "file", "data", "extension"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "update_card".into(),
-            description: "Update card fields. Only passed fields change; omit to leave as-is.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "card_id": {
-                        "type": "string",
-                        "description": "Card ID"
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "New card title"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "New card description"
-                    },
-                    "priority": {
-                        "type": "integer",
-                        "description": "New priority value"
-                    },
-                    "step": {
-                        "type": "string",
-                        "description": "New workflow step"
-                    },
-                    "workflow": {
-                        "type": "string",
-                        "description": "New workflow id (must be known). Pass `step` too if the current step isn't in the new workflow."
-                    },
-                    "model": {
-                        "type": ["string", "null"],
-                        "description": "Model override (e.g. claude-opus-4-8), or null to clear (falls back to project/host default)."
-                    },
-                    "effort": {
-                        "type": ["string", "null"],
-                        "description": "Effort (low, medium, high, xhigh, max), or null to clear."
-                    },
-                    "depends_on": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "REPLACES the dependency set (same-project cards, no cycles). Empty array clears all; omit to leave unchanged."
-                    },
-                    "blocked": {
-                        "type": "boolean",
-                        "description": "Whether the card is blocked"
-                    },
-                    "block_reason": {
-                        "type": "string",
-                        "description": "Reason the card is blocked"
-                    },
-                    "model_autoswitch": {
-                        "type": ["boolean", "null"],
-                        "description": "Cost-aware model auto-switch opt-in: true/false to force, null to reset to inherit the default."
-                    },
-                    "system_prompt_name": {
-                        "type": "string",
-                        "description": "Name of a library system prompt to attach (empty string clears)."
-                    }
-                },
-                "required": ["card_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "update_project".into(),
-            description: "Update fields on an existing project.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "New project name"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "New project context"
-                    },
-                    "worker_count": {
-                        "type": "integer",
-                        "description": "New worker count"
-                    },
-                    "status": {
-                        "type": "string",
-                        "description": "New project status"
-                    }
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_folders".into(),
-            description: "List all folders (working directories) available for projects.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "create_folder".into(),
-            description: "Register a folder (working directory) for projects. create_if_missing=true also creates the directory on disk.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Display name for the folder"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute filesystem path to the folder"
-                    },
-                    "create_if_missing": {
-                        "type": "boolean",
-                        "description": "Create the directory on disk if missing (default false)"
-                    }
-                },
-                "required": ["name", "path"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "create_project".into(),
-            description: "Create a project in a folder. Give folder_id (existing) OR folder_path (looked up by path; registers a new folder if none matches).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Project name"
-                    },
-                    "folder_id": {
-                        "type": "string",
-                        "description": "Folder ID (use this OR folder_path)"
-                    },
-                    "folder_path": {
-                        "type": "string",
-                        "description": "Looked up by path; if none matches, registers a new folder (creates dir on disk if create_folder_if_missing=true)"
-                    },
-                    "folder_name": {
-                        "type": "string",
-                        "description": "Display name for a newly registered folder (default: basename of folder_path)"
-                    },
-                    "create_folder_if_missing": {
-                        "type": "boolean",
-                        "description": "When folder_path is given: create directory on disk if missing (default false)"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Project context / instructions"
-                    },
-                    "worker_count": {
-                        "type": "integer",
-                        "description": "Concurrent workers (default 1)"
-                    }
-                },
-                "required": ["name"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "pause_project".into(),
-            description: "Pause a project; no new work is scheduled.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID"
-                    }
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "resume_project".into(),
-            description: "Resume a paused project; scheduling restarts.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID"
-                    }
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "delete_project".into(),
-            description: "Delete a project PERMANENTLY. Cascades: removes all cards, worker sessions, and their events.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID"
-                    }
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "delete_card".into(),
-            description: "Delete a card permanently.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "card_id": {
-                        "type": "string",
-                        "description": "Card ID"
-                    }
-                },
-                "required": ["card_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "move_card_to_done".into(),
-            description: "Move a card to the done step.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "card_id": {
-                        "type": "string",
-                        "description": "Card ID"
-                    }
-                },
-                "required": ["card_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "move_card_to_wont_do".into(),
-            description: "Move a card to won't-do, optionally with a reason.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "card_id": {
-                        "type": "string",
-                        "description": "Card ID"
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Reason the card won't be done"
-                    }
-                },
-                "required": ["card_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "notify_workers".into(),
-            description: "Broadcast to all other running workers in the project (file changes, shared state, coordination). Delivered before their next action.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "Message to broadcast (e.g. 'Modified src/auth/mod.rs — added JWT middleware')"
-                    },
-                    "files_changed": {
-                        "type": "array",
-                        "description": "File paths modified/created/deleted",
-                        "items": { "type": "string" }
-                    }
-                },
-                "required": ["message"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "fetch_url".into(),
-            description: "Fetch a URL via peckboard's server — bypasses bot protection; use when WebFetch is 403/blocked. Returns page text.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL to fetch"
-                    },
-                    "max_length": {
-                        "type": "integer",
-                        "description": "Max response length in chars (default 10000)"
-                    }
-                },
-                "required": ["url"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_models".into(),
-            description: "List AI models across all providers (incl. plugins) — the valid model IDs for card/project config.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "share_finding".into(),
-            description: "Share a finding with all running workers — anything valuable: research, data patterns, bugs, decisions, constraints. Broadcasts the summary; workers can fetch full detail and ask follow-ups.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "summary": { "type": "string", "description": "Brief summary (broadcast to all workers)" },
-                    "detail": { "type": "string", "description": "Full detail (available on request via get_finding_details)" },
-                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags for categorization" }
-                },
-                "required": ["summary", "detail"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "get_finding_details".into(),
-            description: "Get the full detail of a finding shared by another worker.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "finding_id": { "type": "string", "description": "Finding event ID" }
-                },
-                "required": ["finding_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "send_worker_message".into(),
-            description: "Direct-message another worker session; queued, delivered on their next turn. Good for finding follow-ups.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target_session_id": { "type": "string", "description": "Target worker's session ID" },
-                    "message": { "type": "string", "description": "Message text" }
-                },
-                "required": ["target_session_id", "message"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_project_reports".into(),
-            description: "List reports written by workers in this project (titles, dates, paths).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "read_report".into(),
-            description: "Read a report's full content by folder and file.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "folder": { "type": "string", "description": "Report folder (e.g. 2026-06-07)" },
-                    "file": { "type": "string", "description": "Report filename (e.g. my-report.md)" }
-                },
-                "required": ["folder", "file"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "read_worker_session".into(),
-            description: "Read the recent event tail of another same-scope session — see what a worker did and its tool calls. For specific events (errors, a keyword) without the whole transcript, use search_sessions. A session outside your scope reads as not found; reach those with the session-control tool read_session, which asks the user for approval.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "session_id": { "type": "string", "description": "Session ID to read" },
-                    "last_n": { "type": "integer", "description": "Recent events to return (default 50, max 200)" }
-                },
-                "required": ["session_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "spawn_subagent".into(),
-            description: "Spawn a subagent: a child session (works on every provider) that runs the given task in the background and posts its final message back into THIS session automatically when it finishes. Use it to split large tasks and run independent parts in parallel (max 25 in flight). Pick the child's model deliberately (model routing rules apply) and a task-matched system_prompt_name. Subagents cannot spawn subagents. Results arrive on their own — do not poll; peek with read_worker_session if needed.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Short label for the subagent (its session shows as \"sub: <name>\")." },
-                    "prompt": { "type": "string", "description": "The task. Make it self-contained: the child shares your project folder but not your conversation." },
-                    "model": { "type": "string", "description": "Model id for the child (see list_models). Default: your model." },
-                    "effort": { "type": "string", "description": "Effort level for the child. Default: your effort." },
-                    "system_prompt_name": { "type": "string", "description": "Library prompt matching the work (see list_system_prompts: research / implement / review / debug / docs …)." }
-                },
-                "required": ["name", "prompt"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "upgrade_plugin".into(),
-            description: "Install/upgrade a Peckboard plugin from the registry by id (e.g. \"common-tools\"): downloads the registry version, verifies checksum, swaps it in. If the hook set changed, stays pending until an operator re-approves.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "plugin_id": { "type": "string", "description": "Registry plugin id (e.g. \"common-tools\")." },
-                    "repository": { "type": "string", "description": "Optional registry.json URL to limit to one repository." }
-                },
-                "required": ["plugin_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "set_session_system_prompt".into(),
-            description: "Set (or clear) another session's system prompt. FULLY REPLACES the standing prompt; takes effect on its next agent run. Omit / pass null to clear to the default. Works on any reachable session (same folder, or same project for worker tokens).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "session_id": { "type": "string", "description": "Session whose prompt to edit." },
-                    "system_prompt": { "type": "string", "description": "Full prompt text. Omit or pass null to clear to the default." },
-                    "name": { "type": "string", "description": "Name of a saved prompt from the system-prompt library to apply instead of raw text (use list_system_prompts to see options). Ignored when system_prompt is given." }
-                },
-                "required": ["session_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_system_prompts".into(),
-            description: "List the named system prompts in the library (name + a one-line summary of each). Use a name with set_session_system_prompt or switch_session_model to steer a session toward a kind of work (implement / research / debug / review / docs / …).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "get_model_guidance".into(),
-            description: "Cost-aware auto-switch guidance for THIS session: your current model + tier, the cheaper same-provider+account candidates you may downgrade to, the account's plan-usage snapshot with a recommendation, the named system prompts, and how many switches you've used. Call it after writing your implementation plan to decide whether a cheaper model can handle the work.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "switch_session_model".into(),
-            description: "Switch THIS session to another model of the SAME provider+account (from get_model_guidance's candidates). Downgrade when the plan is simple enough for the cheaper model to implement without problems; you may also switch UP if the cheap model hits a wall. Requires a `rationale`. Optionally apply a focusing `system_prompt_name` from the library. Set `compact: true` when switching UP after finishing the work: instead of a plain resume, the outgoing model writes a summary and the incoming model resumes on a compacted context (use it with a `review` system_prompt_name so the stronger model reviews the work). Takes effect when the session resumes on the new model — wrap up your turn after calling it. Capped per session.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "model": { "type": "string", "description": "Target model id (provider:model[@account]), same provider+account as now." },
-                    "rationale": { "type": "string", "description": "Why this switch is safe/needed (recorded in the event log and the report)." },
-                    "system_prompt_name": { "type": "string", "description": "Optional: a named library prompt matching the work type (implement/research/debug/review/docs)." },
-                    "compact": { "type": "boolean", "description": "Optional (default false). If true, compact before switching: the outgoing model writes a summary and the new model resumes on that compacted context instead of the full transcript. Use when upgrading back for a review after the work is done." }
-                },
-                "required": ["model", "rationale"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_sessions".into(),
-            description: "List every readable session (chat/worker/expert) — folder-wide for chat sessions, project-wide inside a project. Entries: session_id, name, kind, last activity.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "search_sessions".into(),
-            description: "Search session event history WITHOUT reading whole transcripts — keyword grep, errors-only, or event-kind filter. Any session kind; omit session_id to search all readable sessions at once. Returns matching events tagged with session_id/session_name. At least one of query, errors_only, kinds required. list_sessions finds ids; read_worker_session gives a full tail.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "session_id": { "type": "string", "description": "Session to search. Omit to search all readable sessions." },
-                    "query": { "type": "string", "description": "Case-insensitive substring over event text, tool names, inputs, error messages." },
-                    "errors_only": { "type": "boolean", "description": "Only error/failure events: 'error' events, failed tool calls, crashed runs (default false)." },
-                    "kinds": { "type": "array", "items": { "type": "string" }, "description": "Restrict to these event kinds, e.g. [\"agent-tool-end\", \"agent-text\"]." },
-                    "limit": { "type": "integer", "description": "Max matches (default 50, max 200)." }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_worker_sessions".into(),
-            description: "List project worker sessions with card titles and status — find sessions to read or message.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_repeating_tasks".into(),
-            description: "List repeating tasks in this session's folder (non-project sessions only). Each has a schedule + prompt that fires a fresh session per tick.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "create_repeating_task".into(),
-            description: "Create a repeating task in this session's folder (non-project sessions only). Schedule: interval ({\"minutes\": N}), daily ({\"hour\": H, \"minute\": M}), weekly ({\"weekday\": 0-6 Mon=0, \"hour\": H, \"minute\": M}).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Display name" },
-                    "description": { "type": "string", "description": "Informational description (optional)" },
-                    "prompt": { "type": "string", "description": "Prompt sent to the new session on each run" },
-                    "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
-                    "schedule_value": { "type": "object", "description": "Schedule parameters per kind" },
-                    "model": { "type": "string", "description": "Override model id (optional)" },
-                    "effort": { "type": "string", "description": "Override effort level (optional)" },
-                    "enabled": { "type": "boolean", "description": "Whether the schedule fires (default true)" }
-                },
-                "required": ["name", "prompt", "schedule_kind", "schedule_value"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "update_repeating_task".into(),
-            description: "Edit a repeating task (non-project sessions only). Pass only fields to change.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string" },
-                    "name": { "type": "string" },
-                    "description": { "type": "string" },
-                    "prompt": { "type": "string" },
-                    "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
-                    "schedule_value": { "type": "object" },
-                    "model": { "type": ["string", "null"] },
-                    "effort": { "type": ["string", "null"] },
-                    "enabled": { "type": "boolean" }
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "delete_repeating_task".into(),
-            description: "Delete a repeating task (non-project sessions only). Spawned sessions are preserved but detached.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string" }
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "math".into(),
-            description: "Evaluate an arithmetic expression; returns the number. Supports + - * / %, ^/** (power), parentheses, unary minus, pi/e/tau, and abs, sqrt, sin, cos, tan, asin, acos, atan, ln, log/log10, log2, exp, floor, ceil, round, sign, min, max, pow.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "expression": {
-                                                "type": "string",
-                                                "description": "Expression, e.g. \"sqrt(2) * (3 + 4)^2\"."
-                                }
-                },
-                "required": [
-                                "expression"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "search_web".into(),
-            description: "Search the public web (DuckDuckGo); returns top results as {title, url, snippet}. Use when you lack a URL, then fetch_web/parse_web a result url. Ranked results only — does NOT fetch pages.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "query": {
-                                                "type": "string",
-                                                "description": "Search query."
-                                },
-                                "max_results": {
-                                                "type": "integer",
-                                                "description": "Result count (default 10, max 25)."
-                                }
-                },
-                "required": [
-                                "query"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "fetch_web".into(),
-            description: "Fetch a public http(s) URL (GET/HEAD) and STORE the body — returns a compact reference + short preview, not the whole page. Private/loopback hosts blocked; redirects not followed (Location surfaced as redirect_location). Read parts via web_get_part with the reference.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "url": {
-                                                "type": "string",
-                                                "description": "Absolute http(s) URL to fetch."
-                                },
-                                "method": {
-                                                "type": "string",
-                                                "enum": [
-                                                                "GET",
-                                                                "HEAD"
-                                                ],
-                                                "description": "HTTP method (default GET)."
-                                },
-                                "headers": {
-                                                "type": "object",
-                                                "description": "Optional extra request headers (string→string).",
-                                                "additionalProperties": {
-                                                                "type": "string"
-                                                }
-                                }
-                },
-                "required": [
-                                "url"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "web_get_part".into(),
-            description: "Read part of a page stored by fetch_web/parse_web, by reference. Modes: 'info' (url, status, content_type, title, length, line_count), 'lines' (start_line + line_count), 'slice' (offset + length chars), 'search' (query → matching line numbers + snippets).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "reference": {
-                                                "type": "string",
-                                                "description": "Reference id returned by fetch_web/parse_web."
-                                },
-                                "mode": {
-                                                "type": "string",
-                                                "enum": [
-                                                                "info",
-                                                                "lines",
-                                                                "slice",
-                                                                "search"
-                                                ],
-                                                "description": "What to return (default info)."
-                                },
-                                "start_line": {
-                                                "type": "integer",
-                                                "description": "lines mode: 1-based first line."
-                                },
-                                "line_count": {
-                                                "type": "integer",
-                                                "description": "lines mode: how many lines (default 100)."
-                                },
-                                "offset": {
-                                                "type": "integer",
-                                                "description": "slice mode: 0-based character offset."
-                                },
-                                "length": {
-                                                "type": "integer",
-                                                "description": "slice mode: number of characters (default 4000)."
-                                },
-                                "query": {
-                                                "type": "string",
-                                                "description": "search mode: substring to find."
-                                },
-                                "case_insensitive": {
-                                                "type": "boolean",
-                                                "description": "search mode: case-insensitive (default true)."
-                                },
-                                "max_matches": {
-                                                "type": "integer",
-                                                "description": "search mode: cap on matches (default 30)."
-                                }
-                },
-                "required": [
-                                "reference"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "parse_web".into(),
-            description: "Convert HTML to readable text; extract title, headings, links. Pass `url` (fetched now) or `reference` from a prior fetch_web. Returns structure inline + a text_reference readable via web_get_part.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "url": {
-                                                "type": "string",
-                                                "description": "Absolute http(s) URL to fetch and parse."
-                                },
-                                "reference": {
-                                                "type": "string",
-                                                "description": "Reference of an already-fetched page to parse instead of fetching."
-                                }
-                },
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "search_files".into(),
-            description: "Search project-folder file contents for a literal string or regex; returns matching paths, line numbers, line text. Build/vendor/hidden dirs skipped.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "query": {
-                                                "type": "string",
-                                                "description": "Text or regex to search for."
-                                },
-                                "regex": {
-                                                "type": "boolean",
-                                                "description": "Treat query as regex (default false = literal)."
-                                },
-                                "case_insensitive": {
-                                                "type": "boolean",
-                                                "description": "Case-insensitive match (default false)."
-                                },
-                                "path_contains": {
-                                                "type": "string",
-                                                "description": "Only search files whose path contains this substring."
-                                },
-                                "max_results": {
-                                                "type": "integer",
-                                                "description": "Cap on returned matches (default 200)."
-                                }
-                },
-                "required": [
-                                "query"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "list_files".into(),
-            description: "List project-folder files (relative path + byte size); optional path-substring filter.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "path_contains": {
-                                                "type": "string",
-                                                "description": "Only list files whose path contains this substring."
-                                },
-                                "max": {
-                                                "type": "integer",
-                                                "description": "Cap on returned files (default 1000)."
-                                }
-                },
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "read_file".into(),
-            description: "Read a UTF-8 file in the project folder. Targeted reads ENFORCED: whole-file only ≤400 lines, windows (start_line + line_count) ≤600 lines — larger reads are rejected; locate the range first with file_outline / read_symbol / search_files. Returns the content `hash` — keep it for edit_file's original_hash. Path project-relative, inside the folder.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "path": {
-                                                "type": "string",
-                                                "description": "Project-relative file path."
-                                },
-                                "start_line": {
-                                                "type": "integer",
-                                                "description": "1-based first line of an optional window."
-                                },
-                                "line_count": {
-                                                "type": "integer",
-                                                "description": "Number of lines to return from start_line (default 200, max 600)."
-                                }
-                },
-                "required": [
-                                "path"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "write_file".into(),
-            description: "Write (or append) a UTF-8 file in the project folder. For CREATING files or full rewrites — to modify existing, prefer edit_file (targeted, hash-guarded). Overwrites by default; append=true appends. Parent dirs created unless create_dirs=false. Returns `hash` for edit_file. Path project-relative, inside the folder.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "path": {
-                                                "type": "string",
-                                                "description": "Project-relative file path to write."
-                                },
-                                "content": {
-                                                "type": "string",
-                                                "description": "The full text to write (or to append when append=true)."
-                                },
-                                "append": {
-                                                "type": "boolean",
-                                                "description": "Append to the file instead of overwriting (default false)."
-                                },
-                                "create_dirs": {
-                                                "type": "boolean",
-                                                "description": "Create missing parent directories (default true)."
-                                }
-                },
-                "required": [
-                                "path",
-                                "content"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "edit_file".into(),
-            description: "Modify an existing UTF-8 file with targeted insert/update/delete ops instead of rewriting. Hash-guarded: pass the `hash` from read_file/file_outline/read_symbol/write_file/a prior edit_file as original_hash — on mismatch the edit is rejected and the current hash reported (re-read and retry). Line/column numbers are 1-based and address the file BEFORE this call's edits (ranges must not overlap). Omit columns for whole-line ops; give columns for within-line edits (chars; end_column exclusive). Returns the new `hash` for your next edit.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "path": {
-                                                "type": "string",
-                                                "description": "Project-relative path of an existing file."
-                                },
-                                "original_hash": {
-                                                "type": "string",
-                                                "description": "Content hash as last read; proves you're editing the expected version."
-                                },
-                                "edits": {
-                                                "type": "array",
-                                                "description": "Ops to apply, each addressed against the original file.",
-                                                "items": {
-                                                                "type": "object",
-                                                                "properties": {
-                                                                                "op": {
-                                                                                                "type": "string",
-                                                                                                "enum": [
-                                                                                                                "insert",
-                                                                                                                "update",
-                                                                                                                "delete"
-                                                                                                ],
-                                                                                                "description": "What to do."
-                                                                                },
-                                                                                "line": {
-                                                                                                "type": "integer",
-                                                                                                "description": "insert: target line. Without `column`, `text` becomes new line(s) BEFORE this line (total_lines+1 appends at EOF). With `column`, inserted inside the line at that character position."
-                                                                                },
-                                                                                "column": {
-                                                                                                "type": "integer",
-                                                                                                "description": "insert only: 1-based character position within `line`."
-                                                                                },
-                                                                                "start_line": {
-                                                                                                "type": "integer",
-                                                                                                "description": "update/delete: first line of the range."
-                                                                                },
-                                                                                "start_column": {
-                                                                                                "type": "integer",
-                                                                                                "description": "update/delete: optional 1-based start character (inclusive). Provide both columns or neither."
-                                                                                },
-                                                                                "end_line": {
-                                                                                                "type": "integer",
-                                                                                                "description": "update/delete: last line of the range (inclusive in whole-line mode)."
-                                                                                },
-                                                                                "end_column": {
-                                                                                                "type": "integer",
-                                                                                                "description": "update/delete: optional 1-based end character (exclusive)."
-                                                                                },
-                                                                                "text": {
-                                                                                                "type": "string",
-                                                                                                "description": "insert/update: the new text. Whole-line mode replaces whole lines; multi-line ok."
-                                                                                }
-                                                                },
-                                                                "required": [
-                                                                                "op"
-                                                                ],
-                                                                "additionalProperties": false
-                                                }
-                                }
-                },
-                "required": [
-                                "path",
-                                "original_hash",
-                                "edits"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "file_outline".into(),
-            description: "Deterministically parse a source file (no AI) and list its symbols — functions, classes, methods, types — with kind, enclosing parent, 1-based start/end lines, signature, plus the file's `hash`. Supports Rust, TS/JS, Python, Go, Java/Kotlin, C/C++ (by extension). Use FIRST to locate what you need, then read_symbol or a read_file window — don't read whole files.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "path": {
-                                                "type": "string",
-                                                "description": "Project-relative path of the source file."
-                                },
-                                "name_contains": {
-                                                "type": "string",
-                                                "description": "Only list symbols whose name contains this substring (case-insensitive)."
-                                },
-                                "max": {
-                                                "type": "integer",
-                                                "description": "Cap on returned symbols (default 200, max 1000)."
-                                }
-                },
-                "required": [
-                                "path"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "read_symbol".into(),
-            description: "Read one named function/class/method from a file (languages as in file_outline); returns content, start/end lines, and the file's `hash` — ready for edit_file. Exact-name match; disambiguate duplicates with `kind` and/or `parent` (enclosing class/impl, or Go receiver type).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "path": {
-                                                "type": "string",
-                                                "description": "Project-relative path of the source file."
-                                },
-                                "name": {
-                                                "type": "string",
-                                                "description": "Exact symbol name, e.g. \"handle_invoke\" or \"Repo\"."
-                                },
-                                "kind": {
-                                                "type": "string",
-                                                "description": "Optional filter, e.g. fn/function/method/class/struct/impl/trait."
-                                },
-                                "parent": {
-                                                "type": "string",
-                                                "description": "Optional filter: name of the enclosing container (class, impl, module) or a Go receiver type."
-                                }
-                },
-                "required": [
-                                "path",
-                                "name"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "git".into(),
-            description: "Run a READ-ONLY git subcommand in the project folder; returns exit_code, stdout, stderr. Allowed: status, log, diff, show, branch, blame, ls-files, ls-tree, rev-parse, rev-list, describe, shortlog, tag, remote, for-each-ref, cat-file, name-rev, symbolic-ref, whatchanged, reflog. Mutating commands rejected. Args must stay inside the project folder: absolute/`..` paths and jail-escaping flags (--no-index, --output, --git-dir, --work-tree, …) are rejected.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "subcommand": {
-                                                "type": "string",
-                                                "description": "Subcommand, e.g. \"log\" or \"diff\"."
-                                },
-                                "args": {
-                                                "type": "array",
-                                                "items": {
-                                                                "type": "string"
-                                                },
-                                                "description": "argv after the subcommand, e.g. [\"--oneline\", \"-n\", \"10\"]."
-                                },
-                                "reason": {
-                                                "type": "string",
-                                                "description": "One short sentence, shown to the user in the chat: why you are running this git command."
-                                },
-                                "timeout_secs": {
-                                                "type": "integer",
-                                                "description": "Optional timeout (default 120, max 600)."
-                                }
-                },
-                "required": [
-                                "subcommand",
-                                "reason"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "run_command".into(),
-            description: "Run an arbitrary command in the project folder. Worker sessions run commands immediately, no approval needed (exec is always scoped to the project folder). Chat sessions are gated by USER APPROVAL: allowlisted or 'always'-approved programs run immediately; otherwise returns status 'awaiting_approval' while the user picks Approve once / Approve always / Deny \u{2014} their answer resumes the session, then re-call run_command with the SAME command. Args are argv (no shell); cwd = project folder; output capped. A call returns within ~50s: a command still running then is handed off as a background task (status 'running' + task_id; its exit is reported to you automatically \u{2014} never sleep-poll it). For anything long (builds, test suites, waiting on CI) prefer run_background directly. A process you background inside a shell (`x &`) keeps running but its output is dropped \u{2014} redirect it to a file. Commands receive the configured environment variables, but secret values are masked as ******** in the returned output \u{2014} work with secrets by passing them along to programs, not by reading them. ALWAYS pass `reason` \u{2014} one short sentence, shown to the user in the chat, explaining why you are running this command.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "command": {
-                                                "type": "string",
-                                                "description": "Bare executable name (no path, no shell), e.g. \"rg\"."
-                                },
-                                "args": {
-                                                "type": "array",
-                                                "items": {
-                                                                "type": "string"
-                                                },
-                                                "description": "argv after the command, e.g. [\"-n\", \"TODO\", \"src\"]."
-                                },
-                                "reason": {
-                                                "type": "string",
-                                                "description": "One short sentence, shown to the user in the chat: why you are running this command."
-                                },
-                                "timeout_secs": {
-                                                "type": "integer",
-                                                "description": "Optional timeout (default 120, max 600). A call blocks at most 50s: a command still running then continues as a background task (result has status 'running' + task_id) and you are notified automatically when it exits."
-                                }
-                },
-                "required": [
-                                "command",
-                                "reason"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "run_background".into(),
-            description: "Start a long-running command (build, test suite, dev server, watcher) as a peckboard-managed background task and return IMMEDIATELY with {task_id, pid, log_path}. PREFER THIS over Bash run_in_background, `nohup`, `&`, or sleep-polling for anything that takes more than a minute or two. When the process exits (success, nonzero exit, timeout, or stop) you are notified AUTOMATICALLY in this session with its status and last output lines \u{2014} even if you are idle, a new turn starts \u{2014} so do NOT poll or wait for it: continue with other work or end your turn. Approval works exactly like run_command (workers and bypass run immediately; chats may get 'awaiting_approval' \u{2014} re-call with the SAME command after the user answers). Args are argv (no shell); cwd = project folder; configured env vars are injected and secrets are masked in captured output. Use background_status to peek at output, stop_background to stop it, list_background to see this session's tasks. ALWAYS pass `reason`.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Bare executable name (no path, no shell), e.g. \"cargo\"."
-                    },
-                    "args": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "argv after the command, e.g. [\"test\", \"--release\"]."
-                    },
-                    "label": {
-                        "type": "string",
-                        "description": "Short human-readable name shown in the UI and in the completion report (defaults to the command line)."
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "One short sentence, shown to the user in the chat: why you are running this command."
-                    },
-                    "timeout_secs": {
-                        "type": "integer",
-                        "description": "Kill the task (reported as TIMED OUT) after this many seconds. Default and max 86400 (24h)."
-                    }
-                },
-                "required": ["command", "reason"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "background_status".into(),
-            description: "Status and recent output of one of this session's background tasks (started with run_background). You do NOT need this to learn when a task finishes \u{2014} that report arrives automatically; use it to peek at progress or read more output after the report.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "The task_id returned by run_background." },
-                    "lines": { "type": "integer", "description": "How many trailing output lines to return (default 40, max 2000)." }
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "list_background".into(),
-            description: "List this session's background tasks (running and recently finished) with their status, exit code, and log path.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "stop_background".into(),
-            description: "Stop one of this session's running background tasks: SIGTERM to its whole process group, SIGKILL after 5s. The STOPPED report still arrives automatically.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "The task_id returned by run_background." }
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "run_tests".into(),
-            description: "Run the project's test suite; returns exit_code, passed, stdout, stderr. runner=auto (default) detects from markers: Cargo.toml→cargo, package.json→npm, go.mod→go, pyproject/pytest→pytest, pom.xml→maven, build.gradle→gradle, Gemfile→rspec, composer.json→phpunit. Pass `args` for extras (e.g. a test filter).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                                "runner": {
-                                                "type": "string",
-                                                "enum": [
-                                                                "auto",
-                                                                "cargo",
-                                                                "npm",
-                                                                "pnpm",
-                                                                "yarn",
-                                                                "pytest",
-                                                                "go",
-                                                                "gradle",
-                                                                "maven",
-                                                                "rspec",
-                                                                "phpunit",
-                                                                "dotnet"
-                                                ],
-                                                "description": "Which runner to use (default auto)."
-                                },
-                                "args": {
-                                                "type": "array",
-                                                "items": {
-                                                                "type": "string"
-                                                },
-                                                "description": "Extra arguments forwarded to the runner."
-                                },
-                                "reason": {
-                                                "type": "string",
-                                                "description": "One short sentence, shown to the user in the chat: why you are running the tests."
-                                },
-                                "timeout_secs": {
-                                                "type": "integer",
-                                                "description": "Optional timeout (default 300, max 600)."
-                                }
-                },
-                "required": [
-                                "reason"
-                ],
-                "additionalProperties": false
-}),
-        },
-        McpToolDef {
-            name: "browser_open".into(),
-            description: "Open URL in the managed headless browser for web testing. Returns page_id + compressed page outline (~91% smaller than DOM; elements carry ref=eN handles for browser_act). First call may take a minute (server + browser spin-up).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "description": "URL to open." },
-                    "name": { "type": "string", "description": "Short page label." }
-                },
-                "required": ["url"]
-            }),
-        },
-        McpToolDef {
-            name: "browser_outline".into(),
-            description: "Compressed structure of an open page (list-folded, ref=eN handles). Call after actions that change the page. Prefer browser_find for locating specific content.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "page_id": { "type": "string", "description": "From browser_open." }
-                },
-                "required": ["page_id"]
-            }),
-        },
-        McpToolDef {
-            name: "browser_find".into(),
-            description: "Regex-search the page snapshot (ripgrep) instead of reading the whole outline — returns matching lines with their ref=eN handles.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "page_id": { "type": "string", "description": "From browser_open." },
-                    "pattern": { "type": "string", "description": "Regex (alternatives OK: `login|sign in`)." },
-                    "ignore_case": { "type": "boolean", "description": "Default true." },
-                    "line_limit": { "type": "integer", "description": "Max result lines (default 50, max 100)." }
-                },
-                "required": ["page_id", "pattern"]
-            }),
-        },
-        McpToolDef {
-            name: "browser_act".into(),
-            description: "Interact with an open page. action: click|type|fill|select|hover|press_key|upload|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog. Element actions take `ref` (eN from outline/find); type/fill/select/press_key/navigate/wait_selector put their argument in `text`; multi-select uses `values`, upload uses `files`. Set outline=true to get the fresh page structure in the same call.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "page_id": { "type": "string", "description": "From browser_open." },
-                    "action": { "type": "string", "description": "One of the actions above." },
-                    "ref": { "type": "string", "description": "Element handle, e.g. e12." },
-                    "text": { "type": "string", "description": "Text/value/key/url/selector for the action." },
-                    "values": { "type": "array", "items": { "type": "string" }, "description": "select: multiple option values." },
-                    "files": { "type": "array", "items": { "type": "string" }, "description": "upload: file paths." },
-                    "timeout_ms": { "type": "integer", "description": "wait_ms duration (max 30000)." },
-                    "accept": { "type": "boolean", "description": "dialog: accept or dismiss (default true)." },
-                    "outline": { "type": "boolean", "description": "Also return the post-action outline (default false; costs ~2k tokens)." }
-                },
-                "required": ["page_id", "action"]
-            }),
-        },
-        McpToolDef {
-            name: "browser_screenshot".into(),
-            description: "Screenshot an open page (PNG, returned as image). Viewport by default; full_page=true for the whole page.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "page_id": { "type": "string", "description": "From browser_open." },
-                    "full_page": { "type": "boolean", "description": "Default false." }
-                },
-                "required": ["page_id"]
-            }),
-        },
-        McpToolDef {
-            name: "browser_pages".into(),
-            description: "List open browser pages (id, name, url, title).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        McpToolDef {
-            name: "browser_close".into(),
-            description: "Close an open browser page when done testing.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "page_id": { "type": "string", "description": "From browser_open." }
-                },
-                "required": ["page_id"]
-            }),
-        },
-        McpToolDef {
-            name: "list_variables".into(),
-            description: "List agent variables visible to this session: globals plus this folder's, a folder variable shadowing a global one with the same name. Full values included — agent variables are shared, non-secret state managed by agents (set_variable / delete_variable) and users (Settings → Agent Variables).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "set_variable".into(),
-            description: "Create or update an agent variable (upsert by name within a scope). scope 'folder' (default) = this session's folder; 'global' = shared across all folders. A folder variable shadows a global one with the same name. Values are plain text visible to users and other agents — NEVER store secrets here (Settings → Environment Variables is for secrets).".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Variable name, ^[A-Za-z_][A-Za-z0-9_]*$, max 128 chars." },
-                    "value": { "type": "string", "description": "Value to store (max 32 KB)." },
-                    "scope": { "type": "string", "enum": ["folder", "global"], "description": "Where to write: 'folder' (default) = this session's folder, 'global' = all folders." }
-                },
-                "required": ["name", "value"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "delete_variable".into(),
-            description: "Delete an agent variable by name from a scope: 'folder' (default) = this session's folder, 'global' = the shared global scope.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Variable name to delete." },
-                    "scope": { "type": "string", "enum": ["folder", "global"], "description": "Scope to delete from (default 'folder')." }
-                },
-                "required": ["name"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_list".into(),
-            description: "List YOUR enrolled remote-control devices (peckboard-agent daemons) with live state: online, in-flight request count, platform, status, last seen, and lock state (locked, locked_by_you, lock_expires_in_secs). Use the returned device_id with the other remote_agent_* tools — take remote_agent_lock on it first.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_lock".into(),
-            description: "Take exclusive control of a remote device for THIS session. Required before any other remote_agent_* call on that device (echo/run/server/screenshot/mouse/keyboard) — calls without the lock are rejected. Only one session can hold a device's lock; others are refused until it expires or is released. A lock lasts 30s, and every call you make on the device tops it up to at least 15s remaining; calling remote_agent_lock again while holding it does the same. Release it with remote_agent_unlock when done.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Device to lock (see remote_agent_list)." }
-                },
-                "required": ["device_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_unlock".into(),
-            description: "Release this session's lock on a remote device so another session can take control. Fails if this session doesn't hold the lock.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Device to unlock." }
-                },
-                "required": ["device_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_echo".into(),
-            description: "Connectivity probe: send a message to a remote device's daemon and get it echoed back. Proves the full session→server→device→result loop without touching the machine. Start here when a device misbehaves.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
-                    "message": { "type": "string", "description": "Text for the daemon to echo back." }
-                },
-                "required": ["device_id", "message"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_run".into(),
-            description: "Run a shell command on a remote device via its peckboard-agent daemon. The daemon enforces its own per-capability allow/deny config and kill-switch; a refusal comes back as a tool error. Returns stdout/stderr/exit code.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
-                    "command": { "type": "string", "description": "Command line to execute." },
-                    "cwd": { "type": "string", "description": "Working directory (daemon default if omitted)." },
-                    "timeout_secs": { "type": "integer", "description": "Deadline in seconds, 1–600 (default 120)." }
-                },
-                "required": ["device_id", "command"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_server".into(),
-            description: "Manage a long-running server process on a remote device: start / stop / restart / logs / health. The daemon maps 'server' names to its locally configured process definitions.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
-                    "action": { "type": "string", "enum": ["start", "stop", "restart", "logs", "health"], "description": "What to do." },
-                    "server": { "type": "string", "description": "Which configured server to act on." },
-                    "lines": { "type": "integer", "description": "logs: how many trailing lines (daemon default if omitted)." }
-                },
-                "required": ["device_id", "action"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_screenshot".into(),
-            description: "Capture the remote device's screen or a single app window (returned as an image). Multi-monitor: call once with list=true to get the monitor table (with each monitor's x/y offset), then pass 'monitor'. One app: call with list_windows=true to get every window's app_name, title, window_id and absolute screen bounds, then pass window_id (or app / title substrings) to capture just that window. A window capture's result carries window.x/y/scale: image pixel (px, py) is at screen (x + px/scale, y + py/scale) — or pass the same window_id to remote_agent_mouse and use image pixels directly. The daemon shows a visible 'being controlled' indicator while serving these.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
-                    "monitor": { "type": "integer", "description": "Monitor index from list mode (default: the primary display). Not combinable with a window target." },
-                    "list": { "type": "boolean", "description": "true = return the monitor table (index, name, size, x, y, scale_factor, is_primary) instead of capturing." },
-                    "list_windows": { "type": "boolean", "description": "true = return the window table (window_id, app_name, title, x, y, width, height, is_focused, is_minimized) instead of capturing." },
-                    "window_id": { "type": "integer", "description": "Capture exactly this window (from list_windows)." },
-                    "app": { "type": "string", "description": "Capture the window whose app name contains this (case-insensitive); the focused match wins." },
-                    "title": { "type": "string", "description": "Capture the window whose title contains this (case-insensitive); combinable with app." }
-                },
-                "required": ["device_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_mouse".into(),
-            description: "Control the remote device's mouse: move, click, drag, scroll. Coordinates are absolute screen pixels — or, when window_id / app / title is given, pixels within that window's screenshot (from remote_agent_screenshot with the same target); the agent maps them onto the window's current on-screen position and refuses points outside it. The daemon may refuse if the user disabled the mouse capability locally.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
-                    "action": { "type": "string", "enum": ["move", "click", "drag", "scroll"], "description": "What to do." },
-                    "x": { "type": "integer", "description": "Target X (move/click/drag end)." },
-                    "y": { "type": "integer", "description": "Target Y (move/click/drag end)." },
-                    "from_x": { "type": "integer", "description": "drag: start X." },
-                    "from_y": { "type": "integer", "description": "drag: start Y." },
-                    "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "click/drag button (default left)." },
-                    "delta_x": { "type": "integer", "description": "scroll: horizontal amount." },
-                    "delta_y": { "type": "integer", "description": "scroll: vertical amount." },
-                    "window_id": { "type": "integer", "description": "Make x/y (and from_x/from_y) relative to this window (from remote_agent_screenshot list_windows). Not valid for scroll." },
-                    "app": { "type": "string", "description": "Like window_id, but pick the window whose app name contains this (case-insensitive)." },
-                    "title": { "type": "string", "description": "Like window_id, but pick the window whose title contains this; combinable with app." }
-                },
-                "required": ["device_id", "action"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "remote_agent_keyboard".into(),
-            description: "Control the remote device's keyboard: type text or press a key combo (e.g. ctrl+shift+t). The daemon may refuse if the user disabled the keyboard capability locally.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device_id": { "type": "string", "description": "Target device (see remote_agent_list). This session must hold its lock (remote_agent_lock)." },
-                    "action": { "type": "string", "enum": ["type", "combo"], "description": "type = literal text; combo = chord like ctrl+shift+t." },
-                    "text": { "type": "string", "description": "type: the text to type." },
-                    "keys": { "type": "string", "description": "combo: '+'-joined chord, e.g. 'ctrl+c'." }
-                },
-                "required": ["device_id", "action"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "reattach_worker".into(),
-            description: "Orchestrator repair: put a worker session back on a card it was detached from (e.g. it ended its turn waiting on a long background task, or the card was blocked after repeated no-progress turns). The session must be a worker of the card's project and not bound to another card; the card must be unassigned (or already assigned to that session) and not done/won't-do. unblock (default true) lifts the card's block and resets its crash/no-progress budget; a block from an unanswered worker question only lifts once the question is answered (see answer_question). Use this instead of editing the database.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "card_id": { "type": "string", "description": "The card to reattach." },
-                    "session_id": { "type": "string", "description": "The worker session to put back on the card." },
-                    "unblock": { "type": "boolean", "description": "Lift the card's block (default true)." },
-                    "reason": { "type": "string", "description": "Why the worker is being reattached (logged)." }
-                },
-                "required": ["card_id", "session_id", "reason"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "answer_question".into(),
-            description: "Answer (or dismiss) a pending question another session asked the user, on the user's behalf. Voice assistant: any session (use the ids from the `[relay] question` message). Orchestrator sessions: worker sessions of projects in your own folder/scope. Key answers by question index, e.g. {\"0\": \"Use Postgres\"}. The target session resumes with the answer and its card's question block is lifted. Never insert question-resolved events into the database by hand.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "session_id": { "type": "string", "description": "The session that asked the question." },
-                    "question_id": { "type": "string", "description": "The question id from the relay message." },
-                    "answers": {
-                        "type": "object",
-                        "description": "Answers keyed by question index (\"0\", \"1\", …); each value is the chosen option label or free text.",
-                        "additionalProperties": { "type": "string" }
-                    },
-                    "rejected": { "type": "boolean", "description": "true = dismiss the question without answering (answers ignored)." }
-                },
-                "required": ["session_id", "question_id"],
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "show_view".into(),
-            description: "Voice assistant only: switch the user's screen to a project, session, card, or folder (by id or spoken name, fuzzy-matched), or to a top-level page. Call it whenever the conversation turns to a specific project or session. Returns what was opened, or candidates (and opens nothing) when the name is ambiguous or unmatched.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "enum": ["auto", "project", "session", "card", "folder", "page"],
-                        "description": "What to open. auto (default) searches projects, sessions, and folders by name."
-                    },
-                    "id": { "type": "string", "description": "Exact id, when known (e.g. from a candidates list)." },
-                    "name": { "type": "string", "description": "Name as the user said it, e.g. \"stashify\". For target page: sessions, projects, folders, settings, reports, repeating_tasks, usage, or agents." }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "voice_queue".into(),
-            description: "Voice assistant only: relays (other sessions' updates and questions) held back so you stay on one topic. action list = short summary of what is waiting (session, kind, one line each). action next = hand over the next topic's relays now, to handle like [relay] messages. Call next when the user wraps up the current topic or asks what else is new.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["list", "next"], "description": "list (default) or next." }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "voice_pronunciation".into(),
-            description: "Voice assistant only: fix how the text-to-speech voice pronounces a word. action add = save a pronunciation (applies to the next sentence), given a respelling like \"PECK-board\" or \"koh-KOH-roh\" (hyphens split syllables, the ALL-CAPS syllable is stressed, spaces split words, single letters are said as letters) or raw Kokoro phonemes. action list = the saved pronunciations and the words the voice didn't know, most spoken first. action remove = delete a word's pronunciation.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["add", "list", "remove"], "description": "add, list (default), or remove." },
-                    "word": { "type": "string", "description": "The word as written, e.g. \"Peckboard\". Required for add and remove." },
-                    "respelling": { "type": "string", "description": "add: how it sounds, e.g. \"PECK-board\". Give this or phonemes." },
-                    "phonemes": { "type": "string", "description": "add: raw Kokoro/misaki phonemes, e.g. \"pˈɛkbˌɔːɹd\". Give this or respelling." }
-                },
-                "additionalProperties": false
-            }),
-        },
-        McpToolDef {
-            name: "voice_prompt".into(),
-            description: "Voice assistant only: read or change your own system prompt (how you behave), live from your next turn. action get = the current prompt and whether it is the built-in default. action update = replace the whole prompt with content. action append = add text to the end. update and append change your behaviour for good: first say out loud exactly what will change; the call is then parked until the user confirms it on screen. Returns a short diff summary once it runs.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["get", "update", "append"], "description": "get (default), update, or append." },
-                    "content": { "type": "string", "description": "update: the complete new prompt." },
-                    "text": { "type": "string", "description": "append: text added on a new line at the end of the prompt." },
-                    "note": { "type": "string", "description": "update/append: one line on why, shown in the prompt history, e.g. \"user asked for shorter answers\"." }
-                },
-                "additionalProperties": false
-            }),
-        },
-    ]
+                    "additionalProperties": false
+                }),
+            },
+        ]
 }
 
 #[cfg(test)]

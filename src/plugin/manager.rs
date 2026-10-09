@@ -170,7 +170,7 @@ pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "project_files_write", // peckboard_write_file — write a file under the session/project folder
     "register_provider", // peckboard_register_provider / _emit_provider_event / _provider_should_stop / _provider_get_session / _provider_get_mcp_config / _provider_spawn / _read_line / _write_stdin / _read_stdin / _kill / _account_env / _write_file / _probe / _list_accounts / _invoke_mcp / _take_message — register an AI provider and drive its turns (HTTP, CLI, or MCP tools)
     "provide_mcp_tools", // declare mcp_tools (mcp.tool.invoke)
-    "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file — connect to remote SSH hosts, run commands, transfer files
+    "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file / _term_open / _term_list / _term_close — connect to remote SSH hosts, run commands, transfer files, open interactive PTY shells
     "ssh_keys", // peckboard_ssh_key_list, and Auth::KeyRef in peckboard_ssh_* — list vault-key METADATA and use a vault key by id; never exposes private key material, ciphertext, nonce, or passphrase
     "session_dispatch", // peckboard_dispatch_capture / resume_session
     "session_control", // peckboard_interrupt_session / terminate_agent / clear_session / send_message — same-folder free; cross-folder needs Always/Once

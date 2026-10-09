@@ -121,9 +121,10 @@ for (const plugin of [
   'openai-compat',
   'chicken-coop',
   'app-manager',
-  'project-planner',
   'session-control',
+  'project-planner',
   'ui-gauge',
+  'ssh-fleet',
 ]) {
   const wasm = pluginsSrcRoots
     .flatMap((root) => artifactCandidates(plugin).map((rel) => path.join(root, rel)))

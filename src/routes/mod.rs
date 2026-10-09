@@ -50,6 +50,7 @@ use crate::state::AppState;
 use crate::ws::agent::agent_ws_handler;
 use crate::ws::handler::ws_handler;
 use crate::ws::plugin_ui::plugin_ws_handler;
+use crate::ws::terminal::terminal_ws_handler;
 use axum::{Router, routing::get};
 use std::sync::Arc;
 
@@ -62,6 +63,10 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // not by JWT — the sandboxed iframe holding the socket never sees
         // the user's token. See src/ws/plugin_ui.rs.
         .route("/ws/plugin-ui", get(plugin_ws_handler))
+        // Interactive SSH terminal WS: same one-time plugin-scoped ticket as
+        // /ws/plugin-ui, attaching a plugin page to a PTY shell its own
+        // plugin opened. See src/ws/terminal.rs + src/plugin/ssh_term.rs.
+        .route("/ws/terminal", get(terminal_ws_handler))
         // Remote-control daemon WS: authenticated by the device's enrollment
         // token (hashed against devices.secret_hash) BEFORE the upgrade —
         // never by JWT. Daemons send no Origin, so origin_check passes them.

@@ -523,6 +523,26 @@ impl SessionManager {
                 None => config.system_prompt_suffix,
             }
         };
+        // Session memory: the agent's durable notes ride the per-spawn
+        // suffix. Read on every dispatch (one indexed query) but only
+        // reaching the model when a child is actually spawned — a live
+        // child keeps its original system prompt, and already saw its own
+        // memory_* tool results. So the section is fresh exactly when it
+        // matters (after a clear, a resume, a compaction, a model switch)
+        // and never re-sent per turn. An empty pool adds nothing.
+        let system_prompt_suffix = match db.list_session_memories(session_id).await {
+            Ok(entries) => match crate::db::crud::render_memory_prompt(&entries) {
+                Some(section) => Some(match system_prompt_suffix {
+                    Some(s) => format!("{s}\n{section}"),
+                    None => section,
+                }),
+                None => system_prompt_suffix,
+            },
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, "session memory lookup failed: {e}");
+                system_prompt_suffix
+            }
+        };
         let mut final_config = SpawnConfig {
             working_dir,
             model: final_model,

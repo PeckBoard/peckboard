@@ -323,6 +323,19 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'session-memory') {
+        // The session's durable memory pool changed (agent tool call or a
+        // delete from another client). Identifiers only; the Memory modal
+        // refetches.
+        const sessionId = msg.session_id as string
+        if (sessionId) {
+          window.dispatchEvent(
+            new CustomEvent('peckboard:session-memory', { detail: { sessionId } }),
+          )
+        }
+        return
+      }
+
       if (msg.type === 'session-cleared') {
         // Server wiped this session's events + todos. Two event caches
         // need to drop the snapshot in lockstep — `useWsStore`'s

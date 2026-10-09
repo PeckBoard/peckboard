@@ -122,6 +122,11 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/children", get(list_children))
         .route("/api/sessions/{id}/todos", get(events::get_session_todos))
         .route("/api/sessions/{id}/read", post(mark_read))
+        .route("/api/sessions/{id}/memories", get(list_memories))
+        .route(
+            "/api/sessions/{id}/memories/{memory_id}",
+            axum::routing::delete(delete_memory),
+        )
         .route("/api/sessions/{id}/clear", post(clear_session))
         .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/sessions/{id}/recovery-preview", get(recovery_preview))
@@ -1101,6 +1106,50 @@ async fn clear_session(
     })?;
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+}
+/// GET /api/sessions/:id/memories → `{ "memories": [...] }`, oldest first.
+/// Read side of the agent's durable memory pool for the Memory modal.
+async fn list_memories(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.db.list_session_memories(&id).await {
+        Ok(memories) => Ok(Json(serde_json::json!({ "memories": memories }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// DELETE /api/sessions/:id/memories/:memory_id → 204, or 404 when the
+/// entry is not in this session's pool (an id from another session is
+/// indistinguishable from an unknown one). Broadcasts `session-memory` so
+/// other open Memory modals refresh.
+async fn delete_memory(
+    State(state): State<Arc<AppState>>,
+    Path((id, memory_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.db.remove_session_memories(&id, &[memory_id]).await {
+        Ok(0) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "memory not found" })),
+        )),
+        Ok(_) => {
+            state
+                .broadcaster
+                .broadcast(crate::ws::broadcaster::WsEvent {
+                    event_type: "session-memory".into(),
+                    session_id: id.clone(),
+                    data: serde_json::json!({ "session_id": id }),
+                });
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
 }
 
 /// Wipe a session's transcript and reset it — the shared body behind both the

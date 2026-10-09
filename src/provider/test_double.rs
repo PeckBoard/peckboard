@@ -49,7 +49,8 @@ impl AgentProvider for NoopProvider {
         let conv = format!("mock-{}-1", ctx.session_id);
         let scenario = scenario(&ctx.config.model);
         // Same metadata shape as the mock plugin's `Started`, so tests can
-        // assert the dispatched working dir (`tests/worktree_dispatch.rs`).
+        // assert the dispatched working dir (`tests/worktree_dispatch.rs`)
+        // and the per-spawn prompt suffix (`tests/session_memory_dispatch.rs`).
         emit_event(
             &ctx.db,
             &ctx.broadcaster,
@@ -60,6 +61,7 @@ impl AgentProvider for NoopProvider {
                 metadata: serde_json::json!({
                     "scenario": scenario,
                     "working_dir": ctx.config.working_dir,
+                    "system_prompt_suffix": ctx.config.system_prompt_suffix,
                 }),
             },
         )

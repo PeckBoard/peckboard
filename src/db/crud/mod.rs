@@ -32,6 +32,7 @@ mod queued;
 mod remote_device_enrollments;
 mod remote_devices;
 mod repeating_tasks;
+mod session_memories;
 mod session_views;
 mod sessions;
 mod ssh_keys;
@@ -53,6 +54,9 @@ pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport}
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
 pub use remote_device_enrollments::{
     ActivateAttempt, EnrollAttempt, EnrollOutcome, EnrollRefusal, rfc3339_after,
+};
+pub use session_memories::{
+    MAX_MEMORY_ENTRIES, MAX_MEMORY_ENTRY_CHARS, MAX_MEMORY_TOTAL_CHARS, render_memory_prompt,
 };
 pub use session_views::{
     MAX_VIEW_DEPTH, MAX_VIEW_LEAVES, MAX_VIEW_NAME_CHARS, SplitDir, ViewLayout, validate_view_name,

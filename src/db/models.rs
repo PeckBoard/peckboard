@@ -1456,6 +1456,31 @@ pub struct NewPlan {
     pub created_at: String,
     pub updated_at: String,
 }
+// ── Session memories ─────────────────────────────
+
+/// One entry in a session's durable memory pool. Written by the agent via
+/// the `memory_*` MCP tools, rendered into the system prompt on every
+/// spawn. Survives `clear_session` and compaction; deleted with the session
+/// (FK cascade).
+#[derive(Queryable, Selectable, Serialize, Debug, Clone, PartialEq, Eq)]
+#[diesel(table_name = session_memories)]
+pub struct SessionMemory {
+    pub id: String,
+    pub session_id: String,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = session_memories)]
+pub struct NewSessionMemory {
+    pub id: String,
+    pub session_id: String,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
 // ── Document Reviews ─────────────────────────────
 
 /// A review pass over one markdown document. The document's text lives in

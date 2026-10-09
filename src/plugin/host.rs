@@ -4233,6 +4233,40 @@ host_fn!(peckboard_ssh_write_file(user_data: HostState; input: String) -> String
     Ok(super::ssh::write_file_impl(&db, &data_dir, has_ssh_keys, &input))
 });
 
+/// The calling plugin's id, for the per-plugin terminal registry
+/// (`peckboard_ssh_term_*`): a plugin only ever lists, attaches to, or
+/// closes terminals it opened itself.
+fn state_plugin_id(user_data: &UserData<HostState>) -> Result<String, Error> {
+    let state = user_data.get()?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("plugin host state mutex poisoned"))?;
+    Ok(state.plugin_id.clone())
+}
+
+host_fn!(peckboard_ssh_term_open(user_data: HostState; input: String) -> String {
+    let (db, has_ssh, has_ssh_keys, data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    let plugin_id = state_plugin_id(&user_data)?;
+    // Opens a PTY shell that outlives this call; see `plugin::ssh_term`.
+    // Credentials are consumed here and never echoed back.
+    Ok(super::ssh_term::open_impl(&db, &data_dir, &plugin_id, has_ssh_keys, &input))
+});
+
+host_fn!(peckboard_ssh_term_list(user_data: HostState; _input: String) -> String {
+    let (_db, has_ssh, _has_ssh_keys, _data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    let plugin_id = state_plugin_id(&user_data)?;
+    Ok(super::ssh_term::list_impl(&plugin_id))
+});
+
+host_fn!(peckboard_ssh_term_close(user_data: HostState; input: String) -> String {
+    let (_db, has_ssh, _has_ssh_keys, _data_dir) = state_ssh_context(&user_data)?;
+    if !has_ssh { return Ok(error_json("plugin lacks the 'ssh' permission")); }
+    let plugin_id = state_plugin_id(&user_data)?;
+    Ok(super::ssh_term::close_impl(&plugin_id, &input))
+});
+
 host_fn!(peckboard_ask_user(user_data: HostState; input: String) -> String {
     let (db, _plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "ask_user")?;
     if !ok { return Ok(error_json("plugin lacks the 'ask_user' permission")); }
@@ -5009,6 +5043,27 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_ssh_key_list,
+        ),
+        Function::new(
+            "peckboard_ssh_term_open",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_term_open,
+        ),
+        Function::new(
+            "peckboard_ssh_term_list",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_term_list,
+        ),
+        Function::new(
+            "peckboard_ssh_term_close",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_ssh_term_close,
         ),
         Function::new(
             "peckboard_ask_user",

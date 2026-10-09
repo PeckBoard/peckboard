@@ -54,6 +54,7 @@ export default async function globalSetup() {
       'project-planner',
       'session-control',
       'ui-gauge',
+      'ssh-fleet',
     ]) {
       await fetch(`${baseURL}/api/plugins/${plugin}/approval`, {
         method: 'POST',

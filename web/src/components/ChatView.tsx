@@ -36,6 +36,7 @@ import ConfirmDialog from './ConfirmDialog'
 import ModelSwitchDialog, { type ModelSwitchMode } from './ModelSwitchDialog'
 import Modal from './Modal'
 import RenameModal from './RenameModal'
+import SessionMemoryModal from './SessionMemoryModal'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
@@ -945,6 +946,7 @@ export default function ChatView({
   // close the dialog silently, which looked exactly like success.
   const [confirmBusy, setConfirmBusy] = useState(false)
   const [confirmError, setConfirmError] = useState<string | null>(null)
+  const [memoryOpen, setMemoryOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   // Inline interrupt request in flight — locks the button so repeated
   // clicking can't stack interrupts on the agent.
@@ -2027,6 +2029,11 @@ export default function ChatView({
       testId: 'chat-menu-plan',
     },
     {
+      label: 'Memory',
+      onSelect: () => setMemoryOpen(true),
+      testId: 'chat-menu-memory',
+    },
+    {
       label: 'Export transcript',
       submenu: [
         {
@@ -2733,6 +2740,9 @@ export default function ChatView({
           onSubmit={submitRename}
           onClose={() => setRenameOpen(false)}
         />
+      )}
+      {memoryOpen && (
+        <SessionMemoryModal sessionId={sessionId} onClose={() => setMemoryOpen(false)} />
       )}
     </div>
   )

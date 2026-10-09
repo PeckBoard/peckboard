@@ -55,6 +55,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_system_prompt_name_columns(conn)?;
     ensure_system_prompts_table(conn)?;
     ensure_plans_tables(conn)?;
+    ensure_session_memories_table(conn)?;
     ensure_projects_review_columns(conn)?;
     ensure_projects_worktree_isolation_column(conn)?;
     ensure_cards_worktree_unmerged_columns(conn)?;
@@ -1024,6 +1025,27 @@ fn ensure_plans_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     sql_query("CREATE INDEX IF NOT EXISTS idx_plans_session ON plans (session_id)")
         .execute(conn)?;
     sql_query("CREATE INDEX IF NOT EXISTS idx_plans_card ON plans (card_id)").execute(conn)?;
+    Ok(())
+}
+/// Heal DBs that predate `1791533555_session_memories`. Idempotent CREATE
+/// TABLE IF NOT EXISTS + index; DDL mirrors the migration.
+fn ensure_session_memories_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "session_memories")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS session_memories (
+            id          TEXT PRIMARY KEY NOT NULL,
+            session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            content     TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_session_memories_session \
+         ON session_memories (session_id, created_at)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

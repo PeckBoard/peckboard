@@ -61,7 +61,7 @@ const CONNECT_MAX_TIMEOUT: u64 = 120;
 /// right one unambiguously.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum Auth {
+pub(crate) enum Auth {
     Password {
         password: String,
     },
@@ -81,11 +81,11 @@ enum Auth {
 
 /// The connection-shaped fields shared by every `ssh_*` input.
 #[derive(Deserialize)]
-struct Conn {
-    host: String,
+pub(crate) struct Conn {
+    pub(crate) host: String,
     #[serde(default = "default_port")]
-    port: u16,
-    username: String,
+    pub(crate) port: u16,
+    pub(crate) username: String,
     auth: Auth,
     /// Optional pinned server-key fingerprint (`SHA256:…`). When set, a
     /// mismatch aborts the handshake (TOFU pinning).
@@ -108,6 +108,12 @@ impl Conn {
             return Err("`username` is required".into());
         }
         Ok(())
+    }
+
+    /// Whether the credential is a vault-key reference (needs the
+    /// `ssh_keys` grant to resolve).
+    pub(crate) fn uses_key_ref(&self) -> bool {
+        matches!(self.auth, Auth::KeyRef { .. })
     }
 
     /// A stable pool key that binds the identity **and** the exact credential,
@@ -162,7 +168,7 @@ impl Conn {
 
 /// russh client handler. Records the server key fingerprint it saw and, if a
 /// pin was supplied, rejects a mismatch.
-struct HostKeyHandler {
+pub(crate) struct HostKeyHandler {
     expected: Option<String>,
     observed: Arc<Mutex<Option<String>>>,
 }
@@ -189,9 +195,9 @@ impl client::Handler for HostKeyHandler {
 
 // ──────────────────────────────── the pool ──────────────────────────────────
 
-struct Live {
-    handle: client::Handle<HostKeyHandler>,
-    fingerprint: String,
+pub(crate) struct Live {
+    pub(crate) handle: client::Handle<HostKeyHandler>,
+    pub(crate) fingerprint: String,
 }
 
 struct Slot {
@@ -240,6 +246,13 @@ fn pool() -> &'static Pool {
     })
 }
 
+/// The process-global SSH runtime, for long-lived SSH tasks that must
+/// outlive any single host call (interactive terminals in
+/// [`super::ssh_term`]). Pooled connections and their russh driver tasks
+/// already live here, so a shell spawned on it survives between calls too.
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+    &pool().rt
+}
 /// Get (or create) the slot for a pool key, opportunistically reaping idle and
 /// over-cap entries. Never holds the map lock across `.await`.
 fn get_slot(key: &str) -> Arc<Slot> {
@@ -270,17 +283,44 @@ fn get_slot(key: &str) -> Arc<Slot> {
     slot
 }
 
-/// Open a fresh authenticated session for `conn`.
+/// Open a fresh authenticated session for `conn` with the pool's default
+/// config: a 5-minute inactivity timeout, since pooled connections only
+/// ever carry short request/response ops.
 async fn connect(conn: &Conn) -> Result<Live, String> {
+    connect_with(
+        conn,
+        client::Config {
+            inactivity_timeout: Some(Duration::from_secs(300)),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Open a fresh authenticated session for an **interactive** shell: no
+/// inactivity timeout (an idle terminal is the normal case) and periodic
+/// keepalives so a NAT/firewall can't silently drop the session. Never
+/// pooled — the terminal owns the connection for its whole life.
+pub(crate) async fn connect_interactive(conn: &Conn) -> Result<Live, String> {
+    connect_with(
+        conn,
+        client::Config {
+            inactivity_timeout: None,
+            keepalive_interval: Some(Duration::from_secs(30)),
+            keepalive_max: 3,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn connect_with(conn: &Conn, config: client::Config) -> Result<Live, String> {
     let observed = Arc::new(Mutex::new(None));
     let handler = HostKeyHandler {
         expected: conn.known_host.clone(),
         observed: observed.clone(),
     };
-    let config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(300)),
-        ..Default::default()
-    });
+    let config = Arc::new(config);
     let mut handle = tokio::time::timeout(
         conn.connect_timeout(),
         client::connect(config, (conn.host.as_str(), conn.port), handler),
@@ -517,7 +557,7 @@ async fn do_probe(conn: &Conn) -> Result<(String, u64), String> {
 
 /// Run a `'static` SSH future to completion on the global pool runtime from a
 /// dedicated thread, so it is safe even when the caller is on a Tokio worker.
-fn block_on<F, T>(fut: F) -> Result<T, String>
+pub(crate) fn block_on<F, T>(fut: F) -> Result<T, String>
 where
     F: std::future::Future<Output = Result<T, String>> + Send + 'static,
     T: Send + 'static,
@@ -532,7 +572,7 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn parse_conn(input: &str) -> Result<(serde_json::Map<String, Value>, Conn), String> {
+pub(crate) fn parse_conn(input: &str) -> Result<(serde_json::Map<String, Value>, Conn), String> {
     let map: serde_json::Map<String, Value> =
         serde_json::from_str(input).map_err(|e| format!("invalid request json: {e}"))?;
     let conn: Conn = serde_json::from_value(Value::Object(map.clone()))
@@ -551,7 +591,11 @@ fn err_json(msg: impl std::fmt::Display) -> String {
 /// keys hash the actual (rotatable) key material, never the id. A bad or
 /// unknown `key_id` is a clean `Err`, never a panic. `Password`/`Key` auth
 /// passes through unchanged.
-async fn resolve_key_ref(mut conn: Conn, db: &Db, data_dir: &Path) -> Result<Conn, String> {
+pub(crate) async fn resolve_key_ref(
+    mut conn: Conn,
+    db: &Db,
+    data_dir: &Path,
+) -> Result<Conn, String> {
     if let Auth::KeyRef { key_id } = &conn.auth {
         let vault_key = crate::service::ssh_keys::load_or_create_vault_key(data_dir)
             .map_err(|e| format!("failed to load ssh vault key: {e}"))?;
@@ -741,7 +785,7 @@ pub(crate) fn write_file_impl(
 
 /// An owned copy of the connection fields, so the async future handed to a
 /// worker thread is `'static` (it cannot borrow the caller's `Conn`).
-struct ConnOwned {
+pub(crate) struct ConnOwned {
     host: String,
     port: u16,
     username: String,
@@ -774,7 +818,7 @@ impl From<&Conn> for ConnOwned {
     }
 }
 impl ConnOwned {
-    fn as_conn(&self) -> Conn {
+    pub(crate) fn as_conn(&self) -> Conn {
         Conn {
             host: self.host.clone(),
             port: self.port,
@@ -1294,135 +1338,21 @@ mod tests {
     }
 
     /// Real end-to-end test against a throwaway OpenSSH `sshd` on an ephemeral
-    /// port, with host/client keys and config confined to a temp dir. Connects
-    /// as the current user by key and exercises exec, probe, host-key pinning,
-    /// and SFTP. Skips cleanly (does not fail) when OpenSSH is not installed, so
-    /// CI without `sshd` stays green.
+    /// port (see [`super::test_support::LocalSshd`]). Connects as the current
+    /// user by key and exercises exec, probe, host-key pinning, and SFTP.
+    /// Skips cleanly (does not fail) when OpenSSH is not installed, so CI
+    /// without `sshd` stays green.
     #[test]
-    // Test fixture: spawns ssh-keygen/sshd itself, never an agent program.
-    #[allow(clippy::disallowed_methods)]
     fn end_to_end_against_local_sshd() {
         use base64::Engine as _;
         use serde_json::{Value, json};
-        use std::fs;
-        use std::net::{TcpListener, TcpStream};
-        use std::path::PathBuf;
-        use std::process::{Child, Command};
-        use std::time::Duration as Dur;
 
-        fn first_existing(cands: &[&str]) -> Option<PathBuf> {
-            cands.iter().map(PathBuf::from).find(|p| p.exists())
-        }
-        macro_rules! skip {
-            ($($a:tt)*) => {{ eprintln!("SKIP end_to_end_against_local_sshd: {}", format!($($a)*)); return; }};
-        }
-
-        let sshd = match first_existing(&["/usr/sbin/sshd", "/usr/bin/sshd", "/sbin/sshd"]) {
-            Some(p) => p,
-            None => skip!("sshd not found"),
+        let Some(sshd) = super::test_support::LocalSshd::spawn() else {
+            return;
         };
-        let keygen = match first_existing(&["/usr/bin/ssh-keygen", "/bin/ssh-keygen"]) {
-            Some(p) => p,
-            None => skip!("ssh-keygen not found"),
-        };
-        let sftp_server = first_existing(&[
-            "/usr/lib/openssh/sftp-server",
-            "/usr/libexec/openssh/sftp-server",
-            "/usr/libexec/sftp-server",
-            "/usr/lib/ssh/sftp-server",
-        ]);
-
-        let dir = match tempfile::tempdir() {
-            Ok(d) => d,
-            Err(e) => skip!("tempdir: {e}"),
-        };
-        let dp = dir.path();
+        let dp = sshd.dir();
         let db = crate::db::Db::in_memory().unwrap();
-        let hostkey = dp.join("hostkey");
-        let clientkey = dp.join("id");
-        let authkeys = dp.join("authorized_keys");
-        let config = dp.join("sshd_config");
-        let logfile = dp.join("sshd.log");
-
-        for path in [&hostkey, &clientkey] {
-            let ok = Command::new(&keygen)
-                .args(["-t", "ed25519", "-N", "", "-q", "-f"])
-                .arg(path)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok {
-                skip!("ssh-keygen failed for {}", path.display());
-            }
-        }
-        let pubkey = fs::read(clientkey.with_extension("pub")).unwrap();
-        fs::write(&authkeys, &pubkey).unwrap();
-        let private_pem = fs::read_to_string(&clientkey).unwrap();
-
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-
-        let mut cfg = format!(
-            "Port {port}\nListenAddress 127.0.0.1\nHostKey {hk}\nAuthorizedKeysFile {ak}\n\
-StrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
-PubkeyAuthentication yes\nLogLevel ERROR\n",
-            hk = hostkey.display(),
-            ak = authkeys.display(),
-        );
-        if let Some(s) = &sftp_server {
-            cfg.push_str(&format!("Subsystem sftp {}\n", s.display()));
-        }
-        fs::write(&config, cfg).unwrap();
-
-        struct Kill(Child);
-        impl Drop for Kill {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let _guard = match Command::new(&sshd)
-            .arg("-D")
-            .arg("-f")
-            .arg(&config)
-            .arg("-E")
-            .arg(&logfile)
-            .spawn()
-        {
-            Ok(c) => Kill(c),
-            Err(e) => skip!("sshd spawn failed: {e}"),
-        };
-
-        let mut up = false;
-        for _ in 0..50 {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Dur::from_millis(100));
-        }
-        if !up {
-            let log = fs::read_to_string(&logfile).unwrap_or_default();
-            skip!("sshd never accepted on {port}; log:\n{log}");
-        }
-
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("LOGNAME"))
-            .unwrap_or_default();
-        if user.is_empty() {
-            skip!("no USER/LOGNAME in env");
-        }
-
-        let base = json!({
-            "host": "127.0.0.1",
-            "port": port,
-            "username": user,
-            "auth": { "private_key": private_pem },
-            "connect_timeout_secs": 5
-        });
+        let base = sshd.base_conn();
         let call = |v: &Value| -> Value {
             serde_json::from_str(&exec_impl(&db, dp, false, &v.to_string())).unwrap()
         };
@@ -1477,7 +1407,7 @@ PubkeyAuthentication yes\nLogLevel ERROR\n",
         assert_eq!(probe["server_fingerprint"].as_str().unwrap(), fp);
 
         // SFTP write then read round-trips exactly (when sftp-server exists).
-        if sftp_server.is_some() {
+        if sshd.has_sftp() {
             let remote = dp.join("written.txt");
             let content = b"content-123\nsecond line\n";
             let mut w = base.clone();
@@ -1497,6 +1427,174 @@ PubkeyAuthentication yes\nLogLevel ERROR\n",
                 .decode(ro["content_base64"].as_str().unwrap())
                 .unwrap();
             assert_eq!(got, content, "sftp round-trip mismatch");
+        }
+    }
+}
+
+/// Shared test fixture: a throwaway OpenSSH `sshd` on an ephemeral loopback
+/// port, with host/client keys and config confined to a temp dir, accepting
+/// the current user by key. Used by the exec/SFTP test above and by the PTY
+/// terminal test in [`super::ssh_term`].
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::fs;
+    use std::net::{TcpListener, TcpStream};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command};
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+
+    struct Kill(Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    pub(crate) struct LocalSshd {
+        port: u16,
+        user: String,
+        private_key: String,
+        has_sftp: bool,
+        _child: Kill,
+        dir: tempfile::TempDir,
+    }
+
+    impl LocalSshd {
+        /// Start the daemon. `None` (after an eprintln'd `SKIP`) when OpenSSH
+        /// is not installed or cannot start here, so callers skip cleanly
+        /// instead of failing on machines without `sshd`.
+        // Test fixture: spawns ssh-keygen/sshd itself, never an agent program.
+        #[allow(clippy::disallowed_methods)]
+        pub(crate) fn spawn() -> Option<Self> {
+            fn first_existing(cands: &[&str]) -> Option<PathBuf> {
+                cands.iter().map(PathBuf::from).find(|p| p.exists())
+            }
+            macro_rules! skip {
+                ($($a:tt)*) => {{ eprintln!("SKIP local sshd fixture: {}", format!($($a)*)); return None; }};
+            }
+
+            let sshd = match first_existing(&["/usr/sbin/sshd", "/usr/bin/sshd", "/sbin/sshd"]) {
+                Some(p) => p,
+                None => skip!("sshd not found"),
+            };
+            let keygen = match first_existing(&["/usr/bin/ssh-keygen", "/bin/ssh-keygen"]) {
+                Some(p) => p,
+                None => skip!("ssh-keygen not found"),
+            };
+            let sftp_server = first_existing(&[
+                "/usr/lib/openssh/sftp-server",
+                "/usr/libexec/openssh/sftp-server",
+                "/usr/libexec/sftp-server",
+                "/usr/lib/ssh/sftp-server",
+            ]);
+
+            let dir = match tempfile::tempdir() {
+                Ok(d) => d,
+                Err(e) => skip!("tempdir: {e}"),
+            };
+            let dp = dir.path();
+            let hostkey = dp.join("hostkey");
+            let clientkey = dp.join("id");
+            let authkeys = dp.join("authorized_keys");
+            let config = dp.join("sshd_config");
+            let logfile = dp.join("sshd.log");
+
+            for path in [&hostkey, &clientkey] {
+                let ok = Command::new(&keygen)
+                    .args(["-t", "ed25519", "-N", "", "-q", "-f"])
+                    .arg(path)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !ok {
+                    skip!("ssh-keygen failed for {}", path.display());
+                }
+            }
+            let pubkey = fs::read(clientkey.with_extension("pub")).unwrap();
+            fs::write(&authkeys, &pubkey).unwrap();
+            let private_key = fs::read_to_string(&clientkey).unwrap();
+
+            let port = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+
+            let mut cfg = format!(
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {hk}\nAuthorizedKeysFile {ak}\n\
+StrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
+PubkeyAuthentication yes\nLogLevel ERROR\n",
+                hk = hostkey.display(),
+                ak = authkeys.display(),
+            );
+            if let Some(s) = &sftp_server {
+                cfg.push_str(&format!("Subsystem sftp {}\n", s.display()));
+            }
+            fs::write(&config, cfg).unwrap();
+
+            let child = match Command::new(&sshd)
+                .arg("-D")
+                .arg("-f")
+                .arg(&config)
+                .arg("-E")
+                .arg(&logfile)
+                .spawn()
+            {
+                Ok(c) => Kill(c),
+                Err(e) => skip!("sshd spawn failed: {e}"),
+            };
+
+            let mut up = false;
+            for _ in 0..50 {
+                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    up = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if !up {
+                let log = fs::read_to_string(&logfile).unwrap_or_default();
+                skip!("sshd never accepted on {port}; log:\n{log}");
+            }
+
+            let user = std::env::var("USER")
+                .or_else(|_| std::env::var("LOGNAME"))
+                .unwrap_or_default();
+            if user.is_empty() {
+                skip!("no USER/LOGNAME in env");
+            }
+
+            Some(LocalSshd {
+                port,
+                user,
+                private_key,
+                has_sftp: sftp_server.is_some(),
+                _child: child,
+                dir,
+            })
+        }
+
+        /// The temp dir (also a fine `data_dir` for the `*_impl` calls).
+        pub(crate) fn dir(&self) -> &Path {
+            self.dir.path()
+        }
+
+        pub(crate) fn has_sftp(&self) -> bool {
+            self.has_sftp
+        }
+
+        /// Connection fields (inline key auth) for the `*_impl` entry points.
+        pub(crate) fn base_conn(&self) -> Value {
+            json!({
+                "host": "127.0.0.1",
+                "port": self.port,
+                "username": self.user,
+                "auth": { "private_key": self.private_key },
+                "connect_timeout_secs": 5
+            })
         }
     }
 }

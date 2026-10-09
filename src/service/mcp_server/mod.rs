@@ -87,6 +87,11 @@ impl McpToolRegistry {
             "create_card" => self.handle_create_card(args, ctx).await,
             "propose_plan" => self.handle_propose_plan(args, ctx).await,
             "delete_plan" => self.handle_delete_plan(args, ctx).await,
+            "memory_add" => self.handle_memory_add(args, ctx).await,
+            "memory_list" => self.handle_memory_list(args, ctx).await,
+            "memory_update" => self.handle_memory_update(args, ctx).await,
+            "memory_remove" => self.handle_memory_remove(args, ctx).await,
+            "memory_compact" => self.handle_memory_compact(args, ctx).await,
             "list_cards" => self.handle_list_cards(args, ctx).await,
             "list_card_dependencies" => self.handle_list_card_dependencies(args, ctx).await,
             "get_card_dependency_tree" => self.handle_get_card_dependency_tree(args, ctx).await,
@@ -628,6 +633,12 @@ mod tests {
         assert!(names.contains(&"switch_session_model"));
         assert!(names.contains(&"propose_plan"));
         assert!(names.contains(&"delete_plan"));
+        // Per-session durable memory pool.
+        assert!(names.contains(&"memory_add"));
+        assert!(names.contains(&"memory_list"));
+        assert!(names.contains(&"memory_update"));
+        assert!(names.contains(&"memory_remove"));
+        assert!(names.contains(&"memory_compact"));
         assert!(names.contains(&"spawn_subagent"));
         // Agent variables (shared, folder- or global-scoped state).
         assert!(names.contains(&"list_variables"));
@@ -655,7 +666,7 @@ mod tests {
         assert!(names.contains(&"voice_prompt"));
         // Orchestrator repair of a detached worker.
         assert!(names.contains(&"reattach_worker"));
-        assert_eq!(names.len(), 94);
+        assert_eq!(names.len(), 99);
     }
 
     #[test]
