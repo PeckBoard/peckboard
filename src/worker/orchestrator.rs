@@ -879,30 +879,44 @@ async fn spawn_worker_for_card(
     // was created with may be unusable (e.g. that account ran out of
     // credits for the model, so every resume ends without progress), and
     // `reviewer_model` is where that policy lives. Same mechanism as
-    // `switch_session_model`: write the row, the resume reads it.
-    let session = if !created_now && effective_step == crate::workflow::REVIEW_STEP {
+    // `switch_session_model`: write the row, the resume reads it. A move to
+    // another PROVIDER cannot resume the old conversation (its id means
+    // nothing to the new CLI), so the review restarts fresh: conversation
+    // cleared, full assignment prompt instead of the short resume one.
+    let (session, is_resume) = if !created_now && effective_step == crate::workflow::REVIEW_STEP {
         match reviewer_model(state, project, card).await {
             Some(pick) if session.model.as_deref() != Some(pick.as_str()) => {
+                let provider_of = |m: Option<&str>| {
+                    crate::provider::registry::ProviderRegistry::parse_model_id(
+                        m.unwrap_or("claude:default"),
+                        "claude",
+                    )
+                    .0
+                };
+                let new_provider =
+                    provider_of(session.model.as_deref()) != provider_of(Some(&pick));
                 tracing::info!(
                     session_id = %session.id,
                     card_id = %card.id,
                     from = ?session.model,
                     to = %pick,
+                    new_provider,
                     "Moving review session to the current reviewer model"
                 );
                 let update = crate::db::models::UpdateSession {
                     model: Some(Some(pick)),
+                    conversation_id: new_provider.then_some(None),
                     ..Default::default()
                 };
                 match state.db.update_session(&session.id, update).await {
-                    Ok(Some(updated)) => updated,
-                    _ => session,
+                    Ok(Some(updated)) => (updated, is_resume && !new_provider),
+                    _ => (session, is_resume),
                 }
             }
-            _ => session,
+            _ => (session, is_resume),
         }
     } else {
-        session
+        (session, is_resume)
     };
     let session_id = session.id.clone();
 
