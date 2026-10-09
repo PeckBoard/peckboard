@@ -446,8 +446,18 @@ async fn dispatch_inner(
             registry.handle_tool_call(tool_name, final_args, ctx).await
         }
     } else {
+        // `sessionName` is display-only (e.g. ssh-fleet's activity log shows
+        // which session ran a command); scope checks key on the ids.
+        let session_name = ctx
+            .db
+            .get_session(&ctx.session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.name);
         let plugin_ctx = serde_json::json!({
             "sessionId": &ctx.session_id,
+            "sessionName": session_name,
             "projectId": &ctx.project_id,
             "cardId": &ctx.card_id,
             "folderId": &ctx.folder_id,
