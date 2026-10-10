@@ -51,6 +51,8 @@ export type WidgetKind =
   | 'dependencies'
   | 'ssh_activity'
   | 'ssh_hosts'
+  | 'prs'
+  | 'orchestrators'
 
 /** One widget on a view's 12-column grid. The ref key matches `kind`; a
  *  null ref (empty, or its target was deleted) shows a picker. For the
@@ -103,6 +105,8 @@ export const KIND_FIELDS: Record<WidgetKind, readonly WidgetField[]> = {
   dependencies: ['projectId', 'cardId'],
   ssh_activity: ['hostRef'],
   ssh_hosts: [],
+  prs: ['projectId'],
+  orchestrators: [],
 }
 
 /** Max note body, matching the server's bound. */

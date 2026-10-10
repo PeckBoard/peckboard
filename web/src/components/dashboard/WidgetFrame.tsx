@@ -131,6 +131,21 @@ const ICONS: Record<WidgetKind, ReactNode> = {
       <circle cx="4.7" cy="11.25" r="0.7" fill="currentColor" />
     </>
   ),
+  prs: (
+    <>
+      <circle cx="4.5" cy="3.5" r="1.5" {...S} />
+      <circle cx="4.5" cy="12.5" r="1.5" {...S} />
+      <circle cx="11.5" cy="12.5" r="1.5" {...S} />
+      <path d="M4.5 5v6M11.5 11V6.5c0-1.1-.9-2-2-2H7.5M9 3l-1.5 1.5L9 6" {...S} />
+    </>
+  ),
+  orchestrators: (
+    <>
+      <circle cx="8" cy="8" r="5.5" {...S} />
+      <circle cx="8" cy="8" r="2.5" {...S} />
+      <circle cx="8" cy="8" r="0.7" fill="currentColor" />
+    </>
+  ),
 }
 
 interface Props {

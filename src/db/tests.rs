@@ -4010,6 +4010,11 @@ mod tests {
             },
             at("ssh_all", SshActivity, 26),
             at("hosts", SshHosts, 28),
+            ViewWidget {
+                project_id: Some("p1".into()),
+                ..at("prs", Prs, 30)
+            },
+            at("orch", Orchestrators, 32),
         ];
         assert!(validate_widgets(&widgets).is_ok());
         let (view, got) = db
@@ -4039,6 +4044,13 @@ mod tests {
         assert_eq!(wire[13]["hostRef"], serde_json::Value::Null);
         assert_eq!(wire[14]["kind"], "ssh_hosts");
         assert!(wire[14].get("hostRef").is_none(), "ssh_hosts has no ref");
+        assert_eq!(wire[15]["kind"], "prs");
+        assert_eq!(wire[15]["projectId"], "p1");
+        assert_eq!(wire[16]["kind"], "orchestrators");
+        assert!(
+            wire[16].get("projectId").is_none(),
+            "orchestrators has no ref"
+        );
         let back: Vec<ViewWidget> = serde_json::from_value(wire).unwrap();
         assert_eq!(back, widgets);
         assert!(
@@ -4059,6 +4071,10 @@ mod tests {
         assert!(bad(ViewWidget {
             host_ref: Some("h".into()),
             ..at("x", SshHosts, 0)
+        }));
+        assert!(bad(ViewWidget {
+            project_id: Some("p1".into()),
+            ..at("x", Orchestrators, 0)
         }));
         assert!(bad(ViewWidget {
             host_ref: Some("h".repeat(201)),

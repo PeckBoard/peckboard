@@ -14,6 +14,8 @@ import WorktreesWidget from './widgets/WorktreesWidget'
 import DependenciesWidget from './widgets/DependenciesWidget'
 import SshActivityWidget from './widgets/SshActivityWidget'
 import SshHostsWidget from './widgets/SshHostsWidget'
+import PrsWidget from './widgets/PrsWidget'
+import OrchestratorsWidget from './widgets/OrchestratorsWidget'
 
 export type WidgetCategory = 'panes' | 'project' | 'activity' | 'quality' | 'notes' | 'infra'
 
@@ -139,6 +141,17 @@ export const WIDGET_SPECS: Record<WidgetKind, WidgetSpec> = {
     configurable: false,
     component: RepeatingWidget,
   },
+  orchestrators: {
+    kind: 'orchestrators',
+    label: 'Orchestrators',
+    hint: 'goals + runs',
+    category: 'activity',
+    size: { w: 6, h: 8 },
+    scope: 'none',
+    configurable: false,
+    component: OrchestratorsWidget,
+    plugin: 'session-control',
+  },
   review_queue: {
     kind: 'review_queue',
     label: 'Review Queue',
@@ -168,6 +181,17 @@ export const WIDGET_SPECS: Record<WidgetKind, WidgetSpec> = {
     scope: 'optional',
     configurable: true,
     component: WorktreesWidget,
+  },
+  prs: {
+    kind: 'prs',
+    label: 'PRs & CI',
+    hint: 'linked pull requests',
+    category: 'quality',
+    size: { w: 6, h: 8 },
+    scope: 'optional',
+    configurable: true,
+    component: PrsWidget,
+    plugin: 'github-bridge',
   },
   note: {
     kind: 'note',

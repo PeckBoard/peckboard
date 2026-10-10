@@ -116,3 +116,17 @@ export function fmtElapsed(ms: number): string {
   if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
   return `${Math.floor(h / 24)}d ${h % 24}h`
 }
+
+/** "in 5m" / "3h ago" — handles both directions, unlike formatRelativeTime. */
+export function relativeTime(iso: string | null | undefined, now: number): string {
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return iso
+  const diff = t - now
+  const abs = Math.abs(diff)
+  const past = diff < 0
+  const m = Math.floor(abs / 60_000)
+  if (m < 1) return past ? 'just now' : 'in <1m'
+  const fmt = m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`
+  return past ? `${fmt} ago` : `in ${fmt}`
+}

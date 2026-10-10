@@ -468,16 +468,19 @@ function AddWidgetMenu({
   const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const term = useTerminalPickerItems('view-add-terminal', onTerminal)
-  // Approved WASM plugins, for kinds that need one (ssh-fleet).
+  // Approved WASM plugins plus installed bundled crate plugins (listed in
+  // `plugins` by id), for kinds that need one (ssh-fleet, github-bridge,
+  // session-control).
   const [plugins, setPlugins] = useState<Set<string> | null>(null)
   const probePlugins = () => {
     authedFetch('/api/plugins')
       .then((res) => (res.ok ? res.json() : null))
-      .then((body: { wasm_plugins?: WasmPlugin[] } | null) =>
+      .then((body: { wasm_plugins?: WasmPlugin[]; plugins?: { id: string }[] } | null) =>
         setPlugins(
-          new Set(
-            (body?.wasm_plugins ?? []).filter((p) => p.status === 'approved').map((p) => p.name),
-          ),
+          new Set([
+            ...(body?.wasm_plugins ?? []).filter((p) => p.status === 'approved').map((p) => p.name),
+            ...(body?.plugins ?? []).map((p) => p.id),
+          ]),
         ),
       )
       .catch(() => {})

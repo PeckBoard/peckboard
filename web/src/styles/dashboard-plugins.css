@@ -1,0 +1,238 @@
+/* Plugin-backed dashboard widgets: orchestrators (session-control) and
+   PRs & CI (github-bridge). Builds on the .dash-item rows and .dash-pill
+   tones in dashboard-info.css. */
+
+.dash-banner {
+  max-width: none;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+}
+
+/* ─── Orchestrators ─── */
+
+.orch-item {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding-right: 0;
+}
+
+.orch-item-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  padding-right: 4px;
+}
+
+.orch-main {
+  align-items: flex-start;
+}
+
+.orch-dot {
+  margin-top: 5px;
+}
+
+.orch-dot-paused {
+  background: var(--text3);
+  opacity: 0.6;
+}
+
+.orch-dot-error {
+  background: var(--danger);
+}
+
+.orch-dot-idle {
+  background: color-mix(in srgb, var(--success) 45%, var(--border-strong));
+}
+
+.orch-title-line,
+.prs-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.orch-name {
+  flex: 0 1 auto;
+  font-weight: 600;
+}
+
+.orch-goal {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  color: var(--text2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.orch-last .dash-mono {
+  color: var(--text2);
+}
+
+.orch-note-bad {
+  color: var(--danger);
+}
+
+.orch-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+  padding-top: 6px;
+}
+
+.orch-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 8px 8px 24px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  font-size: var(--text-xs);
+}
+
+.orch-log {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.orch-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.orch-log-row .dash-row-time {
+  min-width: 52px;
+}
+
+.orch-log-kind {
+  flex-shrink: 0;
+  color: var(--text2);
+}
+
+.orch-log-detail {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.orch-brain-link {
+  align-self: flex-start;
+  color: var(--accent);
+  font-size: var(--text-xs);
+}
+
+.orch-brain-link:hover {
+  text-decoration: underline;
+}
+
+.orch-count-running {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+/* ─── PRs & CI ─── */
+
+.prs-icon {
+  flex-shrink: 0;
+}
+
+.prs-icon-open {
+  color: var(--success);
+}
+
+.prs-icon-draft {
+  color: var(--text3);
+}
+
+.prs-icon-merged {
+  color: var(--chart-5);
+}
+
+.prs-icon-closed {
+  color: var(--danger);
+}
+
+.prs-ref {
+  flex-shrink: 0;
+  color: var(--text2);
+}
+
+a.prs-title {
+  text-decoration: none;
+}
+
+a.prs-title:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+a.prs-title:focus-visible,
+.prs-card:focus-visible,
+.prs-refresh:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.prs-card {
+  font-size: inherit;
+  color: var(--text2);
+}
+
+button.prs-card:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.prs-checks {
+  font-variant-numeric: tabular-nums;
+}
+
+.prs-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+}
+
+.prs-refresh:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.prs-refresh[aria-busy='true'] svg {
+  animation: prs-spin 0.9s linear infinite;
+}
+
+@keyframes prs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prs-refresh[aria-busy='true'] svg {
+    animation: none;
+  }
+}

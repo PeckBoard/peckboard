@@ -378,3 +378,200 @@ for (const theme of ['dark', 'light'] as const) {
     await page.screenshot({ path: path.join(dir, `widgets-${theme}-full.png`) })
   })
 }
+
+async function createOrchestrator(request: APIRequestContext, auth: Auth, name: string) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'pb-orch-'))
+  const fres = await request.post('/api/folders', {
+    headers: auth.auth,
+    data: { name: `orch-${Date.now()}`, path: dir },
+  })
+  expect(fres.ok(), `create folder failed: ${await fres.text()}`).toBeTruthy()
+  const folderId = ((await fres.json()) as { id: string }).id
+  // Disabled: no scheduled / watchdog fires, only the widget's Run now.
+  const res = await request.post('/api/plugin-ui/session-control/orchestrators', {
+    headers: auth.auth,
+    data: {
+      name,
+      folder_id: folderId,
+      goal: 'Ship the dashboard widgets with tests and screenshots',
+      model: 'mock:happy-path',
+      prompt: '{{goal}}',
+      enabled: false,
+    },
+  })
+  expect(res.ok(), `create orchestrator failed: ${await res.text()}`).toBeTruthy()
+  return ((await res.json()) as { id: string }).id
+}
+
+type OrchList = {
+  orchestrators: { id: string; paused: boolean; stats: { fires: number } }[]
+  clock: string
+}
+
+async function listOrchestrators(request: APIRequestContext, auth: Auth): Promise<OrchList> {
+  const res = await request.get('/api/plugin-ui/session-control/orchestrators', {
+    headers: auth.auth,
+  })
+  expect(res.ok(), await res.text()).toBeTruthy()
+  return (await res.json()) as OrchList
+}
+
+test('orchestrators widget runs and pauses; PRs widget explains a missing plugin', async ({
+  request,
+  page,
+}) => {
+  test.setTimeout(90_000)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  const auth = await authenticate(request)
+  const name = `Widget brain ${Date.now()}`
+  const id = await createOrchestrator(request, auth, name)
+  const orch = async () =>
+    (await listOrchestrators(request, auth)).orchestrators.find((o) => o.id === id)!
+  // Run now needs the engine clock, set on the plugin's first timer tick.
+  await expect
+    .poll(async () => (await listOrchestrators(request, auth)).clock, { timeout: 30_000 })
+    .not.toBe('')
+
+  const viewId = await createView(request, auth)
+  await openView(page, auth.token, viewId)
+  // session-control is bundled + preinstalled; github-bridge isn't installed.
+  await page.getByTestId('add-widget-button').click()
+  await expect(page.getByTestId('view-add-orchestrators')).toBeVisible()
+  await expect(page.getByTestId('view-add-prs')).toHaveCount(0)
+  await page.getByTestId('view-add-orchestrators').click()
+
+  const w = widgetOf(page, 'orchestrators')
+  const row = w.locator(`[data-testid="dash-orchestrator-row"][data-orch-id="${id}"]`)
+  await expect(row).toContainText(name, { timeout: 15_000 })
+  await expect(row).toContainText('Ship the dashboard widgets')
+  await expect(row.getByTestId('dash-orchestrator-goal-status')).toHaveText('In progress')
+
+  await row.getByTestId('dash-orchestrator-run').click()
+  await expect(row).toContainText('Fired', { timeout: 15_000 })
+  await expect.poll(async () => (await orch()).stats.fires).toBeGreaterThan(0)
+
+  await row.getByTestId('dash-orchestrator-pause').click()
+  await expect(row.getByTestId('dash-orchestrator-pause')).toHaveText('Resume')
+  expect((await orch()).paused).toBe(true)
+  await row.getByTestId('dash-orchestrator-pause').click()
+  await expect(row.getByTestId('dash-orchestrator-pause')).toHaveText('Pause')
+  expect((await orch()).paused).toBe(false)
+
+  // Expanding the row shows recent activity (newest first).
+  await row.locator('.orch-main').click()
+  await expect(row.getByTestId('dash-orchestrator-activity')).toContainText('user_paused')
+
+  // A saved prs widget (e.g. from before the plugin was removed) says why.
+  const put = await request.put(`/api/me/views/${viewId}`, {
+    headers: auth.auth,
+    data: { widgets: [{ id: 'w-prs', kind: 'prs', x: 0, y: 0, w: 6, h: 8 }] },
+  })
+  expect(put.ok(), await put.text()).toBeTruthy()
+  await page.reload()
+  const prs = widgetOf(page, 'prs')
+  await expect(prs.getByTestId('dash-prs-empty')).toContainText(
+    'GitHub Bridge plugin not installed',
+    { timeout: 15_000 },
+  )
+  // Installed but no GitHub token: a pointer to the plugin settings.
+  await page.route('**/api/plugin-ui/github-bridge/prs', (route) =>
+    route.fulfill({ json: { configured: false, prs: [], error: null } }),
+  )
+  await page.reload()
+  await expect(prs.getByTestId('dash-prs-empty')).toContainText(
+    'Connect GitHub in the GitHub Bridge plugin settings',
+    { timeout: 15_000 },
+  )
+})
+
+/** A populated `/prs` answer for screenshots (the plugin isn't in e2e). */
+function fakePrs(projectId: string) {
+  const ago = (m: number) => new Date(Date.now() - m * 60_000).toISOString()
+  const pr = (o: Record<string, unknown>) => ({
+    card_id: null,
+    card_title: null,
+    project_id: projectId,
+    repo: 'peckboard/peckboard',
+    draft: false,
+    state: 'open',
+    author: 'octocat',
+    review: null,
+    checks: { state: 'success', passed: 12, failed: 0, pending: 0 },
+    ...o,
+    url: `https://github.com/peckboard/peckboard/pull/${o.number}`,
+  })
+  return {
+    configured: true,
+    error: null,
+    prs: [
+      pr({
+        number: 412,
+        title: 'Dashboard: PRs & CI widget',
+        updated_at: ago(3),
+        card_id: 'c1',
+        card_title: 'PR widget',
+        checks: { state: 'pending', passed: 9, failed: 0, pending: 3 },
+        review: 'review_required',
+      }),
+      pr({
+        number: 409,
+        title: 'Fix flaky worktree merge retry',
+        updated_at: ago(25),
+        card_title: 'Merge retry',
+        checks: { state: 'failure', passed: 10, failed: 2, pending: 0 },
+        review: 'changes_requested',
+        author: 'hubot',
+      }),
+      pr({
+        number: 401,
+        title: 'Orchestrator goal status pills',
+        updated_at: ago(90),
+        review: 'approved',
+      }),
+      pr({
+        number: 398,
+        title: 'WIP: kokoro voice picker',
+        updated_at: ago(300),
+        draft: true,
+        checks: { state: 'none', passed: 0, failed: 0, pending: 0 },
+      }),
+      pr({ number: 377, title: 'Bump diesel to 2.3', updated_at: ago(1500), state: 'merged' }),
+      pr({
+        repo: 'peckboard/plugins',
+        number: 51,
+        title: 'Superseded registry layout',
+        updated_at: ago(4000),
+        state: 'closed',
+        checks: { state: 'none', passed: 0, failed: 0, pending: 0 },
+      }),
+    ],
+  }
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`screenshot: plugin widgets, ${theme} theme`, async ({ request, page }) => {
+    test.skip(!process.env.PB_WIDGET_SHOTS, 'set PB_WIDGET_SHOTS=<dir> to capture')
+    await page.setViewportSize({ width: 1400, height: 760 })
+    const auth = await authenticate(request)
+    const project = await createProject(request, auth, `plug-${theme}`)
+    await createOrchestrator(request, auth, `Release captain (${theme})`)
+    await page.route('**/api/plugin-ui/github-bridge/prs', (route) =>
+      route.fulfill({ json: fakePrs(project.id) }),
+    )
+    const viewId = await createView(request, auth, [
+      { id: 'w-prs', kind: 'prs', x: 0, y: 0, w: 6, h: 10 },
+      { id: 'w-orch', kind: 'orchestrators', x: 6, y: 0, w: 6, h: 10 },
+    ])
+    await openView(page, auth.token, viewId, theme)
+    await expect(widgetOf(page, 'prs').getByTestId('dash-prs-list')).toBeVisible({
+      timeout: 15_000,
+    })
+    const row = widgetOf(page, 'orchestrators').getByTestId('dash-orchestrator-row').first()
+    await expect(row).toBeVisible({ timeout: 15_000 })
+    await row.locator('.orch-main').click()
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 })
+    await page.screenshot({
+      path: path.join(process.env.PB_WIDGET_SHOTS!, `plugin-widgets-${theme}.png`),
+    })
+  })
+}

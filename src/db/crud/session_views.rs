@@ -219,6 +219,8 @@ pub enum WidgetKind {
     Dependencies,
     SshActivity,
     SshHosts,
+    Prs,
+    Orchestrators,
 }
 
 /// A widget's optional ref / content fields, by wire key.
@@ -259,7 +261,7 @@ impl WidgetField {
 }
 
 impl WidgetKind {
-    const ALL: [WidgetKind; 16] = [
+    const ALL: [WidgetKind; 18] = [
         WidgetKind::Session,
         WidgetKind::Terminal,
         WidgetKind::Project,
@@ -276,6 +278,8 @@ impl WidgetKind {
         WidgetKind::Dependencies,
         WidgetKind::SshActivity,
         WidgetKind::SshHosts,
+        WidgetKind::Prs,
+        WidgetKind::Orchestrators,
     ];
 
     fn as_str(self) -> &'static str {
@@ -296,6 +300,8 @@ impl WidgetKind {
             WidgetKind::Dependencies => "dependencies",
             WidgetKind::SshActivity => "ssh_activity",
             WidgetKind::SshHosts => "ssh_hosts",
+            WidgetKind::Prs => "prs",
+            WidgetKind::Orchestrators => "orchestrators",
         }
     }
 
@@ -312,7 +318,10 @@ impl WidgetKind {
             WidgetKind::Terminal => &[TerminalId],
             WidgetKind::Note => &[Body],
             WidgetKind::Report => &[ReportRef],
-            WidgetKind::Background | WidgetKind::Repeating | WidgetKind::SshHosts => &[],
+            WidgetKind::Background
+            | WidgetKind::Repeating
+            | WidgetKind::SshHosts
+            | WidgetKind::Orchestrators => &[],
             WidgetKind::SshActivity => &[HostRef],
             WidgetKind::Dependencies => &[ProjectId, CardId],
             WidgetKind::Project
@@ -321,7 +330,8 @@ impl WidgetKind {
             | WidgetKind::ReviewQueue
             | WidgetKind::ReviewQuality
             | WidgetKind::Workers
-            | WidgetKind::Worktrees => &[ProjectId],
+            | WidgetKind::Worktrees
+            | WidgetKind::Prs => &[ProjectId],
         }
     }
 }

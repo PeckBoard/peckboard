@@ -6,7 +6,7 @@ import type { RepeatingTask, RepeatingTaskRun } from '../../../types/api'
 import { describeSchedule } from '../../../utils/repeatingSchedule'
 import WidgetFrame from '../WidgetFrame'
 import { DashCount, DashEmpty, DashError, DashLoading } from './DashParts'
-import { useDashboardData } from './useDashboardData'
+import { relativeTime as relative, useDashboardData } from './useDashboardData'
 import type { InfoWidgetProps } from './types'
 import '../../../styles/dashboard-info.css'
 
@@ -20,20 +20,6 @@ const OUTCOME: Record<string, { label: string; tone: string }> = {
   failed: { label: 'Failed', tone: 'danger' },
   corrupt_schedule: { label: 'Bad schedule', tone: 'danger' },
   consumed_once: { label: 'Done', tone: 'neutral' },
-}
-
-/** "in 5m" / "3h ago" — handles both directions, unlike formatRelativeTime. */
-function relative(iso: string | null, now: number): string {
-  if (!iso) return '—'
-  const t = new Date(iso).getTime()
-  if (Number.isNaN(t)) return iso
-  const diff = t - now
-  const abs = Math.abs(diff)
-  const past = diff < 0
-  const m = Math.floor(abs / 60_000)
-  if (m < 1) return past ? 'just now' : 'in <1m'
-  const fmt = m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`
-  return past ? `${fmt} ago` : `in ${fmt}`
 }
 
 /** Repeating tasks: schedule, next run, last outcome, and Run now. */
