@@ -41,6 +41,7 @@ import { MenuButton, type MenuItem } from './Dropdown'
 import TerminalPicker from './terminal/TerminalPicker'
 import { useTerminalPickerItems } from './terminal/useTerminalPickerItems'
 import WidgetGrid, { type WidgetContext } from './dashboard/WidgetGrid'
+import ErrorBoundary from './ErrorBoundary'
 import WidgetFrame from './dashboard/WidgetFrame'
 import SessionWidget from './dashboard/SessionWidget'
 import TerminalWidget from './dashboard/TerminalWidget'
@@ -1046,7 +1047,13 @@ function ViewEditor({
         <WidgetGrid
           items={widgets}
           onChange={change}
-          renderWidget={renderWidget}
+          renderWidget={(w, ctx) => (
+            // One widget throwing must not blank the whole view; the
+            // fallback names the widget kind so the culprit is obvious.
+            <ErrorBoundary label={`${WIDGET_SPECS[w.kind]?.label ?? w.kind} widget`}>
+              {renderWidget(w, ctx)}
+            </ErrorBoundary>
+          )}
           testId="view-widget-grid"
           emptyState={
             <div className="widget-grid-empty-state" data-testid="view-empty">

@@ -210,3 +210,33 @@ test('removing a widget persists across reload', async ({ request, page }) => {
   await expect(widgets).toHaveCount(1)
   await expect(page.locator(`[data-pane-id="${drop}"]`)).toHaveCount(0)
 })
+
+test('a widget that crashes is contained; the rest of the view keeps working', async ({
+  request,
+  page,
+}) => {
+  // Phone width: the narrow single-column layout is where the iOS app
+  // reported a whole-view crash.
+  await page.setViewportSize({ width: 390, height: 844 })
+  const auth = await authenticate(request)
+  const folder = await createFolder(request, auth, 'widget-crash')
+  const sessionId = await createSession(request, auth, folder, 'still alive')
+  const viewId = await createView(request, auth, {
+    name: 'crash view',
+    widgets: [
+      { id: 'w-sess', kind: 'session', x: 0, y: 0, w: 6, h: 10, sessionId },
+      { id: 'w-bg', kind: 'background', x: 6, y: 0, w: 6, h: 6 },
+    ],
+  })
+  // A malformed payload makes the background widget throw while rendering.
+  await page.route('**/api/dashboard/background', (route) =>
+    route.fulfill({ json: { tasks: 'not-a-list' } }),
+  )
+
+  await openView(page, auth.token, viewId)
+  const boundary = page.getByTestId('error-boundary')
+  await expect(boundary).toHaveCount(1)
+  await expect(boundary).toContainText('Something went wrong in this Background Tasks widget.')
+  await expect(page.locator('[data-testid="view-widget"][data-widget-id="w-sess"]')).toBeVisible()
+  await expect(page.getByTestId('view-editor')).toBeVisible()
+})

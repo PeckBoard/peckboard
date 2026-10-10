@@ -40,6 +40,12 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
             Something went wrong in this {this.props.label ?? 'view'}.
           </p>
           <p className="error-boundary-detail">{this.state.error.message}</p>
+          {this.state.error.stack && (
+            <details className="error-boundary-stack">
+              <summary>Details</summary>
+              <pre>{this.state.error.stack}</pre>
+            </details>
+          )}
           <button
             type="button"
             className="error-boundary-retry"

@@ -38,6 +38,28 @@
   background: var(--accent-muted);
 }
 
+/* Per-widget boundary on the Views dashboard: fills the cell with the
+   widget chrome instead of the page-level padding. */
+.widget-cell > .error-boundary {
+  height: 100%;
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.error-boundary-stack {
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--text3);
+  text-align: left;
+}
+
+.error-boundary-stack pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .connection-banner {
   display: flex;
   align-items: center;
