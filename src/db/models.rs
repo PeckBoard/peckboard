@@ -758,10 +758,11 @@ pub struct SessionViewNode {
     pub terminal_id: Option<String>,
 }
 
-/// One widget of a saved view's dashboard: a rectangle on the 12-column
-/// grid showing the target named by the ref column matching `kind`.
+/// One widget of a saved view's dashboard (`dashboard_widgets`): a
+/// rectangle on the 12-column grid showing the target named by the ref
+/// column(s) `kind` uses, or note `body` / `report_ref`.
 #[derive(Queryable, Selectable, Insertable, Debug, Clone)]
-#[diesel(table_name = view_widgets)]
+#[diesel(table_name = dashboard_widgets)]
 pub struct ViewWidgetRow {
     pub id: String,
     pub view_id: String,
@@ -773,6 +774,10 @@ pub struct ViewWidgetRow {
     pub session_id: Option<String>,
     pub terminal_id: Option<String>,
     pub project_id: Option<String>,
+    pub card_id: Option<String>,
+    pub report_ref: Option<String>,
+    pub body: Option<String>,
+    pub host_ref: Option<String>,
 }
 
 // ── Project workflow instructions ────────────────────────────────────

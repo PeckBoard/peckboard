@@ -2130,6 +2130,12 @@ function App() {
                   setActiveProject(id)
                   navigate('projects', id)
                 }}
+                onOpenReport={(folder, file) => {
+                  const id = reportTabId(folder, file)
+                  setActiveReportId(id)
+                  navigate('reports', id)
+                  useTabsStore.getState().openTab('report', id)
+                }}
               />
             )}
             {view === 'usage' && <UsageDashboard />}

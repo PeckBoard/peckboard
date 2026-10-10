@@ -293,6 +293,24 @@ diesel::table! {
 }
 
 diesel::table! {
+    dashboard_widgets (view_id, id) {
+        id -> Text,
+        view_id -> Text,
+        kind -> Text,
+        x -> Integer,
+        y -> Integer,
+        w -> Integer,
+        h -> Integer,
+        session_id -> Nullable<Text>,
+        terminal_id -> Nullable<Text>,
+        project_id -> Nullable<Text>,
+        card_id -> Nullable<Text>,
+        report_ref -> Nullable<Text>,
+        body -> Nullable<Text>,
+        host_ref -> Nullable<Text>,
+    }
+}
+diesel::table! {
     view_widgets_converted (view_id) {
         view_id -> Text,
         converted_at -> Text,
@@ -817,6 +835,7 @@ diesel::joinable!(session_views -> users (user_id));
 diesel::joinable!(session_view_nodes -> session_views (view_id));
 diesel::joinable!(view_widgets -> session_views (view_id));
 diesel::joinable!(view_widgets_converted -> session_views (view_id));
+diesel::joinable!(dashboard_widgets -> session_views (view_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -872,6 +891,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     voice_prompt_versions,
     session_view_nodes,
     view_widgets,
+    dashboard_widgets,
     view_widgets_converted,
     remote_devices,
     remote_device_enrollments,

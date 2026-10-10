@@ -9,6 +9,8 @@ pub mod background;
 pub mod backup;
 pub mod claude_accounts;
 pub mod codex_accounts;
+pub mod dashboard_cards;
+pub mod dashboard_ops;
 pub mod devices;
 pub mod doc_reviews;
 pub mod env_vars;
@@ -96,6 +98,8 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(tool_images::router(state.clone()))
         .merge(notifications::router(state.clone()))
         .merge(background::router(state.clone()))
+        .merge(dashboard_cards::router(state.clone()))
+        .merge(dashboard_ops::router(state.clone()))
         .merge(me::router(state.clone()))
         .merge(views::router(state.clone()))
         .merge(assistant::router(state.clone()))

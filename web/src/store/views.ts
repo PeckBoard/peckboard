@@ -34,38 +34,126 @@ export interface ViewSummary {
   updated_at: string
 }
 
-export type WidgetKind = 'session' | 'terminal' | 'project'
+export type WidgetKind =
+  | 'session'
+  | 'terminal'
+  | 'project'
+  | 'note'
+  | 'report'
+  | 'background'
+  | 'repeating'
+  | 'todos'
+  | 'attention'
+  | 'review_queue'
+  | 'review_quality'
+  | 'workers'
+  | 'worktrees'
+  | 'dependencies'
+  | 'ssh_activity'
+  | 'ssh_hosts'
 
 /** One widget on a view's 12-column grid. The ref key matches `kind`; a
- *  null ref (empty, or its target was deleted) shows a picker. */
+ *  null ref (empty, or its target was deleted) shows a picker. For the
+ *  project-scoped info kinds `projectId` is an optional scope (null = all
+ *  projects). See `tmp-widgets2-contract.md`. */
 export interface ViewWidget extends GridItem {
   kind: WidgetKind
   sessionId?: string | null
   terminalId?: string | null
   projectId?: string | null
+  /** `dependencies`: optional root card. */
+  cardId?: string | null
+  /** `note`: markdown body. */
+  body?: string | null
+  /** `report`: `"<folder>/<file>"`; null = latest report. */
+  reportRef?: string | null
+  /** `ssh_activity`: ssh-fleet host id; null = all hosts. */
+  hostRef?: string | null
 }
 
 /** Display identity of a project a view references. */
 export interface ViewProjectMeta {
   name: string
 }
+export type WidgetField =
+  | 'sessionId'
+  | 'terminalId'
+  | 'projectId'
+  | 'cardId'
+  | 'body'
+  | 'reportRef'
+  | 'hostRef'
 
-/** The ref a widget of `kind` points at, or null. */
-export function widgetRef(w: ViewWidget): string | null {
-  return (
-    (w.kind === 'session' ? w.sessionId : w.kind === 'terminal' ? w.terminalId : w.projectId) ??
-    null
-  )
+/** Ref fields each kind may carry; the server 400s any other field. The
+ *  first entry is the kind's primary ref (see `widgetRef`). */
+export const KIND_FIELDS: Record<WidgetKind, readonly WidgetField[]> = {
+  session: ['sessionId'],
+  terminal: ['terminalId'],
+  project: ['projectId'],
+  note: ['body'],
+  report: ['reportRef'],
+  background: [],
+  repeating: [],
+  todos: ['projectId'],
+  attention: ['projectId'],
+  review_queue: ['projectId'],
+  review_quality: ['projectId'],
+  workers: ['projectId'],
+  worktrees: ['projectId'],
+  dependencies: ['projectId', 'cardId'],
+  ssh_activity: ['hostRef'],
+  ssh_hosts: [],
 }
 
-/** Copy of `w` pointing at `ref` (which may switch its kind). Only the
- *  matching ref key is set — the server rejects two refs. */
+/** Max note body, matching the server's bound. */
+export const NOTE_MAX = 20_000
+/** Max `hostRef`, matching the server's bound. */
+const HOST_REF_MAX = 200
+
+/** The primary ref a widget points at (session / terminal / project or
+ *  scope project / report / host / note body), or null. */
+export function widgetRef(w: ViewWidget): string | null {
+  const key = KIND_FIELDS[w.kind]?.[0]
+  return (key && w[key]) || null
+}
+
+/** Clamp string fields to their server bounds. */
+function bound(w: ViewWidget): ViewWidget {
+  if (typeof w.body === 'string') w.body = w.body.slice(0, NOTE_MAX)
+  if (typeof w.hostRef === 'string') w.hostRef = w.hostRef.slice(0, HOST_REF_MAX)
+  return w
+}
+
+/** Copy of `w` as `kind` with its primary ref set to `ref` (which may
+ *  switch its kind). Only the kind's own fields are set — the server
+ *  rejects foreign ones; secondary fields (a dependencies root card) are
+ *  kept only while kind and primary ref stay the same. */
 export function withRef(w: ViewWidget, kind: WidgetKind, ref: string | null): ViewWidget {
   const { id, x, y, w: width, h } = w
-  const base = { id, x, y, w: width, h, kind }
-  if (kind === 'session') return { ...base, sessionId: ref }
-  if (kind === 'terminal') return { ...base, terminalId: ref }
-  return { ...base, projectId: ref }
+  const out: ViewWidget = { id, x, y, w: width, h, kind }
+  const [primary, ...rest] = KIND_FIELDS[kind]
+  if (primary) out[primary] = ref
+  const same = w.kind === kind && (!primary || (w[primary] ?? null) === ref)
+  for (const f of rest) out[f] = same ? (w[f] ?? null) : null
+  return bound(out)
+}
+
+/** Copy of `w` with `patch` applied to the fields its kind allows. A new
+ *  scope project clears a dependencies root card picked inside the old one. */
+export function patchWidget(
+  w: ViewWidget,
+  patch: Partial<Pick<ViewWidget, WidgetField>>,
+): ViewWidget {
+  const out = { ...w }
+  for (const f of KIND_FIELDS[w.kind]) if (f in patch) out[f] = patch[f] ?? null
+  if (
+    w.kind === 'dependencies' &&
+    'projectId' in patch &&
+    (patch.projectId ?? null) !== (w.projectId ?? null) &&
+    !('cardId' in patch)
+  )
+    out.cardId = null
+  return bound(out)
 }
 
 /** Full view shape (`GET/POST/PUT /api/me/views[/:id]`). `terminals` /
@@ -75,6 +163,8 @@ export interface SavedView extends ViewSummary {
   widgets: ViewWidget[]
   terminals?: Record<string, ViewTerminalMeta>
   projects?: Record<string, ViewProjectMeta>
+  /** Titles of cards referenced by `cardId`s. */
+  cards?: Record<string, { title: string }>
 }
 
 async function errorOf(res: Response, fallback: string): Promise<Error> {
@@ -82,9 +172,9 @@ async function errorOf(res: Response, fallback: string): Promise<Error> {
   return new Error((data && typeof data.error === 'string' && data.error) || fallback)
 }
 
-const KINDS: WidgetKind[] = ['session', 'terminal', 'project']
+const KINDS = Object.keys(KIND_FIELDS) as WidgetKind[]
 
-/** Drop malformed widgets and clamp rects to the contract bounds. */
+/** Drop malformed widgets and clamp rects / strings to the contract bounds. */
 function sanitizeWidgets(raw: unknown): ViewWidget[] {
   if (!Array.isArray(raw)) return []
   const seen = new Set<string>()
@@ -92,20 +182,13 @@ function sanitizeWidgets(raw: unknown): ViewWidget[] {
   for (const r of raw as Partial<ViewWidget>[]) {
     if (!r || typeof r.id !== 'string' || seen.has(r.id) || !KINDS.includes(r.kind!)) continue
     seen.add(r.id)
-    const key =
-      r.kind === 'session' ? 'sessionId' : r.kind === 'terminal' ? 'terminalId' : 'projectId'
-    const ref = typeof r[key] === 'string' ? (r[key] as string) : null
-    out.push(
-      withRef(
-        {
-          id: r.id,
-          kind: r.kind!,
-          ...clampRect({ x: r.x ?? 0, y: r.y ?? 0, w: r.w ?? 6, h: r.h ?? 8 }),
-        },
-        r.kind!,
-        ref,
-      ),
-    )
+    const w: ViewWidget = {
+      id: r.id,
+      kind: r.kind!,
+      ...clampRect({ x: r.x ?? 0, y: r.y ?? 0, w: r.w ?? 6, h: r.h ?? 8 }),
+    }
+    for (const f of KIND_FIELDS[w.kind]) w[f] = typeof r[f] === 'string' ? (r[f] as string) : null
+    out.push(bound(w))
   }
   return out
 }

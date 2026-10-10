@@ -11,6 +11,7 @@ mod cascades;
 mod claude_accounts;
 mod codex_accounts;
 mod custom_workflows;
+pub mod dashboard_cards;
 mod dependencies;
 mod devices;
 mod doc_review_anchors;
@@ -66,7 +67,7 @@ pub use session_memories::{
 pub(crate) use session_views::insert_layout as session_views_insert_layout;
 pub use session_views::{
     MAX_VIEW_DEPTH, MAX_VIEW_LEAVES, MAX_VIEW_NAME_CHARS, MAX_VIEW_WIDGETS, SplitDir, ViewLayout,
-    ViewWidget, WidgetKind, validate_view_name, validate_widgets, widget_refs,
+    ViewWidget, WidgetField, WidgetKind, validate_view_name, validate_widgets, widget_refs,
 };
 pub use todos::ProjectCardTodos;
 pub use usage::{UsageRollupRow, UsageWindow};

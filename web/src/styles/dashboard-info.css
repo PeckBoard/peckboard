@@ -1,0 +1,309 @@
+/* ─── Info widgets: note, report, background, repeating, todos
+   (components/dashboard/widgets/*). Shared bits — .dash-scroll, .dash-pill,
+   .dash-empty, .dash-link, .dash-mono — live in dashboard-widgets.css. ─── */
+
+/* Item row: a clickable / static main part plus an optional trailing action. */
+.dash-items {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-right: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dash-item:last-child {
+  border-bottom: 0;
+}
+
+.dash-item-muted {
+  opacity: 0.6;
+}
+
+.dash-item-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+button.dash-item-main {
+  cursor: pointer;
+}
+
+button.dash-item-main:hover {
+  background: var(--surface-hover);
+}
+
+button.dash-item-main:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.dash-item-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dash-item-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.dash-item-sub {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+
+.dash-item-num {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text2);
+}
+
+.dash-item-action {
+  flex-shrink: 0;
+}
+
+/* Status pill tones used by these widgets (base .dash-pill is shared). */
+.dash-pill-run {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-color: var(--accent-muted);
+}
+
+.dash-pill-ok {
+  background: var(--success-bg);
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+}
+
+.dash-pill-danger {
+  background: var(--danger-bg, color-mix(in srgb, var(--danger) 12%, transparent));
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.dash-pill-neutral {
+  background: var(--surface2);
+  color: var(--text2);
+  border-color: var(--border);
+}
+
+/* ─── Markdown (note + report) ─── */
+
+.dash-markdown {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.dash-markdown > :first-child {
+  margin-top: 0;
+}
+
+.dash-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+/* ─── Note ─── */
+
+.dash-note-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-2);
+  gap: 4px;
+}
+
+.dash-note-textarea {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.dash-note-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+
+.dash-note-limit {
+  color: var(--danger);
+}
+
+.dash-note-empty {
+  flex: 1;
+}
+
+/* ─── Report ─── */
+
+.dash-report-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: var(--space-2) var(--space-3) 0;
+  font-size: var(--text-xs);
+  color: var(--text3);
+}
+
+/* ─── Todos ─── */
+
+.dash-todo-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  list-style: none;
+}
+
+.dash-todo-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dash-todo-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.dash-todo-head .dash-item-title {
+  flex: 1;
+}
+
+.dash-progress {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--surface3);
+  overflow: hidden;
+}
+
+.dash-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--success);
+  transition: width 200ms ease;
+}
+
+.dash-todo-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+}
+
+.dash-todo {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text2);
+}
+
+.dash-todo-glyph {
+  flex-shrink: 0;
+  width: 1em;
+  text-align: center;
+}
+
+.dash-todo-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dash-todo-in_progress {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.dash-todo-in_progress .dash-todo-glyph {
+  color: var(--accent);
+}
+
+.dash-todo-done {
+  color: var(--text3);
+}
+
+.dash-todo-done .dash-todo-text {
+  text-decoration: line-through;
+}
+
+.dash-todo-done .dash-todo-glyph {
+  color: var(--success);
+}
+
+/* ─── Configure… modal pickers ─── */
+
+.dash-config-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dash-config-picker-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dash-config-picker-caret {
+  flex-shrink: 0;
+  color: var(--text3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dash-progress > span {
+    transition: none;
+  }
+}
+
+.dash-config-modal .form-field + .form-field {
+  margin-top: var(--space-3);
+}

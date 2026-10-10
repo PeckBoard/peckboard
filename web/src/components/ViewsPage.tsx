@@ -3,6 +3,7 @@ import type { Session } from '../types/api'
 import { useSessionsStore } from '../store/sessions'
 import { useProjectsStore } from '../store/projects'
 import {
+  patchWidget,
   terminalMeta,
   useViewsStore,
   widgetRef,
@@ -11,8 +12,10 @@ import {
   type ViewSummary,
   type ViewTerminalMeta,
   type ViewWidget,
+  type WidgetField,
   type WidgetKind,
 } from '../store/views'
+import { authedFetch } from '../store/auth'
 import {
   popOutTerminal,
   useTerminalsStore,
@@ -42,6 +45,9 @@ import WidgetFrame from './dashboard/WidgetFrame'
 import SessionWidget from './dashboard/SessionWidget'
 import TerminalWidget from './dashboard/TerminalWidget'
 import ProjectWidget, { ProjectPicker } from './dashboard/ProjectWidget'
+import WidgetConfigModal from './dashboard/WidgetConfigModal'
+import { WIDGET_CATEGORIES, WIDGET_SPECS, addTestId, isPane } from './dashboard/registry'
+import type { WasmPlugin } from '../utils/pluginApproval'
 import { describeActionError } from '../utils/actionError'
 import '../styles/dashboard.css'
 
@@ -52,12 +58,6 @@ const STARTERS: { value: StarterShape; label: string }[] = [
   { value: 'main-stack', label: 'Main + stack' },
 ]
 const SAVE_DEBOUNCE_MS = 500
-/** Default footprint of a newly added widget, in grid cells. */
-const DEFAULT_SIZE: Record<WidgetKind, { w: number; h: number }> = {
-  session: { w: 6, h: 10 },
-  terminal: { w: 6, h: 10 },
-  project: { w: 4, h: 9 },
-}
 
 /** Chat sessions a view can show (experts never appear in chat lists). */
 function useChatSessions(): Session[] {
@@ -72,6 +72,7 @@ interface ViewsPageProps {
   onOpenSessionTab: (sessionId: string) => void
   onOpenTerminalTab: (terminalId: string) => void
   onOpenProject: (projectId: string) => void
+  onOpenReport?: (folder: string, file: string) => void
 }
 
 /** Top-level "Views" page: the saved-view list, or one view's widget dashboard. */
@@ -82,6 +83,7 @@ export default function ViewsPage({
   onOpenSessionTab,
   onOpenTerminalTab,
   onOpenProject,
+  onOpenReport,
 }: ViewsPageProps) {
   if (activeViewId) {
     return (
@@ -93,6 +95,7 @@ export default function ViewsPage({
         onOpenSessionTab={onOpenSessionTab}
         onOpenTerminalTab={onOpenTerminalTab}
         onOpenProject={onOpenProject}
+        onOpenReport={onOpenReport}
       />
     )
   }
@@ -443,8 +446,9 @@ function SessionPicker({
   )
 }
 
-/** Header "Add widget" menu: Session / Terminal / Project, each a
- *  searchable flyout that adds the picked target as a new widget. */
+/** Header "Add widget" menu, grouped by category (registry order). Panes
+ *  and project-bound kinds open a searchable flyout of targets; scoped and
+ *  global info widgets add immediately (scoped ones as "All projects"). */
 function AddWidgetMenu({
   sessions,
   sessionsInView,
@@ -457,59 +461,81 @@ function AddWidgetMenu({
   sessionsInView: Set<string>
   projectsInView: Set<string>
   disabled: boolean
-  onAdd: (kind: WidgetKind, ref: string) => void
+  onAdd: (kind: WidgetKind, ref: string | null) => void
   onTerminal: (t: TerminalInfo) => void
 }) {
   const projects = useProjectsStore((s) => s.projects)
   const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const term = useTerminalPickerItems('view-add-terminal', onTerminal)
-  const items: MenuItem[] = [
-    {
-      label: 'Session',
-      hint: 'live chat',
-      testId: 'view-add-session',
-      searchable: true,
-      searchPlaceholder: 'Search sessions…',
-      searchTestId: 'view-add-session-search',
-      emptyLabel: 'No other sessions',
-      submenu: sessions
-        .filter((s) => !sessionsInView.has(s.id))
-        .map((s) => ({
-          label: s.name,
-          searchText: s.id,
-          onSelect: () => onAdd('session', s.id),
-        })),
-    },
-    {
-      label: 'Terminal',
-      hint: 'remote shell',
-      testId: 'view-add-terminal',
-      searchable: true,
-      searchPlaceholder: 'Search terminals and hosts…',
-      searchTestId: 'view-add-terminal-search',
-      emptyLabel: 'No terminals or hosts',
-      submenu: term.items,
-    },
-    {
-      label: 'Project',
-      hint: 'board summary',
-      testId: 'view-add-project',
-      searchable: true,
-      searchPlaceholder: 'Search projects…',
-      searchTestId: 'view-add-project-search',
-      emptyLabel: projectsLoaded ? 'No other projects' : 'Loading projects…',
-      submenu: projects
-        .filter((p) => !projectsInView.has(p.id))
-        .map((p) => ({
-          label: p.name,
-          hint: p.status === 'paused' ? 'paused' : undefined,
-          searchText: p.id,
-          testId: `view-add-project-option-${p.id}`,
-          onSelect: () => onAdd('project', p.id),
-        })),
-    },
-  ]
+  // Approved WASM plugins, for kinds that need one (ssh-fleet).
+  const [plugins, setPlugins] = useState<Set<string> | null>(null)
+  const probePlugins = () => {
+    authedFetch('/api/plugins')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { wasm_plugins?: WasmPlugin[] } | null) =>
+        setPlugins(
+          new Set(
+            (body?.wasm_plugins ?? []).filter((p) => p.status === 'approved').map((p) => p.name),
+          ),
+        ),
+      )
+      .catch(() => {})
+  }
+
+  const projectFlyout = (kind: WidgetKind, exclude?: Set<string>): MenuItem[] =>
+    projects
+      .filter((p) => !exclude?.has(p.id))
+      .map((p) => ({
+        label: p.name,
+        hint: p.status === 'paused' ? 'paused' : undefined,
+        searchText: p.id,
+        testId: `${addTestId(kind)}-option-${p.id}`,
+        onSelect: () => onAdd(kind, p.id),
+      }))
+  const itemFor = (kind: WidgetKind): MenuItem => {
+    const spec = WIDGET_SPECS[kind]
+    const base = { label: spec.label, hint: spec.hint, testId: addTestId(kind) }
+    if (kind === 'session')
+      return {
+        ...base,
+        searchable: true,
+        searchPlaceholder: 'Search sessions…',
+        searchTestId: 'view-add-session-search',
+        emptyLabel: 'No other sessions',
+        submenu: sessions
+          .filter((s) => !sessionsInView.has(s.id))
+          .map((s) => ({
+            label: s.name,
+            searchText: s.id,
+            onSelect: () => onAdd('session', s.id),
+          })),
+      }
+    if (kind === 'terminal')
+      return {
+        ...base,
+        searchable: true,
+        searchPlaceholder: 'Search terminals and hosts…',
+        searchTestId: 'view-add-terminal-search',
+        emptyLabel: 'No terminals or hosts',
+        submenu: term.items,
+      }
+    if (spec.scope === 'required')
+      return {
+        ...base,
+        searchable: true,
+        searchPlaceholder: 'Search projects…',
+        searchTestId: `${addTestId(kind)}-search`,
+        emptyLabel: projectsLoaded ? 'No other projects' : 'Loading projects…',
+        submenu: projectFlyout(kind, kind === 'project' ? projectsInView : undefined),
+      }
+    return { ...base, onSelect: () => onAdd(kind, null) }
+  }
+  const items: MenuItem[] = WIDGET_CATEGORIES.flatMap((cat) =>
+    Object.values(WIDGET_SPECS)
+      .filter((s) => s.category === cat.id && (!s.plugin || plugins?.has(s.plugin)))
+      .map((s) => ({ ...itemFor(s.kind), group: { id: cat.id, label: cat.label } })),
+  )
   return (
     <>
       <MenuButton
@@ -522,6 +548,7 @@ function AddWidgetMenu({
         onOpen={() => {
           term.refresh()
           void fetchProjects()
+          probePlugins()
         }}
       >
         {term.busy ? 'Opening…' : '+ Add widget'}
@@ -544,6 +571,7 @@ function ViewEditor({
   onOpenSessionTab,
   onOpenTerminalTab,
   onOpenProject,
+  onOpenReport,
 }: {
   viewId: string
   onBack: () => void
@@ -551,12 +579,14 @@ function ViewEditor({
   onOpenSessionTab: (sessionId: string) => void
   onOpenTerminalTab: (terminalId: string) => void
   onOpenProject: (projectId: string) => void
+  onOpenReport?: (folder: string, file: string) => void
 }) {
   const getView = useViewsStore((s) => s.getView)
   const updateView = useViewsStore((s) => s.updateView)
   const createTerminal = useTerminalsStore((s) => s.create)
   const closeTerminal = useTerminalsStore((s) => s.close)
   const sessions = useChatSessions()
+  const projects = useProjectsStore((s) => s.projects)
   const allSessions = useSessionsStore((s) => s.sessions)
   const [name, setName] = useState('')
   const [widgets, setWidgets] = useState<ViewWidget[]>([])
@@ -567,6 +597,8 @@ function ViewEditor({
   const [projMeta, setProjMeta] = useState<Record<string, ViewProjectMeta>>({})
   const [termPhase, setTermPhase] = useState<Record<string, TerminalPhase>>({})
   const [changingId, setChangingId] = useState<string | null>(null)
+  const [configuringId, setConfiguringId] = useState<string | null>(null)
+  const [cardMeta, setCardMeta] = useState<Record<string, { title: string }>>({})
   const [closingTerminal, setClosingTerminal] = useState<string | null>(null)
   const [closeBusy, setCloseBusy] = useState(false)
   const [closeError, setCloseError] = useState<string | null>(null)
@@ -581,6 +613,7 @@ function ViewEditor({
         setName(v.name)
         setTermMeta(v.terminals ?? {})
         setProjMeta(v.projects ?? {})
+        setCardMeta(v.cards ?? {})
         setWidgets(compact(v.widgets))
         setStatus('ready')
       })
@@ -608,6 +641,7 @@ function ViewEditor({
       updateView(viewId, { widgets: next })
         .then((v) => {
           if (v.projects) setProjMeta((m) => ({ ...m, ...v.projects }))
+          if (v.cards) setCardMeta((m) => ({ ...m, ...v.cards }))
           setSave(pending.current === undefined ? 'saved' : 'saving')
         })
         .catch(() => setSave('error'))
@@ -673,8 +707,8 @@ function ViewEditor({
   const addWidget = (kind: WidgetKind, ref: string | null) => {
     const cur = widgetsRef.current
     if (cur.length >= MAX_WIDGETS) return
-    if (kind === 'project' && ref) rememberProject(ref)
-    const size = DEFAULT_SIZE[kind]
+    if (WIDGET_SPECS[kind].scope !== 'none' && ref) rememberProject(ref)
+    const size = WIDGET_SPECS[kind].size
     const base = compact(cur)
     const slot = findFreeSlot(base, size.w, size.h)
     change(compact([...base, withRef({ id: newWidgetId(), kind, ...slot }, kind, ref)]))
@@ -684,8 +718,13 @@ function ViewEditor({
     addWidget('terminal', t.id)
   }
   const setRef = (widgetId: string, kind: WidgetKind, ref: string) => {
-    if (kind === 'project') rememberProject(ref)
+    if (WIDGET_SPECS[kind].scope !== 'none') rememberProject(ref)
     change(widgetsRef.current.map((w) => (w.id === widgetId ? withRef(w, kind, ref) : w)))
+  }
+  /** Persist widget-owned fields (scope, note body, pinned report, …). */
+  const patchById = (widgetId: string, patch: Partial<Pick<ViewWidget, WidgetField>>) => {
+    if (patch.projectId) rememberProject(patch.projectId)
+    change(widgetsRef.current.map((w) => (w.id === widgetId ? patchWidget(w, patch) : w)))
   }
   const removeWidget = (widgetId: string) =>
     change(compact(widgetsRef.current.filter((w) => w.id !== widgetId)))
@@ -785,7 +824,68 @@ function ViewEditor({
     onSelect: () => removeWidget(w.id),
   })
 
+  const configureItem: (w: ViewWidget) => MenuItem = (w) => ({
+    label: 'Configure…',
+    testId: 'widget-configure',
+    onSelect: () => setConfiguringId(w.id),
+  })
+  const openHostTerminal = (pluginId: string, hostId: string) => {
+    createTerminal(pluginId, hostId)
+      .then((t) => onOpenTerminalTab(t.id))
+      .catch(() => {})
+  }
+
+  /** Info widgets render their registry component with the page's standard
+   *  menu; a project-bound kind without a project shows a picker instead. */
+  const renderInfo = (w: ViewWidget, ctx: WidgetContext): ReactNode => {
+    const spec = WIDGET_SPECS[w.kind]
+    const Info = spec.component
+    const pid = spec.scope === 'none' ? null : (w.projectId ?? null)
+    if (!Info || (spec.scope === 'required' && !pid)) {
+      return (
+        <WidgetFrame
+          kind={w.kind}
+          widgetId={w.id}
+          title={spec.label}
+          menuItems={[removeItem(w)]}
+          ctx={ctx}
+        >
+          <div className="split-empty-leaf" data-testid="view-scope-leaf">
+            <p>Pick a project to show its {spec.label.toLowerCase()}</p>
+            <div className="view-terminal-closed-actions">
+              <ProjectPicker
+                onPick={(id) => patchById(w.id, { projectId: id })}
+                label="Project…"
+                testId="view-pick-scope"
+              />
+            </div>
+          </div>
+        </WidgetFrame>
+      )
+    }
+    return (
+      <Info
+        widget={w}
+        ctx={ctx}
+        menuItems={[
+          ...(spec.configurable ? [configureItem(w), { divider: true }] : []),
+          removeItem(w),
+        ]}
+        scopeProjectId={pid}
+        scopeName={
+          pid ? (projMeta[pid]?.name ?? projects.find((p) => p.id === pid)?.name) : undefined
+        }
+        onOpenSession={onOpenSessionTab}
+        onOpenProject={onOpenProject}
+        onChange={(patch) => patchById(w.id, patch)}
+        onOpenTerminal={openHostTerminal}
+        onOpenReport={onOpenReport}
+      />
+    )
+  }
+
   const renderWidget = (w: ViewWidget, ctx: WidgetContext): ReactNode => {
+    if (!isPane(w.kind)) return renderInfo(w, ctx)
     const ref = widgetRef(w)
     if (!ref) {
       const what = w.kind === 'session' ? 'session' : w.kind === 'terminal' ? 'terminal' : 'project'
@@ -989,6 +1089,17 @@ function ViewEditor({
           </div>
         </Modal>
       )}
+      {(() => {
+        const cw = configuringId ? widgets.find((w) => w.id === configuringId) : undefined
+        return cw ? (
+          <WidgetConfigModal
+            widget={cw}
+            cardTitle={cw.cardId ? cardMeta[cw.cardId]?.title : undefined}
+            onPatch={(patch) => patchById(cw.id, patch)}
+            onClose={() => setConfiguringId(null)}
+          />
+        ) : null
+      })()}
       {closingTerminal && (
         <ConfirmDialog
           title="Close terminal"

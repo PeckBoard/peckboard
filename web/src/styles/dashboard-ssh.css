@@ -1,0 +1,442 @@
+/* SSH Fleet dashboard widgets (SshActivityWidget, SshHostsWidget): dense,
+   log-viewer rows. Theme comes from the index.css variables. */
+
+.ssh-scroll {
+  height: 100%;
+  overflow: auto;
+  min-height: 0;
+}
+
+.ssh-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  color: var(--text3);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.ssh-empty p {
+  margin: 0;
+}
+
+.ssh-muted {
+  color: var(--text3);
+}
+
+.ssh-status-chip {
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+.ssh-status-chip.ssh-status-bad {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* ── Activity ─────────────────────────────────────────────── */
+
+.ssh-act-list,
+.ssh-host-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ssh-act-row {
+  border-bottom: 1px solid var(--border);
+  border-left: 2px solid transparent;
+  transition: background-color 600ms ease;
+}
+
+.ssh-act-row.ssh-act-failed {
+  border-left-color: var(--danger);
+}
+
+.ssh-act-row.ssh-act-fresh {
+  background: var(--accent-subtle);
+}
+
+.ssh-act-row.expanded {
+  background: var(--surface2);
+}
+
+.ssh-act-line {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.ssh-act-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 3px var(--space-2);
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ssh-act-main:hover {
+  background: var(--surface-hover);
+}
+
+.ssh-act-main:focus-visible,
+.ssh-act-session:focus-visible,
+.ssh-btn:focus-visible,
+.ssh-load-older:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.ssh-act-time {
+  flex: none;
+  width: 4.5em;
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ssh-act-host {
+  flex: none;
+  width: 7em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text2);
+  font-weight: 500;
+}
+
+.ssh-act-tool {
+  flex: none;
+  box-sizing: border-box;
+  width: 10em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--surface3);
+  color: var(--text2);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
+.ssh-act-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ssh-act-summary {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-act-reason {
+  color: var(--text3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-pill {
+  flex: none;
+  min-width: 3.25em;
+  text-align: center;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ssh-pill-ok {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.ssh-pill-bad {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.ssh-act-dur {
+  flex: none;
+  width: 3.75em;
+  text-align: right;
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ssh-act-session {
+  flex: none;
+  max-width: 10em;
+  padding: 3px var(--space-2);
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  align-self: center;
+}
+
+button.ssh-act-session:hover {
+  text-decoration: underline;
+}
+
+.ssh-act-session-none {
+  color: var(--text3);
+  cursor: default;
+}
+
+.ssh-act-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-2) calc(4.5em + var(--space-4));
+}
+
+.ssh-act-detail p {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.ssh-act-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ssh-act-preview-label {
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text3);
+}
+
+.ssh-act-pre {
+  margin: 0;
+  max-height: 12rem;
+  overflow: auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ssh-act-pre-err {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.ssh-diff-add {
+  color: var(--success);
+}
+
+.ssh-diff-del {
+  color: var(--danger);
+}
+
+.ssh-diff-hunk {
+  color: var(--text3);
+}
+
+.ssh-load-older {
+  display: block;
+  width: 100%;
+  padding: var(--space-2);
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.ssh-load-older:disabled {
+  color: var(--text3);
+  cursor: default;
+}
+
+/* ── Hosts ────────────────────────────────────────────────── */
+
+.ssh-host-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px var(--space-2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs);
+}
+
+.ssh-host-row:hover {
+  background: var(--surface-hover);
+}
+
+.ssh-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text3);
+}
+
+.ssh-dot-ok {
+  background: var(--success);
+}
+
+.ssh-dot-error {
+  background: var(--danger);
+}
+
+.ssh-dot-unknown {
+  background: transparent;
+  border: 1.5px solid var(--text3);
+}
+
+.ssh-host-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ssh-host-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ssh-host-label {
+  flex: none;
+  max-width: 50%;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-host-addr {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--surface3);
+  color: var(--text2);
+  font-size: 0.625rem;
+  white-space: nowrap;
+}
+
+.ssh-host-error {
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-host-seen {
+  flex: none;
+  color: var(--text3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ssh-host-actions {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+.ssh-btn {
+  min-width: 3.75em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text2);
+  font: inherit;
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+
+.ssh-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.ssh-btn:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.ssh-spinner {
+  width: 10px;
+  height: 10px;
+  margin: 2px 0;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ssh-spin 0.8s linear infinite;
+}
+
+@keyframes ssh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ssh-spinner {
+    animation-duration: 2s;
+  }
+  .ssh-act-row {
+    transition: none;
+  }
+}

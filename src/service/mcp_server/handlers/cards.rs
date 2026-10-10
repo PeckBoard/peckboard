@@ -1,7 +1,8 @@
 use serde_json::Value;
 
-use super::super::{McpToolRegistry, build_dependency_tree, collect_transitive_deps};
+use super::super::{McpToolRegistry, build_dependency_tree};
 use crate::db::models::{Card, NewCard, UpdateCard};
+use crate::service::card_deps::{ProjectDeps, collect_transitive_deps};
 use crate::service::mcp_server::context::ToolCallContext;
 
 /// First non-empty line of a card description, capped, for the slim
@@ -948,23 +949,9 @@ impl McpToolRegistry {
 
         let scope = ctx.scope_card(card_id).await?;
 
-        let cards = ctx.db.list_cards_by_project(scope.as_str()).await?;
-        let edges = ctx
-            .db
-            .list_dependencies_by_project(scope.as_str())
-            .await
-            .unwrap_or_default();
-
-        let mut deps_by_card: std::collections::HashMap<&str, Vec<&str>> =
-            std::collections::HashMap::new();
-        for (cid, dep_id) in &edges {
-            deps_by_card
-                .entry(cid.as_str())
-                .or_default()
-                .push(dep_id.as_str());
-        }
-        let info_by_id: std::collections::HashMap<&str, &Card> =
-            cards.iter().map(|c| (c.id.as_str(), c)).collect();
+        let graph = ProjectDeps::load(&ctx.db, scope.as_str()).await?;
+        let deps_by_card = graph.deps_by_card();
+        let info_by_id = graph.info_by_id();
 
         let mut path = std::collections::HashSet::new();
         let tree = build_dependency_tree(card_id, &deps_by_card, &info_by_id, &mut path);

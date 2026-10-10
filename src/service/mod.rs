@@ -3,6 +3,7 @@ pub mod assistant_mirror;
 pub mod backup;
 pub mod browser;
 pub mod browser_runs;
+pub mod card_deps;
 pub mod doc_review_sources;
 pub mod doc_reviews;
 pub mod env_vars;

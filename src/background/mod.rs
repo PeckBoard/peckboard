@@ -443,6 +443,19 @@ impl BackgroundRegistry {
         out.into_iter().map(|(_, i)| i).collect()
     }
 
+    /// Every visible task (running, or finished within the retention window)
+    /// across all sessions, oldest first.
+    pub fn list_all(&self) -> Vec<TaskInfo> {
+        self.prune_finished();
+        let mut out: Vec<(Instant, TaskInfo)> = lock(&self.tasks)
+            .values()
+            .filter(|t| !t.hidden.load(Ordering::SeqCst))
+            .map(|t| (t.started, t.info()))
+            .collect();
+        out.sort_by_key(|(s, _)| *s);
+        out.into_iter().map(|(_, i)| i).collect()
+    }
+
     /// Whether `session_id` owns any still-running task. A subagent with one
     /// isn't done yet: the task's exit report resumes it (see
     /// `crate::subagent::handle_subagent_done`).

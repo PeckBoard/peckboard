@@ -3912,7 +3912,248 @@ mod tests {
             session_id: pick(WidgetKind::Session),
             terminal_id: pick(WidgetKind::Terminal),
             project_id: pick(WidgetKind::Project),
+            ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn dashboard_widgets_new_kinds_round_trip() {
+        use crate::db::crud::{ViewWidget, WidgetKind::*, validate_widgets};
+        let db = test_db();
+        seed_user_folder_sessions(&db, &[("a", None)]).await;
+        let ts = now();
+        db.create_project(NewProject {
+            id: "p1".into(),
+            name: "P".into(),
+            context: "".into(),
+            folder_id: "f".into(),
+            worker_count: 1,
+            status: "active".into(),
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            parallel_instructions: false,
+            auto_notify_changes: true,
+            worker_communication: false,
+            created_at: ts.clone(),
+            last_accessed_at: ts.clone(),
+            budget_usd_cents: None,
+            budget_period: None,
+            worktree_isolation: false,
+        })
+        .await
+        .unwrap();
+        db.create_card(NewCard {
+            id: "c1".into(),
+            project_id: "p1".into(),
+            title: "Root card".into(),
+            description: "".into(),
+            step: "todo".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts,
+            system_prompt_name: None,
+        })
+        .await
+        .unwrap();
+
+        let at = |id: &str, kind, y| ViewWidget {
+            id: id.into(),
+            kind,
+            x: 0,
+            y,
+            w: 12,
+            h: 2,
+            ..Default::default()
+        };
+        let mut widgets = vec![
+            ViewWidget {
+                body: Some("# Hi".into()),
+                ..at("note", Note, 0)
+            },
+            ViewWidget {
+                report_ref: Some("f/r.md".into()),
+                ..at("rep", Report, 2)
+            },
+            at("bg", Background, 4),
+            at("rt", Repeating, 6),
+            ViewWidget {
+                project_id: Some("p1".into()),
+                ..at("todo", Todos, 8)
+            },
+            at("att", Attention, 10),
+            ViewWidget {
+                project_id: Some("p1".into()),
+                ..at("rq", ReviewQueue, 12)
+            },
+            at("qual", ReviewQuality, 14),
+            at("wk", Workers, 16),
+            at("wt", Worktrees, 18),
+            ViewWidget {
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                ..at("dep", Dependencies, 20)
+            },
+            ViewWidget {
+                project_id: Some("p1".into()),
+                card_id: Some("gone".into()),
+                ..at("dep2", Dependencies, 22)
+            },
+            ViewWidget {
+                host_ref: Some("host-1".into()),
+                ..at("ssh", SshActivity, 24)
+            },
+            at("ssh_all", SshActivity, 26),
+            at("hosts", SshHosts, 28),
+        ];
+        assert!(validate_widgets(&widgets).is_ok());
+        let (view, got) = db
+            .create_session_view("u1", "Dash", widgets.clone())
+            .await
+            .unwrap();
+        // A stale card ref is stored blank, like other refs.
+        widgets[11].card_id = None;
+        assert_eq!(got, widgets);
+        let (_, again) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
+        assert_eq!(again, widgets);
+
+        // Wire: exactly the kind's fields, snake_case kinds, JSON round-trip.
+        let wire = serde_json::to_value(&widgets).unwrap();
+        assert_eq!(wire[0]["body"], "# Hi");
+        assert!(wire[0].get("projectId").is_none());
+        assert_eq!(wire[1]["reportRef"], "f/r.md");
+        assert!(
+            wire[2].as_object().unwrap().len() == 6,
+            "background has no refs"
+        );
+        assert_eq!(wire[5]["projectId"], serde_json::Value::Null);
+        assert_eq!(wire[6]["kind"], "review_queue");
+        assert_eq!(wire[10]["cardId"], "c1");
+        assert_eq!(wire[12]["kind"], "ssh_activity");
+        assert_eq!(wire[12]["hostRef"], "host-1");
+        assert_eq!(wire[13]["hostRef"], serde_json::Value::Null);
+        assert_eq!(wire[14]["kind"], "ssh_hosts");
+        assert!(wire[14].get("hostRef").is_none(), "ssh_hosts has no ref");
+        let back: Vec<ViewWidget> = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, widgets);
+        assert!(
+            serde_json::from_value::<ViewWidget>(serde_json::json!({
+                "id": "x", "kind": "bogus", "x": 0, "y": 0, "w": 1, "h": 2
+            }))
+            .is_err()
+        );
+
+        // Deleting the card blanks the ref (ON DELETE SET NULL).
+        db.delete_card("c1").await.unwrap();
+        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
+        assert_eq!(after[10].card_id, None);
+        assert_eq!(after[10].project_id.as_deref(), Some("p1"));
+
+        // Per-kind field rules.
+        let bad = |w: ViewWidget| validate_widgets(&[w]).is_err();
+        assert!(bad(ViewWidget {
+            host_ref: Some("h".into()),
+            ..at("x", SshHosts, 0)
+        }));
+        assert!(bad(ViewWidget {
+            host_ref: Some("h".repeat(201)),
+            ..at("x", SshActivity, 0)
+        }));
+        assert!(bad(ViewWidget {
+            project_id: Some("p1".into()),
+            ..at("x", Note, 0)
+        }));
+        assert!(bad(ViewWidget {
+            body: Some("x".into()),
+            ..at("x", Attention, 0)
+        }));
+        assert!(bad(ViewWidget {
+            card_id: Some("c".into()),
+            ..at("x", Dependencies, 0)
+        }));
+        assert!(bad(ViewWidget {
+            body: Some("x".repeat(20_001)),
+            ..at("x", Note, 0)
+        }));
+        assert!(!bad(ViewWidget {
+            body: Some("x".repeat(20_000)),
+            ..at("x", Note, 0)
+        }));
+        for r in ["noslash", "/f", "f/", "../x", "a/b/c"] {
+            assert!(
+                bad(ViewWidget {
+                    report_ref: Some(r.into()),
+                    ..at("x", Report, 0)
+                }),
+                "{r}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dashboard_widgets_migration_copies_view_widgets() {
+        let db = test_db();
+        seed_user_folder_sessions(&db, &[("a", None)]).await;
+        let now = chrono::Utc::now().to_rfc3339();
+        db.with_conn(move |conn| {
+            use crate::db::schema::{session_views, view_widgets, view_widgets_converted};
+            use diesel::connection::SimpleConnection;
+            use diesel::prelude::*;
+            diesel::insert_into(session_views::table)
+                .values(&SessionView {
+                    id: "v1".into(),
+                    user_id: "u1".into(),
+                    name: "Old".into(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                })
+                .execute(conn)?;
+            // A 0.1.81 widget row, written before the copy ran.
+            diesel::insert_into(view_widgets::table)
+                .values((
+                    view_widgets::id.eq("w1"),
+                    view_widgets::view_id.eq("v1"),
+                    view_widgets::kind.eq("session"),
+                    view_widgets::x.eq(0),
+                    view_widgets::y.eq(0),
+                    view_widgets::w.eq(6),
+                    view_widgets::h.eq(8),
+                    view_widgets::session_id.eq(Some("a")),
+                ))
+                .execute(conn)?;
+            diesel::insert_into(view_widgets_converted::table)
+                .values((
+                    view_widgets_converted::view_id.eq("v1"),
+                    view_widgets_converted::converted_at.eq(now),
+                ))
+                .execute(conn)?;
+            // The migration is idempotent: re-running it on a DB that
+            // already has the table just copies the rows.
+            conn.batch_execute(include_str!(
+                "../../migrations/1791700000_dashboard_widgets/up.sql"
+            ))?;
+            conn.batch_execute(include_str!(
+                "../../migrations/1791700000_dashboard_widgets/up.sql"
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (_, got) = db.get_session_view("u1", "v1").await.unwrap().unwrap();
+        assert_eq!(
+            got,
+            vec![widget(
+                "w1",
+                crate::db::crud::WidgetKind::Session,
+                (0, 0, 6, 8),
+                Some("a")
+            )]
+        );
     }
 
     #[tokio::test]

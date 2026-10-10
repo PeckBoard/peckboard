@@ -1,0 +1,582 @@
+/* Dashboard info widgets: attention, review queue/quality, workers,
+   worktrees, dependencies. Dense, Datadog-style rows on the shared
+   surface/text tokens; reuses the project-widget dot, pill, swatch and
+   skeleton classes from dashboard.css. */
+
+.dash-scroll {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+}
+
+.dash-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: var(--space-4);
+  color: var(--text3);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.dash-empty-ok {
+  color: var(--success);
+}
+
+.dash-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dash-heading,
+.dash-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dash-group-head {
+  margin: 0 0 2px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text3);
+}
+
+.dash-tone-accent svg {
+  color: var(--accent);
+}
+
+.dash-tone-danger svg {
+  color: var(--danger);
+}
+
+.dash-tone-warn svg {
+  color: var(--warning);
+}
+
+.dash-heading-count {
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-count-danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.dash-count-warn {
+  background: var(--warning-bg);
+  color: color-mix(in srgb, var(--warning) 60%, var(--text));
+}
+
+.dash-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+button.dash-row {
+  cursor: pointer;
+}
+
+button.dash-row:disabled {
+  cursor: default;
+}
+
+button.dash-row:not(:disabled):hover,
+.dash-row-static:hover {
+  background: var(--surface-hover);
+}
+
+button.dash-row:focus-visible,
+.dash-link:focus-visible,
+.dash-table-row:focus-visible,
+.dash-dag-node:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.dash-row-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dash-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dash-row-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dash-row-sub {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text3);
+  font-size: var(--text-xs);
+}
+
+.dash-row-time {
+  flex-shrink: 0;
+  color: var(--text3);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-row-action {
+  flex-shrink: 0;
+}
+
+.dash-inline-error {
+  max-width: 40%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+.dash-pill {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dash-pill-warn {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  color: color-mix(in srgb, var(--warning) 55%, var(--text));
+}
+
+.dash-mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+}
+
+.dash-muted {
+  color: var(--text3);
+}
+
+.dash-select {
+  padding: 0 4px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text2);
+  font: inherit;
+  font-size: var(--text-xs);
+}
+
+/* ─── Review quality ─── */
+
+.dash-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: var(--space-2);
+}
+
+.dash-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.dash-kpi-value {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-kpi-danger .dash-kpi-value {
+  color: var(--danger);
+}
+
+.dash-kpi-warn .dash-kpi-value {
+  color: color-mix(in srgb, var(--warning) 60%, var(--text));
+}
+
+.dash-kpi-label {
+  overflow: hidden;
+  color: var(--text3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dash-chart {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 90px;
+}
+
+.dash-chart-svg {
+  flex: 1;
+  width: 100%;
+  min-height: 60px;
+  display: block;
+}
+
+.dash-chart-axis {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.dash-chart-hover {
+  fill: var(--surface-hover);
+}
+
+.dash-chart-xaxis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-chart-legend {
+  margin-top: 2px;
+}
+
+.dash-tooltip {
+  position: absolute;
+  top: 0;
+  z-index: 3;
+  min-width: 120px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  font-size: var(--text-xs);
+  pointer-events: none;
+}
+
+.dash-tooltip-title {
+  margin-bottom: 3px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dash-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text2);
+}
+
+.dash-tooltip-val {
+  margin-left: auto;
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Worker fleet ─── */
+
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: var(--text-sm);
+}
+
+.dash-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 3px 6px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dash-table th:first-child {
+  width: 20px;
+}
+
+.dash-table th:nth-child(3) {
+  width: 18%;
+}
+
+.dash-table th:nth-child(4) {
+  width: 20%;
+}
+
+.dash-table th:nth-child(5) {
+  width: 72px;
+}
+
+.dash-table th:nth-child(6) {
+  width: 92px;
+}
+
+.dash-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.dash-table-row {
+  cursor: pointer;
+}
+
+.dash-table-row:hover {
+  background: var(--surface-hover);
+}
+
+.dash-cell-title {
+  max-width: 0;
+}
+
+.dash-cell-title .dash-row-title,
+.dash-cell-title .dash-row-sub {
+  display: block;
+}
+
+.dash-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-table th.dash-num {
+  text-align: right;
+}
+
+.dash-ctx {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dash-ctx-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface3);
+  overflow: hidden;
+}
+
+.dash-ctx-fill {
+  display: block;
+  height: 100%;
+  background: var(--chart-1);
+}
+
+.dash-ctx-fill.is-warn {
+  background: var(--warning);
+}
+
+.dash-ctx-fill.is-danger {
+  background: var(--danger);
+}
+
+.dash-ctx-pct {
+  min-width: 28px;
+  color: var(--text2);
+  font-size: var(--text-xs);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Worktrees ─── */
+
+.dash-commit {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'sha subject time'
+    '. meta meta';
+  column-gap: 8px;
+  padding: 3px 6px;
+  font-size: var(--text-sm);
+}
+
+.dash-sha {
+  grid-area: sha;
+  color: var(--accent);
+}
+
+.dash-commit .dash-row-title {
+  grid-area: subject;
+}
+
+.dash-commit-meta {
+  grid-area: meta;
+}
+
+.dash-commit .dash-row-time {
+  grid-area: time;
+}
+
+/* ─── Dependencies ─── */
+
+.dash-deps {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+}
+
+.dash-deps-blockers {
+  flex-shrink: 0;
+  max-height: 40%;
+  overflow-y: auto;
+}
+
+.dash-blocks {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-dag-wrap {
+  flex: 1;
+  min-height: 80px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.dash-dag {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+}
+
+.dash-dag-edge {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.2;
+}
+
+.dash-dag-edge.is-blocked {
+  stroke: color-mix(in srgb, var(--danger) 60%, transparent);
+}
+
+.dash-dag-node {
+  cursor: pointer;
+}
+
+.dash-dag-node rect {
+  fill: var(--surface2);
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.dash-dag-node text {
+  fill: var(--text);
+  font-size: 11px;
+}
+
+.dash-dag-node:hover rect {
+  stroke: var(--accent);
+}
+
+.dash-dag-node.is-blocked rect {
+  fill: var(--danger-bg);
+  stroke: var(--danger);
+}
+
+.dash-dag-node.is-blocked text {
+  fill: var(--danger);
+}
+
+.dash-dag-node.is-done {
+  opacity: 0.45;
+}

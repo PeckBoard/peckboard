@@ -1,16 +1,18 @@
 //! `/api/me/views` — the user's saved widget dashboards.
 //!
 //! A view is `{id, name, created_at, updated_at, widgets, terminals,
-//! projects}` where `widgets` are [`ViewWidget`] rects on a 12-column grid
-//! showing a session, an SSH terminal, or a project summary; `terminals`
-//! maps each referenced terminal id to its display identity (including
-//! soft-closed ones, so a widget can offer "Reopen on <host>") and
-//! `projects` each referenced project id to `{name}`. Views are strictly
-//! per-user: another user's view id answers 404, exactly like a missing
-//! one. Widgets may only reference the caller's own terminals (admins:
-//! any), the same rule as attaching, and existing projects. A legacy
-//! `layout` split tree is still accepted in request bodies and converted
-//! to widgets.
+//! projects, cards}` where `widgets` are [`ViewWidget`] rects on a
+//! 12-column grid (session / terminal panes, project summaries, notes,
+//! reports, and the info widgets in [`WidgetKind`]); `terminals` maps each
+//! referenced terminal id to its display identity (including soft-closed
+//! ones, so a widget can offer "Reopen on <host>"), `projects` each
+//! referenced project id (pane or scope) to `{name}`, and `cards` each
+//! referenced card id to `{title}`. Views are strictly per-user: another
+//! user's view id answers 404, exactly like a missing one. Widgets may only
+//! reference the caller's own terminals (admins: any), the same rule as
+//! attaching, and existing projects / cards (a card must belong to the
+//! widget's project). A legacy `layout` split tree is still accepted in
+//! request bodies and converted to widgets.
 
 use axum::{
     Extension, Json, Router,
@@ -26,7 +28,7 @@ use std::sync::Arc;
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::Db;
 use crate::db::crud::{
-    ViewLayout, ViewWidget, WidgetKind, validate_view_name, validate_widgets, widget_refs,
+    ViewLayout, ViewWidget, WidgetField, validate_view_name, validate_widgets, widget_refs,
 };
 use crate::db::models::{SessionView, Terminal};
 use crate::state::AppState;
@@ -108,22 +110,22 @@ fn may_use_terminal(user: &AuthUser, t: &Terminal) -> bool {
 }
 
 /// Every terminal the widgets reference must exist and be the caller's
-/// (admins: anyone's), and every project must exist. Unknown and foreign
-/// terminal ids answer the same 404, like `/api/terminals/{id}`.
-/// Soft-closed terminals are allowed — their widget shows a reopen
-/// placeholder.
+/// (admins: anyone's), every project must exist, and every card must exist
+/// in its widget's project. Unknown and foreign terminal ids answer the
+/// same 404, like `/api/terminals/{id}`. Soft-closed terminals are allowed
+/// — their widget shows a reopen placeholder.
 async fn check_widget_refs(
     db: &Db,
     user: &AuthUser,
     widgets: &[ViewWidget],
 ) -> Result<(), ApiError> {
-    for id in widget_refs(widgets, WidgetKind::Terminal) {
+    for id in widget_refs(widgets, WidgetField::TerminalId) {
         match db.get_terminal(id).await.map_err(internal)? {
             Some(t) if may_use_terminal(user, &t) => {}
             _ => return Err(err(StatusCode::NOT_FOUND, "terminal not found")),
         }
     }
-    let projects = widget_refs(widgets, WidgetKind::Project);
+    let projects = widget_refs(widgets, WidgetField::ProjectId);
     if !projects.is_empty() {
         let found = db
             .project_names(projects.iter().map(|s| s.to_string()).collect())
@@ -131,6 +133,21 @@ async fn check_widget_refs(
             .map_err(internal)?;
         if projects.iter().any(|p| !found.contains_key(*p)) {
             return Err(err(StatusCode::NOT_FOUND, "project not found"));
+        }
+    }
+    let cards = widget_refs(widgets, WidgetField::CardId);
+    if !cards.is_empty() {
+        let found = db
+            .card_titles(cards.iter().map(|s| s.to_string()).collect())
+            .await
+            .map_err(internal)?;
+        let in_project = |w: &ViewWidget| match (&w.card_id, &w.project_id) {
+            (Some(c), Some(p)) => found.get(c).is_some_and(|(_, cp)| cp == p),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        if !widgets.iter().all(in_project) {
+            return Err(err(StatusCode::NOT_FOUND, "card not found"));
         }
     }
     Ok(())
@@ -146,15 +163,15 @@ fn summary_json(v: &SessionView) -> serde_json::Value {
 }
 
 /// The full view, plus `terminals: {id: {name, host_label, plugin_id,
-/// host_id, closed}}` and `projects: {id: {name}}` for the targets its
-/// widgets reference.
+/// host_id, closed}}`, `projects: {id: {name}}`, and `cards: {id:
+/// {title}}` for the targets its widgets reference.
 async fn full_json(
     state: &AppState,
     user: &AuthUser,
     (v, widgets): (SessionView, Vec<ViewWidget>),
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut terminals = serde_json::Map::new();
-    for id in widget_refs(&widgets, WidgetKind::Terminal) {
+    for id in widget_refs(&widgets, WidgetField::TerminalId) {
         if let Some(t) = state.db.get_terminal(id).await.map_err(internal)?
             && may_use_terminal(user, &t)
         {
@@ -170,10 +187,13 @@ async fn full_json(
             );
         }
     }
-    let project_ids: Vec<String> = widget_refs(&widgets, WidgetKind::Project)
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let ids = |field| -> Vec<String> {
+        widget_refs(&widgets, field)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    };
+    let project_ids = ids(WidgetField::ProjectId);
     let projects: serde_json::Map<String, serde_json::Value> = if project_ids.is_empty() {
         serde_json::Map::new()
     } else {
@@ -186,10 +206,24 @@ async fn full_json(
             .map(|(id, name)| (id, serde_json::json!({ "name": name })))
             .collect()
     };
+    let card_ids = ids(WidgetField::CardId);
+    let cards: serde_json::Map<String, serde_json::Value> = if card_ids.is_empty() {
+        serde_json::Map::new()
+    } else {
+        state
+            .db
+            .card_titles(card_ids)
+            .await
+            .map_err(internal)?
+            .into_iter()
+            .map(|(id, (title, _))| (id, serde_json::json!({ "title": title })))
+            .collect()
+    };
     let mut out = summary_json(&v);
     out["widgets"] = serde_json::json!(widgets);
     out["terminals"] = serde_json::Value::Object(terminals);
     out["projects"] = serde_json::Value::Object(projects);
+    out["cards"] = serde_json::Value::Object(cards);
     Ok(Json(out))
 }
 
@@ -291,8 +325,8 @@ async fn delete_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::crud::WidgetKind;
     use crate::db::models::NewUser;
-
     fn user(id: &str, role: &str) -> AuthUser {
         AuthUser {
             user_id: id.into(),
@@ -309,9 +343,8 @@ mod tests {
             y: 0,
             w: 6,
             h: 8,
-            session_id: None,
             terminal_id: Some(id.into()),
-            project_id: None,
+            ..Default::default()
         }]
     }
 
@@ -389,5 +422,81 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn card_refs_must_exist_in_the_widgets_project() {
+        use crate::db::models::{NewCard, NewFolder, NewProject};
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for p in ["p1", "p2"] {
+            db.create_project(NewProject {
+                id: p.into(),
+                name: p.into(),
+                context: "".into(),
+                folder_id: "f".into(),
+                worker_count: 1,
+                status: "active".into(),
+                workflow: "task".into(),
+                model: None,
+                effort: None,
+                parallel_instructions: false,
+                auto_notify_changes: true,
+                worker_communication: false,
+                created_at: ts.clone(),
+                last_accessed_at: ts.clone(),
+                budget_usd_cents: None,
+                budget_period: None,
+                worktree_isolation: false,
+            })
+            .await
+            .unwrap();
+        }
+        db.create_card(NewCard {
+            id: "c1".into(),
+            project_id: "p1".into(),
+            title: "C".into(),
+            description: "".into(),
+            step: "todo".into(),
+            priority: 1,
+            workflow: "task".into(),
+            model: None,
+            effort: None,
+            blocked: false,
+            block_reason: None,
+            created_at: ts.clone(),
+            updated_at: ts,
+            system_prompt_name: None,
+        })
+        .await
+        .unwrap();
+        let dep = |project: &str, card: &str| {
+            vec![ViewWidget {
+                id: "w".into(),
+                kind: WidgetKind::Dependencies,
+                x: 0,
+                y: 0,
+                w: 6,
+                h: 9,
+                project_id: Some(project.into()),
+                card_id: Some(card.into()),
+                ..Default::default()
+            }]
+        };
+        let u = user("u", "user");
+        assert!(check_widget_refs(&db, &u, &dep("p1", "c1")).await.is_ok());
+        for (p, c) in [("p2", "c1"), ("p1", "nope")] {
+            let (status, Json(body)) = check_widget_refs(&db, &u, &dep(p, c)).await.unwrap_err();
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"], "card not found");
+        }
     }
 }

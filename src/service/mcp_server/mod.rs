@@ -285,22 +285,6 @@ pub(super) fn build_dependency_tree(
     })
 }
 
-/// Collect every transitive dependency id of `card_id` (excluding itself)
-/// into `seen`. The `seen` set doubles as cycle protection.
-pub(super) fn collect_transitive_deps(
-    card_id: &str,
-    deps_by_card: &std::collections::HashMap<&str, Vec<&str>>,
-    seen: &mut std::collections::HashSet<String>,
-) {
-    if let Some(deps) = deps_by_card.get(card_id) {
-        for dep in deps {
-            if seen.insert(dep.to_string()) {
-                collect_transitive_deps(dep, deps_by_card, seen);
-            }
-        }
-    }
-}
-
 /// Run one MCP tool call end to end, exactly as the `/mcp` JSON-RPC route
 /// does, so the route and any other dispatcher (e.g. the Ollama provider's
 /// tool-calling loop) can't drift:

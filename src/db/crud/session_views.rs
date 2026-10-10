@@ -1,5 +1,6 @@
 //! Saved views (`/api/me/views`). A view is a named, per-user dashboard of
-//! [`ViewWidget`]s on a 12-column grid, stored as `view_widgets` rows.
+//! [`ViewWidget`]s on a 12-column grid, stored as `dashboard_widgets` rows
+//! (`view_widgets` is the pre-0.1.82 table, copied over and left unused).
 //!
 //! Views saved before widgets existed hold a split tree in
 //! `session_view_nodes` (wire shape [`ViewLayout`]). Such a view is
@@ -166,7 +167,7 @@ impl ViewLayout {
                         None
                     },
                     terminal_id: terminal_id.clone(),
-                    project_id: None,
+                    ..Default::default()
                 });
             }
             ViewLayout::Split {
@@ -196,46 +197,150 @@ impl ViewLayout {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+/// Every widget kind a dashboard can hold. Unknown kinds fail to
+/// deserialize, so a request naming one answers 400.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum WidgetKind {
+    #[default]
     Session,
     Terminal,
     Project,
+    Note,
+    Report,
+    Background,
+    Repeating,
+    Todos,
+    Attention,
+    ReviewQueue,
+    ReviewQuality,
+    Workers,
+    Worktrees,
+    Dependencies,
+    SshActivity,
+    SshHosts,
+}
+
+/// A widget's optional ref / content fields, by wire key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidgetField {
+    SessionId,
+    TerminalId,
+    ProjectId,
+    CardId,
+    ReportRef,
+    Body,
+    HostRef,
+}
+
+impl WidgetField {
+    const ALL: [WidgetField; 7] = [
+        WidgetField::SessionId,
+        WidgetField::TerminalId,
+        WidgetField::ProjectId,
+        WidgetField::CardId,
+        WidgetField::ReportRef,
+        WidgetField::Body,
+        WidgetField::HostRef,
+    ];
+
+    /// The wire key.
+    fn key(self) -> &'static str {
+        match self {
+            WidgetField::SessionId => "sessionId",
+            WidgetField::TerminalId => "terminalId",
+            WidgetField::ProjectId => "projectId",
+            WidgetField::CardId => "cardId",
+            WidgetField::ReportRef => "reportRef",
+            WidgetField::Body => "body",
+            WidgetField::HostRef => "hostRef",
+        }
+    }
 }
 
 impl WidgetKind {
+    const ALL: [WidgetKind; 16] = [
+        WidgetKind::Session,
+        WidgetKind::Terminal,
+        WidgetKind::Project,
+        WidgetKind::Note,
+        WidgetKind::Report,
+        WidgetKind::Background,
+        WidgetKind::Repeating,
+        WidgetKind::Todos,
+        WidgetKind::Attention,
+        WidgetKind::ReviewQueue,
+        WidgetKind::ReviewQuality,
+        WidgetKind::Workers,
+        WidgetKind::Worktrees,
+        WidgetKind::Dependencies,
+        WidgetKind::SshActivity,
+        WidgetKind::SshHosts,
+    ];
+
     fn as_str(self) -> &'static str {
         match self {
             WidgetKind::Session => "session",
             WidgetKind::Terminal => "terminal",
             WidgetKind::Project => "project",
+            WidgetKind::Note => "note",
+            WidgetKind::Report => "report",
+            WidgetKind::Background => "background",
+            WidgetKind::Repeating => "repeating",
+            WidgetKind::Todos => "todos",
+            WidgetKind::Attention => "attention",
+            WidgetKind::ReviewQueue => "review_queue",
+            WidgetKind::ReviewQuality => "review_quality",
+            WidgetKind::Workers => "workers",
+            WidgetKind::Worktrees => "worktrees",
+            WidgetKind::Dependencies => "dependencies",
+            WidgetKind::SshActivity => "ssh_activity",
+            WidgetKind::SshHosts => "ssh_hosts",
         }
     }
 
-    fn parse(s: &str) -> Self {
-        match s {
-            "terminal" => WidgetKind::Terminal,
-            "project" => WidgetKind::Project,
-            _ => WidgetKind::Session,
-        }
+    fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
     }
 
-    /// The wire key of this kind's ref field.
-    fn ref_key(self) -> &'static str {
+    /// The fields this kind uses, primary ref first. Setting any other
+    /// field is rejected by [`validate_widgets`].
+    fn fields(self) -> &'static [WidgetField] {
+        use WidgetField::*;
         match self {
-            WidgetKind::Session => "sessionId",
-            WidgetKind::Terminal => "terminalId",
-            WidgetKind::Project => "projectId",
+            WidgetKind::Session => &[SessionId],
+            WidgetKind::Terminal => &[TerminalId],
+            WidgetKind::Note => &[Body],
+            WidgetKind::Report => &[ReportRef],
+            WidgetKind::Background | WidgetKind::Repeating | WidgetKind::SshHosts => &[],
+            WidgetKind::SshActivity => &[HostRef],
+            WidgetKind::Dependencies => &[ProjectId, CardId],
+            WidgetKind::Project
+            | WidgetKind::Todos
+            | WidgetKind::Attention
+            | WidgetKind::ReviewQueue
+            | WidgetKind::ReviewQuality
+            | WidgetKind::Workers
+            | WidgetKind::Worktrees => &[ProjectId],
         }
     }
 }
 
-/// One widget of a saved view: a rect on the 12-column grid plus the ref
-/// matching `kind` (`sessionId` / `terminalId` / `projectId`; `null` is an
-/// empty placeholder). Serializes only the matching ref key, always
-/// present (possibly `null`). [`validate_widgets`] rejects a mismatched ref.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+/// Longest note body, in characters.
+pub const MAX_WIDGET_BODY_CHARS: usize = 20_000;
+/// Longest `reportRef` (`"<folder>/<file>"`), in characters.
+const MAX_REPORT_REF_CHARS: usize = 500;
+/// Longest `hostRef` (opaque ssh-fleet host id), in characters.
+const MAX_HOST_REF_CHARS: usize = 200;
+
+/// One widget of a saved view: a rect on the 12-column grid plus the
+/// fields its `kind` uses ([`WidgetKind::fields`]: a session / terminal /
+/// project / card ref, a `reportRef`, a note `body`, or an ssh-fleet
+/// `hostRef`; `null` is an empty placeholder or "all projects / hosts").
+/// Serializes exactly the kind's fields,
+/// always present (possibly `null`). [`validate_widgets`] rejects any
+/// other field being set.
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct ViewWidget {
     pub id: String,
     pub kind: WidgetKind,
@@ -249,15 +354,36 @@ pub struct ViewWidget {
     pub terminal_id: Option<String>,
     #[serde(rename = "projectId", default)]
     pub project_id: Option<String>,
+    #[serde(rename = "cardId", default)]
+    pub card_id: Option<String>,
+    #[serde(rename = "reportRef", default)]
+    pub report_ref: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(rename = "hostRef", default)]
+    pub host_ref: Option<String>,
 }
 
 impl ViewWidget {
-    /// The ref matching `kind`.
+    /// The kind's primary ref (session / terminal / project id), if any.
     pub fn target(&self) -> Option<&str> {
-        match self.kind {
-            WidgetKind::Session => self.session_id.as_deref(),
-            WidgetKind::Terminal => self.terminal_id.as_deref(),
-            WidgetKind::Project => self.project_id.as_deref(),
+        match self.kind.fields().first() {
+            Some(
+                f @ (WidgetField::SessionId | WidgetField::TerminalId | WidgetField::ProjectId),
+            ) => self.field(*f),
+            _ => None,
+        }
+    }
+
+    pub fn field(&self, f: WidgetField) -> Option<&str> {
+        match f {
+            WidgetField::SessionId => self.session_id.as_deref(),
+            WidgetField::TerminalId => self.terminal_id.as_deref(),
+            WidgetField::ProjectId => self.project_id.as_deref(),
+            WidgetField::CardId => self.card_id.as_deref(),
+            WidgetField::ReportRef => self.report_ref.as_deref(),
+            WidgetField::Body => self.body.as_deref(),
+            WidgetField::HostRef => self.host_ref.as_deref(),
         }
     }
 
@@ -271,32 +397,37 @@ impl ViewWidget {
 impl Serialize for ViewWidget {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let mut m = s.serialize_map(Some(7))?;
+        let fields = self.kind.fields();
+        let mut m = s.serialize_map(Some(6 + fields.len()))?;
         m.serialize_entry("id", &self.id)?;
         m.serialize_entry("kind", &self.kind)?;
         m.serialize_entry("x", &self.x)?;
         m.serialize_entry("y", &self.y)?;
         m.serialize_entry("w", &self.w)?;
         m.serialize_entry("h", &self.h)?;
-        m.serialize_entry(self.kind.ref_key(), &self.target())?;
+        for f in fields {
+            m.serialize_entry(f.key(), &self.field(*f))?;
+        }
         m.end()
     }
 }
 
-/// Every id of `kind` the widgets reference, in order, deduplicated.
-pub fn widget_refs(widgets: &[ViewWidget], kind: WidgetKind) -> Vec<&str> {
+/// Every value of `field` the widgets set, in order, deduplicated.
+/// Callers validate first, so only kinds using `field` contribute.
+pub fn widget_refs(widgets: &[ViewWidget], field: WidgetField) -> Vec<&str> {
     let mut seen = HashSet::new();
     widgets
         .iter()
-        .filter(|w| w.kind == kind)
-        .filter_map(ViewWidget::target)
+        .filter_map(|w| w.field(field))
         .filter(|id| seen.insert(*id))
         .collect()
 }
 
 /// Grid bounds (`x` 0..=11, `w` 1..=12, `x + w` ≤ 12, `y` ≥ 0, `h`
-/// 2..=40), no overlaps, ≤ [`MAX_VIEW_WIDGETS`], unique non-empty ids, and
-/// only the ref matching `kind` set. `Err` is the user-facing reason.
+/// 2..=40), no overlaps, ≤ [`MAX_VIEW_WIDGETS`], unique non-empty ids,
+/// only the fields the kind uses set, `body` ≤ [`MAX_WIDGET_BODY_CHARS`],
+/// `reportRef` shaped `"<folder>/<file>"`, and a dependencies `cardId`
+/// only alongside its `projectId`. `Err` is the user-facing reason.
 pub fn validate_widgets(widgets: &[ViewWidget]) -> Result<(), String> {
     if widgets.len() > MAX_VIEW_WIDGETS {
         return Err(format!("a view holds at most {MAX_VIEW_WIDGETS} widgets"));
@@ -326,16 +457,50 @@ pub fn validate_widgets(widgets: &[ViewWidget]) -> Result<(), String> {
                 w.id
             ));
         }
-        let stray = match w.kind {
-            WidgetKind::Session => w.terminal_id.is_some() || w.project_id.is_some(),
-            WidgetKind::Terminal => w.session_id.is_some() || w.project_id.is_some(),
-            WidgetKind::Project => w.session_id.is_some() || w.terminal_id.is_some(),
-        };
-        if stray {
+        let allowed = w.kind.fields();
+        if let Some(stray) = WidgetField::ALL
+            .into_iter()
+            .find(|f| !allowed.contains(f) && w.field(*f).is_some())
+        {
             return Err(format!(
-                "widget '{}' may only set {}",
+                "widget '{}' of kind '{}' may not set {}",
                 w.id,
-                w.kind.ref_key()
+                w.kind.as_str(),
+                stray.key()
+            ));
+        }
+        if w.body
+            .as_ref()
+            .is_some_and(|b| b.chars().count() > MAX_WIDGET_BODY_CHARS)
+        {
+            return Err(format!(
+                "widget '{}' body must be at most {MAX_WIDGET_BODY_CHARS} characters",
+                w.id
+            ));
+        }
+        if let Some(r) = &w.report_ref {
+            let shaped = r.chars().count() <= MAX_REPORT_REF_CHARS
+                && r.split_once('/').is_some_and(|(folder, file)| {
+                    !folder.is_empty() && !file.is_empty() && !file.contains('/')
+                })
+                && !r.split('/').any(|seg| seg == ".." || seg == ".");
+            if !shaped {
+                return Err(format!(
+                    "widget '{}' reportRef must be \"<folder>/<file>\"",
+                    w.id
+                ));
+            }
+        }
+        if w.card_id.is_some() && w.project_id.is_none() {
+            return Err(format!("widget '{}' needs projectId to set cardId", w.id));
+        }
+        if w.host_ref
+            .as_ref()
+            .is_some_and(|h| h.trim().is_empty() || h.chars().count() > MAX_HOST_REF_CHARS)
+        {
+            return Err(format!(
+                "widget '{}' hostRef must be 1-{MAX_HOST_REF_CHARS} characters",
+                w.id
             ));
         }
     }
@@ -362,36 +527,42 @@ pub fn validate_view_name(name: &str) -> Result<String, String> {
 }
 
 /// Replace every widget row of `view_id` with `widgets` and mark the view
-/// converted. A ref to a session, terminal, or project that no longer
-/// exists is stored blank — the same state `ON DELETE SET NULL` leaves
-/// behind when the row goes later. A soft-closed terminal keeps its id so
-/// the widget can offer to reopen it.
+/// converted. A ref to a session, terminal, project, or card that no
+/// longer exists is stored blank — the same state `ON DELETE SET NULL`
+/// leaves behind when the row goes later. A soft-closed terminal keeps its
+/// id so the widget can offer to reopen it.
 fn store_widgets(
     conn: &mut SqliteConnection,
     view_id: &str,
     widgets: &[ViewWidget],
 ) -> anyhow::Result<()> {
-    let refs = |kind| -> Vec<String> {
-        widget_refs(widgets, kind)
+    let refs = |field| -> Vec<String> {
+        widget_refs(widgets, field)
             .into_iter()
             .map(str::to_string)
             .collect()
     };
     let live_sessions: HashSet<String> = sessions::table
-        .filter(sessions::id.eq_any(refs(WidgetKind::Session)))
+        .filter(sessions::id.eq_any(refs(WidgetField::SessionId)))
         .select(sessions::id)
         .load(conn)?
         .into_iter()
         .collect();
     let live_terminals: HashSet<String> = terminals::table
-        .filter(terminals::id.eq_any(refs(WidgetKind::Terminal)))
+        .filter(terminals::id.eq_any(refs(WidgetField::TerminalId)))
         .select(terminals::id)
         .load(conn)?
         .into_iter()
         .collect();
     let live_projects: HashSet<String> = projects::table
-        .filter(projects::id.eq_any(refs(WidgetKind::Project)))
+        .filter(projects::id.eq_any(refs(WidgetField::ProjectId)))
         .select(projects::id)
+        .load(conn)?
+        .into_iter()
+        .collect();
+    let live_cards: HashSet<String> = cards::table
+        .filter(cards::id.eq_any(refs(WidgetField::CardId)))
+        .select(cards::id)
         .load(conn)?
         .into_iter()
         .collect();
@@ -409,11 +580,16 @@ fn store_widgets(
             session_id: live(&w.session_id, &live_sessions),
             terminal_id: live(&w.terminal_id, &live_terminals),
             project_id: live(&w.project_id, &live_projects),
+            card_id: live(&w.card_id, &live_cards),
+            report_ref: w.report_ref.clone(),
+            body: w.body.clone(),
+            host_ref: w.host_ref.clone(),
         })
         .collect();
-    diesel::delete(view_widgets::table.filter(view_widgets::view_id.eq(view_id))).execute(conn)?;
+    diesel::delete(dashboard_widgets::table.filter(dashboard_widgets::view_id.eq(view_id)))
+        .execute(conn)?;
     if !rows.is_empty() {
-        diesel::insert_into(view_widgets::table)
+        diesel::insert_into(dashboard_widgets::table)
             .values(&rows)
             .execute(conn)?;
     }
@@ -449,27 +625,35 @@ fn load_widgets(conn: &mut SqliteConnection, view_id: &str) -> anyhow::Result<Ve
         };
         store_widgets(conn, view_id, &widgets)?;
     }
-    let rows: Vec<ViewWidgetRow> = view_widgets::table
-        .filter(view_widgets::view_id.eq(view_id))
+    let rows: Vec<ViewWidgetRow> = dashboard_widgets::table
+        .filter(dashboard_widgets::view_id.eq(view_id))
         .select(ViewWidgetRow::as_select())
         .order((
-            view_widgets::y.asc(),
-            view_widgets::x.asc(),
-            view_widgets::id.asc(),
+            dashboard_widgets::y.asc(),
+            dashboard_widgets::x.asc(),
+            dashboard_widgets::id.asc(),
         ))
         .load(conn)?;
+    // A kind this build doesn't know (written by a newer release) is
+    // skipped rather than misread.
     Ok(rows
         .into_iter()
-        .map(|r| ViewWidget {
-            id: r.id,
-            kind: WidgetKind::parse(&r.kind),
-            x: r.x,
-            y: r.y,
-            w: r.w,
-            h: r.h,
-            session_id: r.session_id,
-            terminal_id: r.terminal_id,
-            project_id: r.project_id,
+        .filter_map(|r| {
+            Some(ViewWidget {
+                kind: WidgetKind::parse(&r.kind)?,
+                id: r.id,
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: r.h,
+                session_id: r.session_id,
+                terminal_id: r.terminal_id,
+                project_id: r.project_id,
+                card_id: r.card_id,
+                report_ref: r.report_ref,
+                body: r.body,
+                host_ref: r.host_ref,
+            })
         })
         .collect())
 }
@@ -695,12 +879,31 @@ impl Db {
                     session_view_nodes::table.filter(session_view_nodes::view_id.eq(&id)),
                 )
                 .execute(conn)?;
+                diesel::delete(dashboard_widgets::table.filter(dashboard_widgets::view_id.eq(&id)))
+                    .execute(conn)?;
                 diesel::delete(view_widgets::table.filter(view_widgets::view_id.eq(&id)))
                     .execute(conn)?;
                 diesel::delete(view_widgets_converted::table.find(&id)).execute(conn)?;
                 let n = diesel::delete(session_views::table.find(&id)).execute(conn)?;
                 Ok(n > 0)
             })
+        })
+        .await
+    }
+
+    /// `{id: (title, project_id)}` for the cards among `ids` that exist.
+    pub async fn card_titles(
+        &self,
+        ids: Vec<String>,
+    ) -> anyhow::Result<HashMap<String, (String, String)>> {
+        self.with_conn(move |conn| {
+            Ok(cards::table
+                .filter(cards::id.eq_any(&ids))
+                .select((cards::id, cards::title, cards::project_id))
+                .load::<(String, String, String)>(conn)?
+                .into_iter()
+                .map(|(id, title, project)| (id, (title, project)))
+                .collect())
         })
         .await
     }
