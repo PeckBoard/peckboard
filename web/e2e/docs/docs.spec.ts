@@ -115,14 +115,16 @@ test.describe('Landing', () => {
       /plugins\/session-control\.html$/,
     )
     await expect(steps.nth(1)).toContainText('Session Control plugin')
-    await expect(steps.nth(2).locator('a.more')).toHaveAttribute('href', /#subagent-panes$/)
-    // All eight feature rows, subagents and orchestrators first, and the
-    // what's-new + also-in-the-box grids.
+    // All ten feature rows — the newest (dashboards, terminals) lead, then
+    // subagents and orchestrators — and the what's-new + also-in-the-box
+    // grids.
     const features = page.locator('.feature')
-    await expect(features).toHaveCount(8)
-    await expect(features.nth(0).locator('.kicker')).toHaveText('Subagents')
-    await expect(features.nth(1).locator('.kicker')).toHaveText('Orchestrators')
-    await expect(page.locator('.extra')).toHaveCount(12)
+    await expect(features).toHaveCount(10)
+    await expect(features.nth(0).locator('.kicker')).toHaveText('Dashboards')
+    await expect(features.nth(1).locator('.kicker')).toHaveText('Terminals')
+    await expect(features.nth(2).locator('.kicker')).toHaveText('Subagents')
+    await expect(features.nth(3).locator('.kicker')).toHaveText('Orchestrators')
+    await expect(page.locator('.extra')).toHaveCount(15)
   })
 
   test('voice assistant section sits right after the hero', async ({ page }) => {

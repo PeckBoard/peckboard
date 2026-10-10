@@ -1,8 +1,10 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { expectScreen, spawnSshd, which } from '../tests/ssh-harness'
 
 /**
  * Docs screenshot capture — NOT a test of app behaviour.
@@ -21,6 +23,8 @@ import { fileURLToPath } from 'node:url'
  *   - subagent-panes.png    — a session with running subagents tiled in split panes
  *   - background-tasks.png  — the Background tasks panel over a chat session
  *   - voice-assistant.png   — the Voice Assistant panel over the sessions list
+ *   - dashboard.png         — a saved View as a widget dashboard (project, session, quality)
+ *   - terminal.png          — a View with two SSH terminal panes beside a session pane
  *
  * The last three run against the same live server but stub the relevant
  * API routes in the page (same convention as the tests/ specs): the
@@ -1327,4 +1331,404 @@ test('capture voice assistant screenshot @screenshot', async ({ request, page })
   await expect(page.getByText('Storefront search facets')).toBeVisible()
   await page.waitForTimeout(800)
   await capture(page, 'voice-assistant.png')
+})
+/** The closing line `polishHappyPath` gives a `mock:happy-path` run. */
+const RETRY_DONE = 'Retries are in, with tests for the backoff schedule and the give-up path.'
+
+/** Serve a `mock:happy-path` run as a believable turn: `prompt` as the
+ *  user message, and the mock's model chip, placeholder text and `echo
+ *  hello` shell call rewritten into a capture-retry change. Next page load. */
+async function polishHappyPath(page: Page, prompt: string): Promise<void> {
+  const swaps: [from: string, to: string][] = [
+    [
+      'Working on it...',
+      'Captures that fail with a retryable decline now go through RetryPolicy: three attempts, backing off 2s, 8s, then 32s.',
+    ],
+    ['Say hello to prove the shell works.', 'Run the retry tests'],
+    ['mock:happy-path', 'claude:claude-sonnet-5'],
+    ['echo hello', 'cargo test retry'],
+    ['"hello"', '"test result: ok. 4 passed; 0 failed"'],
+    ['"Done."', `"${RETRY_DONE}"`],
+  ]
+  await polishEvents(page, (_id, events) =>
+    events.map((e) => {
+      if (e.kind === 'user' && !e.data.source) return withText(e, prompt)
+      let json = JSON.stringify(e)
+      for (const [from, to] of swaps) json = json.replaceAll(from, to)
+      return JSON.parse(json) as ShotEvent
+    }),
+  )
+}
+
+// dashboard.png — a saved View as a widget dashboard: a Project summary of
+// a seeded board, a Session pane with a completed mock run, Needs
+// Attention, Review Quality, and the Worker Fleet. The project and session
+// are real; the read models that only fill up after days of worker
+// activity (`/api/dashboard/*`, the summary's active cards and spend) are
+// stubbed with realistic data so no widget sits in its empty state.
+test('capture dashboard view screenshot @screenshot', async ({ request, page }) => {
+  test.setTimeout(90_000)
+  mkdirSync(OUT_DIR, { recursive: true })
+  const { token, authHeader } = await authenticate(request)
+  const folder = await createFolder(
+    request,
+    authHeader,
+    'checkout-api',
+    mkdtempSync(path.join(tmpdir(), 'peckboard-shots-dash-')),
+  )
+  const projectId = await createProject(request, authHeader, 'Checkout API', folder)
+  const cards: [title: string, step: string][] = [
+    ['Idempotency keys for payment retries', 'backlog'],
+    ['Rate-limit coupon redemption', 'backlog'],
+    ['Currency rounding in cart totals', 'backlog'],
+    ['Webhook signature verification', 'backlog'],
+    ['Split tax service out of checkout', 'in_progress'],
+    ['Retry failed captures with backoff', 'in_progress'],
+    ['Saved cards for returning shoppers', 'in_progress'],
+    ['Audit log for refunds', 'review'],
+    ['Apple Pay on the payment sheet', 'review'],
+    ['Order confirmation emails', 'done'],
+    ['Address autocomplete', 'done'],
+    ['Guest checkout', 'done'],
+    ['Stripe SDK upgrade', 'done'],
+  ]
+  for (const [i, [title, step]] of cards.entries()) {
+    await createCard(request, authHeader, projectId, title, '', i % 3, step)
+  }
+
+  const sessionRes = await request.post('/api/sessions', {
+    headers: authHeader,
+    data: { name: 'Retry failed captures', folder_id: folder },
+  })
+  expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const sessionId = ((await sessionRes.json()) as { id: string }).id
+  const prompt = 'Failed card captures are never retried — add a retry with exponential backoff.'
+  const sent = await request.post(`/api/sessions/${sessionId}/message`, {
+    headers: authHeader,
+    data: { text: prompt, model: 'mock:happy-path' },
+  })
+  expect(sent.ok(), `message failed: ${await sent.text()}`).toBeTruthy()
+  await waitForAgentEnds(request, authHeader, sessionId, 1)
+
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
+  const active = [
+    ['Split tax service out of checkout', 'in_progress', true],
+    ['Retry failed captures with backoff', 'in_progress', true],
+    ['Saved cards for returning shoppers', 'in_progress', true],
+    ['Audit log for refunds', 'review', false],
+  ] as const
+  await page.route(`**/api/projects/${projectId}/summary`, async (route) => {
+    const res = await route.fetch()
+    const body = (await res.json()) as Record<string, unknown>
+    await route.fulfill({
+      response: res,
+      json: {
+        ...body,
+        active: active.map(([title, step, running], i) => ({
+          card_id: `c-${i}`,
+          title,
+          step,
+          worker_session_id: null,
+          session_running: running,
+        })),
+        worker_count: 3,
+        blocked_cards: 1,
+        spend_today_usd: 4.82,
+        last_activity_at: ago(2),
+      },
+    })
+  })
+  const at = (kind: string, title: string, detail: string, card: string, min: number) => ({
+    kind,
+    project_id: projectId,
+    project_name: 'Checkout API',
+    card_id: `a-${title}`,
+    card_title: card,
+    session_id: null,
+    title,
+    detail,
+    at: ago(min),
+  })
+  await page.route('**/api/dashboard/attention**', (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          at(
+            'question',
+            'Should a declined card be retried?',
+            'Retry only soft declines, or every failure?',
+            'Retry failed captures with backoff',
+            4,
+          ),
+          at(
+            'plan',
+            'Plan ready for review',
+            'Extract TaxClient behind a trait, then move the rate tables.',
+            'Split tax service out of checkout',
+            18,
+          ),
+          at(
+            'blocked',
+            'Webhook signature verification',
+            'Waiting on the signing secret from the payments team',
+            'Webhook signature verification',
+            95,
+          ),
+        ],
+      },
+    }),
+  )
+  const days = Array.from({ length: 30 }, (_, i) => {
+    const d = new Date(Date.now() - (29 - i) * 86_400_000)
+    return {
+      date: d.toISOString().slice(0, 10),
+      pass: [3, 5, 2, 6, 4, 1, 0][i % 7] + (i > 20 ? 2 : 0),
+      changes_requested: [1, 0, 2, 1, 0, 1, 0][(i * 3) % 7],
+      crashes: i % 11 === 4 ? 1 : 0,
+    }
+  })
+  const sum = (k: 'pass' | 'changes_requested' | 'crashes') => days.reduce((n, d) => n + d[k], 0)
+  await page.route('**/api/dashboard/review-quality**', (route) =>
+    route.fulfill({
+      json: {
+        days,
+        totals: {
+          pass: sum('pass'),
+          changes_requested: sum('changes_requested'),
+          crashes: sum('crashes'),
+          retries: 4,
+        },
+        by_project: [],
+      },
+    }),
+  )
+  const workers = [
+    ['Split tax service out of checkout', 'in_progress', 'claude:claude-opus-5-5', 47, 0.62],
+    ['Retry failed captures with backoff', 'in_progress', 'claude:claude-sonnet-5', 12, 0.31],
+    ['Saved cards for returning shoppers', 'in_progress', 'codex:gpt-5.1-codex', 26, 0.48],
+    ['Audit log for refunds', 'review', 'claude:claude-sonnet-5', 0, 0.84],
+  ] as const
+  await page.route('**/api/dashboard/workers**', (route) =>
+    route.fulfill({
+      json: {
+        workers: workers.map(([title, step, model, min, fill], i) => ({
+          session_id: `w-${i}`,
+          session_name: title,
+          project_id: projectId,
+          project_name: 'Checkout API',
+          card_id: `c-${i}`,
+          card_title: title,
+          step,
+          model,
+          started_at: ago(min),
+          running: min > 0,
+          last_activity_at: ago(1),
+          context_tokens: Math.round(fill * 200_000),
+        })),
+      },
+    }),
+  )
+  await polishHappyPath(page, prompt)
+
+  const viewRes = await request.post('/api/me/views', {
+    headers: authHeader,
+    data: {
+      name: 'Checkout overview',
+      widgets: [
+        // 14 rows: fills the 800px viewport without the grid scrolling.
+        { id: 'w-project', kind: 'project', x: 0, y: 0, w: 4, h: 7, projectId },
+        { id: 'w-attn', kind: 'attention', x: 4, y: 0, w: 4, h: 7 },
+        { id: 'w-quality', kind: 'review_quality', x: 8, y: 0, w: 4, h: 7 },
+        { id: 'w-session', kind: 'session', x: 0, y: 7, w: 5, h: 7, sessionId },
+        { id: 'w-workers', kind: 'workers', x: 5, y: 7, w: 7, h: 7 },
+      ],
+    },
+  })
+  expect(viewRes.status(), await viewRes.text()).toBe(201)
+  const viewId = ((await viewRes.json()) as { id: string }).id
+
+  await loadAppAt(page, token, `/views/${viewId}`)
+  await expect(page.getByTestId('view-editor')).toBeVisible({ timeout: 15_000 })
+  const widget = (kind: string) => page.locator(`[data-testid="view-widget"][data-kind="${kind}"]`)
+  await expect(widget('project').getByTestId('project-widget-active')).toBeVisible({
+    timeout: 15_000,
+  })
+  await expect(widget('attention').getByTestId('dash-attention-list')).toBeVisible()
+  await expect(widget('review_quality').getByTestId('dash-review_quality-list')).toBeVisible()
+  await expect(widget('workers').getByTestId('dash-workers-list')).toBeVisible()
+  await expect(widget('session').getByText(RETRY_DONE)).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 })
+  await page.waitForTimeout(800)
+  await capture(page, 'dashboard.png')
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
+// terminal.png — a View mixing a session pane with two SSH terminal panes
+// on one host (ssh-fleet, tmux-backed PTYs), each shell showing real
+// output from a throwaway git repo. Uses a local OpenSSH daemon on a free
+// port, like tests/view-terminal-panes.spec; skipped where sshd or tmux
+// is missing rather than faked.
+test('capture ssh terminal screenshot @screenshot', async ({ request, page }) => {
+  test.setTimeout(120_000)
+  test.skip(!which('tmux'), 'tmux not installed')
+  const sshd = await spawnSshd()
+  test.skip(!sshd, 'OpenSSH sshd/ssh-keygen not available')
+  if (!sshd) return
+  mkdirSync(OUT_DIR, { recursive: true })
+  const { token, authHeader } = await authenticate(request)
+
+  // A small repo with history, so `git log` and `ls` read like a project.
+  const repo = path.join(mkdtempSync(path.join(tmpdir(), 'peckboard-shots-term-')), 'checkout-api')
+  mkdirSync(path.join(repo, 'src'), { recursive: true })
+  mkdirSync(path.join(repo, 'scripts'))
+  const git = (...args: string[]) =>
+    execFileSync(
+      'git',
+      ['-c', 'user.name=Dana Reyes', '-c', 'user.email=dana@example.com', ...args],
+      {
+        cwd: repo,
+        stdio: 'pipe',
+      },
+    )
+  git('init', '-q', '-b', 'main')
+  const commits: [file: string, body: string, msg: string][] = [
+    ['Cargo.toml', '[package]\nname = "checkout-api"\n', 'Initial checkout service skeleton'],
+    ['src/main.rs', 'fn main() {}\n', 'Wire up axum router and health check'],
+    ['src/cart.rs', '// cart totals\n', 'Cart totals with per-line tax'],
+    ['src/payments.rs', '// captures\n', 'Capture payments through the Stripe client'],
+    ['src/coupons.rs', '// coupons\n', 'Coupon redemption with usage limits'],
+    ['README.md', '# checkout-api\n', 'Document local setup'],
+    ['src/retry.rs', '// backoff\n', 'Retry failed captures with exponential backoff'],
+  ]
+  for (const [file, body, msg] of commits) {
+    writeFileSync(path.join(repo, file), body)
+    git('add', '.')
+    git('commit', '-q', '-m', msg)
+  }
+  writeFileSync(
+    path.join(repo, 'scripts', 'test.sh'),
+    [
+      'echo "   Compiling checkout-api v0.4.2"',
+      'echo "    Finished test profile in 3.41s"',
+      'echo "     Running unittests src/main.rs"',
+      'echo',
+      'echo "running 6 tests"',
+      'for t in cart::totals cart::rounding coupons::limit payments::capture retry::backoff retry::gives_up; do echo "test $t ... ok"; done',
+      'echo',
+      'echo "test result: ok. 6 passed; 0 failed; finished in 0.04s"',
+    ].join('\n') + '\n',
+  )
+
+  const opened: string[] = []
+  try {
+    // addFleetHost's flow, with a host label that reads like a real box.
+    await request.post('/api/plugins/ssh-fleet/approval', {
+      headers: authHeader,
+      data: { decision: 'approve' },
+    })
+    const label = 'build-01'
+    const added = await request.post('/api/plugin-ui/ssh-fleet/hosts', {
+      headers: authHeader,
+      data: {
+        label,
+        hostname: '127.0.0.1',
+        port: sshd.port,
+        username: sshd.user,
+        private_key: sshd.privateKey,
+      },
+    })
+    expect(added.ok(), `add host failed: ${await added.text()}`).toBeTruthy()
+    const hosts = (await (
+      await request.get('/api/terminals/hosts', { headers: authHeader })
+    ).json()) as { id: string; label: string }[]
+    const hostId = hosts.find((h) => h.label === label)?.id ?? ''
+    expect(hostId).not.toBe('')
+
+    const folder = await createFolder(request, authHeader, 'checkout-api-term', repo)
+    const sessionRes = await request.post('/api/sessions', {
+      headers: authHeader,
+      data: { name: 'Retry failed captures', folder_id: folder },
+    })
+    expect(sessionRes.ok(), `create session failed: ${await sessionRes.text()}`).toBeTruthy()
+    const sessionId = ((await sessionRes.json()) as { id: string }).id
+    const prompt = 'Run the retry tests and summarise what the backoff covers.'
+    const sent = await request.post(`/api/sessions/${sessionId}/message`, {
+      headers: authHeader,
+      data: { text: prompt, model: 'mock:happy-path' },
+    })
+    expect(sent.ok(), `message failed: ${await sent.text()}`).toBeTruthy()
+    await waitForAgentEnds(request, authHeader, sessionId, 1)
+    await polishHappyPath(page, prompt)
+
+    const viewRes = await request.post('/api/me/views', {
+      headers: authHeader,
+      data: { name: 'Checkout ops', layout: { kind: 'leaf', sessionId } },
+    })
+    expect(viewRes.ok(), await viewRes.text()).toBeTruthy()
+    const viewId = ((await viewRes.json()) as { id: string }).id
+
+    await loadAppAt(page, token, `/views/${viewId}`)
+    await expect(page.getByTestId('view-editor')).toBeVisible({ timeout: 15_000 })
+    const termPanes = page.getByTestId('view-terminal-pane')
+    for (let i = 1; i <= 2; i++) {
+      await page.getByTestId('add-widget-button').click()
+      await page.getByTestId('view-add-terminal').click()
+      await page.getByTestId(`view-add-terminal-host-${hostId}`).click()
+      await expect(termPanes).toHaveCount(i, { timeout: 15_000 })
+    }
+    const [t1, t2] = await termPanes.evaluateAll((els) =>
+      els.map((e) => e.getAttribute('data-terminal-id') ?? ''),
+    )
+    opened.push(t1, t2)
+
+    // Session on the left, the two shells stacked on the right; 13 rows
+    // fit the 800px viewport without the grid scrolling.
+    await expect(page.getByTestId('view-save-state')).toHaveAttribute('data-state', 'saved', {
+      timeout: 10_000,
+    })
+    const view = (await (
+      await request.get(`/api/me/views/${viewId}`, { headers: authHeader })
+    ).json()) as { widgets: { id: string; kind: string; terminalId?: string }[] }
+    const widgets = view.widgets.map((w) =>
+      w.kind === 'session'
+        ? { ...w, x: 0, y: 0, w: 5, h: 13 }
+        : { ...w, x: 5, y: w.terminalId === t1 ? 0 : 6, w: 7, h: w.terminalId === t1 ? 6 : 7 },
+    )
+    const put = await request.put(`/api/me/views/${viewId}`, {
+      headers: authHeader,
+      data: { widgets },
+    })
+    expect(put.ok(), await put.text()).toBeTruthy()
+    await page.reload()
+    await expect(termPanes).toHaveCount(2, { timeout: 15_000 })
+    for (const id of [t1, t2]) {
+      await expect(
+        page.locator(`[data-terminal-id="${id}"] [data-testid="terminal-pane"]`),
+      ).toHaveAttribute('data-phase', 'live', { timeout: 20_000 })
+    }
+
+    const run = async (id: string, lines: string[], done: RegExp) => {
+      await page.locator(`[data-terminal-id="${id}"] .xterm`).click()
+      await page.keyboard.type(`cd ${repo} && export PS1='\\u@${label}:\\W$ ' && clear\n`)
+      await page.waitForTimeout(800)
+      for (const line of lines) {
+        await page.keyboard.type(`${line}\n`)
+        await page.waitForTimeout(500)
+      }
+      await expectScreen(page, done, id)
+    }
+    await run(t1, ['git log --oneline --decorate'], /Initial checkout service skeleton/)
+    await run(t2, ['ls', 'sh scripts/test.sh'], /6 passed/)
+    await expect(page.getByText(RETRY_DONE)).toBeVisible()
+    // Drop focus so neither terminal draws an active cursor.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    await page.waitForTimeout(800)
+    await capture(page, 'terminal.png')
+  } finally {
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
+    for (const id of opened) {
+      await request.delete(`/api/terminals/${id}`, { headers: authHeader }).catch(() => {})
+    }
+    sshd.child.kill()
+  }
 })

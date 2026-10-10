@@ -6,7 +6,9 @@ nav_order: 25
 
 # SSH Fleet
 
-SSH Fleet keeps a registry of SSH hosts and gives sessions ten tools to act on them — run commands on one host, a tag, or the whole fleet, and read, write, or edit remote files over SFTP. A dashboard page in the sidebar shows every host with its status, credential, and tags, plus a live activity feed of every tool call.
+SSH Fleet keeps a registry of SSH hosts and gives sessions ten tools to act on them — run commands on one host, a tag, or the whole fleet, and read, write, or edit remote files over SFTP. A dashboard page in the sidebar shows every host with its status, credential, and tags, plus a live audit feed of every tool call: each command is attributed to the session that ran it, with a link to that session and the reason the agent was required to state. The page itself has no command box — commands come from agents, or from you in a terminal.
+
+The same hosts power PeckBoard's interactive [terminals]({{ "/features.html#terminals" | relative_url }}): a real, tmux-persistent shell in a tab or a View pane, with credentials resolved from this plugin on every connect. The **SSH Hosts** and **SSH Activity** [dashboard widgets]({{ "/features.html#views-dashboards" | relative_url }}) read from it too.
 
 ![The SSH Fleet dashboard: a searchable host list with status dots and credentials, and the live activity feed]({{ "/assets/screenshots/plugins/ssh-fleet.png" | relative_url }})
 

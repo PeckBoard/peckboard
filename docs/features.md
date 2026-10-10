@@ -45,7 +45,40 @@ Every session shows its agent's live tool calls as structured blocks — a diff 
 
 ## Subagent Panes
 
-When a session launches subagents — PeckBoard children via `spawn_subagent` or Claude-native Agent/Task subagents — each running one slides into its own live split pane beside the parent chat, and the panes tile into a grid as more arrive. A pane stays open exactly as long as its subagent runs, including background subagents that outlive the parent's turn, then closes. The **Subagent panes: Auto / Off** toggle in the session view controls this. A pane you close stays closed across reloads; running subagents without a pane stay one click away on a `+N` chip, and a finished subagent reopens from its tool card's _Show pane_. To group arbitrary sessions side by side, pick _New split view_ from the tab bar's `+ ▾` menu.
+When a session launches subagents — PeckBoard children via `spawn_subagent` or Claude-native Agent/Task subagents — each running one slides into its own live split pane beside the parent chat, and the panes tile into a grid as more arrive. A pane stays open exactly as long as its subagent runs, including background subagents that outlive the parent's turn, then closes. The **Subagent panes: Auto / Off** toggle in the session view controls this. A pane you close stays closed across reloads; running subagents without a pane stay one click away on a `+N` chip, and a finished subagent reopens from its tool card's _Show pane_. A parent can have up to 25 subagents in flight. To group arbitrary sessions side by side, build a [View dashboard](#views-dashboards).
+
+## Views Dashboards {#views-dashboards}
+
+![A View dashboard mixing a live session pane, a project summary, and Needs Attention, Worker Fleet, and Review Quality widgets]({{ "/assets/screenshots/dashboard.png" | relative_url }})
+
+A View is a saved dashboard: a 12-column grid of widgets you drag by the header, resize from the corner, and snap into place; the grid compacts upward and stacks into one column on a phone. Create one from the Views page (**+ New view**) or the tab bar's `+ ▾` → _New split view_, then fill it from **+ Add widget**, grouped by what each widget watches:
+
+| Group          | Widgets                                                                                                                                                                                       |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Panes          | **Session** (a full live chat pane) and **Terminal** (a live SSH shell)                                                                                                                       |
+| Project        | **Project** summary (status, per-step card counts, blocked and worker counts, active cards, spend today), **Card Dependencies** (top blockers and a layered graph), **Project Todos**         |
+| Activity       | **Needs Attention** (open questions, plans to approve, blocked cards, worker errors, unmerged worktrees), **Worker Fleet**, **Background Tasks**, **Repeating Tasks**, **Orchestrator Goals** |
+| Quality        | **Review Queue**, **Review Quality** (pass rate, crashes, retries, daily chart over 7/30/90 days), **Git / Worktrees**, **PRs & CI**                                                          |
+| Infrastructure | **SSH Hosts** (status, probe, open a terminal) and **SSH Activity** (every command agents ran, with exit status, output preview, session, and reason)                                         |
+| Notes          | **Report** (pinned or latest) and **Markdown Note**                                                                                                                                           |
+
+Widgets backed by a plugin — SSH (SSH Fleet), PRs & CI (GitHub Bridge), Orchestrator Goals (Session Control) — appear in the menu only when that plugin is installed. _Configure…_ scopes a widget to a project, host, report, or root card, and every list widget has a filter bar behind its funnel button (search, status chips, toggles, searchable pickers) whose choices save with the view, so they follow you across reloads and devices. Widgets refresh live from the event stream.
+
+## Terminals
+
+The Terminals page (rail, or press `t` for a new one) opens a real interactive shell on any host registered with the [SSH Fleet]({{ "/plugins/ssh-fleet.html" | relative_url }}) plugin — the same as `ssh host`, so vim, top, tab completion, Ctrl-C, and sudo prompts all work. Terminals open as full-size tabs, pop out into their own window, copy and paste, and resize their font with Ctrl +/-.
+
+The remote shell runs inside tmux, so it survives PeckBoard restarts, closed browsers, and dropped networks: the tab reconnects on its own and replays up to 1 MB of scrollback. A host without tmux gets a plain shell marked _not persistent_. Credentials are resolved from SSH Fleet on every connect and never reach the browser, the database, or logs; creating terminals is admin-only. _Add to view…_ drops a terminal into a View, and one host can fill several panes, each its own shell — keystrokes go only to the pane you clicked.
+
+## Session Memory
+
+Every session keeps a small memory pool that survives clears, compaction, resumes, and model switches. Agents manage it with the `memory_add`, `memory_list`, `memory_update`, `memory_remove`, and `memory_compact` tools, and the pool is shown to the agent at every start, so a fact it learned an hour and three clears ago is still in front of it. **Memory** in the session's 3-dot or tab menu lists the entries and lets you delete them.
+
+## Card Run History and Reviews
+
+Every card keeps every session that ever worked it. When a card moves on, its implementation and review sessions are _sealed_ rather than deleted: readable forever, padlocked in the tab strip, but no longer able to run. **Sessions (N)** on the card opens the full run history — role, model, duration, outcome, and summary per run, each with its transcript.
+
+The review step runs on a different model from the one that wrote the code, chosen from a mid-tier review pool across providers (Opus, Sonnet, Grok, GPT) and spread between them, never the most expensive tier; a project can still pin its own reviewer model. The reviewer's verdict and summary land on the card's Review section, and kanban tiles show a _Passed_ or _Changes_ badge. Cards waiting on review are dispatched ahead of the backlog, so a busy board never starves its reviewers.
 
 ## Background Processes
 

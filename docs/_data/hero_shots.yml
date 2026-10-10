@@ -1,11 +1,14 @@
 # Screens that scroll through the landing-page hero marquee, in order.
 # Files live in assets/screenshots/ and are captured by
 # web/e2e/screenshots/screenshots.spec.ts (`cd web && npm run screenshots`).
-# Opens on the Assistant, then the three pillars: subagents,
-# orchestrators, and the board.
+# Opens on the Assistant and the widget dashboard, then the three pillars:
+# subagents, orchestrators, and the board.
 - file: voice-assistant.png
   caption: Assistant
   alt: The Assistant panel docked over the sessions list, answering a relayed question from a worker session
+- file: dashboard.png
+  caption: Dashboards
+  alt: A View dashboard mixing a live session pane, a project summary, and Needs Attention, Worker Fleet, and Review Quality widgets
 - file: subagent-panes.png
   caption: Subagent panes
   alt: A session with three running subagents, each streaming in its own split pane beside the parent chat
@@ -15,6 +18,9 @@
 - file: board.png
   caption: Project board
   alt: A project board with cards spread across Backlog, In Progress, Review, and Done columns
+- file: terminal.png
+  caption: SSH terminals
+  alt: A View with two live SSH terminal panes on one host beside a session pane
 - file: chat.png
   caption: Live sessions
   alt: Chat view of a session showing user messages, agent replies, and a collapsed tool call

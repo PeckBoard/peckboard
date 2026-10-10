@@ -12,7 +12,7 @@ layout: null
     <title>PeckBoard — mission control for AI agents</title>
     <meta
       name="description"
-      content="PeckBoard is self-hosted mission control for AI coding agents: run a board the dispatcher works card by card, put orchestrators in charge of a standing goal, or let agents spawn subagents you watch live in split panes — and run it all by voice. One binary on your own machine."
+      content="PeckBoard is self-hosted mission control for AI coding agents: run a board the dispatcher works card by card, put orchestrators in charge of a standing goal, let agents spawn subagents you watch live in split panes, and pin sessions, terminals, and project widgets to your own dashboards — and run it all by voice. One binary on your own machine."
     />
     <link rel="icon" href="{{ '/assets/icon.png' | relative_url }}" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -31,7 +31,7 @@ layout: null
     />
     <meta
       property="og:description"
-      content="Self-hosted mission control for AI agents: a board the dispatcher works for you, orchestrators that drive sessions toward a goal, and subagents streaming live in panes. One binary, your machine, your code."
+      content="Self-hosted mission control for AI agents: a board the dispatcher works for you, orchestrators that drive sessions toward a goal, subagents streaming live in panes, and widget dashboards that put it all on one screen. One binary, your machine, your code."
     />
     <meta
       property="og:image"
@@ -80,8 +80,9 @@ layout: null
           <p class="pitch">
             Run a board the dispatcher works card by card, put orchestrators in
             charge of a goal, or let any agent spawn subagents you watch live in
-            split panes — then just talk to it. Your whole flock, from one
-            screen, by keyboard or by voice.
+            split panes — then pin sessions, shells, and project widgets to a
+            dashboard and just talk to it. Your whole flock, from one screen, by
+            keyboard or by voice.
           </p>
           <div class="cta-row">
             <a
@@ -138,14 +139,17 @@ layout: null
         </div>
         <div class="marquee" aria-hidden="true">
           <div class="marquee-track">
-            <span>Assistant</span><span>Claude</span><span>Grok</span
-            ><span>Kimi Code</span><span>Cursor</span><span>Ollama</span
+            <span>Assistant</span><span>Dashboards</span><span>Claude</span
+            ><span>Codex</span><span>Grok</span><span>Kimi Code</span
+            ><span>Cursor</span><span>Ollama</span><span>SSH terminals</span
             ><span>WASM plugins</span><span>MCP servers</span
             ><span>Subagents</span><span>Doc review</span
             ><span>Test replay</span><span>Diff viewer</span
-            ><span>SQLite inside</span><span>Assistant</span><span>Claude</span
+            ><span>SQLite inside</span><span>Assistant</span
+            ><span>Dashboards</span><span>Claude</span><span>Codex</span
             ><span>Grok</span><span>Kimi Code</span><span>Cursor</span
-            ><span>Ollama</span><span>WASM plugins</span><span>MCP servers</span
+            ><span>Ollama</span><span>SSH terminals</span
+            ><span>WASM plugins</span><span>MCP servers</span
             ><span>Subagents</span><span>Doc review</span
             ><span>Test replay</span><span>Diff viewer</span
             ><span>SQLite inside</span>
@@ -225,34 +229,52 @@ layout: null
           <h2>Fresh From the Latest Releases</h2>
           <div class="extra-grid">
             <div class="extra">
-              <h3>Subagent panes grid (0.1.31–0.1.35)</h3>
+              <h3>Widget dashboards (0.1.81–0.1.83)</h3>
               <p>
-                When an agent launches subagents, each one slides into its own
-                live pane beside the parent chat, tiled into a grid. Panes open
-                while a subagent runs and close when it truly finishes; toggle
-                Auto or Off, and reopen any finished one with “Show pane”.
+                Views became a drag-and-resize grid of widgets: live session and
+                terminal panes, project summaries, Needs Attention, Worker
+                Fleet, Review Quality, PRs &amp; CI, SSH activity, and more —
+                eighteen kinds in all.
               </p>
             </div>
             <div class="extra">
-              <h3>Background processes (0.1.33)</h3>
+              <h3>Filters that stick (0.1.84)</h3>
               <p>
-                Agents start dev servers, builds, and long test runs with
-                <code>run_background</code> instead of shell <code>&amp;</code>.
-                PeckBoard owns the process group, keeps the log, and wakes the
-                session with the tail when the job ends. A Background chip lists
-                every task with output and a Stop button.
+                Every list widget has a filter bar — search, status chips,
+                toggles, pickers — saved with the view, so a dashboard of
+                failing checks or blocked cards looks the same on every device.
               </p>
             </div>
             <div class="extra">
-              <h3>Remote-control agents (0.1.17)</h3>
+              <h3>Real SSH terminals (0.1.77–0.1.80)</h3>
               <p>
-                Enroll another machine with the
-                <a href="{{ '/remote-agent.html' | relative_url }}"
-                  >peckboard-agent</a
-                >
-                daemon and drive it from your sessions — commands, servers,
-                screenshots, mouse and keyboard. Binaries for every platform
-                ship with each release as of 0.1.18.
+                A true interactive shell on any fleet host, in a tab, a pop-out
+                window, or a dashboard pane. It runs in tmux, so it survives
+                restarts and dropped networks and replays its scrollback.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Card run history (0.1.79)</h3>
+              <p>
+                Sessions that worked a card are sealed, not deleted. Open
+                Sessions (N) on any card to read every implementation and review
+                run, with model, outcome, and summary.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Reviews on a different model (0.1.72–0.1.75)</h3>
+              <p>
+                The review step never grades its own homework: it runs on a peer
+                model from a cross-provider review pool, jumps the queue ahead
+                of the backlog, and leaves a verdict on the card.
+              </p>
+            </div>
+            <div class="extra">
+              <h3>Session memory (0.1.76)</h3>
+              <p>
+                Each session keeps a memory pool its agent writes to and sees on
+                every start — through clears, compaction, resumes, and model
+                switches.
               </p>
             </div>
           </div>
@@ -338,6 +360,56 @@ layout: null
         <span class="kicker">The toolkit</span>
         <h2>Everything your flock needs</h2>
         <div class="wrap">
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Dashboards</span>
+              <h3>Your whole operation on one screen</h3>
+              <p>
+                Build a View from widgets on a 12-column grid — drag by the
+                header, resize from the corner. Mix live session panes and SSH
+                terminals with project summaries, Needs Attention, the worker
+                fleet, review quality, PRs and CI, background tasks, and SSH
+                activity. Scope each widget to a project or host, filter it, and
+                the layout and filters save with the view.
+              </p>
+              <a
+                class="more"
+                href="{{ '/features.html#views-dashboards' | relative_url }}"
+                >Views dashboards →</a
+              >
+            </div>
+            <div class="feature-shot f-dashboard">
+              <img
+                src="{{ '/assets/screenshots/dashboard.png' | relative_url }}"
+                alt="A View dashboard mixing a live session pane, a project summary, and Needs Attention, Worker Fleet, and Review Quality widgets"
+              />
+            </div>
+          </div>
+
+          <div class="feature">
+            <div class="feature-copy">
+              <span class="kicker">Terminals</span>
+              <h3>A real shell on every host</h3>
+              <p>
+                Open an interactive terminal on any SSH Fleet host — vim, top,
+                tab completion, and sudo all work. The shell lives in tmux on
+                the host, so closing the browser or restarting PeckBoard never
+                kills it: the tab reconnects and replays its scrollback. Put
+                several shells and a session side by side in one View.
+              </p>
+              <a
+                class="more"
+                href="{{ '/features.html#terminals' | relative_url }}"
+                >Terminals →</a
+              >
+            </div>
+            <div class="feature-shot f-terminal">
+              <img
+                src="{{ '/assets/screenshots/terminal.png' | relative_url }}"
+                alt="A View with two live SSH terminal panes on one host beside a session pane"
+              />
+            </div>
+          </div>
           <div class="feature">
             <div class="feature-copy">
               <span class="kicker">Subagents</span>
@@ -576,19 +648,19 @@ layout: null
               </p>
             </div>
             <div class="extra">
-              <h3>Split views on demand</h3>
+              <h3>Sessions that remember</h3>
               <p>
-                Group any sessions — chats, workers, a brain and its crew — into
-                a saved split view from the tab bar's + ▾ menu, and watch them
-                side by side.
+                Each session keeps a memory pool its agent maintains with MCP
+                tools and sees on every start, so what it learned survives
+                clears, compaction, and model switches.
               </p>
             </div>
             <div class="extra">
-              <h3>Background jobs that report back</h3>
+              <h3>Every card's full history</h3>
               <p>
-                Long-running commands run under PeckBoard, not a stray shell:
-                killed with their whole process tree on stop, timeout, or
-                session delete, and reported to the agent when they finish.
+                Implementation and review sessions are sealed, never deleted,
+                and the review runs on a different model than the one that wrote
+                the code — its verdict lands on the card.
               </p>
             </div>
             <div class="extra">
