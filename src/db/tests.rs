@@ -3894,12 +3894,136 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn session_views_round_trip_replace_and_session_delete() {
-        use crate::db::crud::{SplitDir, ViewLayout};
-        let db = test_db();
-        seed_user_folder_sessions(&db, &[("a", None), ("b", None), ("c", None)]).await;
+    fn widget(
+        id: &str,
+        kind: crate::db::crud::WidgetKind,
+        (x, y, w, h): (i32, i32, i32, i32),
+        target: Option<&str>,
+    ) -> crate::db::crud::ViewWidget {
+        use crate::db::crud::WidgetKind;
+        let pick = |k: WidgetKind| target.filter(|_| kind == k).map(str::to_string);
+        crate::db::crud::ViewWidget {
+            id: id.into(),
+            kind,
+            x,
+            y,
+            w,
+            h,
+            session_id: pick(WidgetKind::Session),
+            terminal_id: pick(WidgetKind::Terminal),
+            project_id: pick(WidgetKind::Project),
+        }
+    }
 
+    #[tokio::test]
+    async fn session_views_widgets_round_trip_replace_and_target_delete() {
+        use crate::db::crud::WidgetKind::{Project, Session, Terminal as Term};
+        let db = test_db();
+        seed_user_folder_sessions(&db, &[("a", None), ("b", None)]).await;
+        for id in ["t1", "t2"] {
+            let now = chrono::Utc::now().to_rfc3339();
+            db.insert_terminal(Terminal {
+                id: id.into(),
+                user_id: "u1".into(),
+                plugin_id: "ssh".into(),
+                host_id: "h".into(),
+                name: id.into(),
+                host_label: "me@box:22".into(),
+                tmux_session: format!("peck-{id}"),
+                persistent: false,
+                created_at: now.clone(),
+                last_active_at: now,
+                closed_at: None,
+            })
+            .await
+            .unwrap();
+        }
+        let widgets = vec![
+            widget("w1", Session, (0, 0, 6, 8), Some("a")),
+            widget("w2", Term, (6, 0, 6, 8), Some("t1")),
+            widget("w3", Term, (0, 8, 4, 6), Some("t2")),
+            widget("w4", Project, (4, 8, 4, 6), Some("no-such-project")),
+            widget("w5", Session, (8, 8, 4, 6), None),
+        ];
+        let (view, got) = db
+            .create_session_view("u1", "Dash", widgets.clone())
+            .await
+            .unwrap();
+        // A ref to a missing target is stored blank.
+        let mut expected = widgets.clone();
+        expected[3].project_id = None;
+        assert_eq!(got, expected);
+        assert_eq!(
+            db.get_session_view("u1", &view.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            expected
+        );
+        // Views are per-user: another user can neither see nor touch it.
+        assert!(db.get_session_view("u2", &view.id).await.unwrap().is_none());
+        assert!(db.list_session_views("u2").await.unwrap().is_empty());
+        assert!(!db.delete_session_view("u2", &view.id).await.unwrap());
+
+        // Wire shape: only the ref matching `kind`, always present.
+        let wire = serde_json::to_value(&expected).unwrap();
+        assert_eq!(wire[0]["sessionId"], "a");
+        assert!(wire[0].get("terminalId").is_none());
+        assert_eq!(wire[1]["terminalId"], "t1");
+        assert_eq!(wire[3]["projectId"], serde_json::Value::Null);
+        assert_eq!(wire[4]["sessionId"], serde_json::Value::Null);
+        let back: Vec<crate::db::crud::ViewWidget> = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, expected);
+
+        // Soft-close keeps the id; deleting a session or hard-deleting a
+        // terminal blanks its widget instead of breaking the view.
+        assert!(db.close_terminal("t1").await.unwrap());
+        assert!(db.delete_session("a").await.unwrap());
+        db.with_conn(|conn| {
+            use crate::db::schema::terminals;
+            use diesel::prelude::*;
+            diesel::delete(terminals::table.find("t2"))
+                .execute(conn)
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
+        assert_eq!(after[0].session_id, None);
+        assert_eq!(after[1].terminal_id.as_deref(), Some("t1"));
+        assert_eq!(after[2].terminal_id, None);
+
+        // Replace swaps every widget; rename sticks; an empty set stays empty.
+        let replaced = vec![widget("x", Session, (0, 0, 12, 4), Some("b"))];
+        let (view2, got) = db
+            .update_session_view(
+                "u1",
+                &view.id,
+                Some("Renamed".into()),
+                Some(replaced.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view2.name, "Renamed");
+        assert_eq!(got, replaced);
+        let (_, got) = db
+            .update_session_view("u1", &view.id, None, Some(vec![]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(got.is_empty());
+
+        assert!(db.delete_session_view("u1", &view.id).await.unwrap());
+        assert!(db.list_session_views("u1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_views_legacy_tree_converts_to_widgets_once() {
+        use crate::db::crud::{SplitDir, ViewLayout, WidgetKind};
+        let db = test_db();
+        seed_user_folder_sessions(&db, &[("a", None), ("b", None)]).await;
         let leaf = |s: &str| ViewLayout::Leaf {
             session_id: Some(s.into()),
             terminal_id: None,
@@ -3916,52 +4040,42 @@ mod tests {
             ],
             ratios: vec![0.3, 0.7],
         };
-        let (view, got) = db
-            .create_session_view("u1", "Pair", layout.clone())
-            .await
-            .unwrap();
-        assert_eq!(got, layout);
-        assert_eq!(
-            db.get_session_view("u1", &view.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .1,
-            layout
-        );
-        // Views are per-user: another user can neither see nor touch it.
-        assert!(db.get_session_view("u2", &view.id).await.unwrap().is_none());
-        assert!(db.list_session_views("u2").await.unwrap().is_empty());
-        assert!(!db.delete_session_view("u2", &view.id).await.unwrap());
+        // A view as older releases saved it: nodes only, no widget rows.
+        let now = chrono::Utc::now().to_rfc3339();
+        db.with_conn(move |conn| {
+            use crate::db::schema::session_views;
+            use diesel::prelude::*;
+            diesel::insert_into(session_views::table)
+                .values(&SessionView {
+                    id: "v1".into(),
+                    user_id: "u1".into(),
+                    name: "Old".into(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+                .execute(conn)?;
+            crate::db::crud::session_views_insert_layout(conn, "v1", None, 0, 1.0, &layout)
+        })
+        .await
+        .unwrap();
 
-        // Wire shape.
-        let wire = serde_json::to_value(&layout).unwrap();
-        assert_eq!(wire["kind"], "split");
-        assert_eq!(wire["dir"], "row");
-        assert_eq!(wire["children"][0]["sessionId"], "a");
+        let (_, got) = db.get_session_view("u1", "v1").await.unwrap().unwrap();
+        let rects: Vec<_> = got
+            .iter()
+            .map(|w| (w.kind, w.x, w.y, w.w, w.h, w.session_id.as_deref()))
+            .collect();
         assert_eq!(
-            wire["children"][1]["children"][1]["sessionId"],
-            serde_json::Value::Null
+            rects,
+            [
+                (WidgetKind::Session, 0, 0, 4, 16, Some("a")),
+                (WidgetKind::Session, 4, 0, 8, 11, Some("b")),
+                (WidgetKind::Session, 4, 11, 8, 5, None),
+            ]
         );
-
-        // Layout replace swaps the whole tree; rename sticks.
-        let replaced = ViewLayout::Split {
-            dir: SplitDir::Col,
-            children: vec![leaf("c"), leaf("a")],
-            ratios: vec![1.0, 1.0],
-        };
-        let (view2, got) = db
-            .update_session_view(
-                "u1",
-                &view.id,
-                Some("Renamed".into()),
-                Some(replaced.clone()),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(view2.name, "Renamed");
-        assert_eq!(got, replaced);
+        assert!(crate::db::crud::validate_widgets(&got).is_ok());
+        // Converted once: ids are stable across reads, nodes are kept.
+        let (_, again) = db.get_session_view("u1", "v1").await.unwrap().unwrap();
+        assert_eq!(again, got);
         let node_count: i64 = db
             .with_conn(|conn| {
                 use crate::db::schema::session_view_nodes;
@@ -3973,22 +4087,51 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(node_count, 3, "old nodes must be gone after replace");
+        assert_eq!(node_count, 5, "legacy nodes are never deleted");
+        // Emptying the converted view never resurrects the old tree.
+        db.update_session_view("u1", "v1", None, Some(vec![]))
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, after) = db.get_session_view("u1", "v1").await.unwrap().unwrap();
+        assert!(after.is_empty());
+    }
 
-        // Deleting a session blanks its leaf instead of breaking the view.
-        assert!(db.delete_session("c").await.unwrap());
-        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
-        assert_eq!(
-            after,
-            ViewLayout::Split {
-                dir: SplitDir::Col,
-                children: vec![empty_leaf(), leaf("a")],
-                ratios: vec![1.0, 1.0],
-            }
+    #[test]
+    fn view_widget_validation_limits() {
+        use crate::db::crud::{WidgetKind::Session, validate_widgets};
+        let ok = |v: &[crate::db::crud::ViewWidget]| validate_widgets(v).is_ok();
+        assert!(ok(&[
+            widget("a", Session, (0, 0, 6, 2), None),
+            widget("b", Session, (6, 0, 6, 40), None),
+        ]));
+        assert!(
+            !ok(&[widget("a", Session, (7, 0, 6, 2), None)]),
+            "x + w > 12"
         );
-
-        assert!(db.delete_session_view("u1", &view.id).await.unwrap());
-        assert!(db.list_session_views("u1").await.unwrap().is_empty());
+        assert!(!ok(&[widget("a", Session, (0, 0, 6, 1), None)]), "h < 2");
+        assert!(!ok(&[widget("a", Session, (0, -1, 6, 2), None)]), "y < 0");
+        assert!(
+            !ok(&[
+                widget("a", Session, (0, 0, 6, 4), None),
+                widget("b", Session, (5, 3, 6, 4), None),
+            ]),
+            "overlap"
+        );
+        assert!(
+            !ok(&[
+                widget("a", Session, (0, 0, 6, 2), None),
+                widget("a", Session, (6, 0, 6, 2), None),
+            ]),
+            "duplicate id"
+        );
+        let mut two_refs = widget("a", Session, (0, 0, 6, 2), Some("s"));
+        two_refs.project_id = Some("p".into());
+        assert!(!ok(&[two_refs]), "never two refs");
+        let many: Vec<_> = (0..25)
+            .map(|i| widget(&i.to_string(), Session, (0, i * 2, 12, 2), None))
+            .collect();
+        assert!(!ok(&many), "max 24 widgets");
     }
 
     #[test]
@@ -4027,94 +4170,41 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn session_views_terminal_leaves_round_trip_close_and_delete() {
-        use crate::db::crud::{SplitDir, ViewLayout};
-        let db = test_db();
-        seed_user_folder_sessions(&db, &[("a", None)]).await;
-        for id in ["t1", "t2"] {
-            let now = chrono::Utc::now().to_rfc3339();
-            db.insert_terminal(Terminal {
-                id: id.into(),
-                user_id: "u1".into(),
-                plugin_id: "ssh".into(),
-                host_id: "h".into(),
-                name: id.into(),
-                host_label: "me@box:22".into(),
-                tmux_session: format!("peck-{id}"),
-                persistent: false,
-                created_at: now.clone(),
-                last_active_at: now,
-                closed_at: None,
-            })
-            .await
-            .unwrap();
-        }
+    #[test]
+    fn legacy_terminal_leaves_convert_to_terminal_widgets() {
+        use crate::db::crud::{SplitDir, ViewLayout, WidgetKind};
         let term = |t: &str| ViewLayout::Leaf {
             session_id: None,
             terminal_id: Some(t.into()),
         };
         let layout = ViewLayout::Split {
             dir: SplitDir::Row,
-            children: vec![
-                ViewLayout::Leaf {
-                    session_id: Some("a".into()),
-                    terminal_id: None,
-                },
-                term("t1"),
-                term("t2"),
-                term("t1"),
-            ],
-            ratios: vec![1.0; 4],
+            children: vec![empty_leaf(), term("t1"), term("t2")],
+            ratios: vec![1.0; 3],
         };
-        assert!(layout.validate().is_ok());
-        assert_eq!(layout.terminal_ids(), ["t1", "t2", "t1"]);
-        let wire = serde_json::to_value(&layout).unwrap();
-        assert_eq!(wire["children"][1]["terminalId"], "t1");
-        assert!(wire["children"][0].get("terminalId").is_none());
-
-        let (view, got) = db
-            .create_session_view("u1", "Mixed", layout.clone())
-            .await
-            .unwrap();
-        assert_eq!(got, layout);
-
-        // Soft-close keeps the id so the pane can offer "Reopen".
-        assert!(db.close_terminal("t1").await.unwrap());
-        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
-        assert_eq!(after, layout);
-
-        // A hard delete blanks the leaf; the layout survives.
-        db.with_conn(|conn| {
-            use crate::db::schema::terminals;
-            use diesel::prelude::*;
-            diesel::delete(terminals::table.find("t2"))
-                .execute(conn)
-                .map_err(Into::into)
-        })
-        .await
-        .unwrap();
-        let (_, after) = db.get_session_view("u1", &view.id).await.unwrap().unwrap();
-        let ViewLayout::Split { children, .. } = after else {
-            panic!("split expected");
+        let got = layout.to_widgets();
+        let rects: Vec<_> = got
+            .iter()
+            .map(|w| (w.kind, w.x, w.w, w.h, w.target()))
+            .collect();
+        assert_eq!(
+            rects,
+            [
+                (WidgetKind::Session, 0, 4, 16, None),
+                (WidgetKind::Terminal, 4, 4, 16, Some("t1")),
+                (WidgetKind::Terminal, 8, 4, 16, Some("t2")),
+            ]
+        );
+        // Too many panes for the grid falls back to a valid 6x8 flow.
+        let wide = ViewLayout::Split {
+            dir: SplitDir::Row,
+            children: vec![empty_leaf(); 16],
+            ratios: vec![1.0; 16],
         };
-        assert_eq!(children[2], empty_leaf());
-        assert_eq!(children[1], term("t1"));
-
-        // Saving a leaf for a terminal that doesn't exist stores it blank.
-        let (_, got) = db
-            .update_session_view("u1", &view.id, None, Some(term("gone")))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(got, empty_leaf());
-
-        // Both ids on one leaf is rejected.
-        let both = ViewLayout::Leaf {
-            session_id: Some("a".into()),
-            terminal_id: Some("t1".into()),
-        };
-        assert!(both.validate().is_err());
+        let got = wide.to_widgets();
+        assert_eq!(got.len(), 16);
+        assert!(crate::db::crud::validate_widgets(&got).is_ok());
+        assert_eq!((got[15].x, got[15].y, got[15].w, got[15].h), (6, 56, 6, 8));
     }
 
     #[tokio::test]

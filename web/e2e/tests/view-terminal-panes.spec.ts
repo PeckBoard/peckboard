@@ -29,7 +29,7 @@ const PASS = 'view-term-password-1234'
 
 const termPanes = (page: Page) => page.getByTestId('view-terminal-pane')
 const paneOf = (page: Page, terminalId: string) =>
-  page.locator('[data-testid="split-pane"]', {
+  page.locator('[data-testid="view-widget"]', {
     has: page.locator(`[data-terminal-id="${terminalId}"]`),
   })
 
@@ -84,6 +84,7 @@ test('a view mixes a session with two terminals on one host: isolated, focus-dri
     await page.goto(`${server.base}/views/${viewId}`)
     await expect(page.getByTestId('view-editor')).toBeVisible({ timeout: 15_000 })
     for (let i = 1; i <= 2; i++) {
+      await page.getByTestId('add-widget-button').click()
       await page.getByTestId('view-add-terminal').click()
       await page.getByTestId(`view-add-terminal-host-${hostId}`).click()
       await expect(termPanes(page)).toHaveCount(i, { timeout: 15_000 })
@@ -101,7 +102,7 @@ test('a view mixes a session with two terminals on one host: isolated, focus-dri
       ).toHaveAttribute('data-phase', 'live', { timeout: 20_000 })
     }
     await expect(
-      page.locator(`[data-testid="split-pane"][data-pane-id="${sessionId}"]`),
+      page.locator(`[data-testid="view-widget"][data-pane-id="${sessionId}"]`),
     ).toBeVisible()
 
     // ── Keystrokes reach only the focused pane; the outline follows ─────
@@ -127,14 +128,14 @@ test('a view mixes a session with two terminals on one host: isolated, focus-dri
       ).toHaveAttribute('data-phase', 'live', { timeout: 20_000 })
     }
     await expect(
-      page.locator(`[data-testid="split-pane"][data-pane-id="${sessionId}"]`),
+      page.locator(`[data-testid="view-widget"][data-pane-id="${sessionId}"]`),
     ).toBeVisible()
     await page.locator(`[data-terminal-id="${t1}"] .xterm`).click()
     await page.keyboard.type('echo "pv-$PV"\n')
     await expectScreen(page, /pv-one/, t1)
 
     // ── Close terminal: its pane placeholders, the rest is untouched ────
-    await paneOf(page, t2).getByTestId('split-pane-menu').click()
+    await paneOf(page, t2).getByTestId('widget-menu').click()
     await page.getByTestId('view-terminal-close').click()
     const confirm = page.getByTestId('view-terminal-close-confirm')
     await expect(confirm).toBeVisible()
@@ -144,7 +145,7 @@ test('a view mixes a session with two terminals on one host: isolated, focus-dri
     await expect(closed.getByTestId('view-terminal-reopen')).toContainText('Reopen on')
     await expect(termPanes(page)).toHaveCount(1)
     await expect(
-      page.locator(`[data-testid="split-pane"][data-pane-id="${sessionId}"]`),
+      page.locator(`[data-testid="view-widget"][data-pane-id="${sessionId}"]`),
     ).toBeVisible()
     await expect(
       page.locator(`[data-terminal-id="${t1}"] [data-testid="terminal-pane"]`),

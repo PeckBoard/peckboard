@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
-import { sanitizeLayout, type LayoutNode } from '../lib/layoutTree'
+import { clampRect, type GridItem } from '../lib/widgetGrid'
 
 /** Display identity of a terminal a view references. `closed` = soft-closed:
  *  the shell is gone but its pane can reopen one on the same host. */
@@ -34,11 +34,47 @@ export interface ViewSummary {
   updated_at: string
 }
 
-/** Full view shape (`GET/POST/PUT /api/me/views[/:id]`). `terminals` maps
- *  each terminal a pane references to its display identity. */
+export type WidgetKind = 'session' | 'terminal' | 'project'
+
+/** One widget on a view's 12-column grid. The ref key matches `kind`; a
+ *  null ref (empty, or its target was deleted) shows a picker. */
+export interface ViewWidget extends GridItem {
+  kind: WidgetKind
+  sessionId?: string | null
+  terminalId?: string | null
+  projectId?: string | null
+}
+
+/** Display identity of a project a view references. */
+export interface ViewProjectMeta {
+  name: string
+}
+
+/** The ref a widget of `kind` points at, or null. */
+export function widgetRef(w: ViewWidget): string | null {
+  return (
+    (w.kind === 'session' ? w.sessionId : w.kind === 'terminal' ? w.terminalId : w.projectId) ??
+    null
+  )
+}
+
+/** Copy of `w` pointing at `ref` (which may switch its kind). Only the
+ *  matching ref key is set — the server rejects two refs. */
+export function withRef(w: ViewWidget, kind: WidgetKind, ref: string | null): ViewWidget {
+  const { id, x, y, w: width, h } = w
+  const base = { id, x, y, w: width, h, kind }
+  if (kind === 'session') return { ...base, sessionId: ref }
+  if (kind === 'terminal') return { ...base, terminalId: ref }
+  return { ...base, projectId: ref }
+}
+
+/** Full view shape (`GET/POST/PUT /api/me/views[/:id]`). `terminals` /
+ *  `projects` map each referenced terminal / project to its display
+ *  identity. */
 export interface SavedView extends ViewSummary {
-  layout: LayoutNode | null
+  widgets: ViewWidget[]
   terminals?: Record<string, ViewTerminalMeta>
+  projects?: Record<string, ViewProjectMeta>
 }
 
 async function errorOf(res: Response, fallback: string): Promise<Error> {
@@ -46,8 +82,36 @@ async function errorOf(res: Response, fallback: string): Promise<Error> {
   return new Error((data && typeof data.error === 'string' && data.error) || fallback)
 }
 
+const KINDS: WidgetKind[] = ['session', 'terminal', 'project']
+
+/** Drop malformed widgets and clamp rects to the contract bounds. */
+function sanitizeWidgets(raw: unknown): ViewWidget[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: ViewWidget[] = []
+  for (const r of raw as Partial<ViewWidget>[]) {
+    if (!r || typeof r.id !== 'string' || seen.has(r.id) || !KINDS.includes(r.kind!)) continue
+    seen.add(r.id)
+    const key =
+      r.kind === 'session' ? 'sessionId' : r.kind === 'terminal' ? 'terminalId' : 'projectId'
+    const ref = typeof r[key] === 'string' ? (r[key] as string) : null
+    out.push(
+      withRef(
+        {
+          id: r.id,
+          kind: r.kind!,
+          ...clampRect({ x: r.x ?? 0, y: r.y ?? 0, w: r.w ?? 6, h: r.h ?? 8 }),
+        },
+        r.kind!,
+        ref,
+      ),
+    )
+  }
+  return out
+}
+
 function toSaved(raw: SavedView): SavedView {
-  return { ...raw, layout: sanitizeLayout(raw.layout) }
+  return { ...raw, widgets: sanitizeWidgets(raw.widgets) }
 }
 
 interface ViewsState {
@@ -56,11 +120,8 @@ interface ViewsState {
   error: string
   fetchViews: () => Promise<void>
   getView: (id: string) => Promise<SavedView>
-  createView: (name: string, layout: LayoutNode | null) => Promise<SavedView>
-  updateView: (
-    id: string,
-    patch: { name?: string; layout?: LayoutNode | null },
-  ) => Promise<SavedView>
+  createView: (name: string, widgets: ViewWidget[]) => Promise<SavedView>
+  updateView: (id: string, patch: { name?: string; widgets?: ViewWidget[] }) => Promise<SavedView>
   deleteView: (id: string) => Promise<void>
 }
 
@@ -101,11 +162,11 @@ export const useViewsStore = create<ViewsState>((set) => ({
     return toSaved(await res.json())
   },
 
-  createView: async (name, layout) => {
+  createView: async (name, widgets) => {
     const res = await authedFetch('/api/me/views', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, layout }),
+      body: JSON.stringify({ name, widgets }),
     })
     if (!res.ok) throw await errorOf(res, 'Failed to create view')
     const v = toSaved(await res.json())

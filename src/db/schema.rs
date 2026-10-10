@@ -278,6 +278,28 @@ diesel::table! {
 }
 
 diesel::table! {
+    view_widgets (view_id, id) {
+        id -> Text,
+        view_id -> Text,
+        kind -> Text,
+        x -> Integer,
+        y -> Integer,
+        w -> Integer,
+        h -> Integer,
+        session_id -> Nullable<Text>,
+        terminal_id -> Nullable<Text>,
+        project_id -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    view_widgets_converted (view_id) {
+        view_id -> Text,
+        converted_at -> Text,
+    }
+}
+
+diesel::table! {
     todos (session_id, position) {
         session_id -> Text,
         position -> Integer,
@@ -793,6 +815,8 @@ diesel::joinable!(mfa_challenges -> users (user_id));
 diesel::joinable!(mfa_pending -> users (user_id));
 diesel::joinable!(session_views -> users (user_id));
 diesel::joinable!(session_view_nodes -> session_views (view_id));
+diesel::joinable!(view_widgets -> session_views (view_id));
+diesel::joinable!(view_widgets_converted -> session_views (view_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -847,6 +871,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     pending_actions,
     voice_prompt_versions,
     session_view_nodes,
+    view_widgets,
+    view_widgets_converted,
     remote_devices,
     remote_device_enrollments,
 );

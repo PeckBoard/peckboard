@@ -94,6 +94,16 @@ fn sever_worker_resume_link(
     .execute(conn)?;
     Ok(())
 }
+/// The slim per-card columns the project summary widget needs.
+#[derive(Queryable, Debug, Clone)]
+pub struct CardOverview {
+    pub id: String,
+    pub title: String,
+    pub step: String,
+    pub blocked: bool,
+    pub worker_session_id: Option<String>,
+    pub updated_at: String,
+}
 
 impl Db {
     pub async fn create_card(&self, new: NewCard) -> anyhow::Result<Card> {
@@ -140,6 +150,27 @@ impl Db {
         let project_id = project_id.to_string();
         self.with_conn(move |conn| list_cards_by_project_query(conn, &project_id))
             .await
+    }
+    /// Every card of `project_id` as a [`CardOverview`], most recently
+    /// updated first — one query for the project summary.
+    pub async fn list_card_overviews(&self, project_id: &str) -> anyhow::Result<Vec<CardOverview>> {
+        let project_id = project_id.to_string();
+        self.with_conn(move |conn| {
+            cards::table
+                .filter(cards::project_id.eq(&project_id))
+                .select((
+                    cards::id,
+                    cards::title,
+                    cards::step,
+                    cards::blocked,
+                    cards::worker_session_id,
+                    cards::updated_at,
+                ))
+                .order((cards::updated_at.desc(), cards::id.asc()))
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
     }
 
     /// Synchronous twins of the card listers for plugin host functions.

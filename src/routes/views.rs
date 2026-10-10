@@ -1,12 +1,16 @@
-//! `/api/me/views` — the user's saved multi-session split views.
+//! `/api/me/views` — the user's saved widget dashboards.
 //!
-//! A view is `{id, name, created_at, updated_at, layout, terminals}` where
-//! `layout` is a [`ViewLayout`] tree whose leaves show a session or an SSH
-//! terminal, and `terminals` maps each referenced terminal id to its display
-//! identity (including soft-closed ones, so a pane can offer "Reopen on
-//! <host>"). Views are strictly per-user: another user's view id answers
-//! 404, exactly like a missing one. A layout may only reference the
-//! caller's own terminals (admins: any), the same rule as attaching.
+//! A view is `{id, name, created_at, updated_at, widgets, terminals,
+//! projects}` where `widgets` are [`ViewWidget`] rects on a 12-column grid
+//! showing a session, an SSH terminal, or a project summary; `terminals`
+//! maps each referenced terminal id to its display identity (including
+//! soft-closed ones, so a widget can offer "Reopen on <host>") and
+//! `projects` each referenced project id to `{name}`. Views are strictly
+//! per-user: another user's view id answers 404, exactly like a missing
+//! one. Widgets may only reference the caller's own terminals (admins:
+//! any), the same rule as attaching, and existing projects. A legacy
+//! `layout` split tree is still accepted in request bodies and converted
+//! to widgets.
 
 use axum::{
     Extension, Json, Router,
@@ -21,7 +25,9 @@ use std::sync::Arc;
 
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::Db;
-use crate::db::crud::{ViewLayout, validate_view_name};
+use crate::db::crud::{
+    ViewLayout, ViewWidget, WidgetKind, validate_view_name, validate_widgets, widget_refs,
+};
 use crate::db::models::{SessionView, Terminal};
 use crate::state::AppState;
 
@@ -30,13 +36,20 @@ type ApiError = (StatusCode, Json<serde_json::Value>);
 #[derive(Deserialize)]
 struct CreateViewRequest {
     name: String,
-    layout: ViewLayout,
+    #[serde(default)]
+    widgets: Option<Vec<ViewWidget>>,
+    /// Legacy split tree; converted to widgets.
+    #[serde(default)]
+    layout: Option<ViewLayout>,
 }
 
 #[derive(Deserialize)]
 struct UpdateViewRequest {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    widgets: Option<Vec<ViewWidget>>,
+    /// Legacy split tree; converted to widgets.
     #[serde(default)]
     layout: Option<ViewLayout>,
 }
@@ -70,29 +83,54 @@ fn parse_body<T: serde::de::DeserializeOwned>(bytes: &Bytes) -> Result<T, ApiErr
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))
 }
 
-fn validate_layout(layout: &ViewLayout) -> Result<(), ApiError> {
-    layout
-        .validate()
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+/// The validated widget set a request asks for: `widgets` as sent, or a
+/// legacy `layout` tree converted to widgets. `None` when neither is set.
+fn requested_widgets(
+    widgets: Option<Vec<ViewWidget>>,
+    layout: Option<ViewLayout>,
+) -> Result<Option<Vec<ViewWidget>>, ApiError> {
+    let bad = |e: String| err(StatusCode::BAD_REQUEST, e);
+    let widgets = match (widgets, layout) {
+        (Some(_), Some(_)) => return Err(bad("send widgets or layout, not both".into())),
+        (Some(w), None) => w,
+        (None, Some(layout)) => {
+            layout.validate().map_err(bad)?;
+            layout.to_widgets()
+        }
+        (None, None) => return Ok(None),
+    };
+    validate_widgets(&widgets).map_err(bad)?;
+    Ok(Some(widgets))
 }
 
 fn may_use_terminal(user: &AuthUser, t: &Terminal) -> bool {
     t.user_id == user.user_id || user.role == "admin"
 }
 
-/// Every terminal the layout references must exist and be the caller's
-/// (admins: anyone's). Unknown and foreign ids answer the same 404, like
-/// `/api/terminals/{id}`. Soft-closed terminals are allowed — their pane
-/// shows a reopen placeholder.
-async fn check_terminal_access(
+/// Every terminal the widgets reference must exist and be the caller's
+/// (admins: anyone's), and every project must exist. Unknown and foreign
+/// terminal ids answer the same 404, like `/api/terminals/{id}`.
+/// Soft-closed terminals are allowed — their widget shows a reopen
+/// placeholder.
+async fn check_widget_refs(
     db: &Db,
     user: &AuthUser,
-    layout: &ViewLayout,
+    widgets: &[ViewWidget],
 ) -> Result<(), ApiError> {
-    for id in layout.terminal_ids() {
+    for id in widget_refs(widgets, WidgetKind::Terminal) {
         match db.get_terminal(id).await.map_err(internal)? {
             Some(t) if may_use_terminal(user, &t) => {}
             _ => return Err(err(StatusCode::NOT_FOUND, "terminal not found")),
+        }
+    }
+    let projects = widget_refs(widgets, WidgetKind::Project);
+    if !projects.is_empty() {
+        let found = db
+            .project_names(projects.iter().map(|s| s.to_string()).collect())
+            .await
+            .map_err(internal)?;
+        if projects.iter().any(|p| !found.contains_key(*p)) {
+            return Err(err(StatusCode::NOT_FOUND, "project not found"));
         }
     }
     Ok(())
@@ -108,17 +146,15 @@ fn summary_json(v: &SessionView) -> serde_json::Value {
 }
 
 /// The full view, plus `terminals: {id: {name, host_label, plugin_id,
-/// host_id, closed}}` for the terminals its panes reference.
+/// host_id, closed}}` and `projects: {id: {name}}` for the targets its
+/// widgets reference.
 async fn full_json(
     state: &AppState,
     user: &AuthUser,
-    (v, layout): (SessionView, ViewLayout),
+    (v, widgets): (SessionView, Vec<ViewWidget>),
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut terminals = serde_json::Map::new();
-    for id in layout.terminal_ids() {
-        if terminals.contains_key(id) {
-            continue;
-        }
+    for id in widget_refs(&widgets, WidgetKind::Terminal) {
         if let Some(t) = state.db.get_terminal(id).await.map_err(internal)?
             && may_use_terminal(user, &t)
         {
@@ -134,9 +170,26 @@ async fn full_json(
             );
         }
     }
+    let project_ids: Vec<String> = widget_refs(&widgets, WidgetKind::Project)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let projects: serde_json::Map<String, serde_json::Value> = if project_ids.is_empty() {
+        serde_json::Map::new()
+    } else {
+        state
+            .db
+            .project_names(project_ids)
+            .await
+            .map_err(internal)?
+            .into_iter()
+            .map(|(id, name)| (id, serde_json::json!({ "name": name })))
+            .collect()
+    };
     let mut out = summary_json(&v);
-    out["layout"] = serde_json::json!(layout);
+    out["widgets"] = serde_json::json!(widgets);
     out["terminals"] = serde_json::Value::Object(terminals);
+    out["projects"] = serde_json::Value::Object(projects);
     Ok(Json(out))
 }
 
@@ -155,7 +208,8 @@ async fn list_views(
     )))
 }
 
-/// POST /api/me/views `{name, layout}` — the created view with its layout.
+/// POST /api/me/views `{name, widgets}` (or legacy `{name, layout}`) — the
+/// created view with its widgets.
 async fn create_view(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -163,17 +217,17 @@ async fn create_view(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let req: CreateViewRequest = parse_body(&body)?;
     let name = validate_view_name(&req.name).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    validate_layout(&req.layout)?;
-    check_terminal_access(&state.db, &user, &req.layout).await?;
+    let widgets = requested_widgets(req.widgets, req.layout)?.unwrap_or_default();
+    check_widget_refs(&state.db, &user, &widgets).await?;
     let view = state
         .db
-        .create_session_view(&user.user_id, &name, req.layout)
+        .create_session_view(&user.user_id, &name, widgets)
         .await
         .map_err(internal)?;
     Ok((StatusCode::CREATED, full_json(&state, &user, view).await?))
 }
 
-/// GET /api/me/views/:id — `{id, name, created_at, updated_at, layout}`.
+/// GET /api/me/views/:id — the full view (see [`full_json`]).
 async fn get_view(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -188,8 +242,8 @@ async fn get_view(
     full_json(&state, &user, view).await
 }
 
-/// PUT /api/me/views/:id `{name?, layout?}` — rename and/or replace the
-/// whole layout; answers the full updated view.
+/// PUT /api/me/views/:id `{name?, widgets?}` (or legacy `layout?`) —
+/// rename and/or replace every widget; answers the full updated view.
 async fn update_view(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -203,13 +257,13 @@ async fn update_view(
         .map(validate_view_name)
         .transpose()
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    if let Some(layout) = &req.layout {
-        validate_layout(layout)?;
-        check_terminal_access(&state.db, &user, layout).await?;
+    let widgets = requested_widgets(req.widgets, req.layout)?;
+    if let Some(widgets) = &widgets {
+        check_widget_refs(&state.db, &user, widgets).await?;
     }
     let view = state
         .db
-        .update_session_view(&user.user_id, &id, name, req.layout)
+        .update_session_view(&user.user_id, &id, name, widgets)
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
@@ -247,15 +301,22 @@ mod tests {
         }
     }
 
-    fn term_leaf(id: &str) -> ViewLayout {
-        ViewLayout::Leaf {
+    fn term_widget(id: &str) -> Vec<ViewWidget> {
+        vec![ViewWidget {
+            id: "w1".into(),
+            kind: WidgetKind::Terminal,
+            x: 0,
+            y: 0,
+            w: 6,
+            h: 8,
             session_id: None,
             terminal_id: Some(id.into()),
-        }
+            project_id: None,
+        }]
     }
 
     #[tokio::test]
-    async fn layouts_may_only_reference_the_callers_terminals() {
+    async fn widgets_may_only_reference_the_callers_terminals() {
         let db = Db::in_memory().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         for u in ["owner", "other"] {
@@ -287,22 +348,22 @@ mod tests {
         .await
         .unwrap();
 
-        let layout = term_leaf("t1");
+        let widgets = term_widget("t1");
         assert!(
-            check_terminal_access(&db, &user("owner", "user"), &layout)
+            check_widget_refs(&db, &user("owner", "user"), &widgets)
                 .await
                 .is_ok()
         );
         assert!(
-            check_terminal_access(&db, &user("other", "admin"), &layout)
+            check_widget_refs(&db, &user("other", "admin"), &widgets)
                 .await
                 .is_ok()
         );
-        let (status, _) = check_terminal_access(&db, &user("other", "user"), &layout)
+        let (status, _) = check_widget_refs(&db, &user("other", "user"), &widgets)
             .await
             .unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = check_terminal_access(&db, &user("owner", "user"), &term_leaf("nope"))
+        let (status, _) = check_widget_refs(&db, &user("owner", "user"), &term_widget("nope"))
             .await
             .unwrap_err();
         assert_eq!(
@@ -314,9 +375,19 @@ mod tests {
         // A soft-closed terminal stays referenceable (reopen placeholder).
         db.close_terminal("t1").await.unwrap();
         assert!(
-            check_terminal_access(&db, &user("owner", "user"), &layout)
+            check_widget_refs(&db, &user("owner", "user"), &widgets)
                 .await
                 .is_ok()
         );
+
+        // Unknown projects answer 404.
+        let mut proj = term_widget("t1");
+        proj[0].kind = WidgetKind::Project;
+        proj[0].terminal_id = None;
+        proj[0].project_id = Some("missing".into());
+        let (status, _) = check_widget_refs(&db, &user("owner", "user"), &proj)
+            .await
+            .unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

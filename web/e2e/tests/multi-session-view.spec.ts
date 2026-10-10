@@ -245,24 +245,44 @@ test.describe('session view subagent panes', () => {
     await expect(panes).toHaveCount(3)
   })
 })
-
 test.describe('saved multi-session views', () => {
-  async function paneBox(page: Page, sessionId: string) {
-    const box = await page
-      .locator(`[data-testid="view-split-layout"] [data-pane-id="${sessionId}"]`)
-      .boundingBox()
-    expect(box, `pane ${sessionId} has a box`).toBeTruthy()
-    return box!
-  }
+  type Rect = { x: number; y: number; w: number; h: number }
+  type Widget = Rect & { id: string; kind: string; sessionId?: string | null }
 
-  async function viewLayout(request: APIRequestContext, auth: Auth, viewId: string) {
+  const widgetOf = (page: Page, sessionId: string) =>
+    page.locator(`[data-testid="view-widget"][data-pane-id="${sessionId}"]`)
+
+  async function viewWidgets(request: APIRequestContext, auth: Auth, viewId: string) {
     const res = await request.get(`/api/me/views/${viewId}`, { headers: auth.auth })
     expect(res.ok()).toBeTruthy()
-    return JSON.stringify(((await res.json()) as { layout: unknown }).layout)
+    return ((await res.json()) as { widgets: Widget[] }).widgets
   }
 
-  test('create, rearrange, resize and persist a view', async ({ request, page }) => {
-    await page.setViewportSize({ width: 1400, height: 900 })
+  async function rectOf(
+    request: APIRequestContext,
+    auth: Auth,
+    viewId: string,
+    sessionId: string,
+  ): Promise<Rect | undefined> {
+    const w = (await viewWidgets(request, auth, viewId)).find((x) => x.sessionId === sessionId)
+    return w && { x: w.x, y: w.y, w: w.w, h: w.h }
+  }
+
+  /** Press at `from`, travel to `to` in small steps, release. */
+  async function pointerDrag(
+    page: Page,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+  ) {
+    await page.mouse.move(from.x, from.y)
+    await page.mouse.down()
+    await page.mouse.move(from.x + 8, from.y + 8, { steps: 2 })
+    await page.mouse.move(to.x, to.y, { steps: 12 })
+    await page.mouse.up()
+  }
+
+  test('create, drag, resize and persist a view', async ({ request, page }) => {
+    await page.setViewportSize({ width: 1400, height: 1100 })
     const auth = await authenticate(request)
     const folder = await createFolder(request, auth, 'multiview-view')
     const tag = `mv${Date.now()}`
@@ -291,59 +311,63 @@ test.describe('saved multi-session views', () => {
     await expect(editor).toBeVisible({ timeout: 15_000 })
     const viewId = (await editor.getAttribute('data-view-id'))!
     await expect(page).toHaveURL(new RegExp(`/views/${viewId}`))
-    await expect(editor.getByTestId('split-pane')).toHaveCount(3)
-    await expect(editor.getByTestId('split-divider')).toHaveCount(2)
+    await expect(editor.getByTestId('view-widget-grid')).toHaveAttribute('data-mode', 'grid')
+    await expect(editor.getByTestId('view-widget')).toHaveCount(3)
 
-    // Columns: all three share a row.
-    const a0 = await paneBox(page, ids[0])
-    const c0 = await paneBox(page, ids[2])
-    expect(Math.abs(a0.y - c0.y)).toBeLessThan(2)
-    const before = await viewLayout(request, auth, viewId)
+    // Columns starter: three equal columns on one row.
+    expect(await rectOf(request, auth, viewId, ids[0])).toEqual({ x: 0, y: 0, w: 4, h: 16 })
+    expect(await rectOf(request, auth, viewId, ids[2])).toEqual({ x: 8, y: 0, w: 4, h: 16 })
 
-    // Drag pane three's header onto pane one's bottom edge → one/three stack.
-    const header = editor.locator(`[data-pane-id="${ids[2]}"] [data-testid="split-pane-header"]`)
+    // Drag widget three by its header onto widget one's spot: three takes
+    // the top-left cell and one is pushed down below it.
+    const header = widgetOf(page, ids[2]).getByTestId('widget-drag-handle')
     const hb = (await header.boundingBox())!
-    await page.mouse.move(hb.x + 40, hb.y + hb.height / 2)
-    await page.mouse.down()
-    await page.mouse.move(hb.x + 60, hb.y + hb.height / 2 + 10, { steps: 4 })
-    const zone = editor.locator(`[data-pane-id="${ids[0]}"] [data-testid="split-drop-zone-bottom"]`)
-    await expect(zone).toBeAttached()
-    const zb = (await zone.boundingBox())!
-    await page.mouse.move(zb.x + zb.width / 2, zb.y + zb.height / 2, { steps: 8 })
-    await page.mouse.up()
+    const ob = (await widgetOf(page, ids[0]).getByTestId('widget-drag-handle').boundingBox())!
+    await pointerDrag(
+      page,
+      { x: hb.x + 10, y: hb.y + hb.height / 2 },
+      { x: ob.x + 10, y: ob.y + ob.height / 2 },
+    )
 
     const save = editor.getByTestId('view-save-state')
     await expect(save).toHaveAttribute('data-state', 'saved', { timeout: 10_000 })
-    await expect.poll(() => viewLayout(request, auth, viewId)).not.toBe(before)
-    const a1 = await paneBox(page, ids[0])
-    const c1 = await paneBox(page, ids[2])
-    expect(c1.y).toBeGreaterThan(a1.y + a1.height / 2)
-    expect(Math.abs(c1.x - a1.x)).toBeLessThan(2)
-
-    await page.reload()
-    await expect(page.getByTestId('view-editor')).toBeVisible({ timeout: 15_000 })
-    await expect(editor.getByTestId('split-pane')).toHaveCount(3)
-    const a2 = await paneBox(page, ids[0])
-    const c2 = await paneBox(page, ids[2])
-    expect(c2.y).toBeGreaterThan(a2.y + a2.height / 2)
-    expect(Math.abs(c2.x - a2.x)).toBeLessThan(2)
-
-    // Keyboard-resize the column divider; the new ratio persists.
-    const divider = editor.locator('[data-testid="split-divider"][data-dir="row"]').first()
-    const startValue = Number(await divider.getAttribute('aria-valuenow'))
-    await divider.focus()
-    for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowRight')
     await expect
-      .poll(async () => Number(await divider.getAttribute('aria-valuenow')))
-      .toBeGreaterThan(startValue + 5)
-    const resized = Number(await divider.getAttribute('aria-valuenow'))
-    await expect(save).toHaveAttribute('data-state', 'saved', { timeout: 10_000 })
+      .poll(() => rectOf(request, auth, viewId, ids[2]))
+      .toEqual({ x: 0, y: 0, w: 4, h: 16 })
+    expect(await rectOf(request, auth, viewId, ids[0])).toEqual({ x: 0, y: 16, w: 4, h: 16 })
 
     await page.reload()
     await expect(page.getByTestId('view-editor')).toBeVisible({ timeout: 15_000 })
-    await expect(
-      editor.locator('[data-testid="split-divider"][data-dir="row"]').first(),
-    ).toHaveAttribute('aria-valuenow', String(resized))
+    await expect(editor.getByTestId('view-widget')).toHaveCount(3)
+    const one = (await widgetOf(page, ids[0]).boundingBox())!
+    const three = (await widgetOf(page, ids[2]).boundingBox())!
+    expect(one.y).toBeGreaterThan(three.y + three.height / 2)
+    expect(Math.abs(one.x - three.x)).toBeLessThan(2)
+
+    // Resize widget two from its bottom-right handle: two columns wider,
+    // six rows shorter.
+    const before = (await rectOf(request, auth, viewId, ids[1]))!
+    expect(before).toEqual({ x: 4, y: 0, w: 4, h: 16 })
+    const twoBox = (await widgetOf(page, ids[1]).boundingBox())!
+    const colStep = twoBox.width / 4 + 2 // (4·colW + 3·gap) / 4 ≈ colW + gap
+    const handle = page
+      .locator(`.widget-cell:has([data-pane-id="${ids[1]}"])`)
+      .getByTestId('widget-resize-handle')
+    const rb = (await handle.boundingBox())!
+    const start = { x: rb.x + rb.width / 2, y: rb.y + rb.height / 2 }
+    await pointerDrag(page, start, { x: start.x + 2 * colStep, y: start.y - 6 * 48 })
+
+    await expect(save).toHaveAttribute('data-state', 'saved', { timeout: 10_000 })
+    await expect
+      .poll(() => rectOf(request, auth, viewId, ids[1]))
+      .toEqual({ x: 4, y: 0, w: 6, h: 10 })
+
+    await page.reload()
+    await expect(page.getByTestId('view-editor')).toBeVisible({ timeout: 15_000 })
+    const resized = (await widgetOf(page, ids[1]).boundingBox())!
+    expect(resized.width).toBeGreaterThan(twoBox.width * 1.3)
+    expect(resized.height).toBeLessThan(twoBox.height * 0.75)
+    expect(await rectOf(request, auth, viewId, ids[1])).toEqual({ x: 4, y: 0, w: 6, h: 10 })
   })
 
   test('+ ▾ New split view creates a view and adds sessions to it', async ({ request, page }) => {
@@ -367,24 +391,24 @@ test.describe('saved multi-session views', () => {
     const editor = page.getByTestId('view-editor')
     await expect(editor).toBeVisible({ timeout: 15_000 })
     await expect(page).toHaveURL(/\/views\/[^/]+$/)
-    await expect(editor.locator(`[data-pane-id="${one}"]`)).toBeVisible()
+    await expect(widgetOf(page, one)).toBeVisible()
 
-    await editor.getByTestId('view-add-session').click()
+    await editor.getByTestId('add-widget-button').click()
+    await page.getByTestId('view-add-session').click()
     await page.getByTestId('view-add-session-search').fill(`${tag} two`)
     await page.getByRole('option', { name: `${tag} two` }).click()
-    await expect(editor.locator(`[data-pane-id="${two}"]`)).toBeVisible()
-    await expect(editor.getByTestId('split-pane')).toHaveCount(2)
+    await expect(widgetOf(page, two)).toBeVisible()
+    await expect(editor.getByTestId('view-widget')).toHaveCount(2)
 
-    // The added pane mounts collapsed and slides open; its composer must
-    // re-measure at the final width, not stay pinned at the autosize cap.
-    const composer = editor.locator(`[data-pane-id="${two}"] .input-textarea`)
+    // The added widget's composer sizes to its content, not the autosize cap.
+    const composer = widgetOf(page, two).locator('.input-textarea')
     await expect(composer).toBeVisible()
     await expect
       .poll(async () => (await composer.boundingBox())!.height, { timeout: 5_000 })
       .toBeLessThan(60)
   })
 
-  test('narrow viewport shows a pane switcher instead of dividers', async ({ request, page }) => {
+  test('narrow viewport stacks widgets in one column without drag', async ({ request, page }) => {
     await page.setViewportSize({ width: 760, height: 900 })
     const auth = await authenticate(request)
     const folder = await createFolder(request, auth, 'multiview-narrow')
@@ -396,12 +420,15 @@ test.describe('saved multi-session views', () => {
       headers: auth.auth,
       data: {
         name: 'narrow view',
-        layout: {
-          kind: 'split',
-          dir: 'row',
-          ratios: [0.5, 0.5],
-          children: ids.map((sessionId) => ({ kind: 'leaf', sessionId })),
-        },
+        widgets: ids.map((sessionId, i) => ({
+          id: `w-narrow-${i}`,
+          kind: 'session',
+          x: i * 6,
+          y: 0,
+          w: 6,
+          h: 10,
+          sessionId,
+        })),
       },
     })
     expect(res.status(), await res.text()).toBe(201)
@@ -410,15 +437,14 @@ test.describe('saved multi-session views', () => {
     await loadAt(page, auth.token, `/views/${viewId}`)
     const editor = page.getByTestId('view-editor')
     await expect(editor).toBeVisible({ timeout: 15_000 })
-    const tabs = editor.getByTestId('split-switcher-tab')
-    await expect(tabs).toHaveCount(2)
-    await expect(editor.getByTestId('split-divider')).toHaveCount(0)
+    await expect(editor.getByTestId('view-widget-grid')).toHaveAttribute('data-mode', 'narrow')
+    await expect(editor.getByTestId('view-widget')).toHaveCount(2)
+    await expect(editor.getByTestId('widget-resize-handle')).toHaveCount(0)
 
-    // Only the selected pane is on screen; switching tabs swaps it.
-    const visiblePanes = editor.locator('[data-testid="split-pane"]:not([aria-hidden="true"])')
-    await expect(visiblePanes).toHaveCount(1)
-    await tabs.nth(1).click()
-    await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true')
-    await expect(visiblePanes).toHaveAttribute('data-pane-id', ids[1])
+    // Side-by-side on desktop, stacked full-width here.
+    const a = (await widgetOf(page, ids[0]).boundingBox())!
+    const b = (await widgetOf(page, ids[1]).boundingBox())!
+    expect(Math.abs(a.x - b.x)).toBeLessThan(2)
+    expect(b.y).toBeGreaterThan(a.y + a.height - 2)
   })
 })

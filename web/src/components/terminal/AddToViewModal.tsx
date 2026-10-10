@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import Modal from '../Modal'
 import { MenuButton, type MenuItem } from '../Dropdown'
-import { useViewsStore } from '../../store/views'
-import { MAX_LEAVES, countLeaves, insertLeafAuto, terminalLeaf } from '../../lib/layoutTree'
+import { useViewsStore, withRef } from '../../store/views'
+import { MAX_WIDGETS, compact, findFreeSlot, newWidgetId } from '../../lib/widgetGrid'
 import { describeActionError } from '../../utils/actionError'
 
 type Target = { kind: 'existing'; id: string; name: string } | { kind: 'new' }
@@ -14,8 +14,8 @@ interface Props {
   onAdded: (viewId: string) => void
 }
 
-/** "Add to view…": put a terminal in a pane of an existing saved view, or
- *  in a new view of its own. */
+/** "Add to view…": put a terminal in a widget of an existing saved view,
+ *  or in a new view of its own. */
 export default function AddToViewModal({ terminalId, onClose, onAdded }: Props) {
   const views = useViewsStore((s) => s.views)
   const fetchViews = useViewsStore((s) => s.fetchViews)
@@ -55,18 +55,26 @@ export default function AddToViewModal({ terminalId, onClose, onAdded }: Props) 
     setError('')
     try {
       if (target.kind === 'new') {
-        const v = await createView(name.trim(), terminalLeaf(terminalId))
+        const widget = withRef(
+          { id: newWidgetId(), kind: 'terminal', x: 0, y: 0, w: 12, h: 16 },
+          'terminal',
+          terminalId,
+        )
+        const v = await createView(name.trim(), [widget])
         onAdded(v.id)
         return
       }
       const v = await getView(target.id)
-      if (countLeaves(v.layout) >= MAX_LEAVES) {
-        throw new Error(`“${v.name}” already has ${MAX_LEAVES} panes`)
+      if (v.widgets.length >= MAX_WIDGETS) {
+        throw new Error(`“${v.name}” already has ${MAX_WIDGETS} widgets`)
       }
-      const aspect = window.innerHeight > 0 ? window.innerWidth / window.innerHeight : 16 / 9
-      const blank = v.layout?.kind === 'leaf' && !v.layout.sessionId && !v.layout.terminalId
+      const base = compact(v.widgets)
+      const slot = findFreeSlot(base, 6, 10)
       await updateView(v.id, {
-        layout: insertLeafAuto(blank ? null : v.layout, terminalLeaf(terminalId), aspect),
+        widgets: compact([
+          ...base,
+          withRef({ id: newWidgetId(), kind: 'terminal', ...slot }, 'terminal', terminalId),
+        ]),
       })
       onAdded(v.id)
     } catch (err) {

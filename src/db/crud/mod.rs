@@ -50,6 +50,7 @@ mod workflow_instructions;
 
 pub use account_refs::AccountModelRefs;
 pub use card_sessions::{CardRunStart, CardSessionEntry, SealOutcome};
+pub use cards::CardOverview;
 pub use claude_accounts::AccountModelUsage;
 pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;
@@ -61,8 +62,11 @@ pub use remote_device_enrollments::{
 pub use session_memories::{
     MAX_MEMORY_ENTRIES, MAX_MEMORY_ENTRY_CHARS, MAX_MEMORY_TOTAL_CHARS, render_memory_prompt,
 };
+#[cfg(test)]
+pub(crate) use session_views::insert_layout as session_views_insert_layout;
 pub use session_views::{
-    MAX_VIEW_DEPTH, MAX_VIEW_LEAVES, MAX_VIEW_NAME_CHARS, SplitDir, ViewLayout, validate_view_name,
+    MAX_VIEW_DEPTH, MAX_VIEW_LEAVES, MAX_VIEW_NAME_CHARS, MAX_VIEW_WIDGETS, SplitDir, ViewLayout,
+    ViewWidget, WidgetKind, validate_view_name, validate_widgets, widget_refs,
 };
 pub use todos::ProjectCardTodos;
 pub use usage::{UsageRollupRow, UsageWindow};

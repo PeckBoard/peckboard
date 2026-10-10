@@ -2126,6 +2126,10 @@ function App() {
                 getSessionMenuItems={(id) => sessionMenuItemsFor(id)}
                 onOpenSessionTab={openSessionTab}
                 onOpenTerminalTab={openTerminal}
+                onOpenProject={(id) => {
+                  setActiveProject(id)
+                  navigate('projects', id)
+                }}
               />
             )}
             {view === 'usage' && <UsageDashboard />}

@@ -758,6 +758,23 @@ pub struct SessionViewNode {
     pub terminal_id: Option<String>,
 }
 
+/// One widget of a saved view's dashboard: a rectangle on the 12-column
+/// grid showing the target named by the ref column matching `kind`.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone)]
+#[diesel(table_name = view_widgets)]
+pub struct ViewWidgetRow {
+    pub id: String,
+    pub view_id: String,
+    pub kind: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub session_id: Option<String>,
+    pub terminal_id: Option<String>,
+    pub project_id: Option<String>,
+}
+
 // ── Project workflow instructions ────────────────────────────────────
 
 #[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]

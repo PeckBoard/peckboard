@@ -242,6 +242,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/projects/{id}/pause", post(pause_project))
         .route("/api/projects/{id}/resume", post(resume_project))
         .route("/api/projects/{id}/spend", get(get_project_spend))
+        .route("/api/projects/{id}/summary", get(get_project_summary))
         .route(
             "/api/projects/{id}/cards",
             post(cards::create_card).get(cards::list_cards),
@@ -1004,4 +1005,131 @@ async fn get_project_spend(
         "budget_period": project.budget_period,
         "window_reset": window_reset,
     })))
+}
+
+/// Most cards listed under `active` in a project summary.
+const SUMMARY_ACTIVE_CARDS: usize = 8;
+
+/// Per-step card counts in `step_order` (zero-count steps included, steps
+/// not in the order appended as first seen), plus `(total, blocked)`.
+fn summary_step_counts(
+    step_order: Vec<String>,
+    cards: &[crate::db::crud::CardOverview],
+) -> (Vec<(String, usize)>, usize, usize) {
+    let mut steps: Vec<(String, usize)> = step_order.into_iter().map(|s| (s, 0)).collect();
+    for c in cards {
+        match steps.iter_mut().find(|(s, _)| *s == c.step) {
+            Some((_, n)) => *n += 1,
+            None => steps.push((c.step.clone(), 1)),
+        }
+    }
+    let blocked = cards.iter().filter(|c| c.blocked).count();
+    (steps, cards.len(), blocked)
+}
+
+/// GET /api/projects/:id/summary
+/// Compact status for a dashboard widget: per-step counts in workflow
+/// order, the cards workers are on (most recently updated first, max 8),
+/// today's spend (UTC day), and the latest card activity.
+async fn get_project_summary(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let project = state
+        .db
+        .get_project(&id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "project not found" })),
+            )
+        })?;
+    // Already newest-first, so the first card carries `last_activity_at`.
+    let cards = state
+        .db
+        .list_card_overviews(&id)
+        .await
+        .map_err(internal_error)?;
+    let order = workflow::steps_for_card(&project.workflow, "", project.review_enabled);
+    let (steps, total, blocked) = summary_step_counts(order, &cards);
+
+    let mut active = Vec::new();
+    for c in cards
+        .iter()
+        .filter(|c| c.worker_session_id.is_some())
+        .take(SUMMARY_ACTIVE_CARDS)
+    {
+        let sid = c.worker_session_id.as_deref().unwrap_or_default();
+        active.push(serde_json::json!({
+            "card_id": c.id,
+            "title": c.title,
+            "step": c.step,
+            "worker_session_id": sid,
+            "session_running": state.session_manager.is_running(sid).await,
+        }));
+    }
+
+    let today = crate::worker::budget::budget_window_start(chrono::Utc::now(), "daily");
+    let spend_today = state
+        .db
+        .project_cost_in_window(&id, today.timestamp_millis())
+        .await
+        .map_err(internal_error)?;
+
+    Ok::<_, RouteError>(Json(serde_json::json!({
+        "id": project.id,
+        "name": project.name,
+        "status": project.status,
+        "pause_reason": project.pause_reason,
+        "workflow": project.workflow,
+        "steps": steps
+            .iter()
+            .map(|(step, count)| serde_json::json!({ "step": step, "count": count }))
+            .collect::<Vec<_>>(),
+        "total_cards": total,
+        "blocked_cards": blocked,
+        "active": active,
+        "worker_count": project.worker_count,
+        "spend_today_usd": spend_today,
+        "last_activity_at": cards.first().map(|c| c.updated_at.clone()),
+    })))
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    use crate::db::crud::CardOverview;
+
+    fn card(id: &str, step: &str, blocked: bool) -> CardOverview {
+        CardOverview {
+            id: id.into(),
+            title: id.into(),
+            step: step.into(),
+            blocked,
+            worker_session_id: None,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn step_counts_follow_workflow_order_and_append_unknown_steps() {
+        let order = workflow::steps_for_card(workflow::DEFAULT_WORKFLOW_ID, "", true);
+        let cards = [
+            card("a", "in_progress", false),
+            card("b", "wont_do", true),
+            card("c", "in_progress", false),
+        ];
+        let (steps, total, blocked) = summary_step_counts(order.clone(), &cards);
+        assert_eq!((total, blocked), (3, 1));
+        let names: Vec<&str> = steps.iter().map(|(s, _)| s.as_str()).collect();
+        let mut expected: Vec<&str> = order.iter().map(String::as_str).collect();
+        expected.push("wont_do");
+        assert_eq!(names, expected, "workflow order, zero counts kept");
+        let count = |s: &str| steps.iter().find(|(n, _)| n == s).unwrap().1;
+        assert_eq!(count("in_progress"), 2);
+        assert_eq!(count("done"), 0);
+        assert_eq!(count("wont_do"), 1);
+    }
 }

@@ -1,11 +1,17 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { Session } from '../types/api'
 import { useSessionsStore } from '../store/sessions'
+import { useProjectsStore } from '../store/projects'
 import {
   terminalMeta,
   useViewsStore,
+  widgetRef,
+  withRef,
+  type ViewProjectMeta,
   type ViewSummary,
   type ViewTerminalMeta,
+  type ViewWidget,
+  type WidgetKind,
 } from '../store/views'
 import {
   popOutTerminal,
@@ -15,46 +21,43 @@ import {
 } from '../store/terminals'
 import { useTabsStore } from '../store/tabs'
 import {
-  MAX_LEAVES,
-  clearSession,
-  countLeaves,
-  insertAuto,
-  insertLeafAuto,
-  leaf,
-  leafEntries,
-  replaceLeaf,
-  sessionIds,
-  starterLayout,
-  terminalLeaf,
-  type LayoutNode,
-  type LeafEntry,
-  type LeafNode,
-  type StarterLayout,
-} from '../lib/layoutTree'
+  MAX_WIDGETS,
+  compact,
+  findFreeSlot,
+  newWidgetId,
+  starterRects,
+  type StarterShape,
+} from '../lib/widgetGrid'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
 import Modal from './Modal'
 import ConfirmDialog from './ConfirmDialog'
 import FieldError from './FieldError'
 import RenameModal from './RenameModal'
-import ChatView from './ChatView'
-import SplitLayout, { type PaneInfo } from './SplitLayout'
 import { MenuButton, type MenuItem } from './Dropdown'
-import { SessionPaneStatus } from './panes'
 import TerminalPicker from './terminal/TerminalPicker'
-import { TerminalStatusPill } from './terminal/TerminalBadges'
+import { useTerminalPickerItems } from './terminal/useTerminalPickerItems'
+import WidgetGrid, { type WidgetContext } from './dashboard/WidgetGrid'
+import WidgetFrame from './dashboard/WidgetFrame'
+import SessionWidget from './dashboard/SessionWidget'
+import TerminalWidget from './dashboard/TerminalWidget'
+import ProjectWidget, { ProjectPicker } from './dashboard/ProjectWidget'
 import { describeActionError } from '../utils/actionError'
-// xterm is heavy: only load it once a view actually shows a terminal.
-const ViewTerminalPane = lazy(() => import('./terminal/ViewTerminalPane'))
+import '../styles/dashboard.css'
 
-const STARTERS: { value: StarterLayout; label: string }[] = [
+const STARTERS: { value: StarterShape; label: string }[] = [
   { value: 'columns', label: 'Columns' },
   { value: 'rows', label: 'Rows' },
   { value: 'grid', label: 'Grid' },
   { value: 'main-stack', label: 'Main + stack' },
 ]
 const SAVE_DEBOUNCE_MS = 500
-const EMPTY_VIEW_LAYOUT: LayoutNode = { kind: 'leaf', sessionId: null }
+/** Default footprint of a newly added widget, in grid cells. */
+const DEFAULT_SIZE: Record<WidgetKind, { w: number; h: number }> = {
+  session: { w: 6, h: 10 },
+  terminal: { w: 6, h: 10 },
+  project: { w: 4, h: 9 },
+}
 
 /** Chat sessions a view can show (experts never appear in chat lists). */
 function useChatSessions(): Session[] {
@@ -68,15 +71,17 @@ interface ViewsPageProps {
   getSessionMenuItems: (sessionId: string) => MenuItem[]
   onOpenSessionTab: (sessionId: string) => void
   onOpenTerminalTab: (terminalId: string) => void
+  onOpenProject: (projectId: string) => void
 }
 
-/** Top-level "Views" page: the saved-view list, or one view's split layout. */
+/** Top-level "Views" page: the saved-view list, or one view's widget dashboard. */
 export default function ViewsPage({
   activeViewId,
   onNavigate,
   getSessionMenuItems,
   onOpenSessionTab,
   onOpenTerminalTab,
+  onOpenProject,
 }: ViewsPageProps) {
   if (activeViewId) {
     return (
@@ -87,6 +92,7 @@ export default function ViewsPage({
         getSessionMenuItems={getSessionMenuItems}
         onOpenSessionTab={onOpenSessionTab}
         onOpenTerminalTab={onOpenTerminalTab}
+        onOpenProject={onOpenProject}
       />
     )
   }
@@ -228,14 +234,14 @@ export function NewViewModal({
   const [name, setName] = useState('')
   const [picked, setPicked] = useState<string[]>([])
   const [search, setSearch] = useState('')
-  const [starter, setStarter] = useState<StarterLayout>('columns')
+  const [starter, setStarter] = useState<StarterShape>('columns')
   const [touched, setTouched] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   const nameError = touched && !name.trim() ? 'Give the view a name' : ''
   const sessionsError = touched && picked.length === 0 ? 'Pick at least one session' : ''
-  const full = picked.length >= MAX_LEAVES
+  const full = picked.length >= MAX_WIDGETS
   const disabledReason = !name.trim()
     ? 'Enter a name'
     : picked.length === 0
@@ -260,7 +266,11 @@ export function NewViewModal({
     setBusy(true)
     setError('')
     try {
-      const v = await createView(name.trim(), starterLayout(starter, picked) ?? EMPTY_VIEW_LAYOUT)
+      const rects = starterRects(starter, picked.length)
+      const widgets = picked.map((sessionId, i) =>
+        withRef({ id: newWidgetId(), kind: 'session', ...rects[i] }, 'session', sessionId),
+      )
+      const v = await createView(name.trim(), widgets)
       onCreated(v.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create view')
@@ -293,7 +303,7 @@ export function NewViewModal({
           <label className="form-label" htmlFor="new-view-session-search">
             Sessions{' '}
             <span className="optional">
-              ({picked.length}/{MAX_LEAVES})
+              ({picked.length}/{MAX_WIDGETS})
             </span>
           </label>
           <input
@@ -351,7 +361,7 @@ export function NewViewModal({
             id="new-view-starter"
             className="form-input"
             value={starter}
-            onChange={(e) => setStarter(e.target.value as StarterLayout)}
+            onChange={(e) => setStarter(e.target.value as StarterShape)}
             data-testid="new-view-starter"
           >
             {STARTERS.map((s) => (
@@ -360,6 +370,9 @@ export function NewViewModal({
               </option>
             ))}
           </select>
+          <p className="form-hint">
+            A starting arrangement — drag and resize widgets freely afterwards.
+          </p>
         </div>
         {error && (
           <p className="form-error" role="alert" data-testid="new-view-error">
@@ -389,7 +402,7 @@ export function NewViewModal({
   )
 }
 
-/** Searchable single-choice session picker (the "Add session" combobox). */
+/** Searchable single-choice session picker. */
 function SessionPicker({
   sessions,
   exclude,
@@ -430,24 +443,99 @@ function SessionPicker({
   )
 }
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'error'
-
-/** Header status for a terminal pane: host label + live / reconnecting /
- *  ended pill. */
-function TerminalPaneStatus({
-  meta,
-  phase,
+/** Header "Add widget" menu: Session / Terminal / Project, each a
+ *  searchable flyout that adds the picked target as a new widget. */
+function AddWidgetMenu({
+  sessions,
+  sessionsInView,
+  projectsInView,
+  disabled,
+  onAdd,
+  onTerminal,
 }: {
-  meta: ViewTerminalMeta | undefined
-  phase: TerminalPhase
+  sessions: Session[]
+  sessionsInView: Set<string>
+  projectsInView: Set<string>
+  disabled: boolean
+  onAdd: (kind: WidgetKind, ref: string) => void
+  onTerminal: (t: TerminalInfo) => void
 }) {
+  const projects = useProjectsStore((s) => s.projects)
+  const projectsLoaded = useProjectsStore((s) => s.projectsLoaded)
+  const fetchProjects = useProjectsStore((s) => s.fetchProjects)
+  const term = useTerminalPickerItems('view-add-terminal', onTerminal)
+  const items: MenuItem[] = [
+    {
+      label: 'Session',
+      hint: 'live chat',
+      testId: 'view-add-session',
+      searchable: true,
+      searchPlaceholder: 'Search sessions…',
+      searchTestId: 'view-add-session-search',
+      emptyLabel: 'No other sessions',
+      submenu: sessions
+        .filter((s) => !sessionsInView.has(s.id))
+        .map((s) => ({
+          label: s.name,
+          searchText: s.id,
+          onSelect: () => onAdd('session', s.id),
+        })),
+    },
+    {
+      label: 'Terminal',
+      hint: 'remote shell',
+      testId: 'view-add-terminal',
+      searchable: true,
+      searchPlaceholder: 'Search terminals and hosts…',
+      searchTestId: 'view-add-terminal-search',
+      emptyLabel: 'No terminals or hosts',
+      submenu: term.items,
+    },
+    {
+      label: 'Project',
+      hint: 'board summary',
+      testId: 'view-add-project',
+      searchable: true,
+      searchPlaceholder: 'Search projects…',
+      searchTestId: 'view-add-project-search',
+      emptyLabel: projectsLoaded ? 'No other projects' : 'Loading projects…',
+      submenu: projects
+        .filter((p) => !projectsInView.has(p.id))
+        .map((p) => ({
+          label: p.name,
+          hint: p.status === 'paused' ? 'paused' : undefined,
+          searchText: p.id,
+          testId: `view-add-project-option-${p.id}`,
+          onSelect: () => onAdd('project', p.id),
+        })),
+    },
+  ]
   return (
     <>
-      {meta && <span className="view-terminal-host">{meta.host_label}</span>}
-      <TerminalStatusPill phase={meta?.closed ? 'ended' : phase} />
+      <MenuButton
+        items={items}
+        ariaLabel="Add widget"
+        triggerClassName="btn-primary btn-sm"
+        testId="add-widget-button"
+        disabled={disabled || term.busy}
+        title={disabled ? `A view holds at most ${MAX_WIDGETS} widgets` : undefined}
+        onOpen={() => {
+          term.refresh()
+          void fetchProjects()
+        }}
+      >
+        {term.busy ? 'Opening…' : '+ Add widget'}
+      </MenuButton>
+      {term.error && (
+        <span className="form-error" role="alert" data-testid="view-add-terminal-error">
+          {term.error}
+        </span>
+      )}
     </>
   )
 }
+
+type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
 function ViewEditor({
   viewId,
@@ -455,12 +543,14 @@ function ViewEditor({
   getSessionMenuItems,
   onOpenSessionTab,
   onOpenTerminalTab,
+  onOpenProject,
 }: {
   viewId: string
   onBack: () => void
   getSessionMenuItems: (sessionId: string) => MenuItem[]
   onOpenSessionTab: (sessionId: string) => void
   onOpenTerminalTab: (terminalId: string) => void
+  onOpenProject: (projectId: string) => void
 }) {
   const getView = useViewsStore((s) => s.getView)
   const updateView = useViewsStore((s) => s.updateView)
@@ -469,18 +559,19 @@ function ViewEditor({
   const sessions = useChatSessions()
   const allSessions = useSessionsStore((s) => s.sessions)
   const [name, setName] = useState('')
-  const [layout, setLayout] = useState<LayoutNode | null>(null)
+  const [widgets, setWidgets] = useState<ViewWidget[]>([])
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [loadError, setLoadError] = useState('')
   const [save, setSave] = useState<SaveState>('idle')
   const [termMeta, setTermMeta] = useState<Record<string, ViewTerminalMeta>>({})
+  const [projMeta, setProjMeta] = useState<Record<string, ViewProjectMeta>>({})
   const [termPhase, setTermPhase] = useState<Record<string, TerminalPhase>>({})
-  const [replacingKey, setReplacingKey] = useState<string | null>(null)
+  const [changingId, setChangingId] = useState<string | null>(null)
   const [closingTerminal, setClosingTerminal] = useState<string | null>(null)
   const [closeBusy, setCloseBusy] = useState(false)
   const [closeError, setCloseError] = useState<string | null>(null)
   const saveTimer = useRef<number | null>(null)
-  const pending = useRef<LayoutNode | null | undefined>(undefined)
+  const pending = useRef<ViewWidget[] | undefined>(undefined)
 
   useEffect(() => {
     let cancelled = false
@@ -489,10 +580,8 @@ function ViewEditor({
         if (cancelled) return
         setName(v.name)
         setTermMeta(v.terminals ?? {})
-        // The API requires a layout; an empty view round-trips as one blank leaf.
-        const blank =
-          v.layout?.kind === 'leaf' && v.layout.sessionId === null && !v.layout.terminalId
-        setLayout(blank ? null : v.layout)
+        setProjMeta(v.projects ?? {})
+        setWidgets(compact(v.widgets))
         setStatus('ready')
       })
       .catch((e: unknown) => {
@@ -516,16 +605,19 @@ function ViewEditor({
       if (next === undefined) return
       pending.current = undefined
       setSave('saving')
-      updateView(viewId, { layout: next ?? EMPTY_VIEW_LAYOUT })
-        .then(() => setSave(pending.current === undefined ? 'saved' : 'saving'))
+      updateView(viewId, { widgets: next })
+        .then((v) => {
+          if (v.projects) setProjMeta((m) => ({ ...m, ...v.projects }))
+          setSave(pending.current === undefined ? 'saved' : 'saving')
+        })
         .catch(() => setSave('error'))
     }
   }, [viewId, updateView])
   // Leaving the page flushes a pending save rather than dropping it.
   useEffect(() => () => flush.current(), [])
 
-  const change = (next: LayoutNode | null) => {
-    setLayout(next)
+  const change = (next: ViewWidget[]) => {
+    setWidgets(next)
     pending.current = next
     setSave('saving')
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current)
@@ -535,58 +627,80 @@ function ViewEditor({
   useEffect(() => {
     changeRef.current = change
   })
-
-  // A session deleted anywhere blanks its leaf into the "pick another" state.
-  const layoutRef = useRef(layout)
+  const widgetsRef = useRef(widgets)
   useEffect(() => {
-    layoutRef.current = layout
-  }, [layout])
+    widgetsRef.current = widgets
+  }, [widgets])
+
+  // A session deleted anywhere blanks its widget into the "pick another" state.
   useEffect(() => {
     const onRemoved = (e: Event) => {
       const id = (e as CustomEvent<{ sessionId?: string }>).detail?.sessionId
       if (!id) return
-      const cur = layoutRef.current
-      const next = clearSession(cur, id)
-      if (next !== cur) changeRef.current(next)
+      const cur = widgetsRef.current
+      if (!cur.some((w) => w.kind === 'session' && w.sessionId === id)) return
+      changeRef.current(
+        cur.map((w) =>
+          w.kind === 'session' && w.sessionId === id ? withRef(w, 'session', null) : w,
+        ),
+      )
     }
     window.addEventListener('peckboard:session-removed', onRemoved)
     return () => window.removeEventListener('peckboard:session-removed', onRemoved)
   }, [])
 
-  const inView = useMemo(() => new Set(sessionIds(layout)), [layout])
-  const full = countLeaves(layout) >= MAX_LEAVES
+  const refsOf = (kind: WidgetKind) =>
+    new Set(
+      widgets
+        .filter((w) => w.kind === kind)
+        .map(widgetRef)
+        .filter((r): r is string => !!r),
+    )
+  const sessionsInView = refsOf('session')
+  const projectsInView = refsOf('project')
+  const full = widgets.length >= MAX_WIDGETS
   const nameOf = (id: string) => allSessions.find((s) => s.id === id)?.name ?? 'Session'
-  const aspect = () => (window.innerHeight > 0 ? window.innerWidth / window.innerHeight : 16 / 9)
 
   const rememberTerminal = (t: TerminalInfo) =>
     setTermMeta((m) => ({ ...m, [t.id]: terminalMeta(t) }))
   const markClosed = (id: string) =>
     setTermMeta((m) => (m[id] && !m[id].closed ? { ...m, [id]: { ...m[id], closed: true } } : m))
+  const rememberProject = (id: string) => {
+    const p = useProjectsStore.getState().projects.find((x) => x.id === id)
+    if (p) setProjMeta((m) => ({ ...m, [id]: { name: p.name } }))
+  }
 
-  const addSession = (id: string) => {
-    if (inView.has(id) || full) return
-    change(insertAuto(layout, id, aspect()))
+  const addWidget = (kind: WidgetKind, ref: string | null) => {
+    const cur = widgetsRef.current
+    if (cur.length >= MAX_WIDGETS) return
+    if (kind === 'project' && ref) rememberProject(ref)
+    const size = DEFAULT_SIZE[kind]
+    const base = compact(cur)
+    const slot = findFreeSlot(base, size.w, size.h)
+    change(compact([...base, withRef({ id: newWidgetId(), kind, ...slot }, kind, ref)]))
   }
   const addTerminal = (t: TerminalInfo) => {
-    if (full) return
     rememberTerminal(t)
-    change(insertLeafAuto(layout, terminalLeaf(t.id), aspect()))
+    addWidget('terminal', t.id)
   }
-  const fillLeaf = (key: string, next: LeafNode) => {
-    if (layout) change(replaceLeaf(layout, key, next))
+  const setRef = (widgetId: string, kind: WidgetKind, ref: string) => {
+    if (kind === 'project') rememberProject(ref)
+    change(widgetsRef.current.map((w) => (w.id === widgetId ? withRef(w, kind, ref) : w)))
   }
-  /** Open a fresh shell on a closed terminal's host and point every pane
+  const removeWidget = (widgetId: string) =>
+    change(compact(widgetsRef.current.filter((w) => w.id !== widgetId)))
+  /** Open a fresh shell on a closed terminal's host and point every widget
    *  that showed the old one at it (mirrors stay mirrors). */
   const reopenTerminal = async (oldId: string) => {
     const meta = termMeta[oldId]
     if (!meta) return
     const t = await createTerminal(meta.plugin_id, meta.host_id)
     rememberTerminal(t)
-    let next = layoutRef.current
-    for (const e of leafEntries(next)) {
-      if (next && e.terminalId === oldId) next = replaceLeaf(next, e.key, terminalLeaf(t.id))
-    }
-    change(next)
+    change(
+      widgetsRef.current.map((w) =>
+        w.kind === 'terminal' && w.terminalId === oldId ? withRef(w, 'terminal', t.id) : w,
+      ),
+    )
   }
   const confirmCloseTerminal = () => {
     const id = closingTerminal
@@ -625,46 +739,15 @@ function ViewEditor({
     )
   }
 
-  const getPaneInfo = (entry: LeafEntry): PaneInfo => {
-    if (entry.terminalId) {
-      const id = entry.terminalId
-      const meta = termMeta[id]
-      const closed = !!meta?.closed
-      return {
-        title: meta?.name ?? 'Terminal',
-        statusSlot: <TerminalPaneStatus meta={meta} phase={termPhase[entry.key] ?? 'connecting'} />,
-        menuItems: [
-          { label: 'Pop out', onSelect: () => popOutTerminal(id), hidden: closed },
-          { label: 'Replace…', onSelect: () => setReplacingKey(entry.key) },
-          { divider: true },
-          {
-            label: 'Close terminal',
-            danger: true,
-            hidden: closed,
-            testId: 'view-terminal-close',
-            onSelect: () => setClosingTerminal(id),
-          },
-        ],
-        canOpenAsTab: !closed,
-      }
-    }
-    if (!entry.sessionId) return { title: 'Empty pane' }
-    return {
-      title: nameOf(entry.sessionId),
-      statusSlot: <SessionPaneStatus sessionId={entry.sessionId} />,
-      menuItems: getSessionMenuItems(entry.sessionId),
-      canOpenAsTab: true,
-    }
-  }
-
-  /** Session + terminal pickers that fill (or replace) the leaf `key`. */
-  const fillPickers = (key: string, testPrefix: string, after?: () => void) => (
+  /** Session / terminal / project pickers that point widget `widgetId` at
+   *  a new target (switching its kind if needed). */
+  const fillPickers = (widgetId: string, testPrefix: string, after?: () => void) => (
     <>
       <SessionPicker
         sessions={sessions}
-        exclude={inView}
+        exclude={sessionsInView}
         onPick={(id) => {
-          fillLeaf(key, leaf(id))
+          setRef(widgetId, 'session', id)
           after?.()
         }}
         label="Session…"
@@ -673,21 +756,149 @@ function ViewEditor({
       <TerminalPicker
         onPick={(t) => {
           rememberTerminal(t)
-          fillLeaf(key, terminalLeaf(t.id))
+          setRef(widgetId, 'terminal', t.id)
           after?.()
         }}
         label="Terminal…"
         testId={`${testPrefix}-terminal`}
       />
+      <ProjectPicker
+        exclude={projectsInView}
+        onPick={(id) => {
+          setRef(widgetId, 'project', id)
+          after?.()
+        }}
+        label="Project…"
+        testId={`${testPrefix}-project`}
+      />
     </>
   )
+
+  const changeItem: (w: ViewWidget) => MenuItem = (w) => ({
+    label: 'Change…',
+    testId: 'widget-change',
+    onSelect: () => setChangingId(w.id),
+  })
+  const removeItem: (w: ViewWidget) => MenuItem = (w) => ({
+    label: 'Remove',
+    testId: 'widget-remove',
+    onSelect: () => removeWidget(w.id),
+  })
+
+  const renderWidget = (w: ViewWidget, ctx: WidgetContext): ReactNode => {
+    const ref = widgetRef(w)
+    if (!ref) {
+      const what = w.kind === 'session' ? 'session' : w.kind === 'terminal' ? 'terminal' : 'project'
+      return (
+        <WidgetFrame
+          kind={w.kind}
+          widgetId={w.id}
+          title="Empty widget"
+          menuItems={[removeItem(w)]}
+          ctx={ctx}
+        >
+          <div className="split-empty-leaf" data-testid="view-deleted-leaf">
+            <p>Nothing to show — pick a {what}, or switch this widget to something else</p>
+            <div className="view-terminal-closed-actions">{fillPickers(w.id, 'view-pick')}</div>
+          </div>
+        </WidgetFrame>
+      )
+    }
+    if (w.kind === 'session') {
+      const own = getSessionMenuItems(ref)
+      return (
+        <SessionWidget
+          widgetId={w.id}
+          sessionId={ref}
+          title={nameOf(ref)}
+          ctx={ctx}
+          menuItems={[
+            {
+              label: 'Open in tab',
+              testId: 'widget-open-tab',
+              onSelect: () => onOpenSessionTab(ref),
+            },
+            changeItem(w),
+            ...(own.length > 0 ? [{ divider: true }, ...own] : []),
+            { divider: true },
+            removeItem(w),
+          ]}
+        />
+      )
+    }
+    if (w.kind === 'terminal') {
+      const meta = termMeta[ref]
+      const closed = !!meta?.closed
+      return (
+        <TerminalWidget
+          widgetId={w.id}
+          terminalId={ref}
+          meta={meta}
+          phase={termPhase[w.id] ?? 'connecting'}
+          ctx={ctx}
+          menuItems={[
+            {
+              label: 'Open in tab',
+              testId: 'widget-open-tab',
+              hidden: closed,
+              onSelect: () => onOpenTerminalTab(ref),
+            },
+            { label: 'Pop out', onSelect: () => popOutTerminal(ref), hidden: closed },
+            changeItem(w),
+            { divider: true },
+            {
+              label: 'Close terminal',
+              danger: true,
+              hidden: closed,
+              testId: 'view-terminal-close',
+              onSelect: () => setClosingTerminal(ref),
+            },
+            removeItem(w),
+          ]}
+          onStatus={(s) => {
+            setTermPhase((p) => (p[w.id] === s.phase ? p : { ...p, [w.id]: s.phase }))
+            // Closed elsewhere (another tab, the Terminals page).
+            if (s.phase === 'ended' && s.message === 'Terminal closed') markClosed(ref)
+          }}
+          onReopen={() => reopenTerminal(ref)}
+          replaceSlot={
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              data-testid="view-terminal-replace"
+              onClick={() => setChangingId(w.id)}
+            >
+              Change…
+            </button>
+          }
+        />
+      )
+    }
+    return (
+      <ProjectWidget
+        widgetId={w.id}
+        projectId={ref}
+        fallbackName={projMeta[ref]?.name}
+        ctx={ctx}
+        onOpenProject={onOpenProject}
+        onOpenSession={onOpenSessionTab}
+        pickerSlot={fillPickers(w.id, 'view-pick')}
+        menuItems={[
+          { label: 'Open in tab', testId: 'widget-open-tab', onSelect: () => onOpenProject(ref) },
+          changeItem(w),
+          { divider: true },
+          removeItem(w),
+        ]}
+      />
+    )
+  }
 
   return (
     <div className="view-editor" data-testid="view-editor" data-view-id={viewId}>
       <ListViewHeader
         title={name}
         extras={
-          <>
+          <div className="view-editor-actions">
             <span
               className="view-save-state"
               data-testid="view-save-state"
@@ -707,116 +918,72 @@ function ViewEditor({
                 type="button"
                 className="btn-secondary btn-sm"
                 onClick={() => {
-                  pending.current = layout
+                  pending.current = widgets
                   flush.current()
                 }}
               >
                 Retry
               </button>
             )}
-            <SessionPicker
+            <AddWidgetMenu
               sessions={sessions}
-              exclude={inView}
-              onPick={addSession}
-              label="Add session"
-              testId="view-add-session"
+              sessionsInView={sessionsInView}
+              projectsInView={projectsInView}
               disabled={full}
-            />
-            <TerminalPicker
-              onPick={addTerminal}
-              label="Add terminal"
-              testId="view-add-terminal"
-              disabled={full}
+              onAdd={addWidget}
+              onTerminal={addTerminal}
             />
             <button type="button" className="btn-secondary btn-sm" onClick={onBack}>
               All views
             </button>
-          </>
-        }
-      />
-      <SplitLayout
-        layout={layout}
-        onChange={change}
-        rearrangeable
-        testId="view-split-layout"
-        getPaneInfo={getPaneInfo}
-        onOpenAsTab={(entry) => {
-          if (entry.sessionId) onOpenSessionTab(entry.sessionId)
-          else if (entry.terminalId) onOpenTerminalTab(entry.terminalId)
-        }}
-        emptyState={
-          <div className="split-empty-leaf" data-testid="view-empty">
-            <p>This view has no panes.</p>
-            <SessionPicker
-              sessions={sessions}
-              exclude={inView}
-              onPick={addSession}
-              label="Add session"
-              testId="view-empty-add-session"
-            />
-            <TerminalPicker
-              onPick={addTerminal}
-              label="Add terminal"
-              testId="view-empty-add-terminal"
-            />
           </div>
         }
-        renderPane={(entry, ctx) => {
-          if (entry.sessionId) {
-            return <ChatView sessionId={entry.sessionId} compact shortcutsEnabled={ctx.focused} />
-          }
-          if (entry.terminalId) {
-            const id = entry.terminalId
-            return (
-              <Suspense fallback={null}>
-                <ViewTerminalPane
-                  terminalId={id}
-                  meta={termMeta[id]}
-                  focused={ctx.focused && ctx.visible}
-                  visible={ctx.visible}
-                  onStatus={(s) => {
-                    setTermPhase((p) =>
-                      p[entry.key] === s.phase ? p : { ...p, [entry.key]: s.phase },
-                    )
-                    // Closed elsewhere (another tab, the Terminals page).
-                    if (s.phase === 'ended' && s.message === 'Terminal closed') markClosed(id)
-                  }}
-                  onReopen={() => reopenTerminal(id)}
-                  replaceSlot={
-                    <button
-                      type="button"
-                      className="btn-secondary btn-sm"
-                      data-testid="view-terminal-replace"
-                      onClick={() => setReplacingKey(entry.key)}
-                    >
-                      Replace…
-                    </button>
-                  }
-                />
-              </Suspense>
-            )
-          }
-          return (
-            <div className="split-empty-leaf" data-testid="view-deleted-leaf">
-              <p>Empty pane — pick a session or a terminal</p>
+      />
+      <div className="view-dashboard">
+        <WidgetGrid
+          items={widgets}
+          onChange={change}
+          renderWidget={renderWidget}
+          testId="view-widget-grid"
+          emptyState={
+            <div className="widget-grid-empty-state" data-testid="view-empty">
+              <p className="widget-grid-empty-title">This view has no widgets yet</p>
+              <p className="form-hint">
+                Add sessions, terminals, or project summaries, then drag and resize them into place.
+              </p>
               <div className="view-terminal-closed-actions">
-                {fillPickers(entry.key, 'view-pick')}
+                <SessionPicker
+                  sessions={sessions}
+                  exclude={sessionsInView}
+                  onPick={(id) => addWidget('session', id)}
+                  label="Add session"
+                  testId="view-empty-add-session"
+                />
+                <TerminalPicker
+                  onPick={addTerminal}
+                  label="Add terminal"
+                  testId="view-empty-add-terminal"
+                />
+                <ProjectPicker
+                  exclude={projectsInView}
+                  onPick={(id) => addWidget('project', id)}
+                  label="Add project"
+                  testId="view-empty-add-project"
+                />
               </div>
             </div>
-          )
-        }}
-      />
-      {replacingKey && (
-        <Modal
-          onClose={() => setReplacingKey(null)}
-          maxWidth={420}
-          data-testid="view-replace-modal"
-        >
-          <h2>Replace pane</h2>
-          <p className="form-hint">Show a session or a terminal in this pane instead.</p>
+          }
+        />
+      </div>
+      {changingId && (
+        <Modal onClose={() => setChangingId(null)} maxWidth={460} data-testid="view-replace-modal">
+          <h2>Change Widget</h2>
+          <p className="form-hint">
+            Show a session, a terminal, or a project summary here instead. Position and size stay.
+          </p>
           <div className="form-actions">
-            {fillPickers(replacingKey, 'view-replace', () => setReplacingKey(null))}
-            <button type="button" className="btn-secondary" onClick={() => setReplacingKey(null)}>
+            {fillPickers(changingId, 'view-replace', () => setChangingId(null))}
+            <button type="button" className="btn-secondary" onClick={() => setChangingId(null)}>
               Cancel
             </button>
           </div>
@@ -825,7 +992,7 @@ function ViewEditor({
       {closingTerminal && (
         <ConfirmDialog
           title="Close terminal"
-          message={`Close “${termMeta[closingTerminal]?.name ?? 'this terminal'}”? The remote shell is ended and anything running in it stops. Panes showing it offer to reopen one on the same host.`}
+          message={`Close “${termMeta[closingTerminal]?.name ?? 'this terminal'}”? The remote shell is ended and anything running in it stops. Widgets showing it offer to reopen one on the same host.`}
           confirmLabel="Close"
           cancelLabel="Cancel"
           danger

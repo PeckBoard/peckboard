@@ -60,6 +60,10 @@ export interface MenuItem {
   searchable?: boolean
   /** Placeholder for the searchable flyout's filter input. */
   searchPlaceholder?: string
+  /** With a searchable `submenu`: testid for the flyout's filter input. */
+  searchTestId?: string
+  /** With a searchable `submenu`: row shown when it has no items. */
+  emptyLabel?: string
   /** Optional testid forwarded to the rendered button. */
   testId?: string
 }
@@ -140,6 +144,8 @@ export default function Dropdown({
   // wrap against; without a cap the shrink-to-fit popup grows to the viewport
   // edge. An explicit `maxWidth` (a field-anchored picker) always wins.
   const widthCap = maxWidth ?? (visible.some((i) => i.description) ? DESC_MAX_WIDTH : undefined)
+  // Only one submenu flyout open at a time: opening a sibling closes the last.
+  const [openSub, setOpenSub] = useState<number | null>(null)
   // Searchable variant: filter rows by the query and track a keyboard cursor
   // over the selectable rows so ArrowUp/Down + Enter work from the input
   // (mirrors ModelPicker's interaction).
@@ -275,6 +281,8 @@ export default function Dropdown({
         id={searchable && isSelectable ? `${baseId}-opt-${at}` : undefined}
         highlighted={searchable && isSelectable && at === highlight}
         onHover={searchable && isSelectable ? () => setHighlight(at) : undefined}
+        subOpen={openSub === idx}
+        onSubOpen={() => setOpenSub(idx)}
       />
     )
   }
@@ -380,6 +388,8 @@ function MenuRow({
   id,
   highlighted,
   onHover,
+  subOpen,
+  onSubOpen,
 }: {
   item: MenuItem
   onClose: () => void
@@ -392,18 +402,22 @@ function MenuRow({
   highlighted?: boolean
   /** Sync the keyboard cursor when the mouse moves over this row. */
   onHover?: () => void
+  /** This row's flyout is the parent's open one (false once a sibling opens). */
+  subOpen?: boolean
+  onSubOpen?: () => void
 }) {
   const [subAnchor, setSubAnchor] = useState<{ x: number; y: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement | null>(null)
 
   if (item.divider) return <div className="dropdown-divider" role="separator" />
 
-  if (item.submenu && item.submenu.length > 0) {
+  if (item.submenu && (item.submenu.length > 0 || item.searchable)) {
     const open = () => {
       const el = btnRef.current
       if (!el) return
       const r = el.getBoundingClientRect()
       setSubAnchor({ x: r.right, y: r.top })
+      onSubOpen?.()
     }
     return (
       <>
@@ -426,7 +440,7 @@ function MenuRow({
             &rsaquo;
           </span>
         </button>
-        {subAnchor && (
+        {subAnchor && subOpen !== false && (
           <Dropdown
             anchor={subAnchor}
             items={item.submenu}
@@ -436,7 +450,10 @@ function MenuRow({
             }}
             searchable={item.searchable}
             searchPlaceholder={item.searchPlaceholder}
+            searchTestId={item.searchTestId}
+            emptyLabel={item.emptyLabel}
             align="left"
+            listLabel={item.label}
           />
         )}
       </>
