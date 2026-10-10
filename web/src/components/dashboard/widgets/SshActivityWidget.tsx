@@ -11,6 +11,15 @@ import {
   type SshActivityPage,
   type SshHost,
 } from './sshFleet'
+import { DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 import '../../../styles/dashboard-ssh.css'
 
 const PAGE_SIZE = 50
@@ -299,7 +308,8 @@ export default function SshActivityWidget(props: InfoWidgetProps) {
   return <SshActivityFeed key={props.widget.hostRef || 'all'} {...props} />
 }
 
-function SshActivityFeed({ widget, ctx, menuItems, onOpenSession }: InfoWidgetProps) {
+function SshActivityFeed(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, onOpenSession } = props
   const hostRef = widget.hostRef || null
   const { feed, error, fresh, loadingOlder, loadOlder, reload } = useSshActivity(hostRef ?? 'all')
   const hostLabel = useHostLabel(hostRef, feed.items)
@@ -316,6 +326,35 @@ function SshActivityFeed({ widget, ctx, menuItems, onOpenSession }: InfoWidgetPr
     const t = new Date(a.ts).getTime()
     return !Number.isNaN(t) && now - t < HOUR_MS
   }).length
+
+  const { filters, set, clear, activeCount, open, toggle } = useWidgetFilters(props)
+  const tools = [...new Set(feed.items.map((a) => a.tool))].sort()
+  const sessions = new Map<string, string>()
+  for (const a of feed.items)
+    if (a.session_id) sessions.set(a.session_id, a.session_name || 'Session')
+  const defs: FilterDef[] = [
+    { key: 'q', kind: 'search', placeholder: 'Search commands…' },
+    {
+      key: 'tool',
+      kind: 'chips',
+      label: 'Tool',
+      options: tools.map((t) => ({ value: t, label: t.replace(/^ssh_/, '') })),
+    },
+    { key: 'failed', kind: 'toggle', label: 'Failed only' },
+    {
+      key: 'session',
+      kind: 'combo',
+      label: 'Session',
+      options: [...sessions].map(([value, label]) => ({ value, label })),
+    },
+  ]
+  const shown = feed.items.filter(
+    (a) =>
+      inSet(filters.tool, a.tool) &&
+      (filters.failed !== true || isFailure(a)) &&
+      inSet(filters.session, a.session_id) &&
+      matchesSearch(filters.q, a.summary, a.reason, a.session_name),
+  )
 
   let body: ReactNode
   if (error?.notInstalled) {
@@ -343,11 +382,13 @@ function SshActivityFeed({ widget, ctx, menuItems, onOpenSession }: InfoWidgetPr
         No commands run yet
       </div>
     )
+  } else if (shown.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="ssh-scroll">
         <ul className="ssh-act-list" data-testid="dash-ssh_activity-list">
-          {feed.items.map((a) => (
+          {shown.map((a) => (
             <Row
               key={a.id}
               a={a}
@@ -389,10 +430,12 @@ function SshActivityFeed({ widget, ctx, menuItems, onOpenSession }: InfoWidgetPr
           </span>
         ) : undefined
       }
+      actions={<FilterButton activeCount={activeCount} open={open} onToggle={toggle} />}
       menuItems={menuItems}
       ctx={ctx}
       dataAttrs={{ 'data-host-ref': hostRef ?? undefined }}
     >
+      {open && <FilterBar defs={defs} filters={filters} set={set} clear={clear} />}
       {body}
     </WidgetFrame>
   )

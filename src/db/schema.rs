@@ -308,6 +308,7 @@ diesel::table! {
         report_ref -> Nullable<Text>,
         body -> Nullable<Text>,
         host_ref -> Nullable<Text>,
+        filters -> Nullable<Text>,
     }
 }
 diesel::table! {

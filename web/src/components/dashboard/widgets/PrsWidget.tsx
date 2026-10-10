@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import WidgetFrame from '../WidgetFrame'
-import { DashCount, DashEmpty, DashError, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashLoading, DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 import { relativeTime } from './useDashboardData'
 import { pluginUiFetch, PluginUiError } from './pluginUi'
 import type { InfoWidgetProps } from './types'
@@ -158,17 +166,23 @@ function usePrs() {
   return { data, error, refreshing, reload: load }
 }
 
+const STATE_OPTIONS = [
+  { value: 'open', label: 'Open' },
+  { value: 'merged', label: 'Merged' },
+  { value: 'closed', label: 'Closed' },
+]
+
+const REVIEW_OPTIONS = [
+  { value: 'approved', label: 'Approved' },
+  { value: 'changes_requested', label: 'Changes requested' },
+  { value: 'review_required', label: 'Review required' },
+]
+
 /** PRs linked to cards (github-bridge `gh_link_pr`): state, CI checks,
  *  review, and the card each belongs to. Scoped widgets filter on the
  *  card's project. */
-export default function PrsWidget({
-  widget,
-  ctx,
-  menuItems,
-  scopeProjectId,
-  scopeName,
-  onOpenProject,
-}: InfoWidgetProps) {
+export default function PrsWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, scopeProjectId, scopeName, onOpenProject } = props
   const { data, error, refreshing, reload } = usePrs()
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -179,6 +193,35 @@ export default function PrsWidget({
   const prs = (data?.prs ?? []).filter((p) => !scopeProjectId || p.project_id === scopeProjectId)
   const failing = prs.filter((p) => p.state === 'open' && p.checks.state === 'failure').length
   const notInstalled = !!error?.notInstalled
+  const {
+    filters,
+    set,
+    clear,
+    activeCount,
+    open: filterOpen,
+    toggle: toggleFilters,
+  } = useWidgetFilters(props)
+  const repos = [...new Set(prs.map((p) => p.repo))].sort()
+  const defs: FilterDef[] = [
+    { key: 'q', kind: 'search', placeholder: 'Search PRs…' },
+    { key: 'state', kind: 'chips', label: 'State', options: STATE_OPTIONS },
+    { key: 'failing', kind: 'toggle', label: 'Failing checks' },
+    { key: 'review', kind: 'chips', label: 'Review', options: REVIEW_OPTIONS },
+    {
+      key: 'repo',
+      kind: 'combo',
+      label: 'Repo',
+      options: repos.map((r) => ({ value: r, label: r })),
+    },
+  ]
+  const shown = prs.filter(
+    (p) =>
+      inSet(filters.state, p.state) &&
+      (filters.failing !== true || p.checks.state === 'failure') &&
+      inSet(filters.review, p.review) &&
+      inSet(filters.repo, p.repo) &&
+      matchesSearch(filters.q, p.title, `${p.repo}#${p.number}`, p.author, p.card_title),
+  )
 
   let body: ReactNode
   if (notInstalled) {
@@ -212,9 +255,11 @@ export default function PrsWidget({
         )}
         {prs.length === 0 ? (
           <DashEmpty testId="dash-prs-empty">No linked pull requests</DashEmpty>
+        ) : shown.length === 0 ? (
+          <DashNoMatch onClear={clear} />
         ) : (
           <ul className="dash-items" data-testid="dash-prs-list">
-            {prs.map((p) => {
+            {shown.map((p) => {
               const tone = prTone(p)
               const review = p.review ? REVIEW[p.review] : null
               const key = `${p.repo}#${p.number}`
@@ -321,12 +366,16 @@ export default function PrsWidget({
                 />
               </svg>
             </button>
+            <FilterButton activeCount={activeCount} open={filterOpen} onToggle={toggleFilters} />
           </>
         ) : undefined
       }
       menuItems={menuItems}
       ctx={ctx}
     >
+      {filterOpen && !notInstalled && data?.configured && (
+        <FilterBar defs={defs} filters={filters} set={set} clear={clear} />
+      )}
       {body}
     </WidgetFrame>
   )

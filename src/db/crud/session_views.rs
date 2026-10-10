@@ -334,6 +334,18 @@ impl WidgetKind {
             | WidgetKind::Prs => &[ProjectId],
         }
     }
+
+    /// Whether this kind carries a `filters` object (widget UI state).
+    fn has_filters(self) -> bool {
+        !matches!(
+            self,
+            WidgetKind::Session
+                | WidgetKind::Terminal
+                | WidgetKind::Project
+                | WidgetKind::Note
+                | WidgetKind::ReviewQuality
+        )
+    }
 }
 
 /// Longest note body, in characters.
@@ -342,12 +354,27 @@ pub const MAX_WIDGET_BODY_CHARS: usize = 20_000;
 const MAX_REPORT_REF_CHARS: usize = 500;
 /// Longest `hostRef` (opaque ssh-fleet host id), in characters.
 const MAX_HOST_REF_CHARS: usize = 200;
+/// Most keys in a widget's `filters` object.
+const MAX_FILTER_KEYS: usize = 20;
+/// Longest filter key, in characters (`[a-z_]` only).
+const MAX_FILTER_KEY_CHARS: usize = 32;
+/// Longest filter string value (or list item), in characters.
+const MAX_FILTER_STRING_CHARS: usize = 200;
+/// Most items in a filter list value.
+const MAX_FILTER_LIST_ITEMS: usize = 50;
+/// Largest serialized `filters` object, in bytes.
+const MAX_FILTERS_BYTES: usize = 4096;
+
+/// A widget's filter state: an opaque UI-owned object the server bounds
+/// but never interprets.
+pub type WidgetFilters = serde_json::Map<String, serde_json::Value>;
 
 /// One widget of a saved view: a rect on the 12-column grid plus the
 /// fields its `kind` uses ([`WidgetKind::fields`]: a session / terminal /
 /// project / card ref, a `reportRef`, a note `body`, or an ssh-fleet
-/// `hostRef`; `null` is an empty placeholder or "all projects / hosts").
-/// Serializes exactly the kind's fields,
+/// `hostRef`; `null` is an empty placeholder or "all projects / hosts"),
+/// plus `filters` on kinds that have them ([`WidgetKind::has_filters`]).
+/// Serializes exactly the kind's fields (and `filters` where allowed),
 /// always present (possibly `null`). [`validate_widgets`] rejects any
 /// other field being set.
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
@@ -372,6 +399,8 @@ pub struct ViewWidget {
     pub body: Option<String>,
     #[serde(rename = "hostRef", default)]
     pub host_ref: Option<String>,
+    #[serde(default)]
+    pub filters: Option<WidgetFilters>,
 }
 
 impl ViewWidget {
@@ -408,7 +437,8 @@ impl Serialize for ViewWidget {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let fields = self.kind.fields();
-        let mut m = s.serialize_map(Some(6 + fields.len()))?;
+        let has_filters = self.kind.has_filters();
+        let mut m = s.serialize_map(Some(6 + fields.len() + usize::from(has_filters)))?;
         m.serialize_entry("id", &self.id)?;
         m.serialize_entry("kind", &self.kind)?;
         m.serialize_entry("x", &self.x)?;
@@ -417,6 +447,9 @@ impl Serialize for ViewWidget {
         m.serialize_entry("h", &self.h)?;
         for f in fields {
             m.serialize_entry(f.key(), &self.field(*f))?;
+        }
+        if has_filters {
+            m.serialize_entry("filters", &self.filters)?;
         }
         m.end()
     }
@@ -513,11 +546,64 @@ pub fn validate_widgets(widgets: &[ViewWidget]) -> Result<(), String> {
                 w.id
             ));
         }
+        if let Some(filters) = &w.filters {
+            if !w.kind.has_filters() {
+                return Err(format!(
+                    "widget '{}' of kind '{}' may not set filters",
+                    w.id,
+                    w.kind.as_str()
+                ));
+            }
+            validate_filters(filters).map_err(|e| format!("widget '{}' filters {e}", w.id))?;
+        }
     }
     for (i, a) in widgets.iter().enumerate() {
         if let Some(b) = widgets[i + 1..].iter().find(|b| a.overlaps(b)) {
             return Err(format!("widgets '{}' and '{}' overlap", a.id, b.id));
         }
+    }
+    Ok(())
+}
+
+/// Bounds a `filters` object: ≤ [`MAX_FILTER_KEYS`] keys shaped
+/// `^[a-z_]{1,32}$`, each value a string (≤ 200 chars), a bool, or a list
+/// of ≤ 50 such strings, and ≤ [`MAX_FILTERS_BYTES`] serialized. `Err`
+/// completes "widget '<id>' filters …".
+fn validate_filters(filters: &WidgetFilters) -> Result<(), String> {
+    use serde_json::Value;
+    if filters.len() > MAX_FILTER_KEYS {
+        return Err(format!("may hold at most {MAX_FILTER_KEYS} keys"));
+    }
+    let short = |s: &str| s.chars().count() <= MAX_FILTER_STRING_CHARS;
+    for (k, v) in filters {
+        let key_ok = (1..=MAX_FILTER_KEY_CHARS).contains(&k.chars().count())
+            && k.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+        if !key_ok {
+            return Err(format!(
+                "key '{k}' must be 1-{MAX_FILTER_KEY_CHARS} of [a-z_]"
+            ));
+        }
+        let value_ok = match v {
+            Value::String(s) => short(s),
+            Value::Bool(_) => true,
+            Value::Array(items) => {
+                items.len() <= MAX_FILTER_LIST_ITEMS
+                    && items.iter().all(|i| i.as_str().is_some_and(short))
+            }
+            _ => false,
+        };
+        if !value_ok {
+            return Err(format!(
+                "value of '{k}' must be a string (≤ {MAX_FILTER_STRING_CHARS} chars), \
+                 a bool, or ≤ {MAX_FILTER_LIST_ITEMS} such strings"
+            ));
+        }
+    }
+    let bytes = serde_json::to_string(filters).map_or(usize::MAX, |s| s.len());
+    if bytes > MAX_FILTERS_BYTES {
+        return Err(format!(
+            "must serialize to at most {MAX_FILTERS_BYTES} bytes"
+        ));
     }
     Ok(())
 }
@@ -594,6 +680,10 @@ fn store_widgets(
             report_ref: w.report_ref.clone(),
             body: w.body.clone(),
             host_ref: w.host_ref.clone(),
+            filters: w
+                .filters
+                .as_ref()
+                .map(|f| serde_json::Value::Object(f.clone()).to_string()),
         })
         .collect();
     diesel::delete(dashboard_widgets::table.filter(dashboard_widgets::view_id.eq(view_id)))
@@ -663,6 +753,8 @@ fn load_widgets(conn: &mut SqliteConnection, view_id: &str) -> anyhow::Result<Ve
                 report_ref: r.report_ref,
                 body: r.body,
                 host_ref: r.host_ref,
+                // Unparseable text (hand-edited row) reads as no filters.
+                filters: r.filters.and_then(|f| serde_json::from_str(&f).ok()),
             })
         })
         .collect())

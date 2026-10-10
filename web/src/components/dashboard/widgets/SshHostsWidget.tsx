@@ -3,6 +3,15 @@ import { formatRelativeTime } from '../../../lib/review'
 import WidgetFrame from '../WidgetFrame'
 import type { InfoWidgetProps } from './types'
 import { sshFleetFetch, SshFleetError, type SshHost } from './sshFleet'
+import { DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 import '../../../styles/dashboard-ssh.css'
 
 const POLL_MS = 30_000
@@ -48,12 +57,8 @@ function useSshHosts() {
 
 /** The ssh-fleet host registry at a glance: reachability, last seen, a
  *  Probe (connect + auth, no command) and an Open terminal shortcut. */
-export default function SshHostsWidget({
-  widget,
-  ctx,
-  menuItems,
-  onOpenTerminal,
-}: InfoWidgetProps) {
+export default function SshHostsWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, onOpenTerminal } = props
   const { hosts, error, reload } = useSshHosts()
   const [probing, setProbing] = useState<Set<string>>(() => new Set())
   const [probeErr, setProbeErr] = useState<Record<string, string>>({})
@@ -62,6 +67,29 @@ export default function SshHostsWidget({
     const t = window.setInterval(() => tick((n) => n + 1), 60_000)
     return () => window.clearInterval(t)
   }, [])
+  const { filters, set, clear, activeCount, open, toggle } = useWidgetFilters(props)
+  const tags = [...new Set((hosts ?? []).flatMap((h) => h.tags))].sort()
+  const defs: FilterDef[] = [
+    { key: 'q', kind: 'search', placeholder: 'Search hosts…' },
+    {
+      key: 'status',
+      kind: 'chips',
+      label: 'Status',
+      options: [
+        { value: 'ok', label: 'OK' },
+        { value: 'error', label: 'Error' },
+        { value: 'unknown', label: 'Unknown' },
+      ],
+    },
+    { key: 'tag', kind: 'combo', label: 'Tag', options: tags.map((t) => ({ value: t, label: t })) },
+  ]
+  const tagSel = Array.isArray(filters.tag) ? filters.tag : []
+  const shown = (hosts ?? []).filter(
+    (h) =>
+      inSet(filters.status, statusTone(h.last_status)) &&
+      (tagSel.length === 0 || h.tags.some((t) => tagSel.includes(t))) &&
+      matchesSearch(filters.q, h.label, h.hostname, h.username),
+  )
 
   const probe = async (id: string) => {
     setProbing((s) => new Set(s).add(id))
@@ -114,11 +142,13 @@ export default function SshHostsWidget({
         No SSH hosts yet — add one on the SSH Fleet page
       </div>
     )
+  } else if (shown.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="ssh-scroll">
         <ul className="ssh-host-list" data-testid="dash-ssh_hosts-list">
-          {hosts.map((h) => {
+          {shown.map((h) => {
             const tone = statusTone(h.last_status)
             const busy = probing.has(h.id)
             const err = probeErr[h.id] ?? (tone === 'error' ? h.last_error : null)
@@ -213,9 +243,11 @@ export default function SshHostsWidget({
           </span>
         ) : undefined
       }
+      actions={<FilterButton activeCount={activeCount} open={open} onToggle={toggle} />}
       menuItems={menuItems}
       ctx={ctx}
     >
+      {open && <FilterBar defs={defs} filters={filters} set={set} clear={clear} />}
       {body}
     </WidgetFrame>
   )

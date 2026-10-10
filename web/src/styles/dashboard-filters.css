@@ -1,0 +1,168 @@
+/* Widget filter bar (components/dashboard/widgets/filters.tsx): a dense,
+   wrapping row of search / chips / pickers at the top of a widget body,
+   plus the header funnel toggle. Shared surface/text tokens only, so it
+   follows dark and light themes. */
+
+.widget-filter-btn {
+  flex-shrink: 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+}
+
+.widget-filter-btn:hover,
+.widget-filter-btn[aria-pressed='true'] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.widget-filter-btn-active {
+  color: var(--accent);
+}
+
+.widget-filter-badge {
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.widget-filter-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  font-size: var(--text-xs);
+}
+
+.widget-filter-search {
+  flex: 1 1 120px;
+  min-width: 90px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-xs);
+}
+
+.widget-filter-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.widget-filter-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.widget-filter-chip,
+.widget-filter-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text2);
+  font: inherit;
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.widget-filter-chip:hover,
+.widget-filter-select:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.widget-filter-chip.on,
+.widget-filter-select.on {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: var(--text);
+}
+
+.widget-filter-chip:focus-visible,
+.widget-filter-select:focus-visible,
+.widget-filter-btn:focus-visible,
+.widget-filter-clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.widget-filter-select {
+  padding-right: 4px;
+}
+
+.widget-filter-combo {
+  min-width: 0;
+}
+
+.widget-filter-chip-key {
+  color: var(--text3);
+}
+
+.widget-filter-combo-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget-filter-caret {
+  color: var(--text3);
+  font-size: 9px;
+}
+
+.widget-filter-clear {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.widget-filter-clear:hover {
+  background: var(--surface-hover);
+}
+
+.widget-filter-nomatch-clear {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}

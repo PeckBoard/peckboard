@@ -5,9 +5,10 @@ import { useRepeatingTasksStore } from '../../../store/repeatingTasks'
 import type { RepeatingTask, RepeatingTaskRun } from '../../../types/api'
 import { describeSchedule } from '../../../utils/repeatingSchedule'
 import WidgetFrame from '../WidgetFrame'
-import { DashCount, DashEmpty, DashError, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashLoading, DashNoMatch } from './DashParts'
 import { relativeTime as relative, useDashboardData } from './useDashboardData'
 import type { InfoWidgetProps } from './types'
+import { FilterBar, FilterButton, matchesSearch, useWidgetFilters, type FilterDef } from './filters'
 import '../../../styles/dashboard-info.css'
 
 /** Run histories fetched per refresh — one request each, so keep it small. */
@@ -22,8 +23,26 @@ const OUTCOME: Record<string, { label: string; tone: string }> = {
   consumed_once: { label: 'Done', tone: 'neutral' },
 }
 
+/** Outcomes the "Last run failed" toggle keeps. */
+const FAILED = new Set(['failed', 'corrupt_schedule'])
+
+const FILTER_DEFS: FilterDef[] = [
+  { key: 'q', kind: 'search', placeholder: 'Search tasks…' },
+  {
+    key: 'state',
+    kind: 'select',
+    label: 'State',
+    options: [
+      { value: 'enabled', label: 'Enabled' },
+      { value: 'paused', label: 'Paused' },
+    ],
+  },
+  { key: 'failed', kind: 'toggle', label: 'Last run failed' },
+]
+
 /** Repeating tasks: schedule, next run, last outcome, and Run now. */
-export default function RepeatingWidget({ widget, ctx, menuItems }: InfoWidgetProps) {
+export default function RepeatingWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems } = props
   const { data, error, reload } = useDashboardData<RepeatingTask[]>(
     '/api/repeating-tasks',
     null,
@@ -101,6 +120,14 @@ export default function RepeatingWidget({ widget, ctx, menuItems }: InfoWidgetPr
         void reload()
       })
   }
+  const { filters, set, clear, activeCount, open, toggle } = useWidgetFilters(props)
+  const shown = tasks.filter(
+    (t) =>
+      (filters.state !== 'enabled' || t.enabled) &&
+      (filters.state !== 'paused' || !t.enabled) &&
+      (filters.failed !== true || FAILED.has(outcomes[t.id]?.status ?? '')) &&
+      matchesSearch(filters.q, t.name, t.description, t.prompt),
+  )
 
   const enabled = tasks.filter((t) => t.enabled).length
   let body
@@ -112,11 +139,12 @@ export default function RepeatingWidget({ widget, ctx, menuItems }: InfoWidgetPr
         <p>No repeating tasks</p>
       </DashEmpty>
     )
+  else if (shown.length === 0) body = <DashNoMatch onClear={clear} />
   else
     body = (
       <div className="dash-scroll">
         <ul className="dash-items" data-testid="dash-repeating-list">
-          {tasks.map((t) => {
+          {shown.map((t) => {
             const last = outcomes[t.id]
             const o = last
               ? (OUTCOME[last.status] ?? { label: last.status, tone: 'neutral' })
@@ -175,9 +203,11 @@ export default function RepeatingWidget({ widget, ctx, menuItems }: InfoWidgetPr
       widgetId={widget.id}
       title="Repeating Tasks"
       statusSlot={data && <DashCount n={enabled} label={`${enabled} enabled`} />}
+      actions={<FilterButton activeCount={activeCount} open={open} onToggle={toggle} />}
       menuItems={menuItems}
       ctx={ctx}
     >
+      {open && <FilterBar defs={FILTER_DEFS} filters={filters} set={set} clear={clear} />}
       {body}
     </WidgetFrame>
   )

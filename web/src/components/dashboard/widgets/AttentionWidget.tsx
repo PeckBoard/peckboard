@@ -3,7 +3,15 @@ import WidgetFrame from '../WidgetFrame'
 import { formatRelativeTime } from '../../../lib/review'
 import type { InfoWidgetProps } from './types'
 import { useDashboardData } from './useDashboardData'
-import { DashCount, DashEmpty, DashError, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashLoading, DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 
 type AttentionKind = 'question' | 'plan' | 'blocked' | 'worker_error' | 'unmerged'
 
@@ -98,23 +106,44 @@ const GROUPS: { kind: AttentionKind; label: string; tone: string; icon: ReactNod
   },
 ]
 
+const FILTER_DEFS: FilterDef[] = [
+  { key: 'q', kind: 'search', placeholder: 'Search…' },
+  {
+    key: 'kind',
+    kind: 'chips',
+    label: 'Kind',
+    options: [
+      { value: 'question', label: 'Question' },
+      { value: 'plan', label: 'Plan' },
+      { value: 'blocked', label: 'Blocked' },
+      { value: 'worker_error', label: 'Worker error' },
+      { value: 'unmerged', label: 'Unmerged' },
+    ],
+  },
+]
+
 /** Needs Attention: everything waiting on a human, grouped by kind. */
-export default function AttentionWidget({
-  widget,
-  ctx,
-  menuItems,
-  scopeProjectId,
-  scopeName,
-  onOpenSession,
-  onOpenProject,
-}: InfoWidgetProps) {
+export default function AttentionWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, scopeProjectId, scopeName, onOpenSession, onOpenProject } = props
   const { data, error, reload } = useDashboardData<{ items: AttentionItem[] }>(
     '/api/dashboard/attention',
     scopeProjectId,
     ['card-update', 'card-delete', 'worker-question', 'project-update'],
   )
+  const {
+    filters,
+    set,
+    clear,
+    activeCount,
+    open: filterOpen,
+    toggle: toggleFilters,
+  } = useWidgetFilters(props)
   const items = data?.items ?? []
-
+  const shown = items.filter(
+    (it) =>
+      inSet(filters.kind, it.kind) &&
+      matchesSearch(filters.q, it.title, it.detail, it.card_title, it.project_name),
+  )
   const open = (it: AttentionItem): (() => void) | undefined => {
     const toSession = it.kind === 'question' || it.kind === 'plan' || it.kind === 'worker_error'
     if (toSession && it.session_id) {
@@ -147,11 +176,13 @@ export default function AttentionWidget({
         <span>All clear</span>
       </DashEmpty>
     )
+  } else if (shown.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="dash-scroll" data-testid="dash-attention-list">
         {GROUPS.map((g) => {
-          const rows = items.filter((it) => it.kind === g.kind)
+          const rows = shown.filter((it) => it.kind === g.kind)
           if (rows.length === 0) return null
           return (
             <section key={g.kind} className="dash-group" data-group={g.kind}>
@@ -215,17 +246,25 @@ export default function AttentionWidget({
       widgetId={widget.id}
       title={scopeName ? `Needs Attention · ${scopeName}` : 'Needs Attention'}
       statusSlot={
-        data && items.length > 0 ? (
-          <DashCount
-            n={items.length}
-            tone={urgent > 0 ? 'danger' : 'warn'}
-            label={`${items.length} items`}
-          />
+        data ? (
+          <>
+            {items.length > 0 && (
+              <DashCount
+                n={items.length}
+                tone={urgent > 0 ? 'danger' : 'warn'}
+                label={`${items.length} items`}
+              />
+            )}
+            <FilterButton activeCount={activeCount} open={filterOpen} onToggle={toggleFilters} />
+          </>
         ) : undefined
       }
       menuItems={menuItems}
       ctx={ctx}
     >
+      {filterOpen && data && (
+        <FilterBar defs={FILTER_DEFS} filters={filters} set={set} clear={clear} />
+      )}
       {body}
     </WidgetFrame>
   )

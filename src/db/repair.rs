@@ -84,6 +84,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_card_sessions_table(conn)?;
     backfill_session_owners(conn)?;
     ensure_session_view_nodes_terminal_column(conn)?;
+    ensure_dashboard_widgets_filters_column(conn)?;
     Ok(())
 }
 
@@ -335,6 +336,22 @@ fn ensure_session_view_nodes_terminal_column(conn: &mut SqliteConnection) -> any
              REFERENCES terminals(id) ON DELETE SET NULL",
         )
         .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1791800000_dashboard_widget_filters`, whose
+/// `ALTER TABLE … ADD COLUMN` can't be made idempotent. Skipped when the
+/// table itself is missing (its own migration creates it).
+fn ensure_dashboard_widgets_filters_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(dashboard_widgets)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "filters") {
+        tracing::info!("Repairing schema: adding dashboard_widgets.filters");
+        sql_query("ALTER TABLE dashboard_widgets ADD COLUMN filters TEXT NULL").execute(conn)?;
     }
     Ok(())
 }
@@ -3203,5 +3220,34 @@ mod tests {
         assert_eq!(n.n, 1);
         // idempotent second run
         ensure_schema(&mut conn).unwrap();
+    }
+
+    /// A `dashboard_widgets` table that missed `1791800000_dashboard_widget_filters`
+    /// gets its `filters` column back; existing rows keep their data.
+    #[test]
+    fn ensure_schema_adds_dashboard_widgets_filters_column() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("CREATE TABLE dashboard_widgets (id TEXT NOT NULL, kind TEXT NOT NULL)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("INSERT INTO dashboard_widgets (id, kind) VALUES ('w1', 'prs')")
+            .execute(&mut conn)
+            .unwrap();
+
+        ensure_schema(&mut conn).unwrap();
+        ensure_schema(&mut conn).unwrap();
+
+        sql_query("UPDATE dashboard_widgets SET filters = '{\"q\":\"x\"}'")
+            .execute(&mut conn)
+            .unwrap();
+        let n: CountRow = sql_query(
+            "SELECT count(*) AS n FROM dashboard_widgets WHERE id = 'w1' AND filters IS NOT NULL",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(n.n, 1);
     }
 }

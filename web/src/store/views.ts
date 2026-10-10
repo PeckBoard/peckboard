@@ -71,7 +71,66 @@ export interface ViewWidget extends GridItem {
   reportRef?: string | null
   /** `ssh_activity`: ssh-fleet host id; null = all hosts. */
   hostRef?: string | null
+  /** Filter-bar UI state (kinds in `FILTER_KINDS`); null = no filters.
+   *  Opaque to the server. See `tmp-widgets4-contract.md`. */
+  filters?: Filters | null
 }
+
+/** One filter's value: search text, a toggle, or a multi-select set. */
+export type FilterValue = string | boolean | string[]
+export type Filters = Record<string, FilterValue>
+
+/** Kinds that carry a filter bar; the server 400s non-null `filters` on
+ *  any other kind. */
+export const FILTER_KINDS: ReadonlySet<WidgetKind> = new Set<WidgetKind>([
+  'background',
+  'ssh_hosts',
+  'ssh_activity',
+  'repeating',
+  'todos',
+  'report',
+  'attention',
+  'workers',
+  'review_queue',
+  'worktrees',
+  'dependencies',
+  'prs',
+  'orchestrators',
+])
+
+/** Server bounds for `filters`. */
+const FILTER_KEY_RE = /^[a-z_]{1,32}$/
+const FILTER_MAX_KEYS = 20
+const FILTER_STR_MAX = 200
+const FILTER_ARR_MAX = 50
+const FILTER_JSON_MAX = 4096
+
+/** `raw` as valid filters (dropping out-of-bound entries), or null when
+ *  nothing is left. */
+export function sanitizeFilters(raw: unknown): Filters | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const out: Filters = {}
+  let n = 0
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (n >= FILTER_MAX_KEYS || !FILTER_KEY_RE.test(k)) continue
+    let val: FilterValue | null = null
+    if (typeof v === 'boolean') val = v
+    else if (typeof v === 'string') val = v.slice(0, FILTER_STR_MAX)
+    else if (Array.isArray(v))
+      val = v
+        .filter((s): s is string => typeof s === 'string')
+        .slice(0, FILTER_ARR_MAX)
+        .map((s) => s.slice(0, FILTER_STR_MAX))
+    if (val === null) continue
+    out[k] = val
+    n++
+  }
+  if (n === 0 || JSON.stringify(out).length > FILTER_JSON_MAX) return null
+  return out
+}
+
+/** Fields a widget may patch on itself (`InfoWidgetProps.onChange`). */
+export type WidgetPatch = Partial<Pick<ViewWidget, WidgetField | 'filters'>>
 
 /** Display identity of a project a view references. */
 export interface ViewProjectMeta {
@@ -121,10 +180,13 @@ export function widgetRef(w: ViewWidget): string | null {
   return (key && w[key]) || null
 }
 
-/** Clamp string fields to their server bounds. */
+/** Clamp string fields to their server bounds; `filters` only on kinds
+ *  that carry them. */
 function bound(w: ViewWidget): ViewWidget {
   if (typeof w.body === 'string') w.body = w.body.slice(0, NOTE_MAX)
   if (typeof w.hostRef === 'string') w.hostRef = w.hostRef.slice(0, HOST_REF_MAX)
+  if (FILTER_KINDS.has(w.kind)) w.filters = sanitizeFilters(w.filters)
+  else delete w.filters
   return w
 }
 
@@ -139,17 +201,16 @@ export function withRef(w: ViewWidget, kind: WidgetKind, ref: string | null): Vi
   if (primary) out[primary] = ref
   const same = w.kind === kind && (!primary || (w[primary] ?? null) === ref)
   for (const f of rest) out[f] = same ? (w[f] ?? null) : null
+  if (w.kind === kind) out.filters = w.filters ?? null
   return bound(out)
 }
 
 /** Copy of `w` with `patch` applied to the fields its kind allows. A new
  *  scope project clears a dependencies root card picked inside the old one. */
-export function patchWidget(
-  w: ViewWidget,
-  patch: Partial<Pick<ViewWidget, WidgetField>>,
-): ViewWidget {
+export function patchWidget(w: ViewWidget, patch: WidgetPatch): ViewWidget {
   const out = { ...w }
   for (const f of KIND_FIELDS[w.kind]) if (f in patch) out[f] = patch[f] ?? null
+  if ('filters' in patch) out.filters = patch.filters ?? null
   if (
     w.kind === 'dependencies' &&
     'projectId' in patch &&
@@ -192,6 +253,7 @@ function sanitizeWidgets(raw: unknown): ViewWidget[] {
       ...clampRect({ x: r.x ?? 0, y: r.y ?? 0, w: r.w ?? 6, h: r.h ?? 8 }),
     }
     for (const f of KIND_FIELDS[w.kind]) w[f] = typeof r[f] === 'string' ? (r[f] as string) : null
+    w.filters = r.filters
     out.push(bound(w))
   }
   return out

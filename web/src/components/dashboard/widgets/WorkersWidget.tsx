@@ -4,7 +4,15 @@ import { useUsageStore } from '../../../store/usage'
 import { bareModelId, contextWindowInfo } from '../../../util/cost'
 import type { InfoWidgetProps } from './types'
 import { fmtElapsed, humanize, useDashboardData } from './useDashboardData'
-import { DashCount, DashEmpty, DashError, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashLoading, DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 
 interface Worker {
   session_id: string
@@ -23,14 +31,8 @@ interface Worker {
 
 /** Worker Fleet: every card with a worker, its step, model, runtime and
  *  context fill. Rows open the worker session. */
-export default function WorkersWidget({
-  widget,
-  ctx,
-  menuItems,
-  scopeProjectId,
-  scopeName,
-  onOpenSession,
-}: InfoWidgetProps) {
+export default function WorkersWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, scopeProjectId, scopeName, onOpenSession } = props
   const { data, error, reload } = useDashboardData<{ workers: Worker[] }>(
     '/api/dashboard/workers',
     scopeProjectId,
@@ -53,11 +55,48 @@ export default function WorkersWidget({
     return () => window.clearInterval(t)
   }, [running])
 
+  const {
+    filters,
+    set,
+    clear,
+    activeCount,
+    open: filterOpen,
+    toggle: toggleFilters,
+  } = useWidgetFilters(props)
+  // Step / model options come from the loaded workers.
+  const steps = [...new Set(workers.map((w) => w.step))].sort()
+  const models = [...new Set(workers.flatMap((w) => (w.model ? [w.model] : [])))].sort()
+  const defs: FilterDef[] = [
+    { key: 'q', kind: 'search', placeholder: 'Search workers…' },
+    {
+      key: 'step',
+      kind: 'combo',
+      label: 'Step',
+      options: steps.map((s) => ({ value: s, label: humanize(s) })),
+    },
+    {
+      key: 'model',
+      kind: 'combo',
+      label: 'Model',
+      options: models.map((m) => ({ value: m, label: bareModelId(m) })),
+    },
+    { key: 'running', kind: 'toggle', label: 'Running only' },
+  ]
+  const shown = workers.filter(
+    (w) =>
+      (filters.running !== true || w.running) &&
+      inSet(filters.step, w.step) &&
+      inSet(filters.model, w.model) &&
+      matchesSearch(filters.q, w.card_title, w.session_name, w.project_name, w.step, w.model),
+  )
+
   let body: ReactNode
   if (!data) {
     body = error ? <DashError message={error} onRetry={() => void reload()} /> : <DashLoading />
   } else if (workers.length === 0) {
     body = <DashEmpty testId="dash-workers-empty">No workers assigned</DashEmpty>
+  } else if (shown.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="dash-scroll">
@@ -73,7 +112,7 @@ export default function WorkersWidget({
             </tr>
           </thead>
           <tbody>
-            {workers.map((w) => {
+            {shown.map((w) => {
               const started = w.started_at ? Date.parse(w.started_at) : NaN
               const elapsed = Number.isFinite(started) ? fmtElapsed(now - started) : '—'
               const { limit, known } = contextWindowInfo(w.model, costTable)
@@ -150,13 +189,19 @@ export default function WorkersWidget({
       widgetId={widget.id}
       title={scopeName ? `Worker Fleet · ${scopeName}` : 'Worker Fleet'}
       statusSlot={
-        data && workers.length > 0 ? (
-          <DashCount n={running} label={`${running} of ${workers.length} running`} />
+        data ? (
+          <>
+            {workers.length > 0 && (
+              <DashCount n={running} label={`${running} of ${workers.length} running`} />
+            )}
+            <FilterButton activeCount={activeCount} open={filterOpen} onToggle={toggleFilters} />
+          </>
         ) : undefined
       }
       menuItems={menuItems}
       ctx={ctx}
     >
+      {filterOpen && data && <FilterBar defs={defs} filters={filters} set={set} clear={clear} />}
       {body}
     </WidgetFrame>
   )

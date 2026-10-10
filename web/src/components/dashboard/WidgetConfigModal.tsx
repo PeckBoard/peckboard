@@ -7,6 +7,7 @@ import Modal from '../Modal'
 import { MenuButton, type MenuItem } from '../Dropdown'
 import { WIDGET_SPECS } from './registry'
 import { SshFleetError, sshFleetFetch, type SshHost } from './widgets/sshFleet'
+import { inSet } from './widgets/filters'
 import '../../styles/dashboard-info.css'
 
 type Patch = Partial<Pick<ViewWidget, WidgetField>>
@@ -178,8 +179,9 @@ export default function WidgetConfigModal({
     : 'Whole project'
 
   const reportRef = widget.reportRef ?? null
+  // The widget's folder filter narrows the picker too.
   const sortedReports = reports
-    .slice()
+    .filter((r) => inSet(widget.filters?.folder, r.folder))
     .sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0))
   const reportItems: MenuItem[] = [
     {

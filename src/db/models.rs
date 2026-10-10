@@ -778,6 +778,8 @@ pub struct ViewWidgetRow {
     pub report_ref: Option<String>,
     pub body: Option<String>,
     pub host_ref: Option<String>,
+    /// JSON object of widget filter state; `None` = no filters.
+    pub filters: Option<String>,
 }
 
 // ── Project workflow instructions ────────────────────────────────────

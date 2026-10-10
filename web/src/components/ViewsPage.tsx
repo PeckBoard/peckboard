@@ -12,7 +12,7 @@ import {
   type ViewSummary,
   type ViewTerminalMeta,
   type ViewWidget,
-  type WidgetField,
+  type WidgetPatch,
   type WidgetKind,
 } from '../store/views'
 import { authedFetch } from '../store/auth'
@@ -725,7 +725,7 @@ function ViewEditor({
     change(widgetsRef.current.map((w) => (w.id === widgetId ? withRef(w, kind, ref) : w)))
   }
   /** Persist widget-owned fields (scope, note body, pinned report, …). */
-  const patchById = (widgetId: string, patch: Partial<Pick<ViewWidget, WidgetField>>) => {
+  const patchById = (widgetId: string, patch: WidgetPatch) => {
     if (patch.projectId) rememberProject(patch.projectId)
     change(widgetsRef.current.map((w) => (w.id === widgetId ? patchWidget(w, patch) : w)))
   }

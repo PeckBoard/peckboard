@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import WidgetFrame from '../WidgetFrame'
-import { DashEmpty, DashError, DashLoading } from './DashParts'
+import { DashEmpty, DashError, DashLoading, DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 import { humanize, relativeTime } from './useDashboardData'
 import { pluginUiFetch, pluginUiPost, PluginUiError } from './pluginUi'
 import type { InfoWidgetProps } from './types'
@@ -108,15 +116,25 @@ function useOrchestrators() {
   return { data, error, reload: load }
 }
 
+const STATE_OPTIONS = [
+  { value: 'running', label: 'Running' },
+  { value: 'paused', label: 'Paused' },
+  { value: 'disabled', label: 'Disabled' },
+]
+
+/** Bucket for the state chips, in `stateOf`'s precedence. */
+function stateKey(o: Orchestrator, globalPaused: boolean): string {
+  if (o.brain_busy) return 'running'
+  if (!o.enabled) return 'disabled'
+  if (o.paused || globalPaused) return 'paused'
+  return o.error ? 'error' : 'idle'
+}
+
 /** Orchestrator goals at a glance: state, goal + status, next / last run,
  *  latest activity, with Run now and Pause / Resume. A row expands to its
  *  recent activity. */
-export default function OrchestratorsWidget({
-  widget,
-  ctx,
-  menuItems,
-  onOpenSession,
-}: InfoWidgetProps) {
+export default function OrchestratorsWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, onOpenSession } = props
   const { data, error, reload } = useOrchestrators()
   const [expanded, setExpanded] = useState<string | null>(null)
   const [busy, setBusy] = useState<Record<string, boolean>>({})
@@ -156,6 +174,32 @@ export default function OrchestratorsWidget({
 
   const orchs = data?.orchestrators ?? []
   const running = orchs.filter((o) => o.brain_busy).length
+  const {
+    filters,
+    set,
+    clear,
+    activeCount,
+    open: filterOpen,
+    toggle: toggleFilters,
+  } = useWidgetFilters(props)
+  const goalStates = [...new Set(orchs.map((o) => o.goal_status.state))].sort()
+  const defs: FilterDef[] = [
+    { key: 'q', kind: 'search', placeholder: 'Search orchestrators…' },
+    { key: 'state', kind: 'chips', label: 'State', options: STATE_OPTIONS },
+    {
+      key: 'goal',
+      kind: 'chips',
+      label: 'Goal',
+      options: goalStates.map((s) => ({ value: s, label: humanize(s) })),
+    },
+  ]
+  const globalPaused = !!data?.global_paused
+  const shown = orchs.filter(
+    (o) =>
+      inSet(filters.state, stateKey(o, globalPaused)) &&
+      inSet(filters.goal, o.goal_status.state) &&
+      matchesSearch(filters.q, o.name, o.goal, o.goal_status.note),
+  )
 
   let body: ReactNode
   if (error?.notInstalled) {
@@ -172,6 +216,8 @@ export default function OrchestratorsWidget({
     )
   } else if (orchs.length === 0) {
     body = <DashEmpty testId="dash-orchestrators-empty">No orchestrators</DashEmpty>
+  } else if (shown.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="dash-scroll">
@@ -181,7 +227,7 @@ export default function OrchestratorsWidget({
           </div>
         )}
         <ul className="dash-items" data-testid="dash-orchestrators-list">
-          {orchs.map((o) => {
+          {shown.map((o) => {
             const st = stateOf(o, data.global_paused)
             const gs = o.goal_status
             const last = o.log[o.log.length - 1]
@@ -336,12 +382,16 @@ export default function OrchestratorsWidget({
                 All paused
               </span>
             )}
+            <FilterButton activeCount={activeCount} open={filterOpen} onToggle={toggleFilters} />
           </>
         ) : undefined
       }
       menuItems={menuItems}
       ctx={ctx}
     >
+      {filterOpen && data && orchs.length > 0 && (
+        <FilterBar defs={defs} filters={filters} set={set} clear={clear} />
+      )}
       {body}
     </WidgetFrame>
   )

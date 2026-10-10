@@ -4,7 +4,10 @@ import { authedFetch } from '../../../store/auth'
 import { formatRelativeTime } from '../../../lib/review'
 import type { InfoWidgetProps } from './types'
 import { humanize, useDashboardData } from './useDashboardData'
-import { DashCount, DashEmpty, DashError, DashHeading, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashHeading, DashLoading, DashNoMatch } from './DashParts'
+import { FilterBar, FilterButton, inSet, useWidgetFilters, type FilterDef } from './filters'
+
+const REASONS = ['dirty', 'conflict', 'cleanup_failed', 'worktree_missing']
 
 interface Unmerged {
   card_id: string
@@ -66,19 +69,38 @@ function RetryMerge({ row, onDone }: { row: Unmerged; onDone: () => void }) {
 }
 
 /** Git / Worktrees: cards whose worktree failed to merge, plus recent commits. */
-export default function WorktreesWidget({
-  widget,
-  ctx,
-  menuItems,
-  scopeProjectId,
-  scopeName,
-  onOpenProject,
-}: InfoWidgetProps) {
+export default function WorktreesWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, scopeProjectId, scopeName, onOpenProject } = props
   const { data, error, reload } = useDashboardData<{ unmerged: Unmerged[]; commits: Commit[] }>(
     '/api/dashboard/worktrees',
     scopeProjectId,
     ['card-update', 'card-delete'],
   )
+  const {
+    filters,
+    set,
+    clear,
+    activeCount,
+    open: filterOpen,
+    toggle: toggleFilters,
+  } = useWidgetFilters(props)
+  const authors = [...new Set((data?.commits ?? []).map((c) => c.author))].sort()
+  const defs: FilterDef[] = [
+    {
+      key: 'reason',
+      kind: 'chips',
+      label: 'Reason',
+      options: REASONS.map((r) => ({ value: r, label: humanize(r) })),
+    },
+    {
+      key: 'author',
+      kind: 'combo',
+      label: 'Author',
+      options: authors.map((a) => ({ value: a, label: a })),
+    },
+  ]
+  const unmerged = (data?.unmerged ?? []).filter((u) => inSet(filters.reason, u.reason))
+  const commits = (data?.commits ?? []).filter((c) => inSet(filters.author, c.author))
 
   let body: ReactNode
   if (!data) {
@@ -87,16 +109,18 @@ export default function WorktreesWidget({
     body = (
       <DashEmpty testId="dash-worktrees-empty">No unmerged worktrees or recent commits</DashEmpty>
     )
+  } else if (unmerged.length === 0 && commits.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="dash-scroll" data-testid="dash-worktrees-list">
         <section className="dash-group">
-          <DashHeading count={data.unmerged.length}>Needs merge</DashHeading>
-          {data.unmerged.length === 0 ? (
+          <DashHeading count={unmerged.length}>Needs merge</DashHeading>
+          {unmerged.length === 0 ? (
             <p className="project-widget-none">Every worktree is merged.</p>
           ) : (
             <ul className="dash-list">
-              {data.unmerged.map((u) => (
+              {unmerged.map((u) => (
                 <li key={u.card_id} className="dash-row dash-row-static" data-card-id={u.card_id}>
                   <span className="dash-pill dash-pill-warn" title={u.detail ?? u.reason}>
                     {humanize(u.reason)}
@@ -122,11 +146,11 @@ export default function WorktreesWidget({
         </section>
         <section className="dash-group">
           <DashHeading>Recent commits</DashHeading>
-          {data.commits.length === 0 ? (
+          {commits.length === 0 ? (
             <p className="project-widget-none">No commits found.</p>
           ) : (
             <ul className="dash-list dash-commits">
-              {data.commits.map((c) => (
+              {commits.map((c) => (
                 <li
                   key={`${c.project_id}-${c.sha}`}
                   className="dash-commit"
@@ -153,17 +177,23 @@ export default function WorktreesWidget({
       widgetId={widget.id}
       title={scopeName ? `Git / Worktrees · ${scopeName}` : 'Git / Worktrees'}
       statusSlot={
-        data && data.unmerged.length > 0 ? (
-          <DashCount
-            n={data.unmerged.length}
-            tone="warn"
-            label={`${data.unmerged.length} need merge`}
-          />
+        data ? (
+          <>
+            {data.unmerged.length > 0 && (
+              <DashCount
+                n={data.unmerged.length}
+                tone="warn"
+                label={`${data.unmerged.length} need merge`}
+              />
+            )}
+            <FilterButton activeCount={activeCount} open={filterOpen} onToggle={toggleFilters} />
+          </>
         ) : undefined
       }
       menuItems={menuItems}
       ctx={ctx}
     >
+      {filterOpen && data && <FilterBar defs={defs} filters={filters} set={set} clear={clear} />}
       {body}
     </WidgetFrame>
   )

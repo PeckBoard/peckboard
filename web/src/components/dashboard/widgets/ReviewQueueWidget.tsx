@@ -3,7 +3,15 @@ import WidgetFrame from '../WidgetFrame'
 import { formatRelativeTime } from '../../../lib/review'
 import type { InfoWidgetProps } from './types'
 import { useDashboardData } from './useDashboardData'
-import { DashCount, DashEmpty, DashError, DashHeading, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashHeading, DashLoading, DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 
 interface InReview {
   card_id: string
@@ -26,20 +34,44 @@ interface Verdict {
   summary: string | null
 }
 
+const FILTER_DEFS: FilterDef[] = [
+  { key: 'q', kind: 'search', placeholder: 'Search cards…' },
+  {
+    key: 'verdict',
+    kind: 'chips',
+    label: 'Verdict',
+    options: [
+      { value: 'pass', label: 'Passed' },
+      { value: 'changes_requested', label: 'Changes' },
+    ],
+  },
+]
+
 /** Review Queue: cards in review now, plus the latest verdicts. */
-export default function ReviewQueueWidget({
-  widget,
-  ctx,
-  menuItems,
-  scopeProjectId,
-  scopeName,
-  onOpenSession,
-  onOpenProject,
-}: InfoWidgetProps) {
+export default function ReviewQueueWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, scopeProjectId, scopeName, onOpenSession, onOpenProject } = props
   const { data, error, reload } = useDashboardData<{ in_review: InReview[]; recent: Verdict[] }>(
     '/api/dashboard/review-queue',
     scopeProjectId,
     ['card-update', 'card-delete', 'session-updated'],
+  )
+  const {
+    filters,
+    set,
+    clear,
+    activeCount,
+    open: filterOpen,
+    toggle: toggleFilters,
+  } = useWidgetFilters(props)
+  // Search narrows both lists; the verdict chips only the verdicts (cards
+  // still in review have none yet).
+  const inReview = (data?.in_review ?? []).filter((c) =>
+    matchesSearch(filters.q, c.title, c.project_name),
+  )
+  const recent = (data?.recent ?? []).filter(
+    (v) =>
+      inSet(filters.verdict, v.verdict) &&
+      matchesSearch(filters.q, v.title, v.project_name, v.reviewer_model, v.summary),
   )
 
   let body: ReactNode
@@ -47,16 +79,18 @@ export default function ReviewQueueWidget({
     body = error ? <DashError message={error} onRetry={() => void reload()} /> : <DashLoading />
   } else if (data.in_review.length === 0 && data.recent.length === 0) {
     body = <DashEmpty testId="dash-review_queue-empty">Nothing in review</DashEmpty>
+  } else if (inReview.length === 0 && recent.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="dash-scroll" data-testid="dash-review_queue-list">
         <section className="dash-group">
-          <DashHeading count={data.in_review.length}>In review</DashHeading>
-          {data.in_review.length === 0 ? (
+          <DashHeading count={inReview.length}>In review</DashHeading>
+          {inReview.length === 0 ? (
             <p className="project-widget-none">No cards in review.</p>
           ) : (
             <ul className="dash-list">
-              {data.in_review.map((c) => {
+              {inReview.map((c) => {
                 const sid = c.worker_session_id
                 return (
                   <li key={c.card_id} data-card-id={c.card_id}>
@@ -85,11 +119,11 @@ export default function ReviewQueueWidget({
         </section>
         <section className="dash-group">
           <DashHeading>Recent verdicts</DashHeading>
-          {data.recent.length === 0 ? (
+          {recent.length === 0 ? (
             <p className="project-widget-none">No reviews yet.</p>
           ) : (
             <ul className="dash-list">
-              {data.recent.map((v) => (
+              {recent.map((v) => (
                 <li key={`${v.card_id}-${v.reviewed_at}`} data-card-id={v.card_id}>
                   <button
                     type="button"
@@ -128,13 +162,21 @@ export default function ReviewQueueWidget({
       widgetId={widget.id}
       title={scopeName ? `Review Queue · ${scopeName}` : 'Review Queue'}
       statusSlot={
-        data && data.in_review.length > 0 ? (
-          <DashCount n={data.in_review.length} label={`${data.in_review.length} in review`} />
+        data ? (
+          <>
+            {data.in_review.length > 0 && (
+              <DashCount n={data.in_review.length} label={`${data.in_review.length} in review`} />
+            )}
+            <FilterButton activeCount={activeCount} open={filterOpen} onToggle={toggleFilters} />
+          </>
         ) : undefined
       }
       menuItems={menuItems}
       ctx={ctx}
     >
+      {filterOpen && data && (
+        <FilterBar defs={FILTER_DEFS} filters={filters} set={set} clear={clear} />
+      )}
       {body}
     </WidgetFrame>
   )

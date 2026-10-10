@@ -7,7 +7,15 @@ import {
   type BackgroundTaskStatus,
 } from '../../../store/background'
 import WidgetFrame from '../WidgetFrame'
-import { DashCount, DashEmpty, DashError, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashLoading, DashNoMatch } from './DashParts'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 import { useDashboardData } from './useDashboardData'
 import type { InfoWidgetProps } from './types'
 import '../../../styles/dashboard-info.css'
@@ -37,15 +45,17 @@ function tone(t: DashBackgroundTask): string {
   return 'danger'
 }
 
+/** Status chip bucket: stopped and succeeded both count as finished. */
+function bucket(t: DashBackgroundTask): string {
+  if (t.status === 'running') return 'running'
+  return t.status === 'failed' ? 'failed' : 'finished'
+}
+
 /** Background tasks (`run_background`) across the caller's sessions:
  *  running first with live elapsed time and a Stop button, then the last
  *  day's finished ones. A row opens its session. */
-export default function BackgroundWidget({
-  widget,
-  ctx,
-  menuItems,
-  onOpenSession,
-}: InfoWidgetProps) {
+export default function BackgroundWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, onOpenSession } = props
   const { data, error, reload } = useDashboardData<{ tasks: DashBackgroundTask[] }>(
     '/api/dashboard/background',
     null,
@@ -60,6 +70,33 @@ export default function BackgroundWidget({
 
   const tasks = data?.tasks ?? []
   const running = tasks.filter((t) => t.status === 'running').length
+  const { filters, set, clear, activeCount, open, toggle } = useWidgetFilters(props)
+  const sessions = new Map(tasks.map((t) => [t.session_id, t.session_name || 'Session']))
+  const defs: FilterDef[] = [
+    { key: 'q', kind: 'search', placeholder: 'Search tasks…' },
+    {
+      key: 'status',
+      kind: 'chips',
+      label: 'Status',
+      options: [
+        { value: 'running', label: 'Running' },
+        { value: 'finished', label: 'Finished' },
+        { value: 'failed', label: 'Failed' },
+      ],
+    },
+    {
+      key: 'session',
+      kind: 'combo',
+      label: 'Session',
+      options: [...sessions].map(([value, label]) => ({ value, label })),
+    },
+  ]
+  const shown = tasks.filter(
+    (t) =>
+      inSet(filters.status, bucket(t)) &&
+      inSet(filters.session, t.session_id) &&
+      matchesSearch(filters.q, t.label, t.program, t.session_name),
+  )
 
   useEffect(() => {
     void reload()
@@ -96,6 +133,7 @@ export default function BackgroundWidget({
         <p>No background tasks in the last day</p>
       </DashEmpty>
     )
+  else if (shown.length === 0) body = <DashNoMatch onClear={clear} />
   else
     body = (
       <div className="dash-scroll">
@@ -105,7 +143,7 @@ export default function BackgroundWidget({
           </p>
         )}
         <ul className="dash-items" data-testid="dash-background-list">
-          {tasks.map((t) => {
+          {shown.map((t) => {
             const end = t.finished_at ? new Date(t.finished_at).getTime() : now
             const elapsed = formatElapsed(end - new Date(t.started_at).getTime())
             const isRunning = t.status === 'running'
@@ -155,9 +193,11 @@ export default function BackgroundWidget({
       widgetId={widget.id}
       title="Background Tasks"
       statusSlot={data && <DashCount n={running} label={`${running} running`} />}
+      actions={<FilterButton activeCount={activeCount} open={open} onToggle={toggle} />}
       menuItems={menuItems}
       ctx={ctx}
     >
+      {open && <FilterBar defs={defs} filters={filters} set={set} clear={clear} />}
       {body}
     </WidgetFrame>
   )

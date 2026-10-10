@@ -26,6 +26,7 @@ type Widget = {
   cardId?: string | null
   body?: string | null
   hostRef?: string | null
+  filters?: Record<string, string | boolean | string[]> | null
 }
 
 async function authenticate(request: APIRequestContext): Promise<Auth> {
@@ -573,5 +574,217 @@ for (const theme of ['dark', 'light'] as const) {
     await page.screenshot({
       path: path.join(process.env.PB_WIDGET_SHOTS!, `plugin-widgets-${theme}.png`),
     })
+  })
+}
+
+test('needs attention kind chips and search filter rows and persist across reload', async ({
+  request,
+  page,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 })
+  const auth = await authenticate(request)
+  const project = await createProject(request, auth, 'attn-filter')
+  const alpha = `alpha stuck ${Date.now()}`
+  const beta = `beta stuck ${Date.now()}`
+  await createCard(request, auth, project.id, { title: alpha, blocked: true })
+  await createCard(request, auth, project.id, { title: beta, blocked: true })
+
+  const viewId = await createView(request, auth, [
+    { id: 'w-attn', kind: 'attention', x: 0, y: 0, w: 6, h: 10, projectId: project.id },
+  ])
+  await openView(page, auth.token, viewId)
+
+  const attn = widgetOf(page, 'attention')
+  const list = attn.getByTestId('dash-attention-list')
+  await expect(list).toContainText(alpha, { timeout: 15_000 })
+  await expect(list).toContainText(beta)
+
+  // The bar starts closed with no filters active.
+  await expect(attn.getByTestId('widget-filter-bar')).toHaveCount(0)
+  await attn.getByTestId('widget-filter-button').click()
+  const kind = attn.getByTestId('widget-filter-kind')
+  // Questions only: the blocked cards drop out.
+  await kind.locator('[data-value="question"]').click()
+  await expect(attn.getByTestId('dash-filter-nomatch')).toBeVisible()
+  // Adding Blocked brings them back; search narrows to one.
+  await kind.locator('[data-value="blocked"]').click()
+  await expect(list).toContainText(beta)
+  await attn.getByTestId('widget-filter-q').fill('alpha')
+  await expect(list).not.toContainText(beta)
+  await expect(list).toContainText(alpha)
+
+  await expectSaved(page)
+  await expect
+    .poll(
+      async () =>
+        ((await viewWidgets(request, auth, viewId))[0] as { filters?: unknown }).filters ?? null,
+    )
+    .toEqual({ kind: ['question', 'blocked'], q: 'alpha' })
+
+  await page.reload()
+  // Active filters reopen the bar and still apply.
+  await expect(attn.getByTestId('widget-filter-bar')).toBeVisible({ timeout: 15_000 })
+  await expect(list).toContainText(alpha, { timeout: 15_000 })
+  await expect(list).not.toContainText(beta)
+  await expect(attn.getByTestId('widget-filter-q')).toHaveValue('alpha')
+  await expect(attn.getByTestId('widget-filter-button')).toContainText('2')
+
+  // Clear right after typing (inside the search debounce) must not let the
+  // pending keystroke re-save once the clear has landed.
+  await attn.getByTestId('widget-filter-q').fill('pending-text')
+  await attn.getByTestId('widget-filter-clear').click()
+  await expect(list).toContainText(beta)
+  await expect(attn.getByTestId('widget-filter-q')).toHaveValue('')
+  // Outlast the 200ms debounce: what's checked is that nothing arrives late.
+  await page.waitForTimeout(600)
+  await expectSaved(page)
+  await expect
+    .poll(
+      async () =>
+        ((await viewWidgets(request, auth, viewId))[0] as { filters?: unknown }).filters ?? null,
+    )
+    .toBeNull()
+  expect(
+    ((await viewWidgets(request, auth, viewId))[0] as { filters?: unknown }).filters ?? null,
+  ).toBeNull()
+})
+
+/** Worker todos for the todos-filter test: real todos only arrive from a
+ *  worker's TodoWrite stream, so the endpoint is stubbed. */
+const TODOS = {
+  cards: [
+    {
+      card_id: 'c-api',
+      card_title: 'Build the API',
+      todos: [
+        { content: 'Write migration', status: 'completed' },
+        { content: 'Add route handler', status: 'in_progress', activeForm: 'Adding route handler' },
+        { content: 'Write route tests', status: 'pending' },
+      ],
+    },
+    {
+      card_id: 'c-ui',
+      card_title: 'Polish the UI',
+      todos: [
+        { content: 'Fix dark theme contrast', status: 'pending' },
+        { content: 'Ship screenshots', status: 'completed' },
+      ],
+    },
+  ],
+}
+
+test('todos status chips and search filter items and persist across reload', async ({
+  request,
+  page,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 })
+  const auth = await authenticate(request)
+  const project = await createProject(request, auth, 'todos-filter')
+  await page.route('**/api/projects/*/todos', (r) => r.fulfill({ json: TODOS }))
+  const viewId = await createView(request, auth, [
+    { id: 'w-todos', kind: 'todos', x: 0, y: 0, w: 5, h: 10, projectId: project.id },
+  ])
+  await openView(page, auth.token, viewId)
+
+  const todos = widgetOf(page, 'todos')
+  const list = todos.getByTestId('dash-todos-list')
+  await expect(list).toContainText('Write migration', { timeout: 15_000 })
+  await expect(todos.getByTestId('widget-filter-bar')).toHaveCount(0)
+
+  await todos.getByTestId('widget-filter-button').click()
+  await todos.getByTestId('widget-filter-status').locator('[data-value="pending"]').click()
+  await expect(list).toContainText('Write route tests')
+  await expect(list).toContainText('Fix dark theme contrast')
+  await expect(list).not.toContainText('Write migration')
+  await expect(list).not.toContainText('Adding route handler')
+  await todos.getByTestId('widget-filter-q').fill('route')
+  await expect(list).not.toContainText('Fix dark theme contrast')
+  await expect(list).toContainText('Write route tests')
+
+  await expectSaved(page)
+  const savedFilters = async () =>
+    ((await viewWidgets(request, auth, viewId))[0] as { filters?: unknown }).filters ?? null
+  await expect.poll(savedFilters).toEqual({ status: ['pending'], q: 'route' })
+
+  await page.reload()
+  await expect(todos.getByTestId('widget-filter-bar')).toBeVisible({ timeout: 15_000 })
+  await expect(list).toContainText('Write route tests', { timeout: 15_000 })
+  await expect(list).not.toContainText('Fix dark theme contrast')
+  await expect(list).not.toContainText('Write migration')
+  await expect(todos.getByTestId('widget-filter-q')).toHaveValue('route')
+  await expect(todos.getByTestId('widget-filter-button')).toContainText('2')
+
+  // A search nothing matches offers a one-click reset.
+  await todos.getByTestId('widget-filter-q').fill('zzz-nothing')
+  await expect(todos.getByTestId('dash-filter-nomatch')).toBeVisible()
+  await todos.getByTestId('widget-filter-clear').click()
+  await expect(list).toContainText('Write migration')
+  await expect(list).toContainText('Fix dark theme contrast')
+  await expect(todos.getByTestId('widget-filter-q')).toHaveValue('')
+  await expectSaved(page)
+  await expect.poll(savedFilters).toBeNull()
+})
+
+const BG_TASKS = {
+  tasks: [
+    ['t1', 's1', 'Build release', 'cargo build --release', 'running', null],
+    ['t2', 's1', 'Build release', 'npm run build', 'succeeded', 0],
+    ['t3', 's2', 'Fix flaky e2e', 'npx playwright test', 'failed', 1],
+    ['t4', 's2', 'Fix flaky e2e', 'scripts/e2e-shards.sh 4', 'failed', 2],
+  ].map(([id, sid, sname, program, status, exit]) => ({
+    id,
+    session_id: sid,
+    session_name: sname,
+    label: program,
+    program,
+    status,
+    exit_code: exit,
+    started_at: new Date(Date.now() - 300_000).toISOString(),
+    finished_at: status === 'running' ? null : new Date(Date.now() - 60_000).toISOString(),
+    stopping: false,
+  })),
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`screenshot: filtered widgets, ${theme} theme`, async ({ request, page }) => {
+    test.skip(!process.env.PB_WIDGET_SHOTS, 'set PB_WIDGET_SHOTS=<dir> to capture')
+    await page.setViewportSize({ width: 1400, height: 800 })
+    const auth = await authenticate(request)
+    const project = await createProject(request, auth, `fshots-${theme}`)
+    await page.route('**/api/projects/*/todos', (r) => r.fulfill({ json: TODOS }))
+    await page.route(/\/api\/dashboard\/background(\?|$)/, (r) => r.fulfill({ json: BG_TASKS }))
+    const viewId = await createView(request, auth, [
+      {
+        id: 'w-bg',
+        kind: 'background',
+        x: 0,
+        y: 0,
+        w: 5,
+        h: 9,
+        filters: { status: ['failed'], q: 'e2e' },
+      },
+      {
+        id: 'w-todos',
+        kind: 'todos',
+        x: 5,
+        y: 0,
+        w: 3,
+        h: 9,
+        projectId: project.id,
+        filters: { status: ['pending', 'in_progress'] },
+      },
+      { id: 'w-rep', kind: 'repeating', x: 8, y: 0, w: 4, h: 9, filters: { state: 'enabled' } },
+    ])
+    await openView(page, auth.token, viewId, theme)
+    await expect(widgetOf(page, 'background').getByTestId('dash-background-list')).toBeVisible({
+      timeout: 15_000,
+    })
+    await expect(page.getByTestId('widget-filter-bar')).toHaveCount(3)
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 })
+    const dir = process.env.PB_WIDGET_SHOTS!
+    await page.screenshot({ path: path.join(dir, `filters-${theme}.png`) })
+    // The combo picker open, over the background widget.
+    await widgetOf(page, 'background').getByTestId('widget-filter-session').click()
+    await page.screenshot({ path: path.join(dir, `filters-combo-${theme}.png`) })
   })
 }

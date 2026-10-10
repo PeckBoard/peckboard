@@ -3980,7 +3980,15 @@ mod tests {
                 report_ref: Some("f/r.md".into()),
                 ..at("rep", Report, 2)
             },
-            at("bg", Background, 4),
+            ViewWidget {
+                filters: Some(
+                    serde_json::json!({"q": "build", "status": ["running", "failed"]})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                ..at("bg", Background, 4)
+            },
             at("rt", Repeating, 6),
             ViewWidget {
                 project_id: Some("p1".into()),
@@ -4012,6 +4020,12 @@ mod tests {
             at("hosts", SshHosts, 28),
             ViewWidget {
                 project_id: Some("p1".into()),
+                filters: Some(
+                    serde_json::json!({"failing": true, "review": []})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
                 ..at("prs", Prs, 30)
             },
             at("orch", Orchestrators, 32),
@@ -4032,10 +4046,14 @@ mod tests {
         assert_eq!(wire[0]["body"], "# Hi");
         assert!(wire[0].get("projectId").is_none());
         assert_eq!(wire[1]["reportRef"], "f/r.md");
-        assert!(
-            wire[2].as_object().unwrap().len() == 6,
-            "background has no refs"
+        assert_eq!(
+            wire[2].as_object().unwrap().len(),
+            7,
+            "background has no refs, only filters"
         );
+        assert_eq!(wire[2]["filters"]["status"][1], "failed");
+        assert!(wire[0].get("filters").is_none(), "note has no filters");
+        assert_eq!(wire[3]["filters"], serde_json::Value::Null);
         assert_eq!(wire[5]["projectId"], serde_json::Value::Null);
         assert_eq!(wire[6]["kind"], "review_queue");
         assert_eq!(wire[10]["cardId"], "c1");
@@ -4046,6 +4064,7 @@ mod tests {
         assert!(wire[14].get("hostRef").is_none(), "ssh_hosts has no ref");
         assert_eq!(wire[15]["kind"], "prs");
         assert_eq!(wire[15]["projectId"], "p1");
+        assert_eq!(wire[15]["filters"]["failing"], true);
         assert_eq!(wire[16]["kind"], "orchestrators");
         assert!(
             wire[16].get("projectId").is_none(),
@@ -4109,6 +4128,55 @@ mod tests {
                 "{r}"
             );
         }
+
+        // Filters: only on kinds that have them, bounded per contract.
+        let filt = |v: serde_json::Value| v.as_object().unwrap().clone();
+        let with = |kind, v: serde_json::Value| ViewWidget {
+            filters: Some(filt(v)),
+            ..at("x", kind, 0)
+        };
+        let kinds = [
+            Note,
+            crate::db::crud::WidgetKind::Session,
+            crate::db::crud::WidgetKind::Terminal,
+            crate::db::crud::WidgetKind::Project,
+            ReviewQuality,
+        ];
+        for kind in kinds {
+            assert!(bad(with(kind, serde_json::json!({}))), "{kind:?}");
+        }
+        assert!(!bad(with(Todos, serde_json::json!({}))));
+        let many: serde_json::Map<_, _> = (0..21)
+            .map(|i| ("k".repeat(i + 1), serde_json::Value::Bool(true)))
+            .collect();
+        assert!(bad(with(Workers, serde_json::Value::Object(many))));
+        for key in ["", "Q", "a-b", "k1", &"k".repeat(33)] {
+            assert!(bad(with(Workers, serde_json::json!({ key: "v" }))), "{key}");
+        }
+        assert!(!bad(with(
+            Workers,
+            serde_json::json!({ "k".repeat(32): "v" })
+        )));
+        for v in [
+            serde_json::json!(1),
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!([1]),
+            serde_json::json!("x".repeat(201)),
+            serde_json::json!(["x".repeat(201)]),
+            serde_json::json!(vec!["a"; 51]),
+        ] {
+            assert!(bad(with(Workers, serde_json::json!({ "q": v }))));
+        }
+        assert!(!bad(with(
+            Workers,
+            serde_json::json!({ "q": "x".repeat(200), "m": vec!["a"; 50] })
+        )));
+        // 20 legal keys of 200-char lists still blow the 4096-byte cap.
+        let big: serde_json::Map<_, _> = (0..20)
+            .map(|i| ("k".repeat(i + 1), serde_json::json!(["x".repeat(200)])))
+            .collect();
+        assert!(bad(with(Workers, serde_json::Value::Object(big))));
     }
 
     #[tokio::test]

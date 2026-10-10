@@ -158,6 +158,9 @@ interface Props {
   titleTestId?: string
   /** Live status chips beside the title (agent dot, terminal pill…). */
   statusSlot?: ReactNode
+  /** Header controls right of the spacer, before the ⋮ menu (e.g. the
+   *  filter toggle). */
+  actions?: ReactNode
   menuItems: MenuItem[]
   ctx: WidgetContext
   /** Extra attributes on the root, e.g. `data-pane-id` / `data-terminal-id`. */
@@ -176,6 +179,7 @@ export default function WidgetFrame({
   onTitleClick,
   titleTestId,
   statusSlot,
+  actions,
   menuItems,
   ctx,
   dataAttrs,
@@ -239,6 +243,7 @@ export default function WidgetFrame({
         )}
         {statusSlot && <span className="widget-status">{statusSlot}</span>}
         <span className="widget-header-spacer" />
+        {actions}
         <MenuButton
           items={menuItems}
           ariaLabel="Widget menu"

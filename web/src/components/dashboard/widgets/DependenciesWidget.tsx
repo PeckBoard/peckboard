@@ -2,7 +2,8 @@ import { useMemo, type ReactNode } from 'react'
 import WidgetFrame from '../WidgetFrame'
 import type { InfoWidgetProps } from './types'
 import { humanize, useDashboardData } from './useDashboardData'
-import { DashEmpty, DashError, DashHeading, DashLoading } from './DashParts'
+import { DashEmpty, DashError, DashHeading, DashLoading, DashNoMatch } from './DashParts'
+import { FilterBar, FilterButton, useWidgetFilters, type FilterDef } from './filters'
 
 interface DepNode {
   card_id: string
@@ -153,16 +154,33 @@ function DepGraph({ data, onOpen }: { data: Deps; onOpen: () => void }) {
   )
 }
 
+const FILTER_DEFS: FilterDef[] = [
+  { key: 'hide_done', kind: 'toggle', label: 'Hide done' },
+  { key: 'blocked', kind: 'toggle', label: 'Blocked only' },
+]
+
+/** Applies Hide done / Blocked only: hidden nodes take their edges with
+ *  them. A blocker is rarely blocked itself, so under Blocked only the top
+ *  blockers keep the cards a shown card waits on. */
+function filterDeps(data: Deps, hideDone: boolean, blockedOnly: boolean): Deps {
+  if (!hideDone && !blockedOnly) return data
+  const nodes = data.nodes.filter((n) => !(hideDone && n.done) && !(blockedOnly && !n.blocked))
+  const ids = new Set(nodes.map((n) => n.card_id))
+  const edges = data.edges.filter((e) => ids.has(e.card_id) && ids.has(e.depends_on))
+  const done = new Set(data.nodes.filter((n) => n.done).map((n) => n.card_id))
+  const holding = new Set(data.edges.filter((e) => ids.has(e.card_id)).map((e) => e.depends_on))
+  const top_blockers = data.top_blockers.filter(
+    (b) =>
+      !(hideDone && done.has(b.card_id)) &&
+      (blockedOnly ? holding.has(b.card_id) : ids.has(b.card_id)),
+  )
+  return { nodes, edges, top_blockers }
+}
+
 /** Card Dependencies: the cards holding up the most work, and the project's
  *  dependency graph (optionally rooted at one card). */
-export default function DependenciesWidget({
-  widget,
-  ctx,
-  menuItems,
-  scopeProjectId,
-  scopeName,
-  onOpenProject,
-}: InfoWidgetProps) {
+export default function DependenciesWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, scopeProjectId, scopeName, onOpenProject } = props
   const path = scopeProjectId
     ? `/api/dashboard/dependencies${widget.cardId ? `?card_id=${encodeURIComponent(widget.cardId)}` : ''}`
     : null
@@ -173,6 +191,21 @@ export default function DependenciesWidget({
   const openBoard = () => {
     if (scopeProjectId) onOpenProject(scopeProjectId)
   }
+  const {
+    filters,
+    set,
+    clear,
+    activeCount,
+    open: filterOpen,
+    toggle: toggleFilters,
+  } = useWidgetFilters(props)
+  const hideDone = filters.hide_done === true
+  const blockedOnly = filters.blocked === true
+  // Memoized so the graph's layout only reruns when the data or filters change.
+  const shown = useMemo(
+    () => (data ? filterDeps(data, hideDone, blockedOnly) : null),
+    [data, hideDone, blockedOnly],
+  )
 
   let body: ReactNode
   if (!scopeProjectId) {
@@ -185,14 +218,16 @@ export default function DependenciesWidget({
     body = error ? <DashError message={error} onRetry={() => void reload()} /> : <DashLoading />
   } else if (data.edges.length === 0) {
     body = <DashEmpty testId="dash-dependencies-empty">No card dependencies</DashEmpty>
+  } else if (!shown || shown.nodes.length === 0) {
+    body = <DashNoMatch onClear={clear} />
   } else {
     body = (
       <div className="dash-deps" data-testid="dash-dependencies-list">
-        {data.top_blockers.length > 0 && (
+        {shown.top_blockers.length > 0 && (
           <section className="dash-group dash-deps-blockers">
             <DashHeading>Top blockers</DashHeading>
             <ul className="dash-list">
-              {data.top_blockers.map((b) => (
+              {shown.top_blockers.map((b) => (
                 <li key={b.card_id} data-card-id={b.card_id}>
                   <button type="button" className="dash-row" onClick={openBoard} title={b.title}>
                     <span className="dash-row-main">
@@ -208,7 +243,7 @@ export default function DependenciesWidget({
           </section>
         )}
         <div className="dash-dag-wrap">
-          <DepGraph data={data} onOpen={openBoard} />
+          <DepGraph data={shown} onOpen={openBoard} />
         </div>
       </div>
     )
@@ -219,9 +254,17 @@ export default function DependenciesWidget({
       kind="dependencies"
       widgetId={widget.id}
       title={scopeName ? `Dependencies · ${scopeName}` : 'Card Dependencies'}
+      statusSlot={
+        scopeProjectId && data ? (
+          <FilterButton activeCount={activeCount} open={filterOpen} onToggle={toggleFilters} />
+        ) : undefined
+      }
       menuItems={menuItems}
       ctx={ctx}
     >
+      {filterOpen && scopeProjectId && data && (
+        <FilterBar defs={FILTER_DEFS} filters={filters} set={set} clear={clear} />
+      )}
       {body}
     </WidgetFrame>
   )

@@ -32,6 +32,19 @@ export function DashEmpty({ testId, children }: { testId: string; children: Reac
     </div>
   )
 }
+/** Shown when a widget's filters hide every row. */
+export function DashNoMatch({ onClear }: { onClear: () => void }) {
+  return (
+    <div className="dash-empty" data-testid="dash-filter-nomatch">
+      <p>
+        No matches —{' '}
+        <button type="button" className="widget-filter-nomatch-clear" onClick={onClear}>
+          Clear filters
+        </button>
+      </p>
+    </div>
+  )
+}
 
 /** Small uppercase section heading with an optional count. */
 export function DashHeading({ children, count }: { children: ReactNode; count?: number }) {

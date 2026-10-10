@@ -1,9 +1,17 @@
 import { useMemo } from 'react'
 import { parseTodoItems, type TodoItem } from '../../../types/todo'
 import WidgetFrame from '../WidgetFrame'
-import { DashCount, DashEmpty, DashError, DashLoading } from './DashParts'
+import { DashCount, DashEmpty, DashError, DashLoading, DashNoMatch } from './DashParts'
 import { useDashboardData } from './useDashboardData'
 import type { InfoWidgetProps } from './types'
+import {
+  FilterBar,
+  FilterButton,
+  inSet,
+  matchesSearch,
+  useWidgetFilters,
+  type FilterDef,
+} from './filters'
 import '../../../styles/dashboard-info.css'
 
 interface CardTodos {
@@ -14,16 +22,31 @@ interface CardTodos {
 
 const GLYPH: Record<TodoItem['status'], string> = { done: '✓', in_progress: '◐', pending: '○' }
 
+/** Status chip value per todo status (the contract says `completed`). */
+const STATUS_KEY: Record<TodoItem['status'], string> = {
+  pending: 'pending',
+  in_progress: 'in_progress',
+  done: 'completed',
+}
+
+const FILTER_DEFS: FilterDef[] = [
+  { key: 'q', kind: 'search', placeholder: 'Search todos…' },
+  {
+    key: 'status',
+    kind: 'chips',
+    label: 'Status',
+    options: [
+      { value: 'pending', label: 'Pending' },
+      { value: 'in_progress', label: 'In progress' },
+      { value: 'completed', label: 'Completed' },
+    ],
+  },
+]
+
 /** Worker todo lists across one project's cards (`GET /api/projects/{id}/todos`),
  *  each card with a progress bar; open items first. */
-export default function TodosWidget({
-  widget,
-  ctx,
-  menuItems,
-  scopeProjectId,
-  scopeName,
-  onOpenProject,
-}: InfoWidgetProps) {
+export default function TodosWidget(props: InfoWidgetProps) {
+  const { widget, ctx, menuItems, scopeProjectId, scopeName, onOpenProject } = props
   const { data, error, reload } = useDashboardData<{ cards?: unknown }>(
     scopeProjectId ? `/api/projects/${encodeURIComponent(scopeProjectId)}/todos` : null,
     null,
@@ -41,6 +64,19 @@ export default function TodosWidget({
       .filter((g) => g.todos.length > 0)
   }, [data])
   const open = groups.reduce((n, g) => n + g.todos.filter((t) => t.status !== 'done').length, 0)
+  const { filters, set, clear, activeCount, open: barOpen, toggle } = useWidgetFilters(props)
+  // Filters narrow items; a card shows while any of its items match. The
+  // progress bar still counts the card's whole list.
+  const shown = groups
+    .map((g) => ({
+      ...g,
+      items: g.todos.filter(
+        (t) =>
+          inSet(filters.status, STATUS_KEY[t.status]) &&
+          matchesSearch(filters.q, t.content, t.activeForm, g.card_title),
+      ),
+    }))
+    .filter((g) => g.items.length > 0)
 
   let body
   if (error && !data) body = <DashError message={error} onRetry={() => void reload()} />
@@ -52,14 +88,15 @@ export default function TodosWidget({
         <p className="form-hint">Todos appear when a card&apos;s worker reports them.</p>
       </DashEmpty>
     )
+  else if (shown.length === 0) body = <DashNoMatch onClear={clear} />
   else
     body = (
       <div className="dash-scroll">
         <ul className="dash-todo-groups" data-testid="dash-todos-list">
-          {groups.map((g) => {
+          {shown.map((g) => {
             const done = g.todos.filter((t) => t.status === 'done').length
             const order = { in_progress: 0, pending: 1, done: 2 }
-            const items = g.todos.slice().sort((a, b) => order[a.status] - order[b.status])
+            const items = g.items.slice().sort((a, b) => order[a.status] - order[b.status])
             return (
               <li key={g.card_id} className="dash-todo-group" data-card-id={g.card_id}>
                 <div className="dash-todo-head">
@@ -106,10 +143,12 @@ export default function TodosWidget({
       title={scopeName ? `${scopeName} — Todos` : 'Todos'}
       onTitleClick={scopeProjectId ? () => onOpenProject(scopeProjectId) : undefined}
       statusSlot={data && <DashCount n={open} label={`${open} open`} />}
+      actions={<FilterButton activeCount={activeCount} open={barOpen} onToggle={toggle} />}
       menuItems={menuItems}
       ctx={ctx}
       dataAttrs={{ 'data-project-id': scopeProjectId ?? undefined }}
     >
+      {barOpen && <FilterBar defs={FILTER_DEFS} filters={filters} set={set} clear={clear} />}
       {body}
     </WidgetFrame>
   )
