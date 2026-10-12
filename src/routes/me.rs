@@ -49,9 +49,9 @@ pub struct TabView {
     /// project / report / repeating-task tabs.
     pub is_repeating_task_session: bool,
     /// True iff this tab refers to a temp session — one deleted outright
-    /// when its last tab (across all users) is closed. The strip marks the
-    /// chip and offers a "Keep session" action. Always false for
-    /// non-session tabs.
+    /// when its last tab (across all users) is closed (see
+    /// [`deletes_on_last_tab_close`]). The strip marks the chip and offers a
+    /// "Keep session" action. Always false for non-session tabs.
     pub is_temp: bool,
     /// When the session tab's session was sealed (its card moved on; no
     /// agent runs in it again). `None` for live sessions and non-session tabs.
@@ -164,12 +164,13 @@ async fn list_tabs(State(state): State<Arc<AppState>>, req: Request<Body>) -> im
         let (name, is_worker, is_repeating_task_session, is_temp) = match t.item_type.as_str() {
             "session" => match state.db.get_session(&t.item_id).await.ok().flatten() {
                 Some(s) => {
+                    let is_temp = deletes_on_last_tab_close(&s);
                     seal = (s.sealed_at, s.sealed_reason);
                     (
                         Some(s.name),
                         s.is_worker,
                         s.repeating_task_id.is_some(),
-                        s.is_temp,
+                        is_temp,
                     )
                 }
                 None => (None, false, false, false),
@@ -315,13 +316,9 @@ async fn upsert_tab(State(state): State<Arc<AppState>>, req: Request<Body>) -> i
             {
                 "session" => match state.db.get_session(&tab.item_id).await.ok().flatten() {
                     Some(s) => {
+                        let is_temp = deletes_on_last_tab_close(&s);
                         seal = (s.sealed_at, s.sealed_reason);
-                        (
-                            s.name,
-                            s.is_worker,
-                            s.repeating_task_id.is_some(),
-                            s.is_temp,
-                        )
+                        (s.name, s.is_worker, s.repeating_task_id.is_some(), is_temp)
                     }
                     None => (String::new(), false, false, false),
                 },
@@ -443,8 +440,19 @@ async fn delete_tab(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Delete `session_id` iff it is a temp, non-worker session with zero
-/// remaining tabs. Part of the tab-close path — see [`delete_tab`].
+/// Whether closing the last tab on `session` deletes it: a temp session
+/// the user owns the lifecycle of. Workers belong to the orchestrator, and
+/// expert sessions to the core service or plugin that spawned them (e.g. the
+/// Project Planner's interview session, which it keeps driving after the
+/// user peeks at it) — viewing one in a tab and closing it must not kill it.
+/// The startup orphan sweep still reclaims tab-less temp sessions.
+fn deletes_on_last_tab_close(session: &crate::db::models::Session) -> bool {
+    session.is_temp && !session.is_worker && !session.is_expert
+}
+
+/// Delete `session_id` iff it is a temp session with zero remaining tabs
+/// whose lifecycle is the user's ([`deletes_on_last_tab_close`]).
+/// Part of the tab-close path — see [`delete_tab`].
 async fn maybe_delete_temp_session(state: &AppState, session_id: &str) {
     let session = match state.db.get_session(session_id).await {
         Ok(Some(s)) => s,
@@ -455,10 +463,7 @@ async fn maybe_delete_temp_session(state: &AppState, session_id: &str) {
             return;
         }
     };
-    // No creation path sets is_temp on a worker, but a worker must never be
-    // deleted from a tab close — check defensively, mirroring the refusal
-    // in DELETE /api/sessions/:id.
-    if !session.is_temp || session.is_worker {
+    if !deletes_on_last_tab_close(&session) {
         return;
     }
     match state

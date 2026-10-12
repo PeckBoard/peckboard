@@ -190,3 +190,91 @@ test('repo rows offer the repo-scoped Project Planner; header does not', async (
     timeout: 15_000,
   })
 })
+
+test('interview session stays out of session lists and survives being viewed', async ({
+  page,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const auth = await authenticate(request)
+
+  const catalogRes = await request.get('/api/plugins', { headers: auth })
+  const catalog = catalogRes.ok() ? await catalogRes.json() : { plugins: [] }
+  test.skip(
+    !JSON.stringify(catalog).includes('project-planner'),
+    'project-planner wasm not built/staged — run peck-plugins/project-planner/build.sh',
+  )
+
+  const folderName = `e2e-planner-hidden-${Date.now()}`
+  const root = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-'))
+  const res = spawnSync('git', ['-C', root, 'init', '-b', 'main'], { encoding: 'utf8' })
+  expect(res.status, res.stderr).toBe(0)
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: folderName, path: root },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  // Expert sessions (the planner's interview session is one) are still
+  // reachable through the expert usage rollup — that's how the id is found.
+  type Entity = { id: string; name: string }
+  const plannerSessions = async (): Promise<Entity[]> => {
+    const body = await (await request.get('/api/usage/experts', { headers: auth })).json()
+    const rows = (Array.isArray(body) ? body : (body.items ?? [])) as Entity[]
+    return rows.filter((r) => r.name.startsWith('Project Planner interview'))
+  }
+  const before = new Set((await plannerSessions()).map((s) => s.id))
+
+  await loginUi(page, baseURL!)
+  await page.goto(`/folders/${folder.id}/plugin/project-planner?repo=.`)
+  const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
+  await expect(frame.getByText('Plan this project, one question at a time')).toBeVisible({
+    timeout: 15_000,
+  })
+  await frame.locator('.model-select').selectOption({ label: 'Mock: plan review (thinking)' })
+  await frame.getByRole('button', { name: 'Begin the interview' }).click()
+  await expect(frame.locator('.dots')).toBeVisible({ timeout: 15_000 })
+
+  let id = ''
+  await expect
+    .poll(async () => {
+      const created = (await plannerSessions()).find((s) => !before.has(s.id))
+      if (created) id = created.id
+      return !!created
+    })
+    .toBe(true)
+
+  // Not in the sessions list (all folders, this folder, or a name search).
+  const listed = async (query: string) =>
+    (
+      (await (await request.get(`/api/sessions?${query}`, { headers: auth })).json()) as {
+        items: { id: string }[]
+      }
+    ).items.some((s) => s.id === id)
+  expect(await listed('limit=500')).toBe(false)
+  expect(await listed(`folder_id=${folder.id}&limit=500`)).toBe(false)
+  expect(await listed(`q=${encodeURIComponent('Project Planner')}&limit=500`)).toBe(false)
+
+  // Nor on the Sessions page (the default view).
+  await page.goto('/')
+  await expect(page.locator('.rail')).toBeVisible()
+  await expect(
+    page.locator('.list-view-row', { hasText: 'Project Planner interview' }),
+  ).toHaveCount(0)
+
+  // Viewing it via its URL opens it — and closing that tab must not delete
+  // the session (the plugin is still driving it).
+  await page.goto(`/sessions/${id}`)
+  const chip = page.locator(`.tab-wrap[data-tab-id="session:${id}"]`)
+  await expect(chip).toBeVisible({ timeout: 15_000 })
+  await expect(chip.locator('.tab-icon-temp-session')).toHaveCount(0)
+  await chip.locator('.tab-close').click()
+  await expect(chip).toHaveCount(0)
+
+  // Give a (wrong) delete-on-close time to land before asserting it didn't.
+  await page.waitForTimeout(1_000)
+  const after = await request.get(`/api/sessions/${id}`, { headers: auth })
+  expect(after.status(), 'planner session must survive being viewed').toBe(200)
+})
