@@ -860,15 +860,17 @@ pub async fn notify_attachments_dropped(
 /// The system prompt for a provider with no Claude-style
 /// `--append-system-prompt`: the provider's base prompt (the shared
 /// working-style rules, or the user's per-provider override from
-/// `provider::base_prompt` — which REPLACES them), then any per-spawn suffix
-/// (repeating-task context), then any per-session custom prompt. Mirrors how
-/// the Claude provider layers the same three sources so a session behaves
-/// the same whichever CLI runs it — before this, only Claude honoured
-/// `system_prompt_suffix` at all, and cursor honoured neither.
+/// `provider::base_prompt` — which REPLACES them), then the graphify guide
+/// (always — an override must not drop how to read and locate code), then
+/// any per-spawn suffix (repeating-task context), then any per-session
+/// custom prompt. Mirrors how the Claude provider layers the same sources so
+/// a session behaves the same whichever CLI runs it — before this, only
+/// Claude honoured `system_prompt_suffix` at all, and cursor honoured neither.
 pub fn compose_system_prompt(config: &SpawnConfig, base_override: Option<&str>) -> String {
     let mut prompt = base_override
         .unwrap_or(crate::provider::WORKING_STYLE)
         .to_string();
+    prompt.push_str(crate::provider::GRAPHIFY_GUIDE);
     for extra in [
         config.system_prompt_suffix.as_deref(),
         config.system_prompt_override.as_deref(),
@@ -1696,10 +1698,12 @@ mod tests {
     #[test]
     fn compose_system_prompt_layers_suffix_then_override() {
         let mut config = SpawnConfig::default();
-        assert_eq!(
-            compose_system_prompt(&config, None),
-            crate::provider::WORKING_STYLE
+        let base = format!(
+            "{}{}",
+            crate::provider::WORKING_STYLE,
+            crate::provider::GRAPHIFY_GUIDE
         );
+        assert_eq!(compose_system_prompt(&config, None), base);
 
         config.system_prompt_suffix = Some("# Repeating Task Context".into());
         config.system_prompt_override = Some("Always answer in haiku.".into());
@@ -1712,10 +1716,7 @@ mod tests {
         // Blank values add nothing (not even a stray newline).
         config.system_prompt_suffix = Some("   ".into());
         config.system_prompt_override = Some(String::new());
-        assert_eq!(
-            compose_system_prompt(&config, None),
-            crate::provider::WORKING_STYLE
-        );
+        assert_eq!(compose_system_prompt(&config, None), base);
     }
 
     #[tokio::test]
@@ -1741,8 +1742,16 @@ mod tests {
             .unwrap();
         let base = base_prompt::override_for(&db, "mock").await;
         let prompt = compose_system_prompt(&config, base.as_deref());
-        assert_eq!(prompt, "Custom base.\nSession rule.");
+        assert_eq!(
+            prompt,
+            format!(
+                "Custom base.{}\nSession rule.",
+                crate::provider::GRAPHIFY_GUIDE
+            )
+        );
         assert!(!prompt.contains("# Working style"));
+        // The graphify guide survives a base-prompt override.
+        assert!(prompt.contains("graphify_explain"));
         // Other providers are untouched.
         assert_eq!(base_prompt::override_for(&db, "claude").await, None);
 

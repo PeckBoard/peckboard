@@ -10,7 +10,7 @@ Graphify turns each git repo in a folder into a queryable knowledge graph and po
 
 ![The Graphify visualizer: the repo's graph with community clusters, a search box, and per-repo switches and counts]({{ "/assets/screenshots/plugins/graphify.png" | relative_url }})
 
-Everything is off until you switch it on: the folder carries a Graphify switch and each repo inside it carries its own, both default off. While a switch is off, every tool refuses and names the switch to flip; the switches are writable only from the page, so an agent can read them but cannot turn itself on. When switched on, the plugin also sets a session system prompt describing the repo's graph so the agent reaches for the tools first — `graphify_path` even returns a diagram of the hop chain that the chat renders inline.
+Nothing runs until it is switched on: the folder carries a Graphify switch and each repo inside it carries its own, both default off. Flip them on the page, or let a session do it — `graphify_build` switches graphify on for its folder and repo, then builds. While a switch is off, `graphify_path` and `graphify_explain` refuse and tell the agent to call `graphify_build`. Every provider's base prompt explains how to use the tools; when switched on, the plugin also sets a session system prompt describing the repo's graph so the agent reaches for the tools first — `graphify_path` even returns a diagram of the hop chain that the chat renders inline.
 
 | Tool               | What it does                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------------- |
@@ -23,7 +23,7 @@ Edges carry a confidence — **EXTRACTED** (stated in source), **INFERRED** (ded
 <details markdown="1">
 <summary>Installing the graphify engine, settings, and permissions</summary>
 
-The graph builder is the `graphifyy` Python package. When it is missing, every install banner offers an **Install from App Manager** button that opens the [App Manager]({{ "/plugins/app-manager.html" | relative_url }}) with the request prefilled (`python3`, `pip`, `graphifyy`), alongside a manual command — nothing installs behind your back. A legacy self-install into a private venv stays behind the off-by-default `auto_install` setting.
+The graph builder is the `graphifyy` Python package. When it is missing, a tool tells the agent to ask you for approval and then install `python3`, `pip`, and `graphifyy` itself through the [App Manager]({{ "/plugins/app-manager.html" | relative_url }})'s `app_install` tool. Every install banner on the page also offers an **Install from App Manager** button with the request prefilled, alongside a manual command — graphify never installs anything behind your back. A legacy self-install into a private venv stays behind the off-by-default `auto_install` setting.
 
 Settings: `python_bin` (`python3` or `python`, default `python3`), `auto_install` (default off), `prompt_mode` (`when_graph_exists`, `always`, or `off` — whether to set the session system prompt), `path_image` (default on — return found paths as chat-rendered diagrams), and `build_timeout_secs` (30–600, default 600).
 

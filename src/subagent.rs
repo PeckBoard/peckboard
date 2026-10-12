@@ -151,7 +151,13 @@ pub fn build_subagent_prompt(name: &str, parent_session_id: &str, task: &str) ->
          message. Never use terminal/shell tools (use `run_command` / \
          `run_tests` / `git`), never use `grep`/`sed` (use `search_files` and \
          the code tools), stay inside the project folder, and do not spawn \
-         further subagents.\n\n# Task\n\n{task}"
+         further subagents. When the `graphify_*` tools are available, use \
+         them first to read code and find where to change it: \
+         `graphify_explain` on the symbol or feature names the files to \
+         open, `graphify_path` shows how A reaches B, and `graphify_build` \
+         rebuilds the graph (call it when a tool reports no graph, and after \
+         editing to trace what you touched). If graphify is not installed, \
+         say so in your final message instead of installing it.\n\n# Task\n\n{task}"
     )
 }
 /// How long a subagent whose turn failed to authenticate gets to resume
