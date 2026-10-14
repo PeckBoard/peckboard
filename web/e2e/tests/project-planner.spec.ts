@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext } from '../harness'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -277,4 +277,86 @@ test('interview session stays out of session lists and survives being viewed', a
   await page.waitForTimeout(1_000)
   const after = await request.get(`/api/sessions/${id}`, { headers: auth })
   expect(after.status(), 'planner session must survive being viewed').toBe(200)
+})
+
+test('split definition: root index + section files are listed and browsable', async ({
+  page,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const auth = await authenticate(request)
+
+  const catalogRes = await request.get('/api/plugins', { headers: auth })
+  const catalog = catalogRes.ok() ? await catalogRes.json() : { plugins: [] }
+  test.skip(
+    !JSON.stringify(catalog).includes('project-planner'),
+    'project-planner wasm not built/staged — run peck-plugins/project-planner/build.sh',
+  )
+
+  const folderName = `e2e-planner-split-${Date.now()}`
+  const root = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-'))
+  const res = spawnSync('git', ['-C', root, 'init', '-b', 'main'], { encoding: 'utf8' })
+  expect(res.status, res.stderr).toBe(0)
+  // The layout the planner writes (the mock model never calls the planner's
+  // tools, so the writes themselves are unit-tested): a root index plus two
+  // section files, each depending on the root.
+  const depends =
+    '> Depends on: [PROJECT_DEFINITION.md](../PROJECT_DEFINITION.md) — this file is one section of that project definition; read it first.\n'
+  writeFileSync(
+    path.join(root, 'PROJECT_DEFINITION.md'),
+    '# Hat Shop\n\n## Purpose\nSell hats online.\n\n## Sections\n\n' +
+      '<!-- project-planner:sections — generated; edit the linked files, not this list -->\n\n' +
+      '- Users & Stories — not written yet\n' +
+      '- [Flows](project-definition/flows.md) — checkout flow\n' +
+      '- Architecture — not written yet\n' +
+      '- [Technology](project-definition/technology.md) — Rust\n' +
+      '- Deployment & Operations — not written yet\n' +
+      '- Open Questions — not written yet\n',
+  )
+  mkdirSync(path.join(root, 'project-definition'))
+  writeFileSync(
+    path.join(root, 'project-definition/flows.md'),
+    `# Flows\n\n${depends}\n- FLOW-CHECKOUT: cart to payment.\n`,
+  )
+  writeFileSync(
+    path.join(root, 'project-definition/technology.md'),
+    `# Technology\n\n${depends}\n- TECH-RUST: one Rust binary.\n`,
+  )
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: folderName, path: root },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  await loginUi(page, baseURL!)
+  await page.goto(`/folders/${folder.id}/plugin/project-planner?repo=.`)
+  const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
+  await expect(frame.getByText('Plan this project, one question at a time')).toBeVisible({
+    timeout: 15_000,
+  })
+  await expect(frame.locator('.file-chip')).toHaveText('PROJECT_DEFINITION.md + 2 section files')
+  // The panel lists the root and all six sections, written or not.
+  await frame.getByRole('button', { name: 'View definition' }).click()
+  const tabs = frame.locator('.def-file')
+  await expect(tabs).toHaveCount(7)
+  await expect(frame.locator('.def-file.active')).toContainText('Overview')
+  await expect(frame.locator('.def-view')).toContainText('Sell hats online.')
+  await expect(frame.locator('.def-file[data-section="architecture"]')).toContainText(
+    'not written yet',
+  )
+  // Two-column panel: the file list sits beside the viewer, not above it.
+  const navBox = await frame.locator('.def-files').boundingBox()
+  const viewBox = await frame.locator('.def-view').boundingBox()
+  expect(navBox && viewBox && navBox.x + navBox.width <= viewBox.x).toBeTruthy()
+
+  // A tab shows that one file; an index link jumps to its file.
+  await frame.locator('.def-file[data-section="technology"]').click()
+  await expect(frame.locator('.def-view')).toContainText('TECH-RUST')
+  await expect(frame.locator('.def-view')).toContainText('Depends on')
+  await frame.locator('.def-file[data-section="overview"]').click()
+  await frame.locator('.def-view a.def-link', { hasText: 'Flows' }).click()
+  await expect(frame.locator('.def-file.active')).toContainText('Flows')
+  await page.screenshot({ path: '../tmp-pp-shot-flows.png', fullPage: true })
 })
