@@ -169,6 +169,14 @@ pub trait LiveHost: Send + Sync {
     /// Clear `session_id`: cancel any run, wipe its events / todos /
     /// attachments, and reset its conversation. Fire-and-forget; no-op default.
     fn clear_session(&self, _session_id: String) {}
+    /// Clear `session_id` (the [`Self::clear_session`] wipe), then deliver
+    /// `text` and resume it — ordered inside one scheduled task, since
+    /// separate clear + send calls are unordered spawns and the wipe can kill
+    /// the fresh run. The default just calls both (fine for test doubles).
+    fn clear_then_send(&self, session_id: String, text: String) {
+        self.clear_session(session_id.clone());
+        self.send_message(session_id, text, Vec::new());
+    }
     /// Gracefully recycle the agent process for `session_id`: wind the child
     /// down after its current turn (immediately when idle) so the next
     /// message spawns with the session's current config. Used after a
@@ -2324,6 +2332,11 @@ fn caller_may_read_session(
 struct OrchestrateSendRequest {
     session_id: String,
     text: String,
+    /// Wipe the session's transcript before delivering — an orchestrator
+    /// brain starts every run with fresh context; its session memory (which
+    /// a clear never touches) carries what it must remember.
+    #[serde(default)]
+    fresh: bool,
 }
 
 pub(crate) fn orchestrate_send_impl(
@@ -2345,7 +2358,11 @@ pub(crate) fn orchestrate_send_impl(
     let Some(live) = live else {
         return error_json("live control unavailable");
     };
-    live.send_message(target.id.clone(), req.text, Vec::new());
+    if req.fresh {
+        live.clear_then_send(target.id.clone(), req.text);
+    } else {
+        live.send_message(target.id.clone(), req.text, Vec::new());
+    }
     serde_json::json!({ "ok": true, "session_id": target.id }).to_string()
 }
 
@@ -6615,6 +6632,12 @@ mod tests {
                 .unwrap()
                 .push(format!("terminate:{session_id}"));
         }
+        fn clear_then_send(&self, session_id: String, text: String) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("clear-send:{session_id}:{text}"));
+        }
     }
 
     #[tokio::test]
@@ -7891,6 +7914,15 @@ mod tests {
         let r = orchestrate_send_impl(&db, r#"{"session_id":"sO","text":"go"}"#, Some(rec.clone()));
         assert!(r.contains("\"ok\":true"), "send ok: {r}");
         assert_eq!(rec.calls.lock().unwrap().as_slice(), ["send:sO:go"]);
+        // fresh: one ordered clear-then-send, never a bare send.
+        let rec = std::sync::Arc::new(RecordingLive::default());
+        let r = orchestrate_send_impl(
+            &db,
+            r#"{"session_id":"sO","text":"go","fresh":true}"#,
+            Some(rec.clone()),
+        );
+        assert!(r.contains("\"ok\":true"), "fresh send ok: {r}");
+        assert_eq!(rec.calls.lock().unwrap().as_slice(), ["clear-send:sO:go"]);
 
         // create: unknown folder refuses; a real folder creates the session.
         let r = orchestrate_create_session_impl(&db, r#"{"folder_id":"nope","name":"W"}"#);

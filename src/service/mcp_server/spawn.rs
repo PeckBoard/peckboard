@@ -375,6 +375,26 @@ impl crate::plugin::host::LiveHost for AppLiveHost {
         });
     }
 
+    fn clear_then_send(&self, session_id: String, text: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        self.rt.spawn(async move {
+            // Wipe INSIDE the same task, before the send (see
+            // dispatch_capture). On failure, send anyway — stale context
+            // beats a run that never starts.
+            if let Err(e) = crate::routes::sessions::clear_session_core(&state, &session_id).await {
+                tracing::warn!("plugin clear_then_send clear for {session_id} failed: {e}");
+            }
+            if let Err(e) = AppExpertDispatcher::new(state)
+                .send_message_with_attachments(&session_id, text, Vec::new())
+                .await
+            {
+                tracing::warn!("plugin clear_then_send for {session_id} failed: {e}");
+            }
+        });
+    }
+
     fn recycle_agent_after_turn(&self, session_id: String) {
         let Some(state) = self.state.upgrade() else {
             return;

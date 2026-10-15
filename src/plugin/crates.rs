@@ -415,13 +415,15 @@ const SPECS: &[Spec] = &[
 mod tests {
     /// The committed session-control blob must be the build where hitting
     /// max_fires_per_hour skips instead of pausing forever. A stale
-    /// re-embed (the pre-0.4.7 build) carries the old "auto-paused" text.
+    /// re-embed (the pre-0.4.7 build) carries the old "— auto-paused" log
+    /// text. The bare word alone is no proof: the current build keeps an
+    /// "auto-paused" literal to heal those legacy pauses.
     #[test]
     fn embedded_session_control_wasm_has_no_auto_pause() {
         let wasm: &[u8] = include_bytes!("../../peck-plugins-wasm/session-control.wasm");
         let has = |needle: &[u8]| wasm.windows(needle.len()).any(|w| w == needle);
         assert!(
-            !has(b"auto-paused"),
+            !has("— auto-paused".as_bytes()),
             "stale session-control.wasm: auto-pauses at the cap"
         );
         assert!(has(b"skipping until the window frees up"));
