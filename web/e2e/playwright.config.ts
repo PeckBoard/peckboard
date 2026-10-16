@@ -123,6 +123,7 @@ for (const plugin of [
   'app-manager',
   'session-control',
   'project-planner',
+  'pr-review',
   'ui-gauge',
   'ssh-fleet',
 ]) {

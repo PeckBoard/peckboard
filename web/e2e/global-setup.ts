@@ -52,6 +52,7 @@ export default async function globalSetup() {
       'chicken-coop',
       'app-manager',
       'project-planner',
+      'pr-review',
       'session-control',
       'ui-gauge',
       'ssh-fleet',
