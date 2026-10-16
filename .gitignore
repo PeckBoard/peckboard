@@ -22,6 +22,7 @@ peck-plugins/*/*.wasm
 # blobs are rebuilt into peck-plugins-wasm/ — see scripts/check-plugin-blobs.sh.
 peck-plugins/_registry/
 peck-plugins/graphify/
+peck-plugins/pr-review/
 peck-plugins/project-planner/
 peck-plugins/session-control/
 peck-plugins/ssh-fleet/
