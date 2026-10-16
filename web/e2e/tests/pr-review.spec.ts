@@ -192,7 +192,43 @@ test('a submitted review renders summary, ticket, changes and praise', async ({
   await expect(finding.getByTestId('pr-review-consensus')).toBeVisible()
   await expect(frame.getByTestId('pr-review-praise-item')).toContainText('Thorough error-path')
 
-  // Back on the list the row is done with its verdict and blocker count.
+  // ── Triage: ignore the praise, reword the blocker; the preview follows ──
+  const publish = frame.getByTestId('pr-review-publish')
+  await expect(publish).toBeVisible()
+  const caption = frame.getByTestId('pr-review-publish-preview-caption')
+  await expect(caption).toContainText('0 ignored')
+  await frame.getByTestId('pr-review-praise-item').getByTestId('pr-review-finding-ignore').click()
+  await expect(frame.getByTestId('pr-review-ignored-group')).toBeVisible()
+  await expect(caption).toContainText('1 ignored')
+  await finding.getByTestId('pr-review-finding-edit').click()
+  await frame.getByTestId('pr-review-finding-comment-input').fill('Never log credentials.')
+  await frame.getByTestId('pr-review-finding-comment-save').click()
+  await expect(finding.getByTestId('pr-review-finding-edited')).toBeVisible()
+  await frame.getByTestId('pr-review-publish-preview').click()
+  await expect(frame.getByTestId('pr-review-publish-preview-item').first()).toContainText(
+    'issue (blocking): Never log credentials.',
+  )
+
+  // ── Decision is the user's: nothing pre-selected despite the verdict ──
+  for (const d of ['approve', 'request_changes', 'comment']) {
+    await expect(frame.getByTestId(`pr-review-decision-${d}`)).not.toBeChecked()
+  }
+  await expect(frame.getByTestId('pr-review-publish-start')).toBeDisabled()
+  const publishReq = page.waitForRequest(
+    (r) => r.url().includes('/api/plugin-ui/pr-review/publish') && r.method() === 'POST',
+  )
+  await frame.getByTestId('pr-review-decision-approve').check()
+  await frame.getByTestId('pr-review-publish-start').click()
+  await frame.getByTestId('pr-review-confirm-ok').click()
+  expect(((await publishReq).postDataJSON() as { decision: string }).decision).toBe('approve')
+
+  // The mock publish session never reports, so the watchdog fails it and
+  // the page offers a retry.
+  const status = frame.getByTestId('pr-review-publish-status')
+  await expect(status).toHaveAttribute('data-status', 'failed', { timeout: 60_000 })
+  await expect(frame.getByTestId('pr-review-publish-retry')).toBeVisible()
+
+  // Back on the list: done, the model's suggestion, and the publish chip.
   await frame.getByTestId('pr-review-back').click()
   const row = frame.getByTestId('pr-review-row').first()
   await expect(row).toHaveAttribute('data-status', 'done')
@@ -200,6 +236,7 @@ test('a submitted review renders summary, ticket, changes and praise', async ({
     'data-verdict',
     'request_changes',
   )
+  await expect(row.getByTestId('pr-review-publish-chip')).toHaveAttribute('data-status', 'failed')
 })
 
 test('a session starts a review with pr_review_start and is told how it ended', async ({
