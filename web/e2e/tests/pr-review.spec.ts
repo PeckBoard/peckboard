@@ -201,3 +201,55 @@ test('a submitted review renders summary, ticket, changes and praise', async ({
     'request_changes',
   )
 })
+
+test('a session starts a review with pr_review_start and is told how it ended', async ({
+  page,
+  request,
+}) => {
+  const { token, auth } = await authenticate(request)
+  await skipUnlessStaged(request, auth)
+  const folder = await makeRepoFolder(request, auth)
+
+  // A mock:mcp session runs the ```mcp block: pr_review_start in its own
+  // folder with a tool-less review model, so the watchdog fails it and the
+  // requester gets the FAILED notification.
+  const sessionRes = await request.post('/api/sessions', {
+    headers: auth,
+    data: { name: 'review requester', folder_id: folder.id, model: 'mock:mcp' },
+  })
+  expect(sessionRes.ok(), await sessionRes.text()).toBeTruthy()
+  const session = (await sessionRes.json()) as { id: string }
+  const send = await request.post(`/api/sessions/${session.id}/message`, {
+    headers: auth,
+    data: {
+      text: mcpBlock('pr_review_start', {
+        branch: 'feature/ABC-1-login',
+        model: 'mock:plan-review',
+      }),
+      model: 'mock:mcp',
+    },
+  })
+  expect(send.ok(), await send.text()).toBeTruthy()
+
+  // The review shows up on the page, in the requester's folder, and fails.
+  const frame = await openPage(page, token)
+  const row = frame
+    .getByTestId('pr-review-row')
+    .filter({ hasText: 'feature/ABC-1-login' })
+    .filter({ hasText: folder.name })
+  await expect(row).toHaveCount(1, { timeout: 30_000 })
+  await expect(row).toHaveAttribute('data-status', 'failed', { timeout: 60_000 })
+
+  // The requesting session was messaged with the outcome: the delivery wakes
+  // it for a second run (orchestrated messages are not `user` events).
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`/api/sessions/${session.id}/events`, { headers: auth })
+        const events = (await res.json()) as { kind: string }[]
+        return events.filter((e) => e.kind === 'agent-start').length
+      },
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(2)
+})

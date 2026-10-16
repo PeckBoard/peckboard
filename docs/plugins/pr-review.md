@@ -14,7 +14,9 @@ The list shows every review's status, current step (context → reviewing → me
 
 The default global prompt is distilled from Anthropic's code-review and security-review prompts, Qodo PR-Agent, Google's engineering practices, and Conventional Comments: understand the change before judging it, report only issues the diff introduces with a concrete trigger, verify each claim in the code, cap nits, and give specific praise. Edit it from **Global prompt**; a review's own custom prompt is appended to it for that review only.
 
-The two MCP tools (`pr_review_step`, `pr_review_submit`) are the private channel between a review session and the page: steps and provider status flow through the first, and the second validates the final result and returns readable errors until it is well-formed. A watchdog nudges a run that ends without submitting twice, then fails the review with an explicit message.
+Any session can run reviews too. `pr_review_start` takes a branch (plus optional base, folder, model and prompt; the folder defaults to the session's own) and returns at once; when the review finishes the session gets a message with the verdict, counts, summary and top recommended changes, or the failure reason. `pr_review_list` and `pr_review_get` read progress and the full result; `pr_review_rerun`, `pr_review_cancel` and `pr_review_delete` manage reviews; `pr_review_list_folders` lists target folders; `pr_review_get_prompt` and `pr_review_set_prompt` read and replace the global prompt.
+
+Two more tools (`pr_review_step`, `pr_review_submit`) are the private channel between a review session and the page: steps and provider status flow through the first, and the second validates the final result and returns readable errors until it is well-formed. A review session can use only these two — never start or manage other reviews. A watchdog nudges a run that ends without submitting twice, then fails the review with an explicit message.
 
 <details markdown="1">
 <summary>Hooks, permissions, and prerequisites</summary>

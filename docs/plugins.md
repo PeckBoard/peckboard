@@ -48,7 +48,7 @@ Every plugin in the official registry. The name links to the plugin's page, whic
 | [Notifier]({{ "/plugins/notifier.html"                        | relative_url }}) | Lifecycle events forwarded to ntfy, Telegram, Discord, and webhooks                        | —   |
 | [OpenAI-Compatible Provider]({{ "/plugins/openai-compat.html" | relative_url }}) | Any `/v1/chat/completions` endpoint as an AI provider                                      | —   |
 | [OpenSearch]({{ "/plugins/opensearch.html"                    | relative_url }}) | Query and manage an OpenSearch or Elasticsearch-compatible cluster                         | 8   |
-| [PR Review]({{ "/plugins/pr-review.html"                      | relative_url }}) | Parallel multi-model branch reviews with merged, ranked findings and a review page         | 2   |
+| [PR Review]({{ "/plugins/pr-review.html"                      | relative_url }}) | Parallel multi-model branch reviews with merged, ranked findings and a review page         | 11  |
 | [Playwright Tests]({{ "/plugins/playwright-tests.html"        | relative_url }}) | Replay of recorded browser test runs, with MP4 export                                      | —   |
 | [Pre-hatcher]({{ "/plugins/pre-hatcher.html"                  | relative_url }}) | Opt-in enrichment of chat messages with repository context before the main model sees them | 1   |
 | [Project Planner]({{ "/plugins/project-planner.html"          | relative_url }}) | A project definition built by interview, one question per slide                            | 4   |
