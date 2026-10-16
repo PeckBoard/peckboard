@@ -11,6 +11,13 @@
 //! one-time `state`, swaps the code for tokens server-side, and stores
 //! them. The UI polls `GET /api/mcp-oauth/tokens` until the server id
 //! shows up connected.
+//!
+//! A server's `oauth.redirect_uri` overrides that callback for provider apps
+//! registered with a fixed redirect (`http://localhost:8787/callback`): a
+//! loopback one gets a temporary listener on its port for the length of
+//! the sign-in. `POST /api/mcp-oauth/complete` finishes a login from a
+//! pasted redirect URL, for when that loopback redirect lands on a browser
+//! that is not on the PeckBoard host.
 
 use axum::{
     Json, Router,
@@ -20,7 +27,11 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 use crate::auth::middleware::{require_admin, require_auth};
 use crate::service::mcp_server::{oauth, user_servers};
@@ -50,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/mcp-oauth/start", post(start_login))
+        .route("/api/mcp-oauth/complete", post(complete_login))
         .route("/api/mcp-oauth/claim", post(claim_login))
         .route("/api/mcp-oauth/tokens/{server_id}", delete(disconnect))
         .route_layer(middleware::from_fn(require_admin))
@@ -113,7 +125,7 @@ struct StartBody {
 /// pre-configured client id nor dynamic registration — the UI should ask
 /// the user for a client id/secret from a provider-registered app.
 async fn start_login(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<StartBody>,
 ) -> Response {
@@ -143,9 +155,38 @@ async fn start_login(
             return bad_request("the callback broker must be an https:// URL");
         }
     }
-    let redirect_uri = match &broker {
-        Some(b) => format!("{b}/callback"),
-        None => {
+    // An explicit redirect URI stands in for this instance's own callback
+    // when the provider app is registered with a fixed one (a Slack app
+    // set up for another client with `http://localhost:8787/callback`).
+    let redirect_override = cfg
+        .redirect_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string);
+    let redirect_uri = match (&broker, redirect_override) {
+        (Some(b), _) => format!("{b}/callback"),
+        (None, Some(uri)) => {
+            // Same rule as the broker: the code travels in cleartext only
+            // to this machine.
+            if !broker_url_ok(&uri) {
+                return bad_request(
+                    "the callback URL must be https://, or http:// to localhost / 127.0.0.1 / [::1]",
+                );
+            }
+            if oauth::loopback_redirect(&uri).is_some()
+                && !served_by_this_instance(&uri, &headers)
+                && let Err(e) = open_loopback_callback(state.clone(), &uri).await
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({ "error": e, "redirect_uri": uri })),
+                )
+                    .into_response();
+            }
+            uri
+        }
+        (None, None) => {
             let Some(origin) = request_origin(&headers) else {
                 return bad_request("cannot determine this PeckBoard instance's public origin");
             };
@@ -424,6 +465,223 @@ async fn callback(
         ),
     }
 }
+#[derive(serde::Deserialize)]
+struct CompleteBody {
+    url: String,
+}
+
+/// The callback parameters carried by a pasted redirect URL — absolute, or
+/// just the path + query.
+fn callback_params_from_url(raw: &str) -> Option<CallbackParams> {
+    let raw = raw.trim();
+    let url = match reqwest::Url::parse(raw) {
+        Ok(u) => u,
+        Err(_) => reqwest::Url::parse("http://localhost/")
+            .ok()?
+            .join(raw)
+            .ok()?,
+    };
+    let q: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    Some(CallbackParams {
+        code: q.get("code").cloned(),
+        state: q.get("state").cloned(),
+        error: q.get("error").cloned(),
+        error_description: q.get("error_description").cloned(),
+    })
+}
+
+/// POST /api/mcp-oauth/complete `{"url": …}` — finish a sign-in from the
+/// redirect URL copied out of the browser's address bar. The fallback for a
+/// loopback redirect URI when the browser is not on the PeckBoard host, so
+/// the provider's redirect lands on the *browser's* machine instead.
+async fn complete_login(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CompleteBody>,
+) -> Response {
+    let Some(params) = callback_params_from_url(&body.url) else {
+        return bad_request("paste the full address the provider redirected to");
+    };
+    if let Some(err) = params.error.as_deref() {
+        if let Some(st) = params.state.as_deref() {
+            oauth::take_pending(st);
+        }
+        let detail = params.error_description.as_deref().unwrap_or("");
+        return bad_request(format!("the provider reported: {err} {detail}").trim_end());
+    }
+    let (Some(st), Some(code)) = (
+        params.state.as_deref(),
+        params.code.as_deref().filter(|c| !c.is_empty()),
+    ) else {
+        return bad_request(
+            "that address carries no code and state — copy it after the provider redirects",
+        );
+    };
+    let Some(login) = oauth::take_pending(st) else {
+        return bad_request("this sign-in attempt is unknown or expired — start it again");
+    };
+    match finish_login(&state, &login, code).await {
+        Ok(()) => {
+            tracing::info!(
+                "mcp oauth: connected server '{}' from a pasted redirect",
+                login.server_name
+            );
+            Json(serde_json::json!({ "connected": true })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Temporary loopback callback listeners
+// ---------------------------------------------------------------------------
+
+/// How often an idle temporary listener re-checks whether a login still
+/// waits on it.
+const LOOPBACK_CHECK: Duration = Duration::from_secs(30);
+/// A freshly (re)armed listener is never closed sooner than this, so the
+/// login being started right now has time to land in the pending map.
+const LOOPBACK_GRACE: Duration = Duration::from_secs(60);
+
+struct Loopback {
+    path: String,
+    armed: Instant,
+}
+
+/// Open temporary listeners, by loopback port.
+static LOOPBACKS: LazyLock<std::sync::Mutex<HashMap<u16, Loopback>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Serialises opening, so two concurrent sign-ins don't race to bind.
+static LOOPBACK_OPEN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether `uri` points at this very instance (already serving
+/// `/oauth/callback`), judged by the loopback origin the UI is using.
+fn served_by_this_instance(uri: &str, headers: &HeaderMap) -> bool {
+    let Some((_, port, path)) = oauth::loopback_redirect(uri) else {
+        return false;
+    };
+    path == "/oauth/callback"
+        && request_origin(headers)
+            .and_then(|o| oauth::loopback_redirect(&o))
+            .is_some_and(|(_, own, _)| own == port)
+}
+
+/// Open (or re-arm) a temporary listener on the loopback port of
+/// `redirect_uri`, serving only its path with the same handler as
+/// `/oauth/callback`. It closes itself once no unexpired login waits on that
+/// port — right after the redirect lands, or when the attempt times out.
+pub async fn open_loopback_callback(
+    state: Arc<AppState>,
+    redirect_uri: &str,
+) -> Result<(), String> {
+    let Some((host, port, path)) = oauth::loopback_redirect(redirect_uri) else {
+        return Err("not a loopback http:// redirect URI".into());
+    };
+    let _open = LOOPBACK_OPEN.lock().await;
+    {
+        let mut map = LOOPBACKS.lock().expect("loopback listeners lock");
+        if let Some(l) = map.get_mut(&port) {
+            if l.path == path {
+                l.armed = Instant::now();
+                return Ok(());
+            }
+            return Err(format!(
+                "port {port} is already serving a sign-in callback at {}",
+                l.path
+            ));
+        }
+    }
+    let addrs: Vec<SocketAddr> = match host.as_str() {
+        "127.0.0.1" => vec![(Ipv4Addr::LOCALHOST, port).into()],
+        "[::1]" => vec![(Ipv6Addr::LOCALHOST, port).into()],
+        // `localhost` may resolve to either family in the browser.
+        _ => vec![
+            (Ipv4Addr::LOCALHOST, port).into(),
+            (Ipv6Addr::LOCALHOST, port).into(),
+        ],
+    };
+    let mut listeners = Vec::new();
+    let mut last_err = None;
+    for addr in addrs {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => listeners.push(l),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if listeners.is_empty() {
+        return Err(format!(
+            "could not open a temporary callback listener on port {port}: {}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        ));
+    }
+
+    let wake = Arc::new(Notify::new());
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let w = wake.clone();
+    let app = Router::new()
+        .route(
+            &path,
+            get(move |st: State<Arc<AppState>>, q: Query<CallbackParams>| {
+                let w = w.clone();
+                async move {
+                    let page = callback(st, q).await;
+                    w.notify_one();
+                    page
+                }
+            }),
+        )
+        .with_state(state);
+    for listener in listeners {
+        let mut rx = stop_rx.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = rx.wait_for(|stop| *stop).await;
+                })
+                .await;
+        });
+    }
+    LOOPBACKS.lock().expect("loopback listeners lock").insert(
+        port,
+        Loopback {
+            path: path.clone(),
+            armed: Instant::now(),
+        },
+    );
+    tracing::info!("mcp oauth: temporary callback listener open on {host}:{port}{path}");
+
+    tokio::spawn(async move {
+        loop {
+            let _ = tokio::time::timeout(LOOPBACK_CHECK, wake.notified()).await;
+            {
+                let mut map = LOOPBACKS.lock().expect("loopback listeners lock");
+                let fresh = map
+                    .get(&port)
+                    .is_some_and(|l| l.armed.elapsed() < LOOPBACK_GRACE);
+                if fresh || oauth::pending_on_loopback_port(port) {
+                    continue;
+                }
+                map.remove(&port);
+            }
+            let _ = stop_tx.send(true);
+            tracing::info!("mcp oauth: temporary callback listener on port {port} closed");
+            break;
+        }
+    });
+    Ok(())
+}
+
+/// Whether a temporary callback listener is open on `port`.
+pub fn loopback_listener_open(port: u16) -> bool {
+    LOOPBACKS
+        .lock()
+        .expect("loopback listeners lock")
+        .contains_key(&port)
+}
 
 #[cfg(test)]
 mod tests {
@@ -479,5 +737,37 @@ mod tests {
         ] {
             assert!(!broker_url_ok(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn pasted_redirect_url_yields_callback_params() {
+        let p = callback_params_from_url(
+            "  http://localhost:8787/callback?code=abc&state=s%201&extra=1 ",
+        )
+        .unwrap();
+        assert_eq!(p.code.as_deref(), Some("abc"));
+        assert_eq!(p.state.as_deref(), Some("s 1"));
+        // Path + query alone also works.
+        let p = callback_params_from_url("/callback?error=access_denied&state=x").unwrap();
+        assert_eq!(p.error.as_deref(), Some("access_denied"));
+        assert_eq!(p.code, None);
+    }
+
+    #[test]
+    fn only_this_instances_own_callback_skips_the_listener() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ORIGIN, "http://127.0.0.1:3344".parse().unwrap());
+        assert!(served_by_this_instance(
+            "http://localhost:3344/oauth/callback",
+            &h
+        ));
+        assert!(!served_by_this_instance(
+            "http://localhost:8787/callback",
+            &h
+        ));
+        assert!(!served_by_this_instance(
+            "http://localhost:3344/callback",
+            &h
+        ));
     }
 }

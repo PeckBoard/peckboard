@@ -397,6 +397,38 @@ pub fn pending_broker_login(server_id: &str) -> Option<(String, String)> {
         .map(|(s, b, _)| (s, b))
 }
 
+/// `(host, port, path)` when `uri` is a plain-`http` redirect to this
+/// machine's loopback (`localhost` / `127.0.0.1` / `[::1]`) — the shape a
+/// temporary callback listener can serve. Parsed, so
+/// `http://localhost.evil.com` is not loopback.
+pub fn loopback_redirect(uri: &str) -> Option<(String, u16, String)> {
+    let url = reqwest::Url::parse(uri).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+        return None;
+    }
+    Some((
+        host.to_string(),
+        url.port_or_known_default()?,
+        url.path().to_string(),
+    ))
+}
+
+/// Whether any unexpired login is still waiting for a redirect to the
+/// loopback `port` — a temporary callback listener stays up while true.
+pub fn pending_on_loopback_port(port: u16) -> bool {
+    let map = PENDING.lock().expect("pending logins lock");
+    let cutoff = now_ms() - PENDING_TTL_MS;
+    map.values().any(|l| {
+        l.created_ms >= cutoff
+            && l.redirect_broker.is_none()
+            && loopback_redirect(&l.redirect_uri).is_some_and(|(_, p, _)| p == port)
+    })
+}
+
 /// Ask a redirect broker for the code it is holding for `state`. `Ok(None)`
 /// is the ordinary answer while the user is still consenting. The broker
 /// hands a code out once and never sees a token — the exchange happens

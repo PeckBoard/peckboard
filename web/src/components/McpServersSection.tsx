@@ -5,6 +5,7 @@ import Modal from './Modal'
 import {
   checkMcpCommand,
   claimMcpOauth,
+  completeMcpOauth,
   disconnectMcpOauth,
   fetchMcpOauthTokens,
   probeMcpServer,
@@ -560,6 +561,8 @@ function OauthConnect({
   const [error, setError] = useState<string | null>(null)
   const [needsClient, setNeedsClient] = useState(false)
   const [redirectUri, setRedirectUri] = useState(`${window.location.origin}/oauth/callback`)
+  const [pasted, setPasted] = useState('')
+  const [completing, setCompleting] = useState(false)
   // Set once the sign-in starts: this attempt's code comes back through a
   // redirect broker, so it has to be claimed rather than waited for.
   const [brokerFlow, setBrokerFlow] = useState(false)
@@ -614,11 +617,13 @@ function OauthConnect({
   // A configured broker owns the redirect: that fixed URL is what gets
   // registered with the provider, not this instance's origin.
   const brokerBase = (draft.oauth?.redirect_broker ?? '').trim().replace(/\/+$/, '')
-  const effectiveRedirectUri = brokerBase ? `${brokerBase}/callback` : redirectUri
+  const overrideUri = (draft.oauth?.redirect_uri ?? '').trim()
+  const effectiveRedirectUri = brokerBase ? `${brokerBase}/callback` : overrideUri || redirectUri
 
   const signIn = async () => {
     setStarting(true)
     setError(null)
+    setPasted('')
     const r = await startMcpOauth(tidy(draft))
     setStarting(false)
     if (r.ok) {
@@ -626,9 +631,23 @@ function OauthConnect({
       window.open(r.url, '_blank', 'noopener')
       setWaiting(true)
     } else {
-      if (r.redirectUri) setRedirectUri(r.redirectUri)
+      if (r.redirectUri && !overrideUri) setRedirectUri(r.redirectUri)
       if (r.needsClient) setNeedsClient(true)
       setError(r.error)
+    }
+  }
+
+  const completePasted = async () => {
+    setCompleting(true)
+    setError(null)
+    const r = await completeMcpOauth(pasted.trim())
+    setCompleting(false)
+    if (r.ok) {
+      setWaiting(false)
+      setPasted('')
+      await refresh()
+    } else {
+      setError(r.error ?? 'Sign-in failed.')
     }
   }
 
@@ -664,6 +683,19 @@ function OauthConnect({
             Callback URL — allow-list it with the provider if it requires registered redirect URLs
             (Datadog: Organization Settings):{' '}
             <code className="mcp-mono">{effectiveRedirectUri}</code>
+          </span>
+          <input
+            className="plugin-setting-input mcp-mono"
+            type="text"
+            placeholder="Custom callback URL (optional) — http://localhost:8787/callback"
+            value={draft.oauth?.redirect_uri ?? ''}
+            data-testid="mcp-oauth-redirect-uri"
+            onChange={(e) => setOauth({ redirect_uri: e.target.value })}
+          />
+          <span className="plugin-setting-desc">
+            Set this when your provider app already has a fixed redirect URL registered. A{' '}
+            <code>localhost</code> URL makes PeckBoard open a temporary listener on that port until
+            the sign-in finishes.
           </span>
           {showClientFields && (
             <>
@@ -774,6 +806,31 @@ function OauthConnect({
           {error && (
             <div className="mcp-error" data-testid="mcp-oauth-error">
               {error}
+            </div>
+          )}
+          {waiting && !brokerFlow && (
+            <div className="mcp-test-row" data-testid="mcp-oauth-paste">
+              <span className="plugin-setting-desc">
+                Redirect didn&rsquo;t land (e.g. a <code>localhost</code> callback opened on a
+                different machine)? Paste the address from the provider tab&rsquo;s address bar:
+              </span>
+              <input
+                className="plugin-setting-input mcp-mono"
+                type="text"
+                placeholder="http://localhost:8787/callback?code=…&state=…"
+                value={pasted}
+                data-testid="mcp-oauth-paste-url"
+                onChange={(e) => setPasted(e.target.value)}
+              />
+              <button
+                type="button"
+                className="mcp-btn"
+                disabled={!pasted.trim() || completing}
+                data-testid="mcp-oauth-paste-submit"
+                onClick={() => void completePasted()}
+              >
+                {completing ? 'Finishing…' : 'Finish sign-in'}
+              </button>
             </div>
           )}
         </>

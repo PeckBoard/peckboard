@@ -43,6 +43,12 @@ export interface McpOauthConfig {
    * rather than landing on this instance's own `/oauth/callback`.
    */
   redirect_broker?: string | null
+  /**
+   * Exact redirect URI to use instead of this instance's `/oauth/callback`,
+   * for an app registered with a fixed one (`http://localhost:8787/callback`).
+   * A loopback URI gets a temporary listener on the host for the sign-in.
+   */
+  redirect_uri?: string | null
 }
 
 export interface McpServer {
@@ -81,6 +87,7 @@ export function tidy(s: McpServer): McpServer {
           ...s.oauth,
           auth_params: (s.oauth.auth_params ?? []).filter((kv) => kv.key.trim() !== ''),
           redirect_broker: s.oauth.redirect_broker?.trim() || null,
+          redirect_uri: s.oauth.redirect_uri?.trim() || null,
         }
       : s.oauth,
     headers: s.headers.filter((kv) => kv.key.trim() !== ''),
@@ -237,6 +244,28 @@ export async function fetchMcpOauthTokens(): Promise<Record<string, McpOauthToke
   }
 }
 
+/**
+ * Finish a sign-in from the redirect address the user copied out of the
+ * browser — for a loopback callback URL when this browser is not on the
+ * PeckBoard host, so the redirect never reached the temporary listener.
+ */
+export async function completeMcpOauth(url: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await authedFetch('/api/mcp-oauth/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    })
+    if (res.ok) return { ok: true }
+    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null
+    return {
+      ok: false,
+      error: typeof data?.error === 'string' ? data.error : `Sign-in failed (${res.status}).`,
+    }
+  } catch {
+    return { ok: false, error: 'Sign-in failed — server unreachable.' }
+  }
+}
 /** Drop a server's stored OAuth token. */
 export async function disconnectMcpOauth(serverId: string): Promise<boolean> {
   try {

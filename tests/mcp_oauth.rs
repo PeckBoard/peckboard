@@ -336,3 +336,84 @@ async fn slack_style_static_endpoints_nested_token_and_user_scope() {
     let bearer = oauth::bearer_for_server(&state.db, &server).await.unwrap();
     assert_eq!(bearer, "Bearer xoxp-123");
 }
+
+#[tokio::test]
+async fn fixed_loopback_redirect_gets_a_temporary_listener() {
+    // A provider app registered with `http://localhost:<port>/callback`
+    // (not this instance's /oauth/callback): the host opens a temporary
+    // listener on that port that serves the redirect.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let token = post(|Form(form): Form<HashMap<String, String>>| async move {
+        assert_eq!(form.get("code").map(String::as_str), Some("LOOPCODE"));
+        assert!(
+            form.get("redirect_uri")
+                .is_some_and(|r| r.ends_with("/callback") && !r.contains("/oauth/"))
+        );
+        axum::Json(serde_json::json!({ "access_token": "loop-at" }))
+    });
+    let app = Router::new().route("/token", token);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // A free loopback port for the temporary listener.
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let redirect = format!("http://127.0.0.1:{port}/callback");
+
+    let state = build_state().await;
+    let cfg = McpOauthConfig {
+        authorize_url: Some(format!("{base}/authorize")),
+        token_url: Some(format!("{base}/token")),
+        client_id: Some("fixed-app".into()),
+        redirect_uri: Some(redirect.clone()),
+        ..Default::default()
+    };
+    let server = oauth_server("srv-loop", "loop", format!("{base}/mcp"), Some(cfg.clone()));
+    let endpoints = oauth::discover(&oauth::http_client(), &server.url, &cfg)
+        .await
+        .unwrap();
+
+    peckboard::routes::mcp_oauth::open_loopback_callback(state.clone(), &redirect)
+        .await
+        .unwrap();
+    assert!(peckboard::routes::mcp_oauth::loopback_listener_open(port));
+    // Re-arming the same port + path is fine; a different path is refused.
+    peckboard::routes::mcp_oauth::open_loopback_callback(state.clone(), &redirect)
+        .await
+        .unwrap();
+    assert!(
+        peckboard::routes::mcp_oauth::open_loopback_callback(
+            state.clone(),
+            &format!("http://127.0.0.1:{port}/other"),
+        )
+        .await
+        .is_err()
+    );
+
+    let url = oauth::begin_login(
+        &endpoints,
+        &server,
+        "fixed-app".into(),
+        None,
+        redirect.clone(),
+    );
+    assert_eq!(
+        query_param(&url, "redirect_uri").as_deref(),
+        Some(redirect.as_str())
+    );
+    assert!(oauth::pending_on_loopback_port(port));
+
+    let st = query_param(&url, "state").unwrap();
+    let resp = reqwest::get(format!("{redirect}?code=LOOPCODE&state={st}"))
+        .await
+        .unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Connected"), "loopback callback said: {body}");
+    assert!(!oauth::pending_on_loopback_port(port));
+
+    let tokens = oauth::load_tokens(&state.db).await;
+    assert_eq!(tokens.get("srv-loop").unwrap().access_token, "loop-at");
+}

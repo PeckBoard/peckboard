@@ -99,6 +99,15 @@ pub struct McpOauthConfig {
     /// short-lived code; the token exchange stays here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_broker: Option<String>,
+    /// Exact redirect URI to send instead of this instance's own
+    /// `{origin}/oauth/callback` — for apps whose registered Redirect URL is
+    /// fixed elsewhere (e.g. `http://localhost:8787/callback`). A loopback
+    /// `http://` URI makes the host open a temporary listener on that port
+    /// for the duration of the sign-in; any other URI is used verbatim and
+    /// must route to `/oauth/callback` itself. Ignored when
+    /// `redirect_broker` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
 }
 
 /// One choice in a server's URL picker (e.g. a Datadog region). Registry

@@ -1,3 +1,5 @@
+import http from 'node:http'
+import net, { type AddressInfo } from 'node:net'
 import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 /**
@@ -280,4 +282,131 @@ test('the public /oauth/callback route serves the error page directly', async ({
   await page.goto('/oauth/callback?error=access_denied&error_description=user+cancelled')
   await expect(page.getByText('Sign-in failed')).toBeVisible()
   await expect(page.getByText('access_denied')).toBeVisible()
+})
+
+/** A free loopback port (bound then released). */
+async function freePort(): Promise<number> {
+  const srv = net.createServer()
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const port = (srv.address() as AddressInfo).port
+  await new Promise<void>((resolve) => srv.close(() => resolve()))
+  return port
+}
+
+test('fixed localhost callback URL: temporary listener, then paste fallback', async ({
+  request,
+  page,
+}) => {
+  // A real provider stand-in (no /api mocks): `/authorize` either redirects
+  // straight to the requested redirect_uri (browser on the host) or just
+  // shows a page (browser elsewhere — the user pastes the address); `/token`
+  // mints a token for any code.
+  let redirectMode = true
+  const seen: { authorize: URL | null } = { authorize: null }
+  const provider = http.createServer((req, res) => {
+    const u = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (u.pathname === '/authorize') {
+      seen.authorize = u
+      const target = `${u.searchParams.get('redirect_uri')}?code=E2ECODE&state=${encodeURIComponent(u.searchParams.get('state') ?? '')}`
+      if (redirectMode) {
+        res.writeHead(302, { Location: target })
+        res.end()
+      } else {
+        res.writeHead(200, { 'Content-Type': 'text/html' })
+        res.end('<h1>Consent granted elsewhere</h1>')
+      }
+      return
+    }
+    if (u.pathname === '/token' && req.method === 'POST') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ access_token: 'e2e-loop-token' }))
+      return
+    }
+    res.writeHead(404)
+    res.end()
+  })
+  await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${(provider.address() as AddressInfo).port}`
+  const cbPort = await freePort()
+  const redirect = `http://127.0.0.1:${cbPort}/callback`
+
+  const token = await authenticate(request)
+  const put = await request.put('/api/settings/mcp-servers', {
+    data: {
+      servers: [
+        {
+          id: 'e2e-oauth-srv-loop',
+          name: 'slackfixed',
+          transport: 'http',
+          command: '',
+          args: [],
+          env: [],
+          url: `${base}/mcp`,
+          headers: [],
+          auth: 'oauth',
+          oauth: {
+            authorize_url: `${base}/authorize`,
+            token_url: `${base}/token`,
+            client_id: 'fixed-app',
+            redirect_uri: redirect,
+          },
+          enabled: true,
+          providers: [],
+          disabled_tools: [],
+        },
+      ],
+    },
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  expect(put.ok(), `seed failed: ${await put.text()}`).toBeTruthy()
+
+  try {
+    await openMcpSettings(page, token)
+    await page
+      .getByTestId('mcp-server-card-slackfixed')
+      .getByRole('button', { name: 'Edit' })
+      .click()
+    await expect(page.getByTestId('mcp-oauth-redirect-uri')).toHaveValue(redirect)
+    // The callback line shows the override, not this instance's origin.
+    await expect(page.getByTestId('mcp-oauth-callback')).toContainText(redirect)
+
+    // 1. Browser on the host: the redirect lands on the temporary listener.
+    const popupPromise = page.waitForEvent('popup')
+    await page.getByTestId('mcp-oauth-signin').click()
+    const popup = await popupPromise
+    await expect(popup.getByText('Connected')).toBeVisible({ timeout: 10_000 })
+    expect(popup.url()).toContain(`127.0.0.1:${cbPort}/callback`)
+    expect(seen.authorize?.searchParams.get('redirect_uri')).toBe(redirect)
+    await popup.close()
+    await expect(page.getByTestId('mcp-oauth-status')).toContainText('Connected', {
+      timeout: 15_000,
+    })
+
+    // 2. Browser elsewhere: no redirect arrives; paste the address instead.
+    await page.getByTestId('mcp-oauth-disconnect').click()
+    redirectMode = false
+    const popup2Promise = page.waitForEvent('popup')
+    await page.getByTestId('mcp-oauth-signin').click()
+    const popup2 = await popup2Promise
+    await expect(popup2.getByText('Consent granted elsewhere')).toBeVisible()
+    await popup2.close()
+    await expect(page.getByTestId('mcp-oauth-paste')).toBeVisible()
+    const st = seen.authorize?.searchParams.get('state') ?? ''
+    await page
+      .getByTestId('mcp-oauth-paste-url')
+      .fill(`http://localhost:${cbPort}/callback?code=E2ECODE&state=${encodeURIComponent(st)}`)
+    await page.waitForTimeout(300)
+    await page.screenshot({ path: 'e2e/test-results/mcp-oauth-paste.png' })
+    await page.getByTestId('mcp-oauth-paste-submit').click()
+    await expect(page.getByTestId('mcp-oauth-status')).toContainText('Connected', {
+      timeout: 10_000,
+    })
+    await page.keyboard.press('Escape')
+  } finally {
+    provider.close()
+    await request.put('/api/settings/mcp-servers', {
+      data: { servers: [] },
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  }
 })
