@@ -37,6 +37,29 @@ const UPSTREAM_PKG: &str = "better-playwright-mcp3@3.2.0";
 const PINNED_PLAYWRIGHT: &str = "playwright@1.55.0";
 /// The capture sidecar source, embedded so the binary is self-contained.
 const SIDECAR_SRC: &str = include_str!("browser_sidecar.mjs");
+/// rrweb record bundle (@rrweb/record 2.1.7 UMD). Passed to the sidecar via
+/// env, not `--eval`: Linux caps one argument string at 128 KB, and the
+/// sidecar source already occupies that slot.
+const RRWEB_RECORD_JS: &str = include_str!("vendor/rrweb-record.umd.txt");
+
+/// Split the record bundle into <100 KB env values. Each part stays under
+/// `MAX_ARG_STRLEN`; the sidecar concatenates `PECKBOARD_RRWEB_0..`.
+fn apply_rrweb_env(cmd: &mut crate::sandbox::SandboxedTokioCommand) {
+    const PART: usize = 90_000;
+    let bytes = RRWEB_RECORD_JS.as_bytes();
+    let mut i = 0usize;
+    let mut n = 0u32;
+    while i < bytes.len() {
+        let mut end = (i + PART).min(bytes.len());
+        while end > i && end < bytes.len() && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
+            end -= 1;
+        }
+        cmd.env(format!("PECKBOARD_RRWEB_{n}"), &RRWEB_RECORD_JS[i..end]);
+        n += 1;
+        i = end;
+    }
+    cmd.env("PECKBOARD_RRWEB_PARTS", n.to_string());
+}
 
 struct Managed {
     child: tokio::process::Child,
@@ -194,6 +217,7 @@ async fn spawn_on_port(port: u16, token: &str) -> anyhow::Result<SpawnOutcome> {
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::piped());
+    apply_rrweb_env(&mut cmd);
     // Own process group so reaping kills the whole npx → node → chrome tree
     // — killing only the wrapper is exactly how orphans got left behind to
     // squat the port.

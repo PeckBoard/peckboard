@@ -59,6 +59,31 @@ async fn capture_events(page_id: &str) {
     }
 }
 
+/// Drain rrweb events. Best-effort, same as [`capture_events`].
+async fn drain_dom(page_id: &str) {
+    let Some(cursor) = crate::service::browser_runs::dom_cursor(page_id) else {
+        return;
+    };
+    if let Ok(v) = browser::get(&format!("/api/pages/{page_id}/dom?since={cursor}")).await {
+        crate::service::browser_runs::ingest_dom(page_id, &v);
+    }
+}
+
+/// Pull DOM events every second for the life of the run. Tool calls alone
+/// leave a multi-minute thinking gap unrecorded; the sidecar buffer would
+/// drop the snapshot.
+fn spawn_dom_drain(page_id: String) {
+    tokio::spawn(async move {
+        loop {
+            if !crate::service::browser_runs::is_recording(&page_id) {
+                break;
+            }
+            drain_dom(&page_id).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+}
+
 impl McpToolRegistry {
     pub(crate) async fn handle_browser_tool(
         &self,
@@ -108,6 +133,9 @@ impl McpToolRegistry {
                         frame.as_deref(),
                     );
                     capture_events(&page_id).await;
+                    if run_id.is_some() {
+                        spawn_dom_drain(page_id.clone());
+                    }
                 }
                 let mut out =
                     serde_json::json!({ "page_id": page_id, "url": url, "outline": outline });
@@ -337,6 +365,12 @@ impl McpToolRegistry {
 
             "browser_close" => {
                 let page_id = req_str(&args, "page_id")?;
+                // Pull the in-page rrweb queue before delete destroys it.
+                // Best-effort: an older sidecar has no flush route, and the
+                // 500ms pull plus the drain below still apply.
+                if let Ok(v) = browser::get(&format!("/api/pages/{page_id}/dom/flush")).await {
+                    crate::service::browser_runs::ingest_dom(page_id, &v);
+                }
                 browser::delete(&format!("/api/pages/{page_id}")).await?;
                 // Late arrivals: the sidecar's `requestfinished`/console
                 // handlers are async and can land after the page delete —
@@ -347,6 +381,7 @@ impl McpToolRegistry {
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     capture_events(page_id).await;
                 }
+                drain_dom(page_id).await;
                 crate::service::browser_runs::finish(page_id);
                 Ok(serde_json::json!({ "closed": page_id }))
             }

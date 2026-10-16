@@ -29,6 +29,12 @@ const BODY_CAP_CHARS: usize = 4096;
 const HEADER_VALUE_CAP_CHARS: usize = 512;
 const CONSOLE_TEXT_CAP_CHARS: usize = 2000;
 const MAX_POINTER_EVENTS: usize = 5000;
+/// rrweb DOM recording. Events live in `dom.jsonl` (one JSON value per line),
+/// never in `meta.json` — a full snapshot is larger than the wasm plugin can
+/// hold in a list response. The cap is the whole file.
+const DOM_DISK_CAP: u64 = 50 * 1024 * 1024;
+const DOM_CHUNK_TARGET: usize = 256 * 1024;
+const DOM_EVENT_MAX: usize = 8 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RunStep {
@@ -107,7 +113,12 @@ pub struct PointerEvent {
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
-
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RunMeta {
     pub id: String,
@@ -138,6 +149,15 @@ pub struct RunMeta {
     pub pointer_events: Vec<PointerEvent>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub pointer_truncated: u32,
+    /// True once at least one rrweb event was written to `dom.jsonl`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_dom: bool,
+    /// Events dropped by the disk cap or by the sidecar buffer.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dom_truncated: u32,
+    /// Bytes written to `dom.jsonl`, including newlines.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub dom_bytes: u64,
 }
 
 struct ActiveRun {
@@ -149,6 +169,12 @@ struct ActiveRun {
     /// Sidecar request id → index into `meta.network`, for merging the
     /// finish event into its request.
     net_index: HashMap<u64, usize>,
+    /// Sidecar DOM-buffer cursor (`next` from `/dom?since=`).
+    dom_cursor: u64,
+    /// Cumulative `dropped` last reported by the sidecar.
+    dom_sidecar_dropped: u64,
+    /// Per-run disk cap. Production uses [`DOM_DISK_CAP`]; tests shrink it.
+    dom_cap: u64,
 }
 
 /// page_id → in-flight run. A page has at most one run.
@@ -206,9 +232,15 @@ pub fn start(
             console_truncated: 0,
             pointer_events: Vec::new(),
             pointer_truncated: 0,
+            has_dom: false,
+            dom_truncated: 0,
+            dom_bytes: 0,
         },
         next_frame: 0,
         events_cursor: 0,
+        dom_cursor: 0,
+        dom_sidecar_dropped: 0,
+        dom_cap: DOM_DISK_CAP,
         net_index: HashMap::new(),
     };
     persist(&run);
@@ -458,6 +490,228 @@ pub fn ingest_events(page_id: &str, payload: &serde_json::Value) {
     persist(run);
 }
 
+/// Whether `page_id` still has an in-flight run. The background DOM drain
+/// loops on this and stops once [`finish`] drops the handle.
+pub fn is_recording(page_id: &str) -> bool {
+    let map = active().lock().unwrap_or_else(|p| p.into_inner());
+    map.contains_key(page_id)
+}
+
+/// Sidecar DOM cursor for `page_id`, or None when the page isn't recorded.
+pub fn dom_cursor(page_id: &str) -> Option<u64> {
+    let map = active().lock().unwrap_or_else(|p| p.into_inner());
+    map.get(page_id).map(|r| r.dom_cursor)
+}
+
+/// Ingest a sidecar DOM batch (`{events: [{seq, event}], next, dropped}`).
+/// Each rrweb event is masked (`mask_text` only — not the high-entropy pass,
+/// which would destroy CSS hashes) and appended to `dom.jsonl`.
+pub fn ingest_dom(page_id: &str, payload: &serde_json::Value) {
+    let mut map = active().lock().unwrap_or_else(|p| p.into_inner());
+    let Some(run) = map.get_mut(page_id) else {
+        return;
+    };
+    let before = (run.meta.has_dom, run.meta.dom_truncated);
+    let seen = run.dom_cursor;
+    if let Some(next) = payload.get("next").and_then(|v| v.as_u64())
+        && next > run.dom_cursor
+    {
+        run.dom_cursor = next;
+    }
+    if let Some(dropped) = payload.get("dropped").and_then(|v| v.as_u64())
+        && dropped > run.dom_sidecar_dropped
+    {
+        let delta = dropped - run.dom_sidecar_dropped;
+        run.meta.dom_truncated = run
+            .meta
+            .dom_truncated
+            .saturating_add(delta.min(u64::from(u32::MAX)) as u32);
+        run.dom_sidecar_dropped = dropped;
+    }
+    let Some(events) = payload.get("events").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for ev in events {
+        let seq = ev.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+        // Two drains can pull the same `since` before either lands. Seq is the
+        // sidecar's cursor; writing those events again doubles the recording.
+        if seq > 0 && seq <= seen {
+            continue;
+        }
+        let Some(raw) = ev.get("event") else {
+            continue;
+        };
+        let mut event = raw.clone();
+        mask_dom_strings(&mut event);
+        write_dom_event(run, &event);
+    }
+    // meta.json only when what the player reads changes. `dom_bytes` lands
+    // with `finish`; rewriting meta every drain tick is wasted I/O.
+    if (run.meta.has_dom, run.meta.dom_truncated) != before {
+        persist(run);
+    }
+}
+
+fn mask_dom_strings(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => *s = redact::mask_text(s),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                mask_dom_strings(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                mask_dom_strings(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Append one event line. Returns false when the cap (or I/O) refused it.
+fn write_dom_event(run: &mut ActiveRun, event: &serde_json::Value) -> bool {
+    let Ok(line) = serde_json::to_string(event) else {
+        return false;
+    };
+    let extra = (line.len() + 1) as u64;
+    if run.meta.dom_bytes.saturating_add(extra) > run.dom_cap {
+        run.meta.dom_truncated = run.meta.dom_truncated.saturating_add(1);
+        return false;
+    }
+    let path = run.dir.join("dom.jsonl");
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    use std::io::Write;
+    // One write: a reader polling a live run must never see half a line.
+    let mut buf = line.into_bytes();
+    buf.push(b'\n');
+    if file.write_all(&buf).is_err() {
+        return false;
+    }
+    run.meta.dom_bytes += extra;
+    run.meta.has_dom = true;
+    true
+}
+
+/// One chunk of a run's rrweb recording, for `peckboard_browser_run_dom`.
+#[derive(Debug)]
+pub struct DomChunk {
+    pub events: Vec<serde_json::Value>,
+    pub next_offset: u64,
+    pub eof: bool,
+    pub truncated: bool,
+}
+
+/// Read complete `dom.jsonl` lines starting at byte `offset`.
+///
+/// Targets ~256 KB. A single event larger than that is returned alone, up to
+/// 8 MB; a larger line is skipped and `truncated` is set. `None` when the run
+/// does not exist.
+pub fn read_dom_chunk(data_dir: &Path, run_id: &str, offset: u64) -> Option<DomChunk> {
+    read_dom_chunk_limited(data_dir, run_id, offset, DOM_CHUNK_TARGET, DOM_EVENT_MAX)
+}
+
+fn read_dom_chunk_limited(
+    data_dir: &Path,
+    run_id: &str,
+    offset: u64,
+    chunk_target: usize,
+    event_max: usize,
+) -> Option<DomChunk> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let meta = get_run(data_dir, run_id)?;
+    let truncated_run = meta.dom_truncated > 0;
+    let empty = |next_offset: u64| DomChunk {
+        events: Vec::new(),
+        next_offset,
+        eof: true,
+        truncated: truncated_run,
+    };
+    let path = runs_root(data_dir).join(run_id).join("dom.jsonl");
+    let Ok(file) = std::fs::File::open(&path) else {
+        return Some(empty(0));
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if offset >= len {
+        return Some(empty(offset));
+    }
+    // Seek instead of reading the file: a long run's recording is tens of
+    // MB and the player pulls it in 256 KB chunks.
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    let mut pos = offset;
+    if offset > 0 {
+        // Re-read the byte before `offset`: a newline there means the offset
+        // is on a line boundary; anything else resumes at the next line.
+        reader.seek(SeekFrom::Start(offset - 1)).ok()?;
+        let n = reader.read_until(b'\n', &mut line).ok()? as u64;
+        if line.last() != Some(&b'\n') {
+            return Some(empty(offset));
+        }
+        pos = offset - 1 + n;
+    }
+    let mut events = Vec::new();
+    let mut out_bytes = 0usize;
+    let mut skipped = false;
+    let mut partial = false;
+    loop {
+        line.clear();
+        let n = match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        // No newline yet: a live run is mid-append. Leave the line for the
+        // next pull instead of skipping it as unparseable.
+        if line.last() != Some(&b'\n') {
+            partial = true;
+            break;
+        }
+        let body = &line[..n - 1];
+        let body = body.strip_suffix(b"\r").unwrap_or(body);
+        if body.is_empty() {
+            pos += n as u64;
+            continue;
+        }
+        if body.len() > event_max {
+            skipped = true;
+            pos += n as u64;
+            continue;
+        }
+        if !events.is_empty() && out_bytes + body.len() > chunk_target {
+            break;
+        }
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+            events.push(v);
+            out_bytes += body.len();
+        }
+        pos += n as u64;
+        if out_bytes >= chunk_target {
+            break;
+        }
+    }
+    Some(DomChunk {
+        events,
+        next_offset: pos,
+        eof: partial || pos >= len,
+        truncated: truncated_run || skipped,
+    })
+}
+
+#[cfg(test)]
+fn set_dom_cap_for_test(page_id: &str, cap: u64) {
+    let mut map = active().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(run) = map.get_mut(page_id) {
+        run.dom_cap = cap;
+    }
+}
+
 /// Finalize `page_id`'s run (stamps `ended_ms`, drops the active handle).
 pub fn finish(page_id: &str) {
     let mut map = active().lock().unwrap_or_else(|p| p.into_inner());
@@ -525,6 +779,11 @@ pub struct RunSummary {
     /// Failed/4xx/5xx requests plus `error`-level console lines (the list's
     /// red badge). Mirrors the plugin's own pre-0.4.2 computation.
     pub error_count: u32,
+    /// Present when the run has an rrweb `dom.jsonl`. Absent on old runs.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_dom: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dom_truncated: u32,
 }
 
 fn summarize(meta: RunMeta) -> RunSummary {
@@ -549,6 +808,8 @@ fn summarize(meta: RunMeta) -> RunSummary {
         ended_ms: meta.ended_ms,
         request_count: meta.network.len() as u32,
         error_count: (net_errs + con_errs) as u32,
+        has_dom: meta.has_dom,
+        dom_truncated: meta.dom_truncated,
         steps: meta
             .steps
             .into_iter()
@@ -914,5 +1175,196 @@ mod tests {
         assert!(!json.contains("\"console_events\""), "got: {json}");
         assert!(!json.contains("\"pointer_events\""), "got: {json}");
         assert!(json.contains("\"request_count\":1"), "got: {json}");
+    }
+
+    #[test]
+    fn dom_chunks_round_trip_and_old_meta_has_no_dom() {
+        let dir = tempfile::tempdir().unwrap();
+        start(
+            dir.path(),
+            "page-dom",
+            "dom",
+            "https://example.com",
+            "s",
+            None,
+            None,
+        );
+        let big = "x".repeat(300);
+        ingest_dom(
+            "page-dom",
+            &serde_json::json!({
+                "next": 2,
+                "dropped": 0,
+                "events": [
+                    { "seq": 1, "event": { "type": 4, "timestamp": 10, "data": { "href": "https://example.com" } } },
+                    { "seq": 2, "event": { "type": 3, "timestamp": 20, "data": { "text": big } } }
+                ]
+            }),
+        );
+        let id = run_id("page-dom").unwrap();
+        // Same batch pulled twice (flush racing the 1s drain) must not append twice.
+        ingest_dom(
+            "page-dom",
+            &serde_json::json!({
+                "next": 2,
+                "events": [{ "seq": 1, "event": { "type": 4, "data": { "text": "duplicate" } } }]
+            }),
+        );
+        finish("page-dom");
+
+        let full = get_run(dir.path(), &id).unwrap();
+        assert!(full.has_dom);
+        assert_eq!(full.dom_truncated, 0);
+        let raw =
+            std::fs::read_to_string(dir.path().join("browser-runs").join(&id).join("dom.jsonl"))
+                .unwrap();
+        assert_eq!(raw.lines().count(), 2, "replayed pull appended: {raw}");
+        assert!(!raw.contains("duplicate"), "got: {raw}");
+        assert!(full.dom_bytes > 0);
+
+        // Target smaller than the second line, so the read splits.
+        let c1 = super::read_dom_chunk_limited(dir.path(), &id, 0, 80, 8_000_000).unwrap();
+        assert_eq!(c1.events.len(), 1);
+        assert_eq!(c1.events[0]["type"], 4);
+        assert!(!c1.eof);
+        let c2 =
+            super::read_dom_chunk_limited(dir.path(), &id, c1.next_offset, 80, 8_000_000).unwrap();
+        assert_eq!(c2.events.len(), 1);
+        assert_eq!(c2.events[0]["data"]["text"], big);
+        assert!(c2.eof);
+        let c3 =
+            super::read_dom_chunk_limited(dir.path(), &id, c2.next_offset, 80, 8_000_000).unwrap();
+        assert!(c3.events.is_empty());
+        assert!(c3.eof);
+
+        // A meta.json from before DOM recording still loads.
+        let old = dir.path().join("browser-runs").join("oldrun1");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join("meta.json"),
+            r#"{"id":"oldrun1","name":"old","url":"https://x","session_id":"s","started_ms":1,"steps":[]}"#,
+        )
+        .unwrap();
+        let old_meta = get_run(dir.path(), "oldrun1").unwrap();
+        assert!(!old_meta.has_dom);
+        assert_eq!(old_meta.dom_bytes, 0);
+        let empty = read_dom_chunk(dir.path(), "oldrun1", 0).unwrap();
+        assert!(empty.eof && empty.events.is_empty() && !empty.truncated);
+    }
+
+    #[test]
+    fn dom_text_secrets_are_masked_and_the_cap_stops_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        start(
+            dir.path(),
+            "page-dom2",
+            "dom",
+            "https://example.com",
+            "s",
+            None,
+            None,
+        );
+        super::set_dom_cap_for_test("page-dom2", 300);
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dBjftJeZ4CVP";
+        ingest_dom(
+            "page-dom2",
+            &serde_json::json!({
+                "next": 1,
+                "events": [{ "seq": 1, "event": {
+                    "type": 3,
+                    "data": { "text": format!("hello Bearer abcdef123456.xyz token={jwt} card 4111 1111 1111 1111 tail") }
+                }}]
+            }),
+        );
+        // Over the 80-byte cap: counted, not written.
+        ingest_dom(
+            "page-dom2",
+            &serde_json::json!({
+                "next": 2,
+                "events": [{ "seq": 2, "event": { "type": 3, "data": { "text": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" } } }]
+            }),
+        );
+        let id = run_id("page-dom2").unwrap();
+        finish("page-dom2");
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("browser-runs").join(&id).join("dom.jsonl"))
+                .unwrap();
+        assert!(!raw.contains("abcdef123456"), "got: {raw}");
+        assert!(!raw.contains("dBjftJeZ4CVP"), "got: {raw}");
+        assert!(!raw.contains("4111 1111"), "got: {raw}");
+        assert!(raw.contains("hello"), "got: {raw}");
+        assert!(raw.contains("tail"), "got: {raw}");
+        assert!(!raw.contains("yyyyyyyyyyyyyyyyyyyy"));
+        let parsed: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert!(parsed["data"]["text"].as_str().unwrap().contains("tail"));
+
+        let meta = get_run(dir.path(), &id).unwrap();
+        assert!(meta.dom_truncated >= 1);
+        let chunk = read_dom_chunk(dir.path(), &id, 0).unwrap();
+        assert!(chunk.truncated);
+        assert_eq!(chunk.events.len(), 1);
+    }
+
+    #[test]
+    fn oversized_dom_event_is_skipped_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        start(
+            dir.path(),
+            "page-dom3",
+            "dom",
+            "https://example.com",
+            "s",
+            None,
+            None,
+        );
+        ingest_dom(
+            "page-dom3",
+            &serde_json::json!({
+                "next": 2,
+                "events": [
+                    { "seq": 1, "event": { "type": 4, "data": { "text": "keep-me" } } },
+                    { "seq": 2, "event": { "type": 3, "data": { "text": "0123456789abcdef0123456789abcdef" } } }
+                ]
+            }),
+        );
+        let id = run_id("page-dom3").unwrap();
+        finish("page-dom3");
+        // The short line is ~35 bytes; 45 keeps it and drops the long one.
+        let chunk = super::read_dom_chunk_limited(dir.path(), &id, 0, 256 * 1024, 45).unwrap();
+        assert!(chunk.truncated);
+        assert_eq!(chunk.events.len(), 1);
+        assert_eq!(chunk.events[0]["data"]["text"], "keep-me");
+        assert!(chunk.eof);
+    }
+
+    #[test]
+    fn half_written_dom_line_waits_for_the_next_pull() {
+        let dir = tempfile::tempdir().unwrap();
+        start(dir.path(), "page-dom4", "dom", "https://x", "s", None, None);
+        ingest_dom(
+            "page-dom4",
+            &serde_json::json!({
+                "next": 1,
+                "events": [{ "seq": 1, "event": { "type": 4, "data": { "n": 1 } } }]
+            }),
+        );
+        let id = run_id("page-dom4").unwrap();
+        finish("page-dom4");
+        let path = dir.path().join("browser-runs").join(&id).join("dom.jsonl");
+        let mut raw = std::fs::read(&path).unwrap();
+        raw.extend_from_slice(b"{\"type\":3,\"da");
+        std::fs::write(&path, &raw).unwrap();
+
+        let c1 = read_dom_chunk(dir.path(), &id, 0).unwrap();
+        assert_eq!(c1.events.len(), 1);
+        assert!(c1.eof, "a partial tail must not loop the reader");
+        // The partial line is left in place, not skipped.
+        raw.extend_from_slice(b"ta\":{}}\n");
+        std::fs::write(&path, &raw).unwrap();
+        let c2 = read_dom_chunk(dir.path(), &id, c1.next_offset).unwrap();
+        assert_eq!(c2.events.len(), 1);
+        assert_eq!(c2.events[0]["type"], 3);
+        assert!(c2.eof);
     }
 }

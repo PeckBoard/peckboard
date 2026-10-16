@@ -4549,6 +4549,27 @@ host_fn!(peckboard_browser_run_frame(user_data: HostState; input: String) -> Str
     }
 });
 
+// `peckboard_browser_run_dom` — a byte-offset chunk of the run's rrweb
+// recording. `{run_id, offset}` → `{events, next_offset, eof, truncated}`.
+// Events stay out of `peckboard_browser_run` so a snapshot can't OOM the
+// plugin. Gated by `browser_runs_read`.
+host_fn!(peckboard_browser_run_dom(user_data: HostState; input: String) -> String {
+    let (ok, data_dir) = state_permission_and_data_dir(&user_data, "browser_runs_read")?;
+    if !ok { return Ok(error_json("plugin lacks the 'browser_runs_read' permission")); }
+    let v = serde_json::from_str::<serde_json::Value>(&input).unwrap_or_default();
+    let run_id = v.get("run_id").and_then(|r| r.as_str()).unwrap_or_default();
+    let offset = v.get("offset").and_then(|n| n.as_u64()).unwrap_or(0);
+    match crate::service::browser_runs::read_dom_chunk(&data_dir, run_id, offset) {
+        Some(chunk) => Ok(serde_json::json!({
+            "events": chunk.events,
+            "next_offset": chunk.next_offset,
+            "eof": chunk.eof,
+            "truncated": chunk.truncated,
+        }).to_string()),
+        None => Ok(error_json("run not found")),
+    }
+});
+
 /// Build the host-function set a single loaded plugin is wired with. Every
 /// function shares one `UserData<HostState>` (a cheap `Arc` clone of the live
 /// `Db` plus this plugin's id). `plugin_id` namespaces the plugin-settings
@@ -4721,6 +4742,13 @@ pub(crate) fn host_functions(
             [PTR],
             ud.clone(),
             peckboard_browser_run_frame,
+        ),
+        Function::new(
+            "peckboard_browser_run_dom",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_browser_run_dom,
         ),
         Function::new(
             "peckboard_list_projects",

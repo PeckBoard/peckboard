@@ -35,6 +35,21 @@ if (!AUTH_TOKEN) {
   console.error("[peckboard-sidecar] PECKBOARD_SIDECAR_TOKEN is required");
   process.exit(1);
 }
+/** Record bundle, split across env vars so no single argv/env string exceeds
+ *  the kernel's per-string cap. Dropped from the environment before Chrome
+ *  is spawned so child processes don't inherit it. */
+function loadRrwebSource() {
+  const n = parseInt(process.env.PECKBOARD_RRWEB_PARTS || "0", 10) || 0;
+  let out = "";
+  for (let i = 0; i < n; i++) {
+    const key = "PECKBOARD_RRWEB_" + i;
+    out += process.env[key] || "";
+    delete process.env[key];
+  }
+  delete process.env.PECKBOARD_RRWEB_PARTS;
+  return out;
+}
+const RRWEB_SRC = loadRrwebSource();
 
 /** Constant-time check of the per-launch token header. */
 function authorized(req) {
@@ -250,7 +265,10 @@ function attachCapture(pageId, page) {
 
   // Keep the buffer briefly after close so core's final drain still works.
   page.on("close", () => {
-    setTimeout(() => buffers.delete(pageId), 120000).unref?.();
+    setTimeout(() => {
+      buffers.delete(pageId);
+      domBuffers.delete(pageId);
+    }, 120000).unref?.();
   });
 }
 
@@ -316,6 +334,173 @@ async function installPointer(page) {
   }
 }
 /** Answer our events route; return false for everything else. */
+/** pageId -> { seq, dropped, bytes, events: [{seq, event, bytes}] }.
+ *  Separate from the net/console ring: a full DOM snapshot must not be
+ *  evicted by a chatty page's requests. */
+const DOM_BUFFER_MAX_BYTES = 8 * 1024 * 1024;
+const domBuffers = new Map();
+
+function domBuffer(pageId) {
+  let b = domBuffers.get(pageId);
+  if (!b) {
+    b = { seq: 0, dropped: 0, bytes: 0, events: [] };
+    domBuffers.set(pageId, b);
+  }
+  return b;
+}
+
+function pushDom(pageId, event) {
+  if (!event || typeof event !== "object") return;
+  let bytes = 0;
+  try {
+    bytes = JSON.stringify(event).length;
+  } catch {
+    return;
+  }
+  const b = domBuffer(pageId);
+  b.seq += 1;
+  b.events.push({ seq: b.seq, event, bytes });
+  b.bytes += bytes;
+  trimDom(b);
+}
+
+/** Drop events older than the latest full snapshot (keeping its Meta) once
+ *  the buffer exceeds the cap. Never discard that snapshot itself. */
+function trimDom(b) {
+  while (b.bytes > DOM_BUFFER_MAX_BYTES && b.events.length > 1) {
+    let snap = -1;
+    for (let i = b.events.length - 1; i >= 0; i--) {
+      if (b.events[i].event && b.events[i].event.type === 2) {
+        snap = i;
+        break;
+      }
+    }
+    let keepFrom = snap;
+    if (
+      snap > 0 &&
+      b.events[snap - 1].event &&
+      b.events[snap - 1].event.type === 4
+    ) {
+      keepFrom = snap - 1;
+    }
+    if (snap < 0 || keepFrom <= 0) {
+      const old = b.events.shift();
+      b.bytes -= old.bytes;
+      b.dropped += 1;
+      continue;
+    }
+    const dropped = b.events.splice(0, keepFrom);
+    for (const d of dropped) {
+      b.bytes -= d.bytes;
+      b.dropped += 1;
+    }
+  }
+}
+
+/** Install rrweb. Awaited before the first goto, same as the pointer hook. */
+async function installDom(page) {
+  if (!RRWEB_SRC) return;
+  try {
+    await page.addInitScript(RRWEB_SRC);
+    await page.addInitScript(`(() => {
+      if (window.__peckboardDomHooked) return;
+      window.__peckboardDomHooked = true;
+      window.__peckboardDomQueue = [];
+      var rec = window.rrwebRecord && window.rrwebRecord.record;
+      if (typeof rec !== "function") return;
+      try {
+        rec({
+          emit: function (event) {
+            try { window.__peckboardDomQueue.push(event); } catch (_e) {}
+          },
+          maskAllInputs: true,
+          recordCanvas: false,
+          collectFonts: false,
+          inlineImages: false,
+          checkoutEveryNms: 60000,
+          // Scripts never replay; dropping them shrinks the recording and
+          // keeps page code out of the player.
+          slimDOMOptions: { script: true, comment: true, headMetaHttpEquiv: true },
+          sampling: { mousemove: 50, scroll: 150 }
+        });
+      } catch (_e) { /* recording must never break the page */ }
+    })();`);
+  } catch (err) {
+    console.error(`[peckboard-sidecar] dom install failed: ${err}`);
+  }
+}
+
+/** Pull queued rrweb events out of one page. The page only queues;
+ *  bindings choke on a multi-megabyte snapshot. */
+async function pullPageDom(page) {
+  const batch = await page.evaluate(() => {
+    const q = window.__peckboardDomQueue;
+    if (!q || !q.length) return [];
+    const out = q.slice();
+    q.length = 0;
+    return out;
+  });
+  return Array.isArray(batch) ? batch : [];
+}
+
+/** Pull queued rrweb events out of each live page. */
+function startDomPull(server) {
+  const timer = setInterval(() => {
+    let pages;
+    try {
+      pages = [...server.pages.entries()];
+    } catch {
+      return;
+    }
+    for (const [id, info] of pages) {
+      if (!info || !info.page) continue;
+      pullPageDom(info.page)
+        .then((batch) => {
+          for (const ev of batch) pushDom(id, ev);
+        })
+        .catch(() => {
+          /* navigation or closed page */
+        });
+    }
+  }, 500);
+  timer.unref?.();
+}
+
+/** One last pull before the page is destroyed, so the tail of the recording
+ *  is not stuck in the page queue. */
+async function flushPageDom(server, pageId) {
+  let page;
+  try {
+    const info = server.pages.get(pageId);
+    page = info && info.page;
+  } catch {
+    return;
+  }
+  if (!page) return;
+  try {
+    const batch = await pullPageDom(page);
+    for (const ev of batch) pushDom(pageId, ev);
+  } catch {
+    /* page already gone */
+  }
+}
+
+function handleDom(req, res) {
+  const u = new URL(req.url, "http://sidecar");
+  const m = u.pathname.match(/^\/api\/pages\/([^/]+)\/dom$/);
+  if (!m || req.method !== "GET") return false;
+  const b = domBuffers.get(decodeURIComponent(m[1]));
+  const since = parseInt(u.searchParams.get("since") || "0", 10) || 0;
+  const events = b ? b.events.filter((e) => e.seq > since) : [];
+  const out = {
+    events: events.map((e) => ({ seq: e.seq, event: e.event })),
+    next: b ? b.seq : 0,
+    dropped: b ? b.dropped : 0,
+  };
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify(out));
+  return true;
+}
 function handleEvents(req, res) {
   const u = new URL(req.url, "http://sidecar");
   const m = u.pathname.match(/^\/api\/pages\/([^/]+)\/events$/);
@@ -398,6 +583,7 @@ if (!pkgDir) {
             const page = await origNewPage(...pa);
             guardNavigation(page);
             await installPointer(page);
+            await installDom(page);
             return page;
           };
         }
@@ -432,6 +618,7 @@ if (!pkgDir) {
     // Compose our route in front of the upstream express app (an express
     // app is itself a (req, res) handler) instead of calling
     // server.start() — immune to upstream middleware ordering.
+    startDomPull(server);
     const srv = createServer((req, res) => {
       if (!authorized(req)) {
         res.writeHead(401, { "content-type": "application/json" });
@@ -442,7 +629,30 @@ if (!pkgDir) {
       // live capture sidecar from a foreign/orphaned server on the port.
       res.setHeader("x-peckboard-capture", "1");
       try {
-        if (handleEvents(req, res)) return;
+        const u = new URL(req.url || "/", "http://sidecar");
+        const flush = u.pathname.match(/^\/api\/pages\/([^/]+)\/dom\/flush$/);
+        if (flush && req.method === "GET") {
+          const id = decodeURIComponent(flush[1]);
+          flushPageDom(server, id)
+            .catch(() => {})
+            .then(() => {
+              if (res.writableEnded) return;
+              req.url = "/api/pages/" + encodeURIComponent(id) + "/dom";
+              try {
+                if (!handleDom(req, res)) {
+                  res.writeHead(200, { "content-type": "application/json" });
+                  res.end(JSON.stringify({ events: [], next: 0, dropped: 0 }));
+                }
+              } catch (err) {
+                if (!res.headersSent) {
+                  res.writeHead(500, { "content-type": "application/json" });
+                }
+                res.end(JSON.stringify({ error: String(err) }));
+              }
+            });
+          return;
+        }
+        if (handleEvents(req, res) || handleDom(req, res)) return;
       } catch (err) {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: String(err) }));
