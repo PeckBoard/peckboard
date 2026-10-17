@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext } from '../harness'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -359,4 +359,127 @@ test('split definition: root index + section files are listed and browsable', as
   await frame.locator('.def-view a.def-link', { hasText: 'Flows' }).click()
   await expect(frame.locator('.def-file.active')).toContainText('Flows')
   await page.screenshot({ path: '../tmp-pp-shot-flows.png', fullPage: true })
+})
+
+test('batch: every slide answered with no agent run between, then one record run', async ({
+  page,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const auth = await authenticate(request)
+
+  const catalogRes = await request.get('/api/plugins', { headers: auth })
+  const catalog = catalogRes.ok() ? await catalogRes.json() : { plugins: [] }
+  test.skip(
+    !JSON.stringify(catalog).includes('project-planner'),
+    'project-planner wasm not built/staged — run peck-plugins/project-planner/build.sh',
+  )
+
+  const folderName = `e2e-planner-batch-${Date.now()}`
+  const root = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-planner-'))
+  const res = spawnSync('git', ['-C', root, 'init', '-b', 'main'], { encoding: 'utf8' })
+  expect(res.status, res.stderr).toBe(0)
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: folderName, path: root },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+  const scoped = { ...auth, 'x-peckboard-folder-id': folder.id }
+
+  type Entity = { id: string; name: string }
+  const plannerSessions = async (): Promise<Entity[]> => {
+    const body = await (await request.get('/api/usage/experts', { headers: auth })).json()
+    const rows = (Array.isArray(body) ? body : (body.items ?? [])) as Entity[]
+    return rows.filter((r) => r.name.startsWith('Project Planner interview'))
+  }
+  const before = new Set((await plannerSessions()).map((s) => s.id))
+
+  // mock:block keeps the kickoff run alive, so its MCP token stays valid and
+  // the watchdog never sees a run end — the test plays the agent's part
+  // through the planner's MCP tools.
+  const startRes = await request.post('/api/plugin-ui/project-planner/start', {
+    headers: scoped,
+    data: { repo: '.', model: 'mock:block' },
+  })
+  expect(startRes.ok(), `start failed: ${await startRes.text()}`).toBeTruthy()
+  let sessionId = ''
+  await expect
+    .poll(async () => {
+      const created = (await plannerSessions()).find((s) => !before.has(s.id))
+      if (created) sessionId = created.id
+      return !!created
+    })
+    .toBe(true)
+  const cfgPath = path.join(process.env.PECKBOARD_E2E_DATA_DIR!, 'worker-mcp', `${sessionId}.json`)
+  await expect.poll(() => existsSync(cfgPath), { timeout: 15_000 }).toBe(true)
+  const mcpToken = (
+    JSON.parse(readFileSync(cfgPath, 'utf8')) as {
+      mcpServers: { peckboard: { headers: { Authorization: string } } }
+    }
+  ).mcpServers.peckboard.headers.Authorization.replace(/^Bearer /, '')
+  const mcpCall = async (tool: string, args: Record<string, unknown>) => {
+    const r = await request.post('/mcp', {
+      headers: { Authorization: `Bearer ${mcpToken}` },
+      data: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: tool, arguments: args },
+      },
+    })
+    expect(r.ok()).toBeTruthy()
+    const body = (await r.json()) as { result?: { content: { text?: string }[] }; error?: unknown }
+    expect(body.error, `${tool}: ${JSON.stringify(body.error)}`).toBeFalsy()
+    return body.result?.content?.[0]?.text ?? ''
+  }
+
+  // A dependent follow-up waits in the queue; the batch asks one queued
+  // entry (from_queue) plus a fresh question.
+  await mcpCall('project_planner_queue', { add: ['Which DB holds orders?', 'What should X do?'] })
+  const asked = await mcpCall('project_planner_ask', {
+    questions: [
+      {
+        topic: 'Purpose',
+        section: 'overview',
+        kind: 'fill',
+        question: 'The project exists to ___.',
+        why: 'Every other choice depends on it.',
+      },
+      {
+        topic: 'Database',
+        section: 'technology',
+        kind: 'fill',
+        question: 'Orders live in ___.',
+        why: 'Storage shapes the stack.',
+        from_queue: 'Which DB holds orders?',
+      },
+    ],
+  })
+  expect(asked).toMatch(/All 2 slides are showing/)
+
+  await loginUi(page, baseURL!)
+  await page.goto(`/folders/${folder.id}/plugin/project-planner?repo=.`)
+  const frame = page.frameLocator('[data-testid="plugin-fullpage-frame"]')
+  await expect(frame.locator('.batch-progress')).toHaveText('Question 1 of 2', { timeout: 15_000 })
+  await expect(frame.locator('.queue-badge')).toHaveText('1 queued')
+  await page.screenshot({ path: '../tmp-pp-shot-batch.png', fullPage: true })
+  await frame.locator('.fill-input').fill('sell hats')
+  await frame.getByRole('button', { name: 'Next question' }).click()
+
+  // Straight to the next slide — no thinking screen, no agent run.
+  await expect(frame.locator('.batch-progress')).toHaveText('Question 2 of 2')
+  await expect(frame.locator('.question')).toContainText('Orders live in')
+  await frame.locator('.fill-input').fill('SQLite')
+  await frame.getByRole('button', { name: 'Submit answer' }).click()
+
+  // The last answer hands the whole batch to ONE record run.
+  await expect(frame.getByText('Recording your answers, then the next questions…')).toBeVisible()
+  const state = await (
+    await request.get('/api/plugin-ui/project-planner/state?repo=.', { headers: scoped })
+  ).json()
+  expect(state.status).toBe('thinking')
+  expect(state.answered).toBe(2)
+  expect(state.pending_count).toBe(1)
 })
