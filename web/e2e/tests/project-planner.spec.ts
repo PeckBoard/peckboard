@@ -471,6 +471,16 @@ test('batch: every slide answered with no agent run between, then one record run
   // Straight to the next slide — no thinking screen, no agent run.
   await expect(frame.locator('.batch-progress')).toHaveText('Question 2 of 2')
   await expect(frame.locator('.question')).toContainText('Orders live in')
+  // Back to the first slide: its answer comes back prefilled and can change.
+  await expect(frame.locator('.back-btn')).toBeVisible()
+  await frame.locator('.back-btn').click()
+  await expect(frame.locator('.batch-progress')).toHaveText('Question 1 of 2')
+  await expect(frame.locator('.back-btn')).toHaveCount(0)
+  await expect(frame.locator('.fill-input')).toHaveValue('sell hats')
+  await frame.locator('.fill-input').fill('sell hats online')
+  await frame.getByRole('button', { name: 'Next question' }).click()
+  await expect(frame.locator('.batch-progress')).toHaveText('Question 2 of 2')
+  await page.screenshot({ path: '../tmp-pp-shot-batch-back.png', fullPage: true })
   await frame.locator('.fill-input').fill('SQLite')
   await frame.getByRole('button', { name: 'Submit answer' }).click()
 
