@@ -629,6 +629,18 @@ pub async fn run_server(
                                     // replacement's slot and produce two
                                     // concurrent workers for the same card.
                                     tracing::warn!(session_id = %sid, "Worker crashed or interrupted");
+                                    // Out of quota: hold this account until
+                                    // the reset so the orchestrator neither
+                                    // respawns onto it nor reviews on it.
+                                    if completion.error_kind
+                                        == Some(crate::provider::stream::CrashKind::RateLimit)
+                                    {
+                                        orchestrator_state.provider_registry.rate_limits.note(
+                                            session.model.as_deref(),
+                                            completion.error.as_deref().unwrap_or(""),
+                                            chrono::Utc::now(),
+                                        );
+                                    }
                                     if let Some(card_id) = &session.card_id {
                                         let _ = orchestrator_state
                                             .db

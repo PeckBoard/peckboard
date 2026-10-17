@@ -704,6 +704,15 @@ async fn spawn_worker_for_card(
     // the provider restores the old conversation via its conversation_id,
     // so the agent keeps its context instead of rediscovering the card
     // from scratch.
+    //
+    // A review whose account ran out of quota is never resumed or reused:
+    // a fresh review session re-picks a model on an account that has quota
+    // left (`ProviderRegistry::review_model` skips limited accounts).
+    let limits = &state.provider_registry.rate_limits;
+    let now_utc = chrono::Utc::now();
+    let is_review_step = effective_step == crate::workflow::REVIEW_STEP;
+    let stale_review =
+        |prev: &Session| is_review_step && limits.is_limited(prev.model.as_deref(), now_utc);
     let resume_session = match card.last_worker_session_id.as_deref() {
         Some(prev_sid) => state
             .db
@@ -723,6 +732,7 @@ async fn spawn_worker_for_card(
                     // the dispatch chokepoint injects it, so the resumed
                     // chunk starts fresh WITH the preserved context.
                     && (prev.conversation_id.is_some() || prev.pending_handover_doc.is_some())
+                    && !stale_review(prev)
             }),
         None => None,
     };
@@ -750,12 +760,27 @@ async fn spawn_worker_for_card(
                         && prev.sealed_at.is_none()
                         && prev.conversation_id.is_none()
                         && prev.pending_handover_doc.is_none()
+                        && !stale_review(prev)
                 }),
             None => None,
         }
     } else {
         None
     };
+
+    // A worker pinned to an out-of-quota account waits for the reset
+    // instead of spawning a run that dies within a second.
+    if let Some(prev) = resume_session.as_ref().or(reusable_dead_session.as_ref())
+        && let Some(until) = limits.limited_until(prev.model.as_deref(), now_utc)
+    {
+        tracing::debug!(
+            card_id = %card.id,
+            session_id = %prev.id,
+            until = %until,
+            "Worker's account is rate-limited; deferring spawn"
+        );
+        return Ok(());
+    }
 
     let (session, is_resume, created_now) = match resume_session {
         Some(prev) => {
@@ -836,6 +861,17 @@ async fn spawn_worker_for_card(
                         card.effort.clone().or_else(|| project.effort.clone()),
                     )
                 };
+                // Every candidate account is out of quota (or the card is
+                // pinned to one): wait for the reset rather than mint a
+                // session that crashes on its first turn.
+                if let Some(until) = limits.limited_until(model.as_deref(), now_utc) {
+                    tracing::debug!(
+                        card_id = %card.id,
+                        until = %until,
+                        "Worker model's account is rate-limited; deferring spawn"
+                    );
+                    return Ok(());
+                }
                 let session = state
                     .db
                     .create_session(NewSession {

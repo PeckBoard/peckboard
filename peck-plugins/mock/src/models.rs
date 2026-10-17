@@ -99,6 +99,12 @@ pub fn seed_models() -> serde_json::Value {
             "tier": 1
         },
         {
+            "id": "rate-limit",
+            "display_name": "Mock: usage limit crash",
+            "capabilities": ["mock"],
+            "tier": 1
+        },
+        {
             "id": "tool-orphan-crash",
             "display_name": "Mock: tool start without end then crash",
             "capabilities": ["mock", "tools"],

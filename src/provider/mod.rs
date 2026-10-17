@@ -8,6 +8,7 @@ pub mod crate_provider;
 pub mod manager;
 pub mod message;
 pub mod plugin_provider;
+pub mod rate_limits;
 pub mod registry;
 pub mod resume;
 pub mod resume_recovery;

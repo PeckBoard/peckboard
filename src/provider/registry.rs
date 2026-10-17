@@ -191,6 +191,8 @@ pub struct ProviderRegistry {
     /// providers list only `model@acct` ids, and their bare seed must never
     /// come back just because one refresh failed.
     last_good: std::sync::Mutex<HashMap<String, Vec<ModelInfo>>>,
+    /// Provider accounts out of quota; review picks skip them.
+    pub rate_limits: crate::provider::rate_limits::RateLimits,
 }
 
 impl ProviderRegistry {
@@ -198,6 +200,7 @@ impl ProviderRegistry {
         ProviderRegistry {
             providers: Mutex::new(HashMap::new()),
             last_good: std::sync::Mutex::new(HashMap::new()),
+            rate_limits: Default::default(),
         }
     }
 
@@ -493,7 +496,8 @@ impl ProviderRegistry {
 
     /// The model a card review runs on: one of [`REVIEW_MODELS`] (else
     /// [`REVIEW_MODELS_FALLBACK`]) that the catalog offers, minus hidden
-    /// providers and minus `avoid` (the model that did the work, any id form
+    /// providers, minus accounts in [`Self::rate_limits`], and minus `avoid`
+    /// (the model that did the work, any id form
     /// [`same_base_model`] accepts). Reviews spread across the pool by
     /// `seed` (stable per card, so a resumed review keeps its pick). Among a
     /// model's account-scoped entries, one on `account` wins, keeping the
@@ -507,6 +511,7 @@ impl ProviderRegistry {
         seed: u64,
     ) -> Option<String> {
         let providers = self.list_providers_with_models_except(exclude).await;
+        let now = chrono::Utc::now();
         let resolve = |base: &str| -> Option<String> {
             if same_base_model(base, avoid) {
                 return None;
@@ -517,6 +522,11 @@ impl ProviderRegistry {
                     p.models
                         .iter()
                         .filter(|m| same_base_model(&m.id, base))
+                        .filter(move |m| {
+                            !self
+                                .rate_limits
+                                .is_limited(Some(&format!("{}:{}", p.id, m.id)), now)
+                        })
                         .map(move |m| (p.id.as_str(), m.id.as_str()))
                 })
                 .collect();
@@ -565,9 +575,15 @@ impl ProviderRegistry {
             .find(|m| same_base_model(&m.id, avoid))
             .map(|m| m.tier);
         let on_account = |id: &str| account.is_some() && split_model_account(id).1 == account;
-        let prefer_account = models.iter().any(|m| on_account(&m.id));
+        let now = chrono::Utc::now();
+        let limited = |m: &ModelInfo| {
+            self.rate_limits
+                .is_limited(Some(&format!("{provider_id}:{}", m.id)), now)
+        };
+        let prefer_account = models.iter().any(|m| on_account(&m.id) && !limited(m));
         let candidates: Vec<&ModelInfo> = models
             .iter()
+            .filter(|m| !limited(m))
             .filter(|m| !prefer_account || on_account(&m.id))
             .filter(|m| m.tier > 0 && m.tier < top_tier && !same_base_model(&m.id, avoid))
             .collect();
@@ -819,6 +835,30 @@ mod tests {
                 "grok:grok-4.7@g1",
                 "codex:gpt-5.6-sol@c1"
             ]
+        );
+
+        // An out-of-quota account drops out of the rotation until its reset.
+        let now = chrono::Utc::now();
+        let until = registry.rate_limits.note(
+            Some("codex:gpt-5.6-sol@c1"),
+            "You've hit your usage limit.",
+            now,
+        );
+        for seed in 0..3 {
+            let pick = registry
+                .review_model(&none, "claude-opus-5-5[1m]", Some("a2"), seed)
+                .await
+                .unwrap();
+            assert!(
+                !pick.starts_with("codex:"),
+                "limited account picked: {pick}"
+            );
+        }
+        assert!(until > now);
+        registry.rate_limits.note(
+            Some("codex:gpt-5.6-sol@c1"),
+            "",
+            now - chrono::Duration::hours(1),
         );
 
         // Hidden providers are skipped; the top tier is never chosen.

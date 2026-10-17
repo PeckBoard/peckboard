@@ -849,12 +849,20 @@ pub const BLOCK_AFTER_CRASHES: u32 = 2;
 ///   at startup when an in-flight session was orphaned by a restart. The
 ///   underlying agent never failed; the server just stopped. It carries no
 ///   `errorKind` — there is no taxonomy slot for "the host restarted".
+/// - `errorKind: "rate_limit"`: the provider account is out of quota. The
+///   completion listener records the reset in
+///   [`crate::provider::rate_limits::RateLimits`] and the orchestrator holds
+///   dispatch to that account until then (a review moves to another
+///   model), so there is no spin loop to stop — and blocking would park the
+///   card for good over a limit that lifts by itself.
 ///
 /// The kind is the contract; the `reason` check is the compatibility path
 /// for `agent-end` rows persisted before `errorKind` existed (and for
 /// `server-shutdown`).
 fn crash_counts(error_kind: Option<&str>, reason: Option<&str>) -> bool {
-    if error_kind == Some(CrashKind::Interrupted.as_str()) {
+    if error_kind == Some(CrashKind::Interrupted.as_str())
+        || error_kind == Some(CrashKind::RateLimit.as_str())
+    {
         return false;
     }
     !matches!(reason, Some("interrupted") | Some("server-shutdown"))
@@ -1462,6 +1470,11 @@ mod tests {
             make_event(
                 "agent-end",
                 r#"{"status":"crashed","reason":"Failed to authenticate. API Error: 401","errorKind":"auth_expired"}"#,
+            ),
+            // Out of quota: held by the rate-limit book, never a block.
+            make_event(
+                "agent-end",
+                r#"{"status":"crashed","reason":"You've hit your usage limit.","errorKind":"rate_limit"}"#,
             ),
         ];
         assert_eq!(count_consecutive_crashes(&events), 1);

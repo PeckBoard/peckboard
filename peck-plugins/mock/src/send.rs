@@ -306,6 +306,7 @@ impl Ctx<'_> {
             "thinking" => self.thinking()?,
             "tool-orphan-crash" => return self.tool_orphan_crash(),
             "crash" => return self.crash(),
+            "rate-limit" => return self.rate_limit(),
             "auth-error" => return self.auth_error(),
             "auth-error-once" => {
                 if self.auth_error_once()? {
@@ -906,6 +907,17 @@ impl Ctx<'_> {
             "unknown",
             Some(1),
             Some("simulated stderr"),
+        )
+    }
+
+    /// Crash the way an out-of-quota account does. The short reset keeps
+    /// the host's hold on the `mock` provider from outliving the spec.
+    fn rate_limit(&self) -> Result<(), String> {
+        self.crashed(
+            "You've hit your usage limit. Try again in 12 seconds.",
+            "rate_limit",
+            Some(1),
+            None,
         )
     }
 
