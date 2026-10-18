@@ -335,13 +335,36 @@ async fn ping(
         wait_until_idle(session_manager, &session_id, RUN_TIMEOUT).await;
     }
 
+    // Read how the run ended before its events go: a ping whose turn
+    // crashed (expired login, quota) must report a failure, not "ok".
+    let failure = run_failure(db, &session_id).await;
+
     // Always tear down: kill any lingering child, then remove the session and
     // its events (FKs are enforced, so events must go first).
     session_manager.cancel_and_wait(&session_id).await;
     let _ = db.delete_events_by_session(&session_id).await;
     let _ = db.delete_session(&session_id).await;
 
-    dispatch.map(|_| ())
+    dispatch?;
+    match failure {
+        Some(reason) => Err(anyhow::anyhow!("run failed: {reason}")),
+        None => Ok(()),
+    }
+}
+
+/// The error of the session's last `agent-end`: a crash's reason, or the
+/// `error` a completed-but-failed turn carries. `None` for a clean turn.
+async fn run_failure(db: &Db, session_id: &str) -> Option<String> {
+    let events = db.events_tail(session_id, 16).await.ok()?;
+    let end = events.iter().rev().find(|e| e.kind == "agent-end")?;
+    let data: serde_json::Value = serde_json::from_str(&end.data).ok()?;
+    let field = match data.get("status").and_then(|s| s.as_str()) {
+        Some("crashed") => "reason",
+        _ => "error",
+    };
+    data.get(field)
+        .and_then(|v| v.as_str())
+        .map(|s| s.chars().take(200).collect())
 }
 
 /// Poll until the session's run finishes or `timeout` elapses.

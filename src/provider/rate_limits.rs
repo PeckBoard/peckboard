@@ -80,9 +80,13 @@ impl RateLimits {
 /// The reset time a rate-limit error names, clamped to
 /// `(now, now + MAX_HOLD_HOURS]`; [`FALLBACK_HOLD_MINUTES`] from `now` when
 /// it names none. Understands Codex's "try again at Oct 18th, 2026 1:59 AM"
-/// (machine-local time) and relative "resets in 4m" / "try again in 2 hours".
+/// and its same-day "try again at 1:59 AM" (machine-local time; a clock
+/// time already past means tomorrow), and relative "resets in 4m" / "try
+/// again in 2 hours".
 pub fn reset_at(reason: &str, now: DateTime<Utc>) -> DateTime<Utc> {
-    let parsed = absolute_reset(reason).or_else(|| relative_reset(reason, now));
+    let parsed = absolute_reset(reason)
+        .or_else(|| clock_reset(reason, now))
+        .or_else(|| relative_reset(reason, now));
     match parsed {
         Some(t) if t > now => t.min(now + Duration::hours(MAX_HOLD_HOURS)),
         _ => now + Duration::minutes(FALLBACK_HOLD_MINUTES),
@@ -109,6 +113,21 @@ fn absolute_reset(reason: &str) -> Option<DateTime<Utc>> {
         .from_local_datetime(&naive)
         .earliest()
         .map(|t| t.with_timezone(&Utc))
+}
+
+/// "try again at 1:59 AM" with no date: the next local occurrence of that
+/// clock time.
+fn clock_reset(reason: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let re = regex::Regex::new(r"(?i)try again at (\d{1,2}):(\d{2}) ?([AP]M)").ok()?;
+    let c = re.captures(reason)?;
+    let text = format!("{}:{} {}", &c[1], &c[2], c[3].to_uppercase());
+    let time = chrono::NaiveTime::parse_from_str(&text, "%I:%M %p").ok()?;
+    let today = now.with_timezone(&Local).date_naive();
+    [today, today.succ_opt()?]
+        .into_iter()
+        .filter_map(|d| Local.from_local_datetime(&d.and_time(time)).earliest())
+        .map(|t| t.with_timezone(&Utc))
+        .find(|t| *t > now)
 }
 
 fn relative_reset(reason: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -174,6 +193,24 @@ mod tests {
         assert_eq!(
             reset_at("usage limit, try again in 500 hours", now),
             now + Duration::hours(MAX_HOLD_HOURS)
+        );
+    }
+    /// Codex drops the date when the reset is within a day.
+    #[test]
+    fn clock_only_reset_is_the_next_occurrence() {
+        let now = now();
+        let at = (Local::now() + Duration::hours(2)).format("%-I:%M %p");
+        let delta = reset_at(&format!("usage limit ... or try again at {at}."), now) - now;
+        assert!(
+            delta > Duration::minutes(118) && delta <= Duration::minutes(121),
+            "{delta}"
+        );
+        // A clock time already past rolls over to tomorrow.
+        let past = (Local::now() - Duration::hours(1)).format("%-I:%M %p");
+        let delta = reset_at(&format!("try again at {past}"), now) - now;
+        assert!(
+            delta > Duration::hours(22) && delta <= Duration::hours(23),
+            "{delta}"
         );
     }
 
