@@ -396,6 +396,9 @@ function App() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(() => new Set())
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false)
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null)
   const [sessionFilterInput, setSessionFilterInput] = useState('')
   const sessionSearchActive = sessionFilterInput.trim() !== ''
   const chatSessionSearchResults = useMemo(
@@ -1182,6 +1185,28 @@ function App() {
       /* ignore */
     }
     setConfirmDeleteId(null)
+  }
+
+  // Delete every selected session. Failures stay selected and the dialog
+  // stays open naming them, so a partial failure never reads as success.
+  const confirmBulkDeleteSessions = async () => {
+    const ids = [...selectedSessions]
+    setBulkDeleteBusy(true)
+    setBulkDeleteError(null)
+    const results = await Promise.allSettled(ids.map((id) => deleteSession(id)))
+    setBulkDeleteBusy(false)
+    const failed = ids.filter((_, i) => results[i].status === 'rejected')
+    if (failed.length === 0) {
+      setSelectedSessions(new Set())
+      setConfirmBulkDelete(false)
+      return
+    }
+    const first = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    const why = first.reason instanceof Error ? first.reason.message : String(first.reason)
+    setSelectedSessions(new Set(failed))
+    setBulkDeleteError(
+      `Couldn't delete ${failed.length} of ${ids.length} sessions: ${why}. They're still selected.`,
+    )
   }
 
   const confirmDeleteProject = async () => {
@@ -1990,9 +2015,6 @@ function App() {
                     onToggleSelected={(s) => toggleSessionSelected(s.id)}
                     onClearSelection={() => setSelectedSessions(new Set())}
                     bulkActions={[
-                      // No destructive actions in the list — delete lives on the
-                      // chat-toolbar 3-dot menu and tab right-click menu, where
-                      // the user has the session open and can act intentionally.
                       {
                         label: 'Mark as read',
                         onClick: () => {
@@ -2000,6 +2022,15 @@ function App() {
                           setSelectedSessions(new Set())
                         },
                         hidden: ![...selectedSessions].some((id) => unreadSessions.has(id)),
+                      },
+                      // Destructive, so it always goes through a confirm.
+                      {
+                        label: 'Delete',
+                        danger: true,
+                        onClick: () => {
+                          setBulkDeleteError(null)
+                          setConfirmBulkDelete(true)
+                        },
                       },
                     ]}
                     renderItem={(s) => (
@@ -2428,6 +2459,20 @@ function App() {
           danger
           onConfirm={confirmDelete}
           onCancel={() => setConfirmDeleteId(null)}
+        />
+      )}
+      {confirmBulkDelete && (
+        <ConfirmDialog
+          title={`Delete ${selectedSessions.size} session${selectedSessions.size === 1 ? '' : 's'}`}
+          message={`Delete ${selectedSessions.size === 1 ? 'this session' : `these ${selectedSessions.size} sessions`} and all their events? Running agents are stopped. This can't be undone.`}
+          confirmLabel="Delete"
+          cancelLabel="Cancel"
+          danger
+          busy={bulkDeleteBusy}
+          busyLabel="Deleting…"
+          error={bulkDeleteError}
+          onConfirm={confirmBulkDeleteSessions}
+          onCancel={() => setConfirmBulkDelete(false)}
         />
       )}
       {confirmDeleteProjectId && (

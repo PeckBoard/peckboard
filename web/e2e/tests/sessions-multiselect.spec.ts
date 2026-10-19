@@ -4,12 +4,9 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /**
- * E2E for multi-selecting sessions on the sessions list. The list intentionally
- * does NOT expose delete — that lives on the chat-toolbar 3-dot menu and the
- * tab right-click menu so the user has the session open and can act
- * intentionally. The bar surfaces non-destructive bulk actions only (currently
- * just "Mark as read", which is hidden unless any selected session is unread),
- * plus a Clear button that empties the selection.
+ * E2E for multi-selecting sessions on the sessions list: the floating bulk
+ * bar shows the count, "Mark as read" (hidden unless a selected session is
+ * unread), a danger "Delete" that always goes through a confirm, and Clear.
  */
 
 const E2E_USER = 'e2e-user'
@@ -40,12 +37,13 @@ async function createSession(
   auth: Record<string, string>,
   folderId: string,
   name: string,
-): Promise<void> {
+): Promise<string> {
   const res = await request.post('/api/sessions', {
     headers: auth,
     data: { name, folder_id: folderId },
   })
   expect(res.ok(), `create session failed: ${await res.text()}`).toBeTruthy()
+  return ((await res.json()) as { id: string }).id
 }
 
 async function loadAs(page: Page, token: string, route: string) {
@@ -56,7 +54,7 @@ async function loadAs(page: Page, token: string, route: string) {
   await expect(page.locator('.rail-avatar')).toBeVisible({ timeout: 10_000 })
 }
 
-test('multi-select surfaces a non-destructive bulk bar with no delete option', async ({
+test('bulk delete removes the selected sessions after a confirm; Clear keeps them', async ({
   request,
   page,
 }) => {
@@ -68,9 +66,9 @@ test('multi-select surfaces a non-destructive bulk bar with no delete option', a
   const nameA = `ms-A-${ts}`
   const nameB = `ms-B-${ts}`
   const nameC = `ms-C-${ts}`
-  await createSession(request, auth, folderId, nameA)
-  await createSession(request, auth, folderId, nameB)
-  await createSession(request, auth, folderId, nameC)
+  const idA = await createSession(request, auth, folderId, nameA)
+  const idB = await createSession(request, auth, folderId, nameB)
+  const idC = await createSession(request, auth, folderId, nameC)
 
   await loadAs(page, token, '/')
 
@@ -81,24 +79,42 @@ test('multi-select surfaces a non-destructive bulk bar with no delete option', a
   await expect(rowB).toBeVisible()
   await expect(rowC).toBeVisible()
 
-  // Check the left-edge boxes for A and B.
-  await rowA.locator('.list-view-select').check()
-  await rowB.locator('.list-view-select').check()
-
-  // The bulk-action bar appears with the selected count.
-  const bar = page.locator('.bulk-action-bar')
-  await expect(bar).toContainText('2 selected')
-
-  // The card-level requirement is that the sessions list NEVER offers delete
-  // — neither as a bulk action nor as a row 3-dot menu item. Assert both.
-  await expect(bar.locator('.bulk-action-btn.danger')).toHaveCount(0)
-  await expect(bar.locator('.bulk-action-btn', { hasText: /delete/i })).toHaveCount(0)
-  await expect(rowA.locator('.list-view-menu')).toHaveCount(0)
-
   // Clear empties the selection and dismisses the bar; rows survive.
+  await rowC.locator('.list-view-select').check()
+  const bar = page.locator('.bulk-action-bar')
+  await expect(bar).toContainText('1 selected')
   await bar.locator('.bulk-action-btn', { hasText: 'Clear' }).click()
   await expect(bar).toHaveCount(0)
-  await expect(rowA).toBeVisible()
-  await expect(rowB).toBeVisible()
   await expect(rowC).toBeVisible()
+
+  await rowA.locator('.list-view-select').check()
+  await rowB.locator('.list-view-select').check()
+  await expect(bar).toContainText('2 selected')
+
+  // Delete asks first; Cancel deletes nothing and keeps the selection.
+  const del = bar.locator('.bulk-action-btn.danger', { hasText: 'Delete' })
+  await del.click()
+  const dialog = page.getByRole('alertdialog', { name: 'Delete 2 sessions' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('these 2 sessions')
+  await dialog.getByTestId('confirm-dialog-cancel').click()
+  await expect(dialog).toHaveCount(0)
+  await expect(rowA).toBeVisible()
+  await expect(bar).toContainText('2 selected')
+
+  // Confirming deletes both, clears the selection, and leaves C alone.
+  await del.click()
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(rowA).toHaveCount(0)
+  await expect(rowB).toHaveCount(0)
+  await expect(bar).toHaveCount(0)
+  await expect(rowC).toBeVisible()
+
+  for (const id of [idA, idB]) {
+    const res = await request.get(`/api/sessions/${id}`, { headers: auth })
+    expect(res.status(), `session ${id} should be gone`).toBe(404)
+  }
+  const kept = await request.get(`/api/sessions/${idC}`, { headers: auth })
+  expect(kept.ok()).toBeTruthy()
 })
