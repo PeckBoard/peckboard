@@ -433,7 +433,12 @@ impl ProviderEvent {
             } => serde_json::json!({
                 "status": "crashed",
                 "reason": reason,
-                "errorKind": error_kind.as_str(),
+                // A plugin that can't classify its own crash reports
+                // `Unknown` (codex does for an in-stream usage-limit
+                // error); sniff the text so the persisted kind — which the
+                // crash-block counter reads — matches what the host
+                // classifies for the completion.
+                "errorKind": error_kind.or(CrashKind::classify(reason)).as_str(),
                 "exitCode": exit_code,
                 "stderr": stderr,
             }),
@@ -683,6 +688,16 @@ mod tests {
         assert_eq!(data["reason"], "timeout");
         assert_eq!(data["exitCode"], 137);
         assert_eq!(data["errorKind"], "timeout");
+
+        // A plugin's `Unknown` is refined from the text, so the crash-block
+        // counter sees a usage limit as one.
+        let event = ProviderEvent::Crashed {
+            reason: "You've hit your usage limit. ... try again at 7:29 AM.".into(),
+            error_kind: CrashKind::Unknown,
+            exit_code: Some(1),
+            stderr: None,
+        };
+        assert_eq!(event.event_data()["errorKind"], "rate_limit");
     }
 
     #[test]

@@ -21,7 +21,7 @@
 
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -89,14 +89,59 @@ function guardNavigation(page) {
 // predecessor) then dies on Chrome's ProcessSingleton lock. Honor the flag
 // here: a truly ephemeral per-process profile unless the caller pinned
 // USER_DATA_DIR explicitly.
+//
+// The profile lives in tmpdir(), which is often RAM-backed tmpfs, and the
+// core usually stops this process with SIGKILL, so exit handlers alone
+// leak it (hundreds of ~20 MB profiles on a long-running host). Remove our
+// own on a clean exit, and on startup sweep every profile whose owning
+// sidecar pid is gone.
+const PROFILE_PREFIX = "peckboard-browser-profile-";
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+function sweepOrphanProfiles() {
+  let names = [];
+  try {
+    names = readdirSync(tmpdir());
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(PROFILE_PREFIX)) continue;
+    const pid = Number(name.slice(name.lastIndexOf("-") + 1));
+    if (!Number.isInteger(pid) || pid <= 0 || pidAlive(pid)) continue;
+    try {
+      rmSync(join(tmpdir(), name), { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
 if (process.env.NO_USER_PROFILE === "true" && !process.env.USER_DATA_DIR) {
-  const dir = join(
-    tmpdir(),
-    "peckboard-browser-profile-" + PORT + "-" + process.pid,
-  );
+  sweepOrphanProfiles();
+  const dir = join(tmpdir(), PROFILE_PREFIX + PORT + "-" + process.pid);
   try {
     mkdirSync(dir, { recursive: true });
     process.env.USER_DATA_DIR = dir;
+    const removeProfile = () => {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    };
+    process.on("exit", removeProfile);
+    for (const sig of ["SIGTERM", "SIGINT"]) {
+      process.on(sig, () => process.exit(0));
+    }
   } catch {
     /* fall through to the upstream default */
   }
