@@ -389,6 +389,20 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 linger_announced = false;
                 continue;
             }
+            // The CLI already holds user sends of its own — written to stdin
+            // mid-turn, after the model's last tool call, so they missed this
+            // turn and will run as their own turn(s) with their own result.
+            // Killing the child now would drop them: an `ask_user` answer
+            // given while the agent was still writing its reply was lost
+            // exactly this way. Keep reading until the backlog is empty.
+            if !winding_down && queued_turns(&json_line) > 0 {
+                last_result_error = None;
+                watchdog.rearm();
+                turn_settled = false;
+                linger_guard = Watchdog::arm(None);
+                linger_announced = false;
+                continue;
+            }
             // Background subagents still running inside the CLI: linger —
             // killing now would orphan them (0.1.15 and earlier lost the
             // work; --resume only replayed a "stopped" notification).
@@ -806,6 +820,15 @@ fn take_message(session_id: &str) -> Result<Option<Value>, String> {
 /// user-turn result carries no `origin`; skipping a foreign frame lets the
 /// loop keep reading until the real turn settles (worst case: eof →
 /// `classify_exit`, a visible crash instead of a silent success).
+/// User sends still waiting in the CLI's command queue when this `result`
+/// was produced. The CLI documents `> 0` as "at least one more user turn
+/// (and result) follows without further input"; absent on older CLIs.
+fn queued_turns(json: &Value) -> u64 {
+    json.get("queued_turn_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
 fn is_turn_result(json: &Value) -> bool {
     if json.get("origin").is_some() {
         return false;
@@ -1030,6 +1053,30 @@ mod tests {
             "num_turns": 0, "result": "Not logged in · Please run /login",
         });
         assert!(is_turn_result(&auth_error));
+    }
+
+    /// A send written to stdin after the model's last tool call misses the
+    /// running turn; the CLI reports it as `queued_turn_count` on that
+    /// turn's result, and the child must stay up to run it.
+    #[test]
+    fn queued_turn_count_keeps_the_child_for_the_backlog() {
+        let backlog: Value = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "result": "Waiting for your approval.",
+            "queued_turn_count": 1,
+        });
+        assert!(is_turn_result(&backlog));
+        assert_eq!(queued_turns(&backlog), 1);
+        let drained: Value = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "result": "OK", "queued_turn_count": 0,
+        });
+        assert_eq!(queued_turns(&drained), 0);
+        // Older CLIs omit the field: nothing queued.
+        let legacy: Value = serde_json::json!({
+            "type": "result", "subtype": "success", "num_turns": 1, "result": "OK",
+        });
+        assert_eq!(queued_turns(&legacy), 0);
     }
 
     #[test]
