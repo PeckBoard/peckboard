@@ -18,6 +18,7 @@ mod remote_agent;
 mod repeating_tasks;
 mod reports;
 mod session_memory;
+mod shared_files;
 mod subagents;
 mod variables;
 mod voice;

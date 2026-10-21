@@ -46,7 +46,10 @@ impl McpToolRegistry {
         // the model-facing result and surface it to the chat as a `file-diff`
         // event instead (the model shouldn't pay context for its own diff).
         if let Some(diff) = value.as_object_mut().and_then(|o| o.remove("_diff")) {
-            self.emit_file_diff(ctx, diff).await;
+            self.emit_file_diff(ctx, diff.clone()).await;
+            // A newly created image/video/archive/pdf also gets a
+            // downloadable `file-shared` card.
+            self.auto_share_created(ctx, &diff).await;
         }
         Ok(value)
     }

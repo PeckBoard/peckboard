@@ -55,6 +55,11 @@ export function transcriptMarkdown(events: Event[], sessionName: string): string
       case 'file-diff':
         lines.push('', '```diff', item.diff.diff, '```', '')
         break
+      case 'file-shared':
+        lines.push(
+          `- 📎 shared file \`${item.file.filename}\`${item.file.caption ? ` — ${item.file.caption}` : ''}`,
+        )
+        break
       case 'step':
         lines.push('---', '', `### ${item.label}`, '')
         break

@@ -51,6 +51,17 @@ export interface FileDiff {
   truncated?: boolean
   created?: boolean
 }
+/** A file an agent shared into the chat (`file-shared` event): a snapshot
+ *  in the server's shared-files store, fetched through a signed URL. */
+export interface SharedFile {
+  id: string
+  filename: string
+  mimeType: string
+  size: number
+  sourcePath?: string
+  origin?: 'share' | 'created' | 'generated'
+  caption?: string
+}
 
 /** A display item derived from one or more raw events. */
 export type DisplayItem =
@@ -120,6 +131,7 @@ export type DisplayItem =
       key: string
     }
   | { type: 'file-diff'; diff: FileDiff; ts: number; key: string }
+  | { type: 'file-shared'; file: SharedFile; ts: number; key: string }
   | { type: 'thinking'; text: string; key: string; ts: number }
   | {
       type: 'turn-usage'
@@ -275,6 +287,8 @@ export function displayItemSearchText(item: DisplayItem): string {
     }
     case 'file-diff':
       return `${item.diff.path}\n${item.diff.diff}`
+    case 'file-shared':
+      return [item.file.filename, item.file.caption ?? ''].join('\n')
     case 'step':
       return item.label
     case 'agent-start':
@@ -1013,6 +1027,24 @@ function foldEvent(st: FoldState, ev: Event): void {
       if (!attached) {
         items.push({ type: 'file-diff', diff, ts: ev.ts, key: ev.id })
       }
+      break
+    }
+    case 'file-shared': {
+      flushAssistant(st)
+      const d = ev.data as Record<string, unknown>
+      if (typeof d.id !== 'string' || typeof d.filename !== 'string') break
+      const origin = d.origin
+      const file: SharedFile = {
+        id: d.id,
+        filename: d.filename,
+        mimeType: typeof d.mimeType === 'string' ? d.mimeType : 'application/octet-stream',
+        size: typeof d.size === 'number' ? d.size : 0,
+        sourcePath: typeof d.sourcePath === 'string' ? d.sourcePath : undefined,
+        origin:
+          origin === 'share' || origin === 'created' || origin === 'generated' ? origin : undefined,
+        caption: typeof d.caption === 'string' ? d.caption : undefined,
+      }
+      items.push({ type: 'file-shared', file, ts: ev.ts, key: ev.id })
       break
     }
     case 'question': {

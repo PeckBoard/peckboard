@@ -100,6 +100,7 @@ impl McpToolRegistry {
             "set_workflow_instructions" => self.handle_set_workflow_instructions(args, ctx).await,
             "write_report" => self.handle_write_report(args, ctx).await,
             "attach_report_file" => self.handle_attach_report_file(args, ctx).await,
+            "share_file" => self.handle_share_file(args, ctx).await,
             "update_card" => self.handle_update_card(args, ctx).await,
             "update_project" => self.handle_update_project(args, ctx).await,
             "create_project" => self.handle_create_project(args, ctx).await,
@@ -660,7 +661,9 @@ mod tests {
         assert!(names.contains(&"voice_prompt"));
         // Orchestrator repair of a detached worker.
         assert!(names.contains(&"reattach_worker"));
-        assert_eq!(names.len(), 99);
+        // Hand the user a downloadable file in the chat.
+        assert!(names.contains(&"share_file"));
+        assert_eq!(names.len(), 100);
     }
 
     #[test]

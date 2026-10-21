@@ -250,6 +250,25 @@ pub fn tool_annotations(name: &str) -> serde_json::Value {
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
             McpToolDef {
+                name: "share_file".into(),
+                description: "Share a file from the project folder into the chat so the user can preview and download it. Use this to hand the user any artifact you produced for them — zips, tarballs, builds/binaries, images, videos, PDFs, reports, logs, CSV/JSON exports. The file is snapshotted at call time (later edits don't change the shared copy); images and videos show an inline preview, text files open in a viewer, and every card has a download button. Max 2 GB. Path is relative to the project folder (an absolute path inside the folder also works).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File to share, relative to the project folder"
+                        },
+                        "caption": {
+                            "type": "string",
+                            "description": "Optional one-line note shown on the card (what the file is)"
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
                 name: "complete_step".into(),
                 description: "Finish the CURRENT workflow step and hand off to the next step's worker. Advances the card EXACTLY ONE step — does NOT finish the card. Use ONLY when real work remains for a later step. If ALL the card's work is done, call `finish_card` instead; `complete_step` then would strand the card in an early step and block every dependent card.".into(),
                 input_schema: serde_json::json!({

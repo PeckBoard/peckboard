@@ -22,6 +22,7 @@ pub mod restart;
 pub mod retention;
 pub mod secret_mask;
 pub mod session_notify;
+pub mod shared_files;
 pub mod ssh_keys;
 pub mod tls;
 pub mod tool_images;

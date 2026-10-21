@@ -133,7 +133,7 @@ fn sanitize_filename(name: &str) -> String {
 /// Build a Content-Disposition value with both a sanitized ASCII fallback
 /// (`filename=`) and an RFC 5987 UTF-8 form (`filename*=`) so non-ASCII
 /// names survive round-tripping without enabling header injection.
-fn content_disposition(filename: &str) -> String {
+pub(crate) fn content_disposition(filename: &str) -> String {
     let safe = sanitize_filename(filename);
     let ascii_fallback: String = safe
         .chars()

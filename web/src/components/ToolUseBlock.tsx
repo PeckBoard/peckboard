@@ -252,9 +252,10 @@ function ClampedPre({ text, className }: { text: string; className?: string }) {
 }
 
 /** Syntax-highlighted preview of a file's content (write_file / Write
- *  inputs): the content is fenced as markdown so rehype-highlight colors
- *  it, with the fence kept longer than any backtick run inside. */
-function CodePreview({ path, content }: { path?: string; content: string }) {
+ *  inputs, shared-file previews): the content is fenced as markdown so
+ *  rehype-highlight colors it, with the fence kept longer than any
+ *  backtick run inside. */
+export function CodePreview({ path, content }: { path?: string; content: string }) {
   const [showAll, setShowAll] = useState(false)
   const lines = content.split('\n')
   const clampable = lines.length > PRE_CLAMP_LINES + PRE_CLAMP_SLACK

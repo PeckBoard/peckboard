@@ -864,6 +864,8 @@ pub async fn delete_session_core(state: &AppState, id: &str) -> anyhow::Result<b
         );
     }
 
+    // Snapshots of files the agent shared into the chat.
+    crate::service::shared_files::remove_session_dir(&state.config.data_dir, id);
     // Clean up MCP config and tokens
     crate::service::mcp_server::delete_mcp_config(&state.config.data_dir, id);
     state.mcp_tokens.revoke_by_session(id).await;

@@ -396,6 +396,14 @@ expected to use:
   fields the user filled in correctly. Pair it with a
   `.form-actions-reason` span stating why the primary action is disabled —
   a disabled button with no stated reason reads as broken.
+- **`SharedFileCard` + `FilePreviewModal`**
+  (`web/src/components/SharedFileCard.tsx`) — a file an agent shared
+  (`file-shared` event): icon, name, size, caption, inline thumbnail for
+  images/videos, and an always-visible Download button; clicking opens the
+  preview modal (image / video / highlighted text via `CodePreview`, else
+  download-only). Bytes come from short-lived signed URLs
+  (`POST /api/sessions/{id}/shared-files/{fid}/url`). Reuse it anywhere a
+  downloadable agent artifact is shown.
 
 **Naming and ordering of menu items must match across surfaces.** If a
 session's chat-toolbar 3-dot menu says "Clear session", the tab

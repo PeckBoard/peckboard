@@ -1372,42 +1372,34 @@ impl PluginProviderRuntime {
 
     /// Copy images the turn's CLI generated into the session folder (its
     /// home is out of every sandbox's reach) and show each in the chat as a
-    /// `generated_image` tool block carrying the image and its new path.
+    /// downloadable `file-shared` card (snapshotted into the shared-files
+    /// store, `origin: "generated"`).
     fn import_generated_images(&self, plugin_id: &str, session_id: &str, turn: &TurnState) {
+        let folder = Path::new(&turn.snapshot.folder_path);
         let imported = match self.gen_images.lock() {
             Ok(mut m) => match m.get_mut(session_id) {
-                Some(w) => {
-                    generated_images::import(plugin_id, w, Path::new(&turn.snapshot.folder_path))
-                }
+                Some(w) => generated_images::import(plugin_id, w, folder),
                 None => return,
             },
             Err(_) => return,
         };
+        let Some(data_dir) = turn.db.data_dir().map(Path::to_path_buf) else {
+            return;
+        };
         for img in imported {
-            let tool_use_id = format!("generated-image:{}", img.rel_path);
-            turn.rt.block_on(emit_event(
+            let src = folder.join(&img.rel_path);
+            if let Err(e) = turn.rt.block_on(crate::service::shared_files::share(
                 &turn.db,
                 &turn.broadcaster,
+                &data_dir,
                 session_id,
-                ProviderEvent::ToolStart {
-                    tool_use_id: tool_use_id.clone(),
-                    name: "generated_image".into(),
-                    input: serde_json::json!({ "path": img.rel_path }),
-                    parent_tool_use_id: None,
-                },
-            ));
-            turn.rt.block_on(emit_event(
-                &turn.db,
-                &turn.broadcaster,
-                session_id,
-                ProviderEvent::ToolEnd {
-                    tool_use_id,
-                    output: Some(format!("Saved to the project folder: {}", img.rel_path)),
-                    error: None,
-                    images: img.image.into_iter().collect(),
-                    parent_tool_use_id: None,
-                },
-            ));
+                &src,
+                &img.rel_path,
+                crate::service::shared_files::Origin::Generated,
+                None,
+            )) {
+                tracing::warn!(session_id, path = %img.rel_path, "sharing generated image failed: {e}");
+            }
         }
     }
     /// `peckboard_provider_invoke_mcp {session_id, name, arguments}` — run one

@@ -10,13 +10,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::provider::stream::ToolImage;
-
 /// Folder-relative directory imported images land in.
 pub const IMPORT_DIR: &str = ".peckboard/generated-images";
-
-/// Images larger than this are imported but not inlined into the chat.
-const MAX_INLINE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Clock slack when comparing a file's mtime against the turn start.
 const MTIME_SLACK: Duration = Duration::from_secs(2);
@@ -68,8 +63,6 @@ impl Default for Watch {
 pub struct Imported {
     /// Folder-relative path, e.g. `.peckboard/generated-images/x.png`.
     pub rel_path: String,
-    /// Inline copy for the chat; `None` when over [`MAX_INLINE_BYTES`].
-    pub image: Option<ToolImage>,
 }
 
 /// Conversation ids become path components: allow the UUID alphabet only.
@@ -143,7 +136,7 @@ pub fn import(plugin_id: &str, watch: &mut Watch, folder: &Path) -> Vec<Imported
             .filter(|(p, _)| !watch.imported.contains(p))
             .collect();
         files.sort_by_key(|(_, m)| m.modified().ok());
-        for (src, meta) in files {
+        for (src, _) in files {
             let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
@@ -161,19 +154,8 @@ pub fn import(plugin_id: &str, watch: &mut Watch, folder: &Path) -> Vec<Imported
                 continue;
             }
             watch.imported.insert(src.clone());
-            let image = (meta.len() <= MAX_INLINE_BYTES)
-                .then(|| std::fs::read(&src).ok())
-                .flatten()
-                .map(|bytes| {
-                    use base64::Engine;
-                    ToolImage {
-                        mime_type: image_mime(&src).unwrap_or("image/png").to_string(),
-                        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    }
-                });
             out.push(Imported {
                 rel_path: format!("{IMPORT_DIR}/{dest_name}"),
-                image,
             });
         }
     }
@@ -209,7 +191,6 @@ mod tests {
         let got = import("codex", &mut w, folder.path());
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].rel_path, ".peckboard/generated-images/exec-a.png");
-        assert_eq!(got[0].image.as_ref().unwrap().mime_type, "image/png");
         assert!(folder.path().join(&got[0].rel_path).is_file());
         assert!(import("codex", &mut w, folder.path()).is_empty());
 

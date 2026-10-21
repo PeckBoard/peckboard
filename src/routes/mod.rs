@@ -34,6 +34,7 @@ pub mod repeating_tasks;
 pub mod reports;
 pub mod sessions;
 pub mod settings;
+pub mod shared_files;
 pub mod ssh_keys;
 pub mod system_prompts;
 pub mod terminals;
@@ -99,6 +100,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(notifications::router(state.clone()))
         .merge(background::router(state.clone()))
         .merge(dashboard_cards::router(state.clone()))
+        // Signed-URL GET is public (the HMAC is the credential); minting
+        // the URL is JWT + session-access gated.
+        .merge(shared_files::router(state.clone()))
         .merge(dashboard_ops::router(state.clone()))
         .merge(me::router(state.clone()))
         .merge(views::router(state.clone()))

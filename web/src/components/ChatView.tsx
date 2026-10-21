@@ -32,6 +32,7 @@ import { downloadTranscript } from '../util/transcript'
 import InputBar from './InputBar'
 import ToolUseBlock, { CopyButton } from './ToolUseBlock'
 import DiffBlock from './DiffBlock'
+import SharedFileCard from './SharedFileCard'
 import ConfirmDialog from './ConfirmDialog'
 import ModelSwitchDialog, { type ModelSwitchMode } from './ModelSwitchDialog'
 import Modal from './Modal'
@@ -681,6 +682,12 @@ export const ChatRow = memo(function ChatRow({
       return (
         <div className="chat-row chat-row-tool">
           <DiffBlock diff={item.diff} />
+        </div>
+      )
+    case 'file-shared':
+      return (
+        <div className="chat-row chat-row-tool">
+          <SharedFileCard sessionId={sessionId} file={item.file} />
         </div>
       )
     case 'status':
