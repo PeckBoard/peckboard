@@ -5,6 +5,7 @@ pub mod login_stash {
     pub use crate::accounts::login_stash::*;
 }
 pub mod crate_provider;
+pub mod generated_images;
 pub mod manager;
 pub mod message;
 pub mod plugin_provider;

@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use crate::db::Db;
 use crate::plugin::manager::PluginManager;
 use crate::provider::agent::{AgentProvider, ProcessCompletion, SendMessageContext, emit_event};
+use crate::provider::generated_images;
 use crate::provider::message::UserMessage;
 #[cfg(test)]
 use crate::provider::registry::{AnswerTransport, InterruptKind};
@@ -317,6 +318,9 @@ pub struct PluginProviderRuntime {
     /// session_id -> (MCP bearer token, config path) the in-flight turn's
     /// agent process started with; revoked when the turn ends.
     mcp_tokens: std::sync::Mutex<HashMap<String, (String, std::path::PathBuf)>>,
+    /// session_id -> generated-image import state for an in-flight Codex /
+    /// Grok turn (see [`generated_images`]).
+    gen_images: std::sync::Mutex<HashMap<String, generated_images::Watch>>,
 }
 
 /// One host-owned CLI child a plugin spawned for an in-flight turn.
@@ -407,6 +411,11 @@ impl PluginProviderRuntime {
                 "a provider turn is already in flight for session '{session_id}'"
             ));
         }
+        if generated_images::supports(&turn.plugin_id)
+            && let Ok(mut m) = self.gen_images.lock()
+        {
+            m.insert(session_id.to_string(), generated_images::Watch::new());
+        }
         self.bind_mcp_token(session_id, &turn);
         turns.insert(session_id.to_string(), Arc::new(turn));
         Ok(())
@@ -455,6 +464,9 @@ impl PluginProviderRuntime {
     /// never took so the caller can re-queue them.
     pub(crate) fn end_turn_full(&self, session_id: &str) -> EndedTurn {
         self.kill_child(session_id);
+        if let Ok(mut m) = self.gen_images.lock() {
+            m.remove(session_id);
+        }
         let turn = self
             .turns
             .lock()
@@ -1099,12 +1111,38 @@ impl PluginProviderRuntime {
             &event,
             ProviderEvent::System { subtype, .. } if subtype == BACKGROUND_LINGER_SUBTYPE
         );
+        let import_images = generated_images::supports(plugin_id);
+        let tool_ended = matches!(&event, ProviderEvent::ToolEnd { .. });
+        if import_images {
+            if let ProviderEvent::Started {
+                conversation_id: Some(c),
+                ..
+            }
+            | ProviderEvent::Completed {
+                conversation_id: Some(c),
+                ..
+            } = &event
+            {
+                self.note_conversation_id(&req.session_id, c);
+            }
+            // Before the terminal event, so the images land ahead of
+            // `agent-end` and are on disk when the turn reports done.
+            if matches!(
+                &event,
+                ProviderEvent::Completed { .. } | ProviderEvent::Crashed { .. }
+            ) {
+                self.import_generated_images(plugin_id, &req.session_id, &turn);
+            }
+        }
         turn.rt.block_on(emit_event(
             &turn.db,
             &turn.broadcaster,
             &req.session_id,
             event,
         ));
+        if import_images && tool_ended {
+            self.import_generated_images(plugin_id, &req.session_id, &turn);
+        }
         if starts_linger && turn.end_linger.load(Ordering::SeqCst) {
             // A finished worker: end the run rather than keep its child up
             // for background work (see `TurnState::end_linger`).
@@ -1298,8 +1336,78 @@ impl PluginProviderRuntime {
             &req.session_id,
             req.model.as_deref(),
         )) {
-            Ok(v) => v.to_string(),
+            Ok(v) => {
+                self.note_account_home(plugin_id, &req.session_id, &v);
+                v.to_string()
+            }
             Err(e) => error_json(e),
+        }
+    }
+
+    /// Remember the CLI home the turn's account points at, where its
+    /// generated images land.
+    fn note_account_home(&self, plugin_id: &str, session_id: &str, account: &serde_json::Value) {
+        let Some(key) = generated_images::home_env_key(plugin_id) else {
+            return;
+        };
+        let home = account
+            .get("env")
+            .and_then(|e| e.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        if let (Some(home), Ok(mut m)) = (home, self.gen_images.lock())
+            && let Some(w) = m.get_mut(session_id)
+        {
+            w.home = Some(home.into());
+        }
+    }
+
+    fn note_conversation_id(&self, session_id: &str, conversation_id: &str) {
+        if let Ok(mut m) = self.gen_images.lock()
+            && let Some(w) = m.get_mut(session_id)
+        {
+            w.conversation_id = Some(conversation_id.to_string());
+        }
+    }
+
+    /// Copy images the turn's CLI generated into the session folder (its
+    /// home is out of every sandbox's reach) and show each in the chat as a
+    /// `generated_image` tool block carrying the image and its new path.
+    fn import_generated_images(&self, plugin_id: &str, session_id: &str, turn: &TurnState) {
+        let imported = match self.gen_images.lock() {
+            Ok(mut m) => match m.get_mut(session_id) {
+                Some(w) => {
+                    generated_images::import(plugin_id, w, Path::new(&turn.snapshot.folder_path))
+                }
+                None => return,
+            },
+            Err(_) => return,
+        };
+        for img in imported {
+            let tool_use_id = format!("generated-image:{}", img.rel_path);
+            turn.rt.block_on(emit_event(
+                &turn.db,
+                &turn.broadcaster,
+                session_id,
+                ProviderEvent::ToolStart {
+                    tool_use_id: tool_use_id.clone(),
+                    name: "generated_image".into(),
+                    input: serde_json::json!({ "path": img.rel_path }),
+                    parent_tool_use_id: None,
+                },
+            ));
+            turn.rt.block_on(emit_event(
+                &turn.db,
+                &turn.broadcaster,
+                session_id,
+                ProviderEvent::ToolEnd {
+                    tool_use_id,
+                    output: Some(format!("Saved to the project folder: {}", img.rel_path)),
+                    error: None,
+                    images: img.image.into_iter().collect(),
+                    parent_tool_use_id: None,
+                },
+            ));
         }
     }
     /// `peckboard_provider_invoke_mcp {session_id, name, arguments}` — run one
