@@ -523,106 +523,59 @@ async fn reviewed_session_id(
         .map(|e| e.session_id)
 }
 
-/// Model for a card's review session. The review must run on a DIFFERENT
-/// model than the one that did the work (else it is the author grading its
-/// own homework), and on a mid-tier model, never a provider's top tier: a
-/// review re-checks finished work and the top tier is the most expensive.
-/// An explicit project reviewer model is the user's call and always wins.
-/// Otherwise the pick comes from the review pool
-/// (`ProviderRegistry::review_model`), skipping the model the implementer
-/// actually ran (its newest `agent-start`, which reflects auto-switches and
-/// resolved defaults); then a non-top peer on the implementer's provider
-/// (`ProviderRegistry::alternate_model`); then the project model.
+/// Model for a card's review session. The review follows the card: the
+/// card's own model wins, else the project's reviewer model, the project
+/// model, then the model the implementer's session was on. It never moves
+/// to another model or provider on its own — only [`dispatch_model`] does,
+/// when that account is out of quota AND the card's auto-switch is on.
 async fn reviewer_model(state: &Arc<AppState>, project: &Project, card: &Card) -> Option<String> {
-    use crate::provider::registry::{ProviderRegistry, split_model_account};
-    use std::hash::{Hash, Hasher};
-
     let not_auto = |m: &String| !crate::provider::is_auto_model(m);
-    if let Some(explicit) = project.review_model.clone().filter(not_auto) {
-        return Some(explicit);
-    }
-    let configured = project.model.clone().filter(not_auto);
-    let (session_model, ran) = match reviewed_session_id(state, &card.id, None).await {
-        Some(reviewed) => {
-            let session_model = state
+    let configured = card
+        .model
+        .clone()
+        .filter(not_auto)
+        .or_else(|| project.review_model.clone().filter(not_auto))
+        .or_else(|| project.model.clone().filter(not_auto));
+    let model = match configured {
+        Some(m) => m,
+        None => {
+            let reviewed = reviewed_session_id(state, &card.id, None).await?;
+            state
                 .db
                 .get_session(&reviewed)
                 .await
                 .ok()
                 .flatten()
                 .and_then(|s| s.model)
-                .filter(not_auto);
-            let ran = state
-                .db
-                .latest_event_of_kind(&reviewed, "agent-start")
-                .await
-                .ok()
-                .flatten()
-                .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
-                .and_then(|d| d.get("model").and_then(|m| m.as_str()).map(str::to_owned))
-                .or_else(|| session_model.clone());
-            (session_model, ran)
+                .filter(not_auto)?
         }
-        None => (None, None),
     };
-    // The implementer's provider and account (else the project model's):
-    // a reviewer on the same provider stays on that account.
-    let (provider, account) = match session_model.as_deref().or(configured.as_deref()) {
-        Some(m) => {
-            let (p, rest) = ProviderRegistry::parse_model_id(m, "claude");
-            let account = split_model_account(&rest).1.map(str::to_owned);
-            (p, account)
-        }
-        None => ("claude".to_string(), None),
-    };
-    let avoid = ran
-        .clone()
-        .or_else(|| configured.clone())
-        .unwrap_or_default();
-    // Stable per card, so a resumed review keeps the same pick.
-    let seed = {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        card.id.hash(&mut h);
-        h.finish()
-    };
+    Some(dispatch_model(state, card, model).await)
+}
+
+/// The model a card's run dispatches on: `model` while its account has
+/// quota; with the account held, an available alternative only when the
+/// card's auto-switch is on (NULL inherits ON for workers) — see
+/// `ProviderRegistry::dispatchable_model`. Otherwise `model` unchanged, and
+/// the spawn's rate-limit check waits for the reset.
+async fn dispatch_model(state: &Arc<AppState>, card: &Card, model: String) -> String {
+    let autoswitch = crate::service::mcp_server::autoswitch_enabled(card.model_autoswitch, true);
     let hidden = crate::routes::settings::hidden_providers_for_db(state.db.clone()).await;
-    let registry = &state.provider_registry;
-    // Work driven by the scripted `mock` provider (tests, demos) is never
-    // reviewed on a real, billed model.
-    let pool_pick = if provider == "mock" {
-        None
-    } else {
-        registry
-            .review_model(&hidden, &avoid, account.as_deref(), seed)
-            .await
-    };
-    let pick = match pool_pick {
-        Some(pick) => Some(pick),
-        None if !avoid.is_empty() => {
-            registry
-                .alternate_model(&provider, account.as_deref(), &avoid)
-                .await
-        }
-        None => None,
-    };
-    match pick {
-        Some(pick) => {
+    match state
+        .provider_registry
+        .dispatchable_model(&model, autoswitch, &hidden)
+        .await
+    {
+        Some(pick) if pick != model => {
             tracing::info!(
                 card_id = %card.id,
-                implementer_model = %avoid,
-                reviewer_model = %pick,
-                "Review runs on a different, mid-tier model"
+                from = %model,
+                to = %pick,
+                "Card model's account is out of quota; auto-switching"
             );
-            Some(pick)
+            pick
         }
-        None => {
-            tracing::warn!(
-                card_id = %card.id,
-                implementer_model = %avoid,
-                "No review-pool model available; reviewing on the project model"
-            );
-            configured
-        }
+        _ => model,
     }
 }
 /// Spawn a worker agent for a specific card.
@@ -704,15 +657,15 @@ async fn spawn_worker_for_card(
     // the provider restores the old conversation via its conversation_id,
     // so the agent keeps its context instead of rediscovering the card
     // from scratch.
-    //
-    // A review whose account ran out of quota is never resumed or reused:
-    // a fresh review session re-picks a model on an account that has quota
-    // left (`ProviderRegistry::review_model` skips limited accounts).
+    // A session pinned to an out-of-quota account is never resumed or
+    // reused while the card's auto-switch is on: a fresh session picks an
+    // available model (`dispatch_model`). With auto-switch OFF it is kept,
+    // and the rate-limit hold below waits for the reset instead.
     let limits = &state.provider_registry.rate_limits;
     let now_utc = chrono::Utc::now();
-    let is_review_step = effective_step == crate::workflow::REVIEW_STEP;
-    let stale_review =
-        |prev: &Session| is_review_step && limits.is_limited(prev.model.as_deref(), now_utc);
+    let autoswitch_on = crate::service::mcp_server::autoswitch_enabled(card.model_autoswitch, true);
+    let stale_session =
+        |prev: &Session| autoswitch_on && limits.is_limited(prev.model.as_deref(), now_utc);
     let resume_session = match card.last_worker_session_id.as_deref() {
         Some(prev_sid) => state
             .db
@@ -732,7 +685,7 @@ async fn spawn_worker_for_card(
                     // the dispatch chokepoint injects it, so the resumed
                     // chunk starts fresh WITH the preserved context.
                     && (prev.conversation_id.is_some() || prev.pending_handover_doc.is_some())
-                    && !stale_review(prev)
+                    && !stale_session(prev)
             }),
         None => None,
     };
@@ -760,7 +713,7 @@ async fn spawn_worker_for_card(
                         && prev.sealed_at.is_none()
                         && prev.conversation_id.is_none()
                         && prev.pending_handover_doc.is_none()
-                        && !stale_review(prev)
+                        && !stale_session(prev)
                 }),
             None => None,
         }
@@ -857,7 +810,12 @@ async fn spawn_worker_for_card(
                 } else {
                     (
                         format!("worker: {}", card.title),
-                        card.model.clone().or_else(|| project.model.clone()),
+                        match card.model.clone().or_else(|| project.model.clone()) {
+                            Some(m) if !crate::provider::is_auto_model(&m) => {
+                                Some(dispatch_model(state, card, m).await)
+                            }
+                            other => other,
+                        },
                         card.effort.clone().or_else(|| project.effort.clone()),
                     )
                 };
@@ -2915,5 +2873,172 @@ mod crash_block_tests {
         assert_eq!(spawned[0].card_id.as_deref(), Some("c2"));
         assert_eq!(spawned[0].name, "review: Finished work");
         assert_eq!(spawned[0].worker_step.as_deref(), Some("review"));
+    }
+
+    /// Catalog for the model-selection tests: codex on two accounts, claude
+    /// on one. Registered with the no-op double (every turn completes).
+    async fn register_codex_and_claude(state: &AppState) {
+        use crate::provider::registry::ProviderInfo;
+        use crate::provider::stream::ModelInfo;
+        let model = |id: &str, tier: i32| ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            capabilities: vec![],
+            tier,
+        };
+        for (id, models) in [
+            (
+                "codex",
+                vec![model("gpt-5.6-sol@c1", 2), model("gpt-5.6-sol@c2", 2)],
+            ),
+            (
+                "claude",
+                vec![
+                    model("claude-opus-5-5@a1", 2),
+                    model("claude-fable-5-1@a1", 3),
+                ],
+            ),
+        ] {
+            state
+                .provider_registry
+                .register(
+                    Arc::new(crate::provider::test_double::NoopProvider::new()),
+                    ProviderInfo {
+                        id: id.into(),
+                        display_name: id.into(),
+                        models,
+                        effort_levels: vec![],
+                        capabilities: Default::default(),
+                    },
+                )
+                .await;
+        }
+    }
+
+    async fn set_card_model(state: &AppState, model: &str, autoswitch: Option<bool>) {
+        state
+            .db
+            .update_card(
+                "c1",
+                UpdateCard {
+                    model: Some(Some(model.into())),
+                    model_autoswitch: Some(autoswitch),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The review runs on the card's model — no "different reviewer" pool
+    /// pick, no provider hop. A held account moves only with auto-switch
+    /// ON: same provider, other account first, then another provider;
+    /// never onto a held account. With auto-switch OFF the held model stays
+    /// (the spawn then waits for the reset).
+    #[tokio::test]
+    async fn review_follows_the_card_model_and_autoswitch() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        seed_project(&state.db, None).await;
+        register_codex_and_claude(&state).await;
+        let sol_c1 = "codex:gpt-5.6-sol@c1";
+        let project = state.db.get_project("p1").await.unwrap().unwrap();
+        let pick = |state: Arc<AppState>| async move {
+            let card = state.db.get_card("c1").await.unwrap().unwrap();
+            let project = state.db.get_project("p1").await.unwrap().unwrap();
+            reviewer_model(&state, &project, &card).await.unwrap()
+        };
+        assert_eq!(project.model.as_deref(), Some("mock:crash"));
+
+        set_card_model(&state, sol_c1, Some(false)).await;
+        assert_eq!(pick(state.clone()).await, sol_c1);
+
+        let now = chrono::Utc::now();
+        let limits = &state.provider_registry.rate_limits;
+        limits.note(Some(sol_c1), "You've hit your weekly limit", now);
+        assert_eq!(pick(state.clone()).await, sol_c1, "auto-switch OFF holds");
+
+        set_card_model(&state, sol_c1, None).await;
+        assert_eq!(
+            pick(state.clone()).await,
+            "codex:gpt-5.6-sol@c2",
+            "same provider, other account first"
+        );
+
+        limits.note(Some("codex:gpt-5.6-sol@c2"), "usage limit", now);
+        assert_eq!(pick(state.clone()).await, "claude:claude-opus-5-5@a1");
+    }
+
+    /// A worker whose session crashed on an out-of-quota account is not
+    /// resumed on that dead model: with auto-switch ON a fresh session
+    /// starts on an available account; with it OFF nothing spawns until the
+    /// reset.
+    #[tokio::test]
+    async fn crash_retry_starts_fresh_on_an_available_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(dir.path());
+        seed_project(&state.db, None).await;
+        register_codex_and_claude(&state).await;
+        let sol_c1 = "codex:gpt-5.6-sol@c1";
+        set_card_model(&state, sol_c1, Some(false)).await;
+        let ts = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_session(NewSession {
+                id: "dead".into(),
+                name: "worker: Add auth".into(),
+                folder_id: "f1".into(),
+                model: Some(sol_c1.into()),
+                is_worker: true,
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                conversation_id: Some("conv-dead".into()),
+                worker_step: Some("in_progress".into()),
+                created_at: ts.clone(),
+                last_activity: ts,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .update_card(
+                "c1",
+                UpdateCard {
+                    last_worker_session_id: Some(Some("dead".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state.provider_registry.rate_limits.note(
+            Some(sol_c1),
+            "You've hit your weekly limit",
+            chrono::Utc::now(),
+        );
+        let workers = |state: Arc<AppState>| async move {
+            state
+                .db
+                .list_worker_sessions_by_project("p1")
+                .await
+                .unwrap()
+        };
+
+        // Auto-switch OFF: hold — no spawn, no new session.
+        check_and_spawn_workers_at(&state, chrono::Utc::now()).await;
+        assert_eq!(workers(state.clone()).await.len(), 1);
+        let card = state.db.get_card("c1").await.unwrap().unwrap();
+        assert!(card.worker_session_id.is_none());
+
+        // Auto-switch ON: a fresh session on the other codex account.
+        set_card_model(&state, sol_c1, Some(true)).await;
+        check_and_spawn_workers_at(&state, chrono::Utc::now()).await;
+        let fresh: Vec<_> = workers(state.clone())
+            .await
+            .into_iter()
+            .filter(|s| s.id != "dead")
+            .collect();
+        assert_eq!(fresh.len(), 1, "dead session not reused");
+        assert_eq!(fresh[0].model.as_deref(), Some("codex:gpt-5.6-sol@c2"));
     }
 }

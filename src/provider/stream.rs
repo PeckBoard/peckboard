@@ -98,6 +98,14 @@ impl CrashKind {
             "too many requests",
             "quota",
             "usage limit",
+            // Claude subscription caps: "You've hit your weekly limit",
+            // "5-hour limit reached ∙ resets 3pm", "out of extra usage".
+            "hit your limit",
+            "weekly limit",
+            // Not bare "limit reached": "max turns limit reached" is no
+            // usage cap and must not hold the account.
+            "hour limit reached",
+            "out of extra usage",
             "overloaded",
         ]) {
             return CrashKind::RateLimit;
@@ -747,6 +755,20 @@ mod tests {
             // Claude CLI on a throttled account.
             (
                 "API Error: 429 {\"error\":{\"type\":\"rate_limit_error\"}}",
+                CrashKind::RateLimit,
+            ),
+            // Claude subscription caps (weekly / 5-hour / extra usage):
+            // must hold the account, not count as a plain crash.
+            (
+                "You've hit your weekly limit \u{00b7} resets Oct 24, 9am",
+                CrashKind::RateLimit,
+            ),
+            (
+                "5-hour limit reached \u{2219} resets 3pm",
+                CrashKind::RateLimit,
+            ),
+            (
+                "You're out of extra usage \u{00b7} resets 7pm",
                 CrashKind::RateLimit,
             ),
             // grok: the device-login marker's rewritten message.

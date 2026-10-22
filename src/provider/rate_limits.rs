@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDateTime, TimeZone, Utc};
 
 use crate::provider::registry::{ProviderRegistry, split_model_account};
 
@@ -81,10 +81,11 @@ impl RateLimits {
 /// `(now, now + MAX_HOLD_HOURS]`; [`FALLBACK_HOLD_MINUTES`] from `now` when
 /// it names none. Understands Codex's "try again at Oct 18th, 2026 1:59 AM"
 /// and its same-day "try again at 1:59 AM" (machine-local time; a clock
-/// time already past means tomorrow), and relative "resets in 4m" / "try
-/// again in 2 hours".
+/// time already past means tomorrow), relative "resets in 4m" / "try
+/// again in 2 hours", and Claude's "resets 3pm" / "resets Oct 24, 9am".
 pub fn reset_at(reason: &str, now: DateTime<Utc>) -> DateTime<Utc> {
     let parsed = absolute_reset(reason)
+        .or_else(|| dated_reset(reason, now))
         .or_else(|| clock_reset(reason, now))
         .or_else(|| relative_reset(reason, now));
     match parsed {
@@ -115,12 +116,42 @@ fn absolute_reset(reason: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
 }
 
-/// "try again at 1:59 AM" with no date: the next local occurrence of that
-/// clock time.
-fn clock_reset(reason: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let re = regex::Regex::new(r"(?i)try again at (\d{1,2}):(\d{2}) ?([AP]M)").ok()?;
+/// Claude's "resets Oct 24, 9am": a month and day with no year, in the
+/// current year (next year once that is past).
+fn dated_reset(reason: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let re = regex::Regex::new(
+        r"(?i)resets?(?: at| on)? ([A-Z][a-z]{2}) (\d{1,2}),?(?: at)? (\d{1,2})(?::(\d{2}))? ?([AP]M)",
+    )
+    .ok()?;
     let c = re.captures(reason)?;
-    let text = format!("{}:{} {}", &c[1], &c[2], c[3].to_uppercase());
+    let minutes = c.get(4).map_or("00", |m| m.as_str());
+    let year = now.with_timezone(&Local).year();
+    [year, year + 1].into_iter().find_map(|y| {
+        let text = format!(
+            "{} {} {y} {}:{minutes} {}",
+            &c[1],
+            &c[2],
+            &c[3],
+            c[5].to_uppercase()
+        );
+        let naive = NaiveDateTime::parse_from_str(&text, "%b %d %Y %I:%M %p").ok()?;
+        Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .map(|t| t.with_timezone(&Utc))
+            .filter(|t| *t > now)
+    })
+}
+
+/// "try again at 1:59 AM" / Claude's "resets 3pm" with no date: the next
+/// local occurrence of that clock time.
+fn clock_reset(reason: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let re =
+        regex::Regex::new(r"(?i)(?:try again at|resets?(?: at)?) (\d{1,2})(?::(\d{2}))? ?([AP]M)")
+            .ok()?;
+    let c = re.captures(reason)?;
+    let minutes = c.get(2).map_or("00", |m| m.as_str());
+    let text = format!("{}:{} {}", &c[1], minutes, c[3].to_uppercase());
     let time = chrono::NaiveTime::parse_from_str(&text, "%I:%M %p").ok()?;
     let today = now.with_timezone(&Local).date_naive();
     [today, today.succ_opt()?]
@@ -211,6 +242,35 @@ mod tests {
         assert!(
             delta > Duration::hours(22) && delta <= Duration::hours(23),
             "{delta}"
+        );
+    }
+    /// Claude's subscription-cap wording: "resets 3pm" and the weekly
+    /// "resets Oct 24, 9am" (no year; clamped to the 24h max).
+    #[test]
+    fn claude_resets_wording_is_parsed() {
+        let now = now();
+        let at = (Local::now() + Duration::hours(2)).format("%-I%P");
+        let delta = reset_at(&format!("5-hour limit reached \u{2219} resets {at}"), now) - now;
+        assert!(
+            delta > Duration::minutes(59) && delta <= Duration::minutes(121),
+            "{delta}"
+        );
+        let soon = (Local::now() + Duration::hours(5)).format("%b %-d, %-I:%M%P");
+        let delta = reset_at(
+            &format!("You've hit your weekly limit \u{00b7} resets {soon}"),
+            now,
+        ) - now;
+        assert!(
+            delta > Duration::minutes(298) && delta <= Duration::minutes(301),
+            "{delta}"
+        );
+        let later = (Local::now() + Duration::days(3)).format("%b %-d, %-I%P");
+        assert_eq!(
+            reset_at(
+                &format!("weekly limit reached \u{00b7} resets {later}"),
+                now
+            ),
+            now + Duration::hours(MAX_HOLD_HOURS)
         );
     }
 

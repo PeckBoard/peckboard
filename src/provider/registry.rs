@@ -602,6 +602,55 @@ impl ProviderRegistry {
             None => strongest(&|_| true),
         }
     }
+
+    /// The model a card's run dispatches on, given the card's `model` and
+    /// whether its auto-switch is on. `model` itself while its account has
+    /// quota ([`Self::rate_limits`]). With the account held and auto-switch
+    /// ON: the same base model on another available account of the same
+    /// provider, then another model of that provider
+    /// ([`Self::alternate_model`]), then another provider's pool model
+    /// ([`Self::review_model`]) — never a held account. `None` when the
+    /// account is held and auto-switch is OFF or nothing else is available:
+    /// the caller waits for the reset instead of switching.
+    pub async fn dispatchable_model(
+        &self,
+        model: &str,
+        autoswitch: bool,
+        hidden: &std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let now = chrono::Utc::now();
+        if !self.rate_limits.is_limited(Some(model), now) {
+            return Some(model.to_string());
+        }
+        if !autoswitch {
+            return None;
+        }
+        let (provider_id, rest) = Self::parse_model_id(model, "claude");
+        if !hidden.contains(&provider_id) {
+            let entry = {
+                let providers = self.providers.lock().await;
+                providers
+                    .get(provider_id.as_str())
+                    .map(|r| (r.info.clone(), r.provider.clone()))
+            };
+            if let Some((info, provider)) = entry {
+                let models = self.effective_models(&info, &provider).await;
+                let other_account = models
+                    .iter()
+                    .map(|m| format!("{provider_id}:{}", m.id))
+                    .find(|id| {
+                        same_base_model(id, &rest) && !self.rate_limits.is_limited(Some(id), now)
+                    });
+                if let Some(id) = other_account {
+                    return Some(id);
+                }
+                if let Some(id) = self.alternate_model(&provider_id, None, model).await {
+                    return Some(id);
+                }
+            }
+        }
+        self.review_model(hidden, model, None, 0).await
+    }
     /// If no prefix, uses the default provider.
     pub fn parse_model_id(model_id: &str, default_provider: &str) -> (String, String) {
         match model_id.split_once(':') {
