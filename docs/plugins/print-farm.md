@@ -63,9 +63,12 @@ Bambu printers refuse every remote command — start, pause, temperatures, the l
 | `print_start`             | Queues a print, naming the spools it will use, and starts only on your "Start print"             |
 | `print_list`              | Lists queued, running, and finished prints                                                       |
 | `print_control`           | Pauses or cancels a print (resume is page-only — it moves hardware)                              |
-| `print_snapshot`          | Saves a webcam snapshot                                                                          |
-| `camera_capture`          | Captures a still into the gallery and returns the picture                                        |
-| `print_snapshot`          | Saves a webcam snapshot                                                                          |
+| `print_snapshot`          | Grabs a live webcam frame, saves it, and shows the agent the picture                             |
+| `camera_capture`          | Captures a still into the gallery and shows the agent the picture                                |
+| `capture_list`            | Lists kept captures, newest first, optionally for one printer                                    |
+| `capture_view`            | Shows the agent a kept capture (yours from the page too), an image file, or a printer's newest   |
+
+Camera tools return the image itself, so a vision-capable model can look at the print (spaghetti, warping, an empty bed) rather than a base64 string.
 
 If the agent cannot ask you (no live chat), the print waits on the page with a **Start print** button.
 
