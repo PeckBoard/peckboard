@@ -95,6 +95,42 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
 /// sessions (`createSession({expert_kind: "pre-hatcher"})` in
 /// `peck-plugins/pre-hatcher/src/hatch.ts`).
 pub const PRE_HATCHER_EXPERT_KIND: &str = "pre-hatcher";
+/// The `expert_kind` of the backing session of an OAuth `client_credentials`
+/// client (`routes::oauth_server`): an external system calling `/mcp` with no
+/// agent process behind it. The session is created sealed, so nothing ever
+/// dispatches an agent into it; [`external_blocked_tool_names`] is the tool
+/// surface that only makes sense with a live agent process of the caller.
+pub const EXTERNAL_MCP_EXPERT_KIND: &str = "external_mcp";
+
+/// Core and plugin tools an external OAuth client may NOT call — each one
+/// drives, re-dispatches, or reports back into the CALLING session's own
+/// agent process, which an external client does not have:
+/// subagent/background results resume the caller, model/prompt/clear/
+/// interrupt/terminate act on the caller's running agent, `browser_*` keep a
+/// per-agent browser, `watch_session` wakes the caller, `propose_plan`
+/// resumes it on approval, and `reattach_worker` hands a card to a running
+/// agent. Hidden from `tools/list` AND refused at dispatch (`ToolGate`).
+pub fn external_blocked_tool_names() -> &'static [&'static str] {
+    &[
+        "spawn_subagent",
+        "switch_session_model",
+        "get_model_guidance",
+        "set_session_system_prompt",
+        "run_background",
+        "stop_background",
+        // The answer comes back as a new agent turn, and a sealed external
+        // session never runs one — the caller would wait forever.
+        "ask_user",
+        "propose_plan",
+        "reattach_worker",
+        // Plugin-provided session-control tools (session-control plugin).
+        "clear_session",
+        "interrupt_session",
+        "terminate_agent",
+        "watch_session",
+        "unwatch_session",
+    ]
+}
 
 /// The ONLY tools a pre-hatcher research session may call. Unlike the
 /// hidden-name lists above this is ENFORCED at dispatch — `routes/mcp.rs`

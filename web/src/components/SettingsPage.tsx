@@ -56,6 +56,7 @@ import TlsSettingsSection from './TlsSettingsSection'
 import EnvVarsSection from './EnvVarsSection'
 import SshKeysSection from './SshKeysSection'
 import RemoteAccessSection from './RemoteAccessSection'
+import ExternalAccessSection from './ExternalAccessSection'
 import AgentVarsSection from './AgentVarsSection'
 import AssistantMirrorSection from './AssistantMirrorSection'
 import ConfirmDialog from './ConfirmDialog'
@@ -113,6 +114,7 @@ type SubPage =
   | 'mcp'
   | 'ssh-keys'
   | 'remote-access'
+  | 'external-access'
   | 'plugins'
   | 'registry'
   | 'server'
@@ -213,6 +215,12 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
         id: 'remote-access',
         title: 'Remote Access',
         blurb: 'Reach this server from anywhere through the relay',
+        adminOnly: true,
+      },
+      {
+        id: 'external-access',
+        title: 'External Access',
+        blurb: 'OAuth clients that let outside systems call the MCP server',
         adminOnly: true,
       },
     ],
@@ -453,6 +461,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'relay pairing pair device phone laptop internet tunnel connect qr',
   },
   {
+    page: 'external-access',
+    section: 'External Access',
+    anchor: 'external-access',
+    keywords: 'oauth client credentials secret token mcp api integration external rotate revoke',
+  },
+  {
     page: 'plugins',
     section: 'Installed Plugins',
     anchor: 'plugins',
@@ -528,6 +542,12 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
     <>
       <circle cx="8" cy="8" r="5.5" />
       <path d="M2.5 8h11M8 2.5c1.6 1.6 2.25 3.4 2.25 5.5S9.6 11.9 8 13.5M8 2.5C6.4 4.1 5.75 5.9 5.75 8S6.4 11.9 8 13.5" />
+    </>
+  ),
+  'external-access': (
+    <>
+      <path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5" />
+      <path d="M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3" />
     </>
   ),
   account: (
@@ -1715,6 +1735,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         {activeSubPage === 'remote-access' && (
           <div data-settings-anchor="remote-access">
             <RemoteAccessSection />
+          </div>
+        )}
+        {activeSubPage === 'external-access' && (
+          <div data-settings-anchor="external-access">
+            <ExternalAccessSection />
           </div>
         )}
         {activeSubPage === 'variables' && (

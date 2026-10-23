@@ -12,8 +12,8 @@ use crate::db::models::Session;
 
 use super::handlers::autoswitch_enabled;
 use super::schemas::{
-    PRE_HATCHER_EXPERT_KIND, chat_hidden_tool_names, pre_hatcher_allowed_tool_names,
-    worker_hidden_tool_names,
+    EXTERNAL_MCP_EXPERT_KIND, PRE_HATCHER_EXPERT_KIND, chat_hidden_tool_names,
+    external_blocked_tool_names, pre_hatcher_allowed_tool_names, worker_hidden_tool_names,
 };
 
 /// Built-in headless-browser tools (`browser_open`, `browser_act`, …).
@@ -30,6 +30,10 @@ pub struct ToolGate {
     /// Voice assistant session (`expert_kind == "voice"`): the only role
     /// that may call `show_view`, and the one role with no browser.
     voice: bool,
+    /// Backing session of an external OAuth client
+    /// (`expert_kind == "external_mcp"`): no agent process behind it, so
+    /// the tools that act on the caller's own agent are refused.
+    external: bool,
     autoswitch_on: bool,
     /// Names of plugin-owned tools this session's role must never dispatch
     /// — populated via [`Self::with_plugin_tools`] from each active plugin's
@@ -48,12 +52,14 @@ impl ToolGate {
             session.expert_kind.as_deref() == Some(crate::service::doc_reviews::EXPERT_KIND);
         let voice =
             session.expert_kind.as_deref() == Some(crate::service::voice_relay::VOICE_EXPERT_KIND);
+        let external = session.expert_kind.as_deref() == Some(EXTERNAL_MCP_EXPERT_KIND);
         let autoswitch_on = autoswitch_enabled(session.model_autoswitch, session.is_worker);
         Self {
             is_worker: session.is_worker,
             pre_hatcher,
             doc_review,
             voice,
+            external,
             autoswitch_on,
             worker_denied_plugin_tools: std::collections::HashSet::new(),
         }
@@ -69,6 +75,7 @@ impl ToolGate {
             pre_hatcher: false,
             doc_review: false,
             voice: false,
+            external: false,
             autoswitch_on: false,
             worker_denied_plugin_tools: std::collections::HashSet::new(),
         }
@@ -95,6 +102,10 @@ impl ToolGate {
     /// context-budget trim, not enforcement — [`Self::blocked`] is the hard
     /// gate consulted at dispatch.
     pub fn advertised(&self, name: &str) -> bool {
+        if self.external && (external_blocked_tool_names().contains(&name) || is_browser_tool(name))
+        {
+            return false;
+        }
         if self.pre_hatcher {
             return pre_hatcher_allowed_tool_names().contains(&name);
         }
@@ -139,6 +150,13 @@ impl ToolGate {
     /// stop a session calling a hidden tool by name, so every in-process
     /// tool runner must consult this before dispatch.
     pub fn blocked(&self, name: &str) -> Option<String> {
+        if self.external && (external_blocked_tool_names().contains(&name) || is_browser_tool(name))
+        {
+            return Some(format!(
+                "tool '{name}' is blocked: an external OAuth client has no \
+                 agent process for this tool to act on."
+            ));
+        }
         if self.pre_hatcher && !pre_hatcher_allowed_tool_names().contains(&name) {
             return Some(format!(
                 "tool '{name}' is blocked: pre-hatcher sessions are \
@@ -393,5 +411,25 @@ mod tests {
                 assert!(!gate.advertised(tool));
             }
         }
+    }
+
+    #[test]
+    fn external_client_has_no_agent_process_tools() {
+        let ext = ToolGate::from_session(&session(false, Some(EXTERNAL_MCP_EXPERT_KIND), None));
+        for tool in [
+            "spawn_subagent",
+            "browser_open",
+            "clear_session",
+            "run_background",
+        ] {
+            assert!(ext.blocked(tool).is_some(), "{tool}");
+            assert!(!ext.advertised(tool), "{tool}");
+        }
+        for tool in ["list_cards", "create_card", "read_file"] {
+            assert!(ext.blocked(tool).is_none(), "{tool}");
+            assert!(ext.advertised(tool), "{tool}");
+        }
+        let chat = ToolGate::from_session(&session(false, None, None));
+        assert!(chat.blocked("spawn_subagent").is_none());
     }
 }

@@ -12,6 +12,7 @@ pub mod github_pr;
 pub mod mcp_client;
 pub mod mcp_server;
 pub mod mdns;
+pub mod oauth_server;
 pub mod push;
 pub mod questions;
 pub mod redact;

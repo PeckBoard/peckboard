@@ -71,7 +71,7 @@ fn b64url(bytes: &[u8]) -> String {
 }
 
 /// 32 random bytes, base64url — the PKCE verifier / state alphabet.
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     b64url(&bytes)

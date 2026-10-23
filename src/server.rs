@@ -811,7 +811,11 @@ pub async fn run_server(
             let resolver: Arc<dyn rustls::server::ResolvesServerCert> =
                 Arc::new(crate::state::TlsCertResolver(state.tls.clone()));
             let tls_acceptor = tls::acceptor_from_resolver(resolver);
-            let https_app = app.clone();
+            // Marks every request this listener serves, so routes can tell
+            // TLS traffic from plain HTTP (the OAuth `/mcp` network gate).
+            let https_app = app
+                .clone()
+                .layer(axum::Extension(crate::service::oauth_server::HttpsListener));
             tracing::info!("Peckboard listening on https://{https_addr}");
             (
                 Some(tokio::spawn(serve_https(

@@ -837,6 +837,33 @@ diesel::joinable!(session_view_nodes -> session_views (view_id));
 diesel::joinable!(view_widgets -> session_views (view_id));
 diesel::joinable!(view_widgets_converted -> session_views (view_id));
 diesel::joinable!(dashboard_widgets -> session_views (view_id));
+diesel::table! {
+    oauth_clients (id) {
+        id -> Text,
+        name -> Text,
+        client_id -> Text,
+        secret_hash -> Text,
+        folder_id -> Text,
+        project_id -> Nullable<Text>,
+        session_id -> Text,
+        created_by -> Text,
+        created_at -> Text,
+        last_used_at -> Nullable<Text>,
+        revoked_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    oauth_access_tokens (token_hash) {
+        token_hash -> Text,
+        oauth_client_id -> Text,
+        expires_at -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::joinable!(oauth_clients -> folders (folder_id));
+diesel::joinable!(oauth_access_tokens -> oauth_clients (oauth_client_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -896,4 +923,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     view_widgets_converted,
     remote_devices,
     remote_device_enrollments,
+    oauth_clients,
+    oauth_access_tokens,
 );

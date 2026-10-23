@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
     extract::{ConnectInfo, Extension, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    response::{IntoResponse, Response},
     routing::post,
 };
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::service::mcp_server::{McpToolRegistry, ToolCallContext};
+use crate::service::oauth_server::{self, HttpsListener, RequestOrigin};
 use crate::service::remote_access::tunnel::Tunnelled;
 use crate::state::AppState;
 
@@ -72,19 +74,179 @@ impl JsonRpcResponse {
 // ── Router ─────────────────────────────────────────────────────────
 
 /// MCP route -- not behind the normal auth middleware.
-/// Uses its own bearer token auth and loopback gating.
+/// Uses its own bearer token auth and network gating (see [`McpPrincipal`]).
 pub fn router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new().route("/mcp", post(mcp_handler))
 }
 
+// ── Principal ──────────────────────────────────────────────────────
+
+/// Who a `/mcp` bearer token speaks for. Resolved once per request by
+/// [`resolve_principal`], which also applies the principal's network gate,
+/// so holding one means "this token is valid AND allowed from where the
+/// request came from".
+#[derive(Debug, Clone)]
+pub enum McpPrincipal {
+    /// A per-dispatch agent token from the in-memory `McpTokenRegistry`.
+    /// Loopback only.
+    Agent {
+        session_id: String,
+        project_id: Option<String>,
+    },
+    /// An OAuth `client_credentials` access token (`oauth_access_tokens`).
+    /// Loopback or the HTTPS listener, never tunnelled. `folder_id` and
+    /// `project_id` come from the client row — the grant the admin made —
+    /// not from the backing session.
+    OAuthClient {
+        client_row_id: String,
+        session_id: String,
+        folder_id: String,
+        project_id: Option<String>,
+    },
+}
+
+impl McpPrincipal {
+    pub fn session_id(&self) -> &str {
+        match self {
+            McpPrincipal::Agent { session_id, .. }
+            | McpPrincipal::OAuthClient { session_id, .. } => session_id,
+        }
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            McpPrincipal::Agent { project_id, .. }
+            | McpPrincipal::OAuthClient { project_id, .. } => project_id.as_deref(),
+        }
+    }
+}
+
+/// Why a request has no principal.
+enum AuthFailure {
+    /// Not allowed from this network origin at all.
+    Forbidden,
+    /// Missing/unknown/expired bearer.
+    Unauthorized(&'static str),
+}
+
+/// Agent registry first, then the OAuth token table. Each principal kind is
+/// checked against its own network policy.
+async fn resolve_principal(
+    state: &AppState,
+    origin: RequestOrigin,
+    token: Option<&str>,
+) -> Result<McpPrincipal, AuthFailure> {
+    // Nothing but loopback, or OAuth over HTTPS, may even try.
+    if !origin.agent_allowed() && !origin.oauth_allowed() {
+        return Err(AuthFailure::Forbidden);
+    }
+    let Some(token) = token else {
+        return Err(AuthFailure::Unauthorized(
+            "missing or invalid Authorization header",
+        ));
+    };
+    if let Some((session_id, project_id)) = state.mcp_tokens.lookup(token).await {
+        if !origin.agent_allowed() {
+            return Err(AuthFailure::Forbidden);
+        }
+        return Ok(McpPrincipal::Agent {
+            session_id,
+            project_id,
+        });
+    }
+    if token.starts_with(oauth_server::ACCESS_TOKEN_PREFIX) && origin.oauth_allowed() {
+        let hash = oauth_server::hash_secret(token);
+        if let Ok(Some(client)) = state.db.lookup_oauth_access_token(&hash).await {
+            if let Err(e) = state.db.touch_oauth_client(&client.id).await {
+                tracing::debug!(client = %client.id, "oauth last_used_at update failed: {e}");
+            }
+            return Ok(McpPrincipal::OAuthClient {
+                client_row_id: client.id,
+                session_id: client.session_id,
+                folder_id: client.folder_id,
+                project_id: client.project_id,
+            });
+        }
+    }
+    Err(AuthFailure::Unauthorized("invalid MCP token"))
+}
+
 // ── Handler ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn mcp_handler(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     tunnelled: Option<Extension<Tunnelled>>,
+    https: Option<Extension<HttpsListener>>,
+    uri: Uri,
     headers: HeaderMap,
     Json(body): Json<JsonRpcRequest>,
+) -> Response {
+    let rpc_json =
+        |resp: JsonRpcResponse| Json(serde_json::to_value(resp).unwrap_or(serde_json::json!({})));
+    let id = body.id.clone().unwrap_or(Value::Null);
+
+    // Network gating. Agent tokens: loopback only (127.0.0.1 / ::1).
+    // Relay-tunnelled requests are already attributed to the device's real
+    // (non-loopback) address; the explicit marker check is a second guard so
+    // a remote device can never reach agent tooling. OAuth tokens: loopback
+    // or the HTTPS listener, never tunnelled, never plain remote HTTP.
+    let origin = RequestOrigin::new(addr, https.is_some(), tunnelled.is_some());
+
+    // Validate JSON-RPC version (only once the origin may talk to us at all).
+    if (origin.agent_allowed() || origin.oauth_allowed()) && body.jsonrpc != "2.0" {
+        return (
+            StatusCode::BAD_REQUEST,
+            rpc_json(JsonRpcResponse::error(
+                id,
+                -32600,
+                "invalid jsonrpc version".into(),
+            )),
+        )
+            .into_response();
+    }
+
+    let token = extract_bearer(&headers);
+    let principal = match resolve_principal(&state, origin, token.as_deref()).await {
+        Ok(p) => p,
+        Err(AuthFailure::Forbidden) => {
+            return (
+                StatusCode::FORBIDDEN,
+                rpc_json(JsonRpcResponse::error(id, -32000, "loopback only".into())),
+            )
+                .into_response();
+        }
+        Err(AuthFailure::Unauthorized(msg)) => {
+            let mut resp = (
+                StatusCode::UNAUTHORIZED,
+                rpc_json(JsonRpcResponse::error(id, -32000, msg.into())),
+            )
+                .into_response();
+            // A remote MCP client discovers the authorization server from
+            // here (RFC 9728). Loopback callers are local agent CLIs holding
+            // a per-dispatch token; inviting them into an OAuth flow would
+            // only derail them.
+            if !origin.loopback {
+                let base = oauth_server::base_url(&headers, &uri, origin.https, state.config.port);
+                if let Ok(v) = HeaderValue::from_str(&format!(
+                    "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\""
+                )) {
+                    resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+                }
+            }
+            return resp;
+        }
+    };
+
+    handle_rpc(state, principal, body).await.into_response()
+}
+
+/// Serve one JSON-RPC message for an authenticated, network-gated principal.
+async fn handle_rpc(
+    state: Arc<AppState>,
+    principal: McpPrincipal,
+    body: JsonRpcRequest,
 ) -> (StatusCode, Json<Value>) {
     // Helper to convert JsonRpcResponse to Json<Value>
     let rpc_json =
@@ -94,60 +256,24 @@ async fn mcp_handler(
     // a notification never triggers a meaningful one for) fall back to null.
     let is_notification = body.id.is_none();
     let id = body.id.clone().unwrap_or(Value::Null);
+    let session_id = principal.session_id().to_string();
+    let token_project_id = principal.project_id().map(str::to_string);
 
-    // Loopback gating: only allow from 127.0.0.1 or ::1. Relay-tunnelled
-    // requests are already attributed to the device's real (non-loopback)
-    // address; the explicit marker check is a second guard so a remote
-    // device can never reach agent tooling.
-    let ip = addr.ip();
-    if !ip.is_loopback() || tunnelled.is_some() {
+    // An OAuth client whose backing session was deleted has nothing to act
+    // as; refuse it outright rather than fall back to the ungated
+    // `ToolGate::none()` surface in `tools/list`.
+    if matches!(principal, McpPrincipal::OAuthClient { .. })
+        && !matches!(state.db.get_session(&session_id).await, Ok(Some(_)))
+    {
         return (
-            StatusCode::FORBIDDEN,
-            rpc_json(JsonRpcResponse::error(id, -32000, "loopback only".into())),
-        );
-    }
-
-    // Validate JSON-RPC version
-    if body.jsonrpc != "2.0" {
-        return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
             rpc_json(JsonRpcResponse::error(
                 id,
-                -32600,
-                "invalid jsonrpc version".into(),
+                -32000,
+                "session not found for token".into(),
             )),
         );
     }
-
-    // Extract bearer token
-    let token = match extract_bearer(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                rpc_json(JsonRpcResponse::error(
-                    id,
-                    -32000,
-                    "missing or invalid Authorization header".into(),
-                )),
-            );
-        }
-    };
-
-    // Look up token in MCP registry
-    let (session_id, token_project_id) = match state.mcp_tokens.lookup(&token).await {
-        Some(info) => info,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                rpc_json(JsonRpcResponse::error(
-                    id,
-                    -32000,
-                    "invalid MCP token".into(),
-                )),
-            );
-        }
-    };
 
     // Notifications (no `id`) — e.g. `notifications/initialized` after the
     // handshake — expect no JSON-RPC response, just an HTTP 202. This path
@@ -305,7 +431,12 @@ async fn mcp_handler(
             }
 
             let card_id = session_row.card_id.clone();
-            let folder_id = session_row.folder_id.clone();
+            // An OAuth client is bounded by the folder its grant names, even
+            // if its backing session row was later moved elsewhere.
+            let folder_id = match &principal {
+                McpPrincipal::OAuthClient { folder_id, .. } => folder_id.clone(),
+                McpPrincipal::Agent { .. } => session_row.folder_id.clone(),
+            };
 
             let ctx = ToolCallContext {
                 session_id,

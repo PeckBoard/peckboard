@@ -1860,3 +1860,37 @@ pub struct NewMfaPending {
     pub created_at: i64,
     pub expires_at: i64,
 }
+
+// ── OAuth clients (client_credentials for `/mcp`) ──────────────────────
+
+/// An OAuth `client_credentials` client allowed to call `/mcp` as its
+/// backing session (`session_id`). `secret_hash` is the SHA-256 (hex) of the
+/// client secret; the secret itself is never stored. Never serialized as-is
+/// — the admin API projects it to a view without the hash.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone)]
+#[diesel(table_name = oauth_clients)]
+pub struct OAuthClient {
+    pub id: String,
+    pub name: String,
+    pub client_id: String,
+    pub secret_hash: String,
+    pub folder_id: String,
+    pub project_id: Option<String>,
+    pub session_id: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+/// An issued access token, keyed by the SHA-256 (hex) of the bearer value.
+/// `expires_at` is RFC3339 UTC at second precision (`…Z`), so string
+/// comparison orders it correctly.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone)]
+#[diesel(table_name = oauth_access_tokens)]
+pub struct OAuthAccessToken {
+    pub token_hash: String,
+    pub oauth_client_id: String,
+    pub expires_at: String,
+    pub created_at: String,
+}

@@ -910,6 +910,7 @@ type ConfirmActionState = {
  *  verbatim. */
 const SEALED_REASONS: Record<string, string> = {
   superseded: 'The card moved on — a newer run picked it up.',
+  external_mcp: 'External OAuth client — its tool calls show here; no agent runs in this session.',
 }
 export default function ChatView({
   sessionId,

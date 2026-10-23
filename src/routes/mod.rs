@@ -22,6 +22,7 @@ pub mod mcp_oauth;
 pub mod me;
 pub mod misc;
 pub mod notifications;
+pub mod oauth_server;
 pub mod ollama;
 pub mod plans;
 pub mod plugin_api;
@@ -79,6 +80,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // generated helper from inside sessions), the answer route is JWT'd.
         .merge(askpass::router(state.clone()))
         // MCP route -- no auth middleware, uses its own token auth + loopback gating
+        // OAuth client_credentials for /mcp: /oauth/token + .well-known
+        // metadata are public; /api/oauth-clients/* is JWT + admin.
+        .merge(oauth_server::router(state.clone()))
         .merge(mcp::router(state.clone()))
         // MCP-server OAuth: /api/* routes are JWT'd; GET /oauth/callback is
         // public — the provider redirect is claimed by its one-time state.

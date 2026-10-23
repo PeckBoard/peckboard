@@ -67,6 +67,7 @@ impl Db {
                 .select(doc_reviews::id)
                 .load(conn)?;
             purge_doc_reviews(conn, review_ids)?;
+            purge_oauth_clients(conn, &id)?;
             diesel::delete(folders::table.find(&id)).execute(conn)?;
             Ok(FolderEmptyDelete::Deleted)
         })
@@ -119,6 +120,7 @@ impl Db {
             diesel::delete(env_vars::table.filter(env_vars::folder_id.eq(&id))).execute(conn)?;
             diesel::delete(agent_vars::table.filter(agent_vars::folder_id.eq(&id)))
                 .execute(conn)?;
+            purge_oauth_clients(conn, &id)?;
             let folder_deleted = diesel::delete(folders::table.find(&id)).execute(conn)?;
             if folder_deleted == 0 {
                 anyhow::bail!("folder not found: {id}");
@@ -331,6 +333,27 @@ fn detach_doc_review_sessions(
     }
     diesel::update(doc_reviews::table.filter(doc_reviews::session_id.eq_any(session_ids.to_vec())))
         .set(doc_reviews::session_id.eq::<Option<String>>(None))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Delete a folder's OAuth clients and their access tokens — the
+/// `oauth_clients.folder_id` FK would otherwise block the folder delete.
+/// Their backing sessions are folder sessions, handled by the caller.
+fn purge_oauth_clients(conn: &mut SqliteConnection, folder_id: &str) -> anyhow::Result<()> {
+    let client_ids: Vec<String> = oauth_clients::table
+        .filter(oauth_clients::folder_id.eq(folder_id))
+        .select(oauth_clients::id)
+        .load(conn)?;
+    if client_ids.is_empty() {
+        return Ok(());
+    }
+    diesel::delete(
+        oauth_access_tokens::table
+            .filter(oauth_access_tokens::oauth_client_id.eq_any(client_ids.clone())),
+    )
+    .execute(conn)?;
+    diesel::delete(oauth_clients::table.filter(oauth_clients::id.eq_any(client_ids)))
         .execute(conn)?;
     Ok(())
 }

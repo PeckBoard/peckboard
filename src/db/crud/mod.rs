@@ -22,6 +22,7 @@ mod folders;
 mod grok_accounts;
 mod kimi_accounts;
 mod mfa;
+mod oauth_clients;
 mod pending_actions;
 mod plans;
 mod plugin_approvals;
@@ -56,6 +57,7 @@ pub use claude_accounts::AccountModelUsage;
 pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
+pub use oauth_clients::{EXTERNAL_MCP_SEAL_REASON, OAuthClientView, oauth_ts};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
 pub use remote_device_enrollments::{
     ActivateAttempt, EnrollAttempt, EnrollOutcome, EnrollRefusal, rfc3339_after,

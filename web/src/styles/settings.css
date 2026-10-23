@@ -2452,3 +2452,38 @@ a.wasm-plugin-repo:hover {
     flex: none;
   }
 }
+
+/* ── External access (OAuth clients) ─────────────────────────────── */
+.ext-access-endpoints {
+  margin: 10px 0 14px;
+}
+.ext-access-copy-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ext-access-copy-row > .form-input {
+  flex: 1;
+  min-width: 0;
+}
+.ext-access-copy-row > textarea.form-input {
+  resize: vertical;
+  white-space: pre;
+}
+.ext-access-mono {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+/* The meta block (scope, client id, dates) is wide; without this the
+   ellipsised name shrinks to nothing. */
+.ext-access .list-view-name {
+  flex: 0 1 auto;
+  min-width: 6em;
+  font-weight: 600;
+}
+.ext-access .list-view-meta {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
