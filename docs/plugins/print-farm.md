@@ -10,9 +10,18 @@ Print Farm runs a fleet of 3D printers from PeckBoard and slices models with the
 
 ![The Print Farm page: printer cards with state, progress, temperatures, and webcam snapshots]({{ "/assets/screenshots/plugins/print-farm.png" | relative_url }})
 
-Supported printers: **Klipper** (Moonraker), **OctoPrint**, **Prusa** (PrusaLink), and **Bambu Lab** in LAN mode through the [print-bridge](https://github.com/PeckBoard/print-bridge) helper. Bambu speaks MQTT and FTPS over TLS, which a WASM plugin cannot reach, so print-bridge — a small native daemon on `127.0.0.1:7781`, not a registry plugin — translates them to plain HTTP. When you add a Bambu printer, Print Farm shows an **Install print-bridge** button that opens App Manager: it downloads the binary, creates a token, and runs it as a systemd user service, and Print Farm picks the token up from `~/.config/print-bridge/token` with no setting to fill in. Newer Bambu firmware only allows third-party LAN control with **LAN-only mode and Developer Mode** enabled on the printer.
+Supported printers: **Klipper** (Moonraker), **OctoPrint**, **Prusa** (PrusaLink), and **Bambu Lab** in LAN mode through the [print-bridge](https://github.com/PeckBoard/print-bridge) helper. Bambu speaks MQTT and FTPS over TLS, which a WASM plugin cannot reach, so print-bridge — a small native daemon on `127.0.0.1:7781`, not a registry plugin — translates them to plain HTTP. Newer Bambu firmware only allows third-party LAN control with **LAN-only mode and Developer Mode** enabled on the printer.
 
-OrcaSlicer is driven as a separate process — install it on the PeckBoard host (App Manager has an `orca-slicer` entry, and `xvfb` for headless hosts). The plugin reads Orca's bundled vendor profiles and your own presets, resolves their `inherits` chains, and reports estimated time and filament from the sliced output.
+Setup is automatic. With nothing to fill in, Print Farm:
+
+- installs OrcaSlicer itself if none is found: it extracts the AppImage into `~/.local/share/orca-slicer` without root, and fetches libraries the host lacks (for example `libGLU`). On a host with no display it wraps the slicer in `xvfb-run` when that is installed.
+- installs or upgrades print-bridge as a systemd user service once a Bambu printer exists, and reads its token from `~/.config/print-bridge/token`.
+- picks the printer's own OrcaSlicer machine preset, and that preset's default process and filament.
+- corrects a mistyped Bambu serial from the printer's certificate.
+
+The plugin reads Orca's bundled vendor profiles and your own presets and resolves their `inherits` chains within the preset's own vendor. It slices a Bambu Studio project 3MF by keeping its geometry and applying the chosen profiles, and reports estimated time and filament from the sliced output.
+
+The Bambu camera stays connected while the page is open and shows the latest frame. On weak printer Wi-Fi a frame can take a minute to arrive. The connection drops after a minute without viewers, because the printer allows only one camera client.
 
 | Tool             | What it does                                                                                     |
 | ---------------- | ------------------------------------------------------------------------------------------------ |
