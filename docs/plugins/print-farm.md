@@ -67,8 +67,26 @@ Bambu printers refuse every remote command — start, pause, temperatures, the l
 | `camera_capture`          | Captures a still into the gallery and shows the agent the picture                                |
 | `capture_list`            | Lists kept captures, newest first, optionally for one printer                                    |
 | `capture_view`            | Shows the agent a kept capture (yours from the page too), an image file, or a printer's newest   |
+| `profile_get`             | One preset: its own values, the resolved values after `inherits`, and its file                   |
+| `profile_save`            | Creates or updates a User preset (inherits a system preset plus overrides)                       |
+| `profile_delete`          | Deletes a User preset                                                                            |
+| `farm_settings_get`       | The farm-wide slicing and monitoring defaults                                                    |
+| `farm_settings_set`       | Changes farm-wide defaults                                                                       |
+| `printer_settings_set`    | Sets a printer's installed plate, nozzle, and default presets                                    |
 
 Camera tools return the image itself, so a vision-capable model can look at the print (spaghetti, warping, an empty bed) rather than a base64 string.
+
+## Plate Type, Defaults, and Profiles
+
+Every slice tells OrcaSlicer which **build plate** is installed (`curr_bed_type`), so the filament preset's bed temperature for that plate applies — without it Orca assumes Cool Plate, which gives PLA a 35 °C bed. The plate and every other slicing default resolve in this order: the slice itself, then the printer's settings, then the farm settings, then the preset.
+
+- **Settings tab** (farm-wide): plate type (default Textured PEI), default material and quality, brim (off / auto / fixed width), auto-arrange and auto-orient, an optional bed temperature override for every filament, confirm-before-start, and monitoring — camera snapshot interval, Bambu HMS codes to ignore, and auto-pause on a failure.
+- **Printers → Slicing** (per printer): the installed plate, nozzle size, and default printer / process / filament presets picked from searchable lists, with the values currently in effect.
+- **Profiles tab**: browse printer, filament, and process presets by vendor, including your **User** presets. Duplicate a system preset into a User preset and edit it with typed fields — nozzle temperatures, bed temperature **per plate** (first and other layers), cooling, flow, max volumetric speed, layer height, walls, infill, brim, supports, speeds — or as raw JSON. User presets are written to OrcaSlicer's own user folder (`~/.config/OrcaSlicer/user/default/`), so the OrcaSlicer app sees them too.
+
+`slice_model` takes `bed_type`, `brim_width`, `bed_temp`, and an `overrides` map, and `slice_status` reports the **effective** plate and the bed and nozzle temperatures read back from the produced G-code. The slice panel shows the same and warns when the bed is below 45 °C on a PEI, engineering, or high-temperature plate.
+
+PrusaLink has no API for heater control, so temperature changes on Prusa printers are reported as unsupported. A print start that times out keeps its confirmation, so retrying with the same token works and never starts the print twice.
 
 If the agent cannot ask you (no live chat), the print waits on the page with a **Start print** button.
 
