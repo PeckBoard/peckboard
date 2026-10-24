@@ -43,6 +43,7 @@ Every plugin in the official registry. The name links to the plugin's page, whic
 | [Diff Viewer]({{ "/plugins/diff-viewer.html"                  | relative_url }}) | A side-by-side diff and editor for every repo in the folder, on projects and sessions              | —   |
 | [GitHub Bridge]({{ "/plugins/github-bridge.html"              | relative_url }}) | GitHub issues synced with kanban cards, PR links, auto-close on done                               | 4   |
 | [Graphify]({{ "/plugins/graphify.html"                        | relative_url }}) | A queryable code knowledge graph per repo, with a visualizer page                                  | 3   |
+| [HomeKit]({{ "/plugins/homekit.html"                          | relative_url }}) | Pair and control HomeKit Wi-Fi/Ethernet accessories directly, from a page and from agents          | 7   |
 | [Kaiad]({{ "/plugins/kaiad.html"                              | relative_url }}) | Kaiad control-plane access from any session                                                        | 4   |
 | [Nginx Proxy Manager]({{ "/plugins/nginx-proxy-manager.html"  | relative_url }}) | Nginx Proxy Manager control from any session                                                       | 4   |
 | [Notifier]({{ "/plugins/notifier.html"                        | relative_url }}) | Lifecycle events forwarded to ntfy, Telegram, Discord, and webhooks                                | —   |
