@@ -50,3 +50,28 @@ Open **Discover**, pick the accessory, and enter the 8-digit setup code from its
 `homekit_set` checks the value against the characteristic's range, step, and allowed values before sending it, accepts labels such as `heat` or `locked` for enum values, and asks for a service when a device has more than one match.
 
 Settings: `bridge_url` (default `http://127.0.0.1:7782`) and `bridge_token` (default: read from `~/.config/homekit-bridge/token`). A bridge at a custom address is never auto-installed.
+
+### Running the Bridge on Another Machine
+
+The bridge has to be on the same network as the devices. When PeckBoard runs elsewhere (a server, a VPS), install homekit-bridge on an always-on machine at home — App Manager can do it on any SSH host — and point `bridge_url` / `bridge_token` at it. Keep the bridge off the open internet: bind it to a private address such as its Tailscale IP (`--bind 100.x.y.z:7782`), or put it behind a TLS proxy.
+
+## Philips Hue
+
+Hue lights are controlled through your **Hue Bridge**'s local API (homekit-bridge 0.2.0 or newer). Unlike HomeKit accessories, Hue lights **stay in Apple Home and the Hue app** — nothing is unpaired.
+
+![Hue lights grouped by room, with room power, brightness, and a scene chip]({{ "/assets/screenshots/plugins/homekit-hue.png" | relative_url }})
+
+Open **Discover**: the Hue Bridge section lists the bridges on your network (or **Link it by address** for one it can't see — the IP from the Hue app's _Settings → My Hue system_). Click **Link**, then press the round button on the bridge within 30 seconds. Its lights appear under **Devices**, grouped by Hue room and zone, each room with a power switch, a brightness slider, and its scenes.
+
+The connection is HTTPS, checked against Signify's Hue Bridge root certificates (older bridges with a self-signed certificate are pinned when linked), and live state streams from the bridge. The key lives in `~/.local/share/homekit-bridge/hue.json`, mode 600. Hue Bluetooth-only bulbs without a bridge are not supported.
+
+| Tool                   | What it does                                                   |
+| ---------------------- | -------------------------------------------------------------- |
+| `homekit_hue_bridges`  | Hue Bridges found on the network and whether each is linked    |
+| `homekit_hue_link`     | Links a bridge — asks you to press its button, then call again |
+| `homekit_rooms`        | Hue rooms and zones with their on/off and brightness           |
+| `homekit_room_set`     | Turns a room on or off or sets its brightness                  |
+| `homekit_scenes`       | Scenes, optionally for one room                                |
+| `homekit_scene_recall` | Recalls a scene by name                                        |
+
+`homekit_set` and `homekit_get` work on Hue lights too, by name.

@@ -36,28 +36,28 @@ The AI providers (Claude, Codex, Cursor, Grok, Kimi, Ollama, Mock) are also plug
 
 Every plugin in the official registry. The name links to the plugin's page, which lists its MCP tools, settings, permissions, and prerequisites.
 
-| Plugin                                                        | What it adds     | MCP tools                                                                                          |
-| ------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------- | --- |
-| [App Manager]({{ "/plugins/app-manager.html"                  | relative_url }}) | Install and remove developer apps on the host and SSH targets, with a dashboard                    | 7   |
-| [Chicken Coop]({{ "/plugins/chicken-coop.html"                | relative_url }}) | A 3D chicken run visualizing every live session as a bird                                          | —   |
-| [Diff Viewer]({{ "/plugins/diff-viewer.html"                  | relative_url }}) | A side-by-side diff and editor for every repo in the folder, on projects and sessions              | —   |
-| [GitHub Bridge]({{ "/plugins/github-bridge.html"              | relative_url }}) | GitHub issues synced with kanban cards, PR links, auto-close on done                               | 4   |
-| [Graphify]({{ "/plugins/graphify.html"                        | relative_url }}) | A queryable code knowledge graph per repo, with a visualizer page                                  | 3   |
-| [HomeKit]({{ "/plugins/homekit.html"                          | relative_url }}) | Pair and control HomeKit Wi-Fi/Ethernet accessories directly, from a page and from agents          | 7   |
-| [Kaiad]({{ "/plugins/kaiad.html"                              | relative_url }}) | Kaiad control-plane access from any session                                                        | 4   |
-| [Nginx Proxy Manager]({{ "/plugins/nginx-proxy-manager.html"  | relative_url }}) | Nginx Proxy Manager control from any session                                                       | 4   |
-| [Notifier]({{ "/plugins/notifier.html"                        | relative_url }}) | Lifecycle events forwarded to ntfy, Telegram, Discord, and webhooks                                | —   |
-| [OpenAI-Compatible Provider]({{ "/plugins/openai-compat.html" | relative_url }}) | Any `/v1/chat/completions` endpoint as an AI provider                                              | —   |
-| [OpenSearch]({{ "/plugins/opensearch.html"                    | relative_url }}) | Query and manage an OpenSearch or Elasticsearch-compatible cluster                                 | 8   |
-| [PR Review]({{ "/plugins/pr-review.html"                      | relative_url }}) | Parallel multi-model branch reviews, triaged and posted to the GitHub PR with your decision        | 14  |
-| [Print Farm]({{ "/plugins/print-farm.html"                    | relative_url }}) | 3D printer fleet control (Klipper, OctoPrint, Prusa, Bambu) with OrcaSlicer slicing and 3D preview | 9   |
-| [Playwright Tests]({{ "/plugins/playwright-tests.html"        | relative_url }}) | Replay of recorded browser test runs, with MP4 export                                              | —   |
-| [Pre-hatcher]({{ "/plugins/pre-hatcher.html"                  | relative_url }}) | Opt-in enrichment of chat messages with repository context before the main model sees them         | 1   |
-| [Project Planner]({{ "/plugins/project-planner.html"          | relative_url }}) | A project definition built by interview, one question per slide                                    | 4   |
-| [Public API]({{ "/plugins/api.html"                           | relative_url }}) | A public REST API with scoped API keys                                                             | —   |
-| [Session Control]({{ "/plugins/session-control.html"          | relative_url }}) | Tools for controlling other sessions, plus goal-driven orchestrators                               | 14  |
-| [SSH Fleet]({{ "/plugins/ssh-fleet.html"                      | relative_url }}) | A registry of SSH hosts, remote command and file tools, and a live dashboard                       | 10  |
-| [UI Gauge]({{ "/plugins/ui-gauge.html"                        | relative_url }}) | UI design scoring against user-ranked baselines, with a learned style prompt                       | 5   |
+| Plugin                                                        | What it adds     | MCP tools                                                                                           |
+| ------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------- | --- |
+| [App Manager]({{ "/plugins/app-manager.html"                  | relative_url }}) | Install and remove developer apps on the host and SSH targets, with a dashboard                     | 7   |
+| [Chicken Coop]({{ "/plugins/chicken-coop.html"                | relative_url }}) | A 3D chicken run visualizing every live session as a bird                                           | —   |
+| [Diff Viewer]({{ "/plugins/diff-viewer.html"                  | relative_url }}) | A side-by-side diff and editor for every repo in the folder, on projects and sessions               | —   |
+| [GitHub Bridge]({{ "/plugins/github-bridge.html"              | relative_url }}) | GitHub issues synced with kanban cards, PR links, auto-close on done                                | 4   |
+| [Graphify]({{ "/plugins/graphify.html"                        | relative_url }}) | A queryable code knowledge graph per repo, with a visualizer page                                   | 3   |
+| [HomeKit]({{ "/plugins/homekit.html"                          | relative_url }}) | HomeKit Wi-Fi/Ethernet accessories and Philips Hue lights, rooms and scenes, from a page and agents | 13  |
+| [Kaiad]({{ "/plugins/kaiad.html"                              | relative_url }}) | Kaiad control-plane access from any session                                                         | 4   |
+| [Nginx Proxy Manager]({{ "/plugins/nginx-proxy-manager.html"  | relative_url }}) | Nginx Proxy Manager control from any session                                                        | 4   |
+| [Notifier]({{ "/plugins/notifier.html"                        | relative_url }}) | Lifecycle events forwarded to ntfy, Telegram, Discord, and webhooks                                 | —   |
+| [OpenAI-Compatible Provider]({{ "/plugins/openai-compat.html" | relative_url }}) | Any `/v1/chat/completions` endpoint as an AI provider                                               | —   |
+| [OpenSearch]({{ "/plugins/opensearch.html"                    | relative_url }}) | Query and manage an OpenSearch or Elasticsearch-compatible cluster                                  | 8   |
+| [PR Review]({{ "/plugins/pr-review.html"                      | relative_url }}) | Parallel multi-model branch reviews, triaged and posted to the GitHub PR with your decision         | 14  |
+| [Print Farm]({{ "/plugins/print-farm.html"                    | relative_url }}) | 3D printer fleet control (Klipper, OctoPrint, Prusa, Bambu) with OrcaSlicer slicing and 3D preview  | 9   |
+| [Playwright Tests]({{ "/plugins/playwright-tests.html"        | relative_url }}) | Replay of recorded browser test runs, with MP4 export                                               | —   |
+| [Pre-hatcher]({{ "/plugins/pre-hatcher.html"                  | relative_url }}) | Opt-in enrichment of chat messages with repository context before the main model sees them          | 1   |
+| [Project Planner]({{ "/plugins/project-planner.html"          | relative_url }}) | A project definition built by interview, one question per slide                                     | 4   |
+| [Public API]({{ "/plugins/api.html"                           | relative_url }}) | A public REST API with scoped API keys                                                              | —   |
+| [Session Control]({{ "/plugins/session-control.html"          | relative_url }}) | Tools for controlling other sessions, plus goal-driven orchestrators                                | 14  |
+| [SSH Fleet]({{ "/plugins/ssh-fleet.html"                      | relative_url }}) | A registry of SSH hosts, remote command and file tools, and a live dashboard                        | 10  |
+| [UI Gauge]({{ "/plugins/ui-gauge.html"                        | relative_url }}) | UI design scoring against user-ranked baselines, with a learned style prompt                        | 5   |
 
 ## MCP Server Catalog
 
