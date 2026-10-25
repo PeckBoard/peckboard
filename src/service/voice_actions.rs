@@ -94,6 +94,21 @@ const FREE_TOOLS: &[&str] = &[
     "voice_queue",
     "voice_pronunciation",
     "voice_prompt",
+    // HomeKit / Hue plugin: every tool, locks, doors and pairing included
+    // (the user's explicit choice: voice controls the home unconfirmed).
+    "homekit_list",
+    "homekit_get",
+    "homekit_discover",
+    "homekit_identify",
+    "homekit_rooms",
+    "homekit_room_set",
+    "homekit_scenes",
+    "homekit_scene_recall",
+    "homekit_hue_bridges",
+    "homekit_set",
+    "homekit_pair",
+    "homekit_unpair",
+    "homekit_hue_link",
 ];
 
 /// Destructive or persistent beyond the conversation: deletes, clears,
@@ -594,6 +609,14 @@ mod tests {
             policy("voice_pronunciation", &json!({"action": "add"})),
             ToolPolicy::Free
         );
+        // HomeKit: every tool runs unconfirmed, locks and pairing included;
+        // the remote-agent and command tools stay gated.
+        for t in ["homekit_list", "homekit_room_set", "homekit_pair"] {
+            assert_eq!(policy(t, &none), ToolPolicy::Free, "{t}");
+        }
+        let unlock = json!({"device": "Door", "characteristic": "lock", "value": "unlocked"});
+        assert_eq!(policy("homekit_set", &unlock), ToolPolicy::Free);
+        assert_eq!(policy("remote_agent_run", &none), ToolPolicy::Gated);
     }
 
     #[tokio::test]
