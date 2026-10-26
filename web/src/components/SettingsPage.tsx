@@ -423,6 +423,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     anchor: 'ollama',
     keywords: 'local remote server pull model',
   },
+  {
+    page: 'providers',
+    section: 'OpenAI-Compatible',
+    anchor: 'openai-compat',
+    keywords: 'openai compatible vllm llama.cpp lm studio localai tgi sglang api key server',
+  },
   { page: 'providers', section: 'Cursor', anchor: 'cursor', keywords: 'cli binary discovery' },
   {
     page: 'providers',
@@ -1528,6 +1534,13 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                           Local and remote Ollama servers. Models on the default server appear under
                           their bare name; models on additional named servers appear as model@server
                           (e.g. qwen2.5-coder@gpu-box).
+                        </p>
+                      )}
+                      {p.id === 'openai-compat' && (
+                        <p className="form-hint">
+                          Any server that speaks the OpenAI Chat Completions API — vLLM, llama.cpp
+                          server, LM Studio, LocalAI, TGI, SGLang. Models on additional named
+                          servers appear as model@server (e.g. Qwen/Qwen3-32B@gpu-box).
                         </p>
                       )}
                       <PluginSettingsForm pluginId={p.id} />

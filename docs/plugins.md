@@ -28,7 +28,7 @@ Installed plugins are single `.wasm` files in `<data-dir>/plugins/`, loaded at s
 
 Plugins that need configuration declare settings fields in their manifest; PeckBoard renders a form for them on Settings → Plugins — click the plugin's row — and stores values per plugin. The same values can be provided in `config.json` under `plugins.<id>.config`, which wins over the UI on every start.
 
-The AI providers (Claude, Codex, Cursor, Grok, Kimi, Ollama, Mock) are also plugins — first-party ones compiled into the binary, activated from the same registry page. The [Providers]({{ "/providers.html" | relative_url }}) page covers them. One historical note: the standard worker tools (file reading and editing, search, git, web fetch, `run_command`, `run_tests`, `math`) were once a plugin called `common-tools` but are now part of core — every session has them with nothing to install.
+The AI providers (Claude, Codex, Cursor, Grok, Kimi, Ollama, OpenAI-Compatible, Mock) are also plugins — first-party ones compiled into the binary, activated from the same registry page. The [Providers]({{ "/providers.html" | relative_url }}) page covers them. One historical note: the standard worker tools (file reading and editing, search, git, web fetch, `run_command`, `run_tests`, `math`) were once a plugin called `common-tools` but are now part of core — every session has them with nothing to install.
 
 </details>
 

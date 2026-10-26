@@ -5,17 +5,18 @@ nav_order: 6
 
 # Providers
 
-A _provider_ is the backend that runs a session's agent — usually by driving a coding CLI installed on the host, sometimes over HTTP. PeckBoard ships seven first-party providers as built-in plugins, and two more routes for anything else: the OpenAI-Compatible Provider plugin and the WASM provider API. Every model id carries its provider as a prefix, `provider:model` — `claude:claude-opus-5`, `ollama:qwen2.5-coder` — and a bare id defaults to `claude:`.
+A _provider_ is the backend that runs a session's agent — usually by driving a coding CLI installed on the host, sometimes over HTTP. PeckBoard ships eight first-party providers as built-in plugins, and the WASM provider API for anything else. Every model id carries its provider as a prefix, `provider:model` — `claude:claude-opus-5`, `ollama:qwen2.5-coder` — and a bare id defaults to `claude:`.
 
-| Provider | Drives                                           | Sign-in                                               |
-| -------- | ------------------------------------------------ | ----------------------------------------------------- |
-| Claude   | The Claude Code CLI (`claude`), streaming JSON   | Host `claude` login, plus OAuth accounts in Settings  |
-| Codex    | The OpenAI Codex CLI (`codex exec --json`)       | ChatGPT device-code flow in Settings → Codex Accounts |
-| Cursor   | The `cursor-agent` CLI in print mode             | `cursor-agent login` on the host                      |
-| Grok     | The Grok CLI (`grok`), streaming JSON            | Browser device flow in Settings → Grok Accounts       |
-| Kimi     | Moonshot AI's Kimi Code CLI (`kimi`)             | Device flow or API key in Settings → Kimi Accounts    |
-| Ollama   | An Ollama server's `/api/chat` HTTP API — no CLI | None; configure server URLs in Settings               |
-| Mock     | Nothing — scripted scenarios for demos and tests | None                                                  |
+| Provider          | Drives                                                                   | Sign-in                                               |
+| ----------------- | ------------------------------------------------------------------------ | ----------------------------------------------------- |
+| Claude            | The Claude Code CLI (`claude`), streaming JSON                           | Host `claude` login, plus OAuth accounts in Settings  |
+| Codex             | The OpenAI Codex CLI (`codex exec --json`)                               | ChatGPT device-code flow in Settings → Codex Accounts |
+| Cursor            | The `cursor-agent` CLI in print mode                                     | `cursor-agent login` on the host                      |
+| Grok              | The Grok CLI (`grok`), streaming JSON                                    | Browser device flow in Settings → Grok Accounts       |
+| Kimi              | Moonshot AI's Kimi Code CLI (`kimi`)                                     | Device flow or API key in Settings → Kimi Accounts    |
+| Ollama            | An Ollama server's `/api/chat` HTTP API — no CLI                         | None; configure server URLs in Settings               |
+| OpenAI-Compatible | Any OpenAI `/v1/chat/completions` server (vLLM, llama.cpp, LM Studio, …) | Optional API key in Settings                          |
+| Mock              | Nothing — scripted scenarios for demos and tests                         | None                                                  |
 
 None of them is active on a fresh install — activate the ones you use from Settings → Plugin Registry, the same flow as any [plugin]({{ "/plugins.html" | relative_url }}).
 
@@ -39,6 +40,7 @@ Settings → Providers & Accounts holds each provider's accounts. Claude, Codex,
 
 **Ollama** talks HTTP to one or more Ollama servers — `base_url` plus optional named extra servers whose models appear as `model@alias`. It keeps multi-turn history itself (Ollama is stateless), probes each model's capabilities before a turn so tool calls and images are only sent where supported, runs MCP tools through an internal tool loop, and prices everything at zero. A model-pull widget in Settings downloads new models to the server.
 
+**OpenAI-Compatible** (`openai-compat`) talks the OpenAI Chat Completions API to vLLM, llama.cpp server, LM Studio, LocalAI, TGI, SGLang, or any other compatible server. Configure a default server URL (with or without the trailing `/v1`), an optional API key (sent as `Authorization: Bearer`), and optional named extra servers whose models appear as `model@alias`. Models are discovered from each server's `/v1/models`, so ids like `openai-compat:Qwen/Qwen3-32B` work as-is. Like Ollama, it keeps multi-turn history itself and runs MCP tools as OpenAI function tools; if a server rejects tools for a model, the turn retries once without them.
 **Mock** is the scripted provider the test suite and demos use — each model id is a scenario (`mock:happy-path`, `mock:echo`, `mock:crash`, …) that replays a fixed event sequence with no network and no cost.
 
 <details markdown="1">
@@ -52,4 +54,4 @@ A provider turn runs under its own budget — default 300 seconds, raised with `
 
 ## Adding a Provider PeckBoard Does Not Ship
 
-The quickest route is the [OpenAI-Compatible Provider]({{ "/plugins/openai-compat.html" | relative_url }}) plugin: point it at any `/v1/chat/completions` endpoint (OpenRouter, LM Studio, vLLM, llama.cpp) and its models join the picker. For anything else, a WASM plugin can register a full provider through the `provider.register` and `provider.send` hooks — it owns entire agent turns, streams the same events first-party providers do, and can drive either HTTP or a host-managed CLI process. The internal architecture notes in the repository (`docs/architecture/providers.md`) document the hook contract.
+Any server that speaks the OpenAI Chat Completions API is covered by the built-in [OpenAI-Compatible]({{ "/plugins/openai-compat.html" | relative_url }}) provider: point it at the `/v1/chat/completions` endpoint (vLLM, llama.cpp, LM Studio, LocalAI, TGI, SGLang, OpenRouter) and its models join the picker. For anything else, a WASM plugin can register a full provider through the `provider.register` and `provider.send` hooks — it owns entire agent turns, streams the same events first-party providers do, and can drive either HTTP or a host-managed CLI process. The internal architecture notes in the repository (`docs/architecture/providers.md`) document the hook contract.

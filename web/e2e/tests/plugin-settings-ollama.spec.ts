@@ -166,7 +166,15 @@ test('first-party providers render plugin-owned settings forms', async ({
   const token = await authenticate(request)
   await loadAppAt(page, token, '/settings/providers')
 
-  for (const id of ['claude', 'grok', 'kimi', 'ollama', 'cursor', 'codex'] as const) {
+  for (const id of [
+    'claude',
+    'grok',
+    'kimi',
+    'ollama',
+    'openai-compat',
+    'cursor',
+    'codex',
+  ] as const) {
     await expect(page.getByTestId(`${id}-settings-section`)).toBeVisible({ timeout: 10_000 })
     await expect(page.getByTestId(`plugin-settings-${id}`)).toBeVisible()
   }

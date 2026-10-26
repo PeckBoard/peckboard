@@ -32,6 +32,7 @@ pub const CRATE_PLUGIN_IDS: &[&str] = &[
     "kimi",
     "codex",
     "ollama",
+    "openai-compat",
     "mock",
     "session-control",
 ];
@@ -45,7 +46,7 @@ pub fn is_crate_plugin_id(id: &str) -> bool {
 pub fn is_crate_provider_id(id: &str) -> bool {
     matches!(
         id,
-        "claude" | "grok" | "cursor" | "kimi" | "codex" | "ollama" | "mock"
+        "claude" | "grok" | "cursor" | "kimi" | "codex" | "ollama" | "openai-compat" | "mock"
     )
 }
 
@@ -187,6 +188,42 @@ static SESSION_CONTROL_VERSION: std::sync::LazyLock<String> = std::sync::LazyLoc
     }
 });
 
+/// Crate providers that replaced a registry WASM plugin with the same id.
+/// Upgraded installs seeded their installed set before the crate existed, so
+/// the crate would start inactive while the WASM is now skipped at load —
+/// leaving `<id>:*` sessions with no provider.
+const SUPERSEDED_WASM_IDS: &[&str] = &["openai-compat"];
+
+/// One-shot adoption: for each superseded id whose `.wasm` is still in the
+/// plugins dir, add the crate to the persisted installed set and rename the
+/// file to `<id>.wasm.superseded` (kept, never loaded) so a later uninstall
+/// of the crate sticks across reboots.
+async fn adopt_superseded_wasm(
+    db: &Db,
+    plugins_dir: &std::path::Path,
+    installed: &HashSet<String>,
+) -> HashSet<String> {
+    let mut set = installed.clone();
+    let mut changed = false;
+    for id in SUPERSEDED_WASM_IDS {
+        let wasm = plugins_dir.join(format!("{id}.wasm"));
+        if !wasm.is_file() {
+            continue;
+        }
+        let dest = plugins_dir.join(format!("{id}.wasm.superseded"));
+        if let Err(e) = std::fs::rename(&wasm, &dest) {
+            tracing::warn!("could not retire superseded plugin {}: {e}", wasm.display());
+            continue;
+        }
+        tracing::info!("registry plugin '{id}' superseded by the built-in provider; activating it");
+        changed |= set.insert(id.to_string());
+    }
+    if changed {
+        write_installed(db, &set).await;
+    }
+    set
+}
+
 /// Register every crate plugin into the builtin catalog (all of them — the
 /// catalog is the metadata source for both the installed list and the
 /// registry browser) and activate the ones in `installed`.
@@ -197,6 +234,8 @@ pub async fn register_all(
     plugins: Arc<PluginManager>,
     installed: &HashSet<String>,
 ) {
+    let adopted = adopt_superseded_wasm(db, &plugins.data_dir().join("plugins"), installed).await;
+    let installed = &adopted;
     for spec in SPECS {
         registry
             .register_and_init(
@@ -279,6 +318,7 @@ const PROVIDER_PERMS: &[Permission] = &[
     Permission::FilesystemWrite,
 ];
 
+/// HTTP-only providers (ollama, openai-compat): no process spawn, no files.
 const OLLAMA_PERMS: &[Permission] = &[Permission::RegisterProvider, Permission::NetworkAccess];
 
 const MOCK_PERMS: &[Permission] = &[Permission::RegisterProvider];
@@ -343,6 +383,14 @@ const OLLAMA: CrateHooks = CrateHooks {
     interrupt_frame: None,
     base_prompt: None,
 };
+const OPENAI_COMPAT: CrateHooks = CrateHooks {
+    send: peckboard_openai_compat_plugin::send_turn,
+    refresh_models: peckboard_openai_compat_plugin::refresh_models,
+    registration: peckboard_openai_compat_plugin::registration,
+    manifest_json: peckboard_openai_compat_plugin::manifest_json,
+    interrupt_frame: None,
+    base_prompt: None,
+};
 const MOCK: CrateHooks = CrateHooks {
     send: peckboard_mock_plugin::send_turn,
     refresh_models: peckboard_mock_plugin::refresh_models,
@@ -396,6 +444,13 @@ const SPECS: &[Spec] = &[
         hooks: Some(OLLAMA),
     },
     Spec {
+        id: "openai-compat",
+        display_name: "OpenAI-Compatible",
+        description: "Drives sessions through any OpenAI-compatible /v1/chat/completions server (vLLM, llama.cpp, LM Studio, LocalAI, TGI, SGLang).",
+        perms: OLLAMA_PERMS,
+        hooks: Some(OPENAI_COMPAT),
+    },
+    Spec {
         id: "mock",
         display_name: "Mock",
         description: "Scripted in-process provider for dev/test scenarios.",
@@ -427,5 +482,40 @@ mod tests {
             "stale session-control.wasm: auto-pauses at the cap"
         );
         assert!(has(b"skipping until the window frees up"));
+    }
+
+    /// Every provider crate's static registration must pass the same shape
+    /// validation boot applies — a failure there is only a log line, and the
+    /// provider silently never registers.
+    #[test]
+    fn every_crate_provider_registration_is_valid() {
+        use crate::provider::plugin_provider::{ProviderRegistration, validate_registration};
+        for id in super::provider_ids() {
+            let hooks = super::hooks_for(id).unwrap();
+            let reg: ProviderRegistration = serde_json::from_value((hooks.registration)())
+                .unwrap_or_else(|e| panic!("{id}: registration JSON invalid: {e}"));
+            assert_eq!(reg.id, id);
+            validate_registration(&reg).unwrap_or_else(|e| panic!("{id}: {e}"));
+        }
+    }
+
+    /// A leftover registry `openai-compat.wasm` activates the built-in crate
+    /// once, and is retired so a later uninstall sticks.
+    #[tokio::test]
+    async fn superseded_wasm_activates_crate_once() {
+        let db = crate::db::Db::in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("openai-compat.wasm"), b"x").unwrap();
+        let seeded: std::collections::HashSet<String> = ["ollama".to_string()].into();
+
+        let set = super::adopt_superseded_wasm(&db, dir.path(), &seeded).await;
+        assert!(set.contains("openai-compat") && set.contains("ollama"));
+        assert_eq!(super::installed_set(&db).await.unwrap(), set);
+        assert!(!dir.path().join("openai-compat.wasm").exists());
+        assert!(dir.path().join("openai-compat.wasm.superseded").exists());
+
+        // Second boot after the user uninstalled it: stays uninstalled.
+        let again = super::adopt_superseded_wasm(&db, dir.path(), &seeded).await;
+        assert_eq!(again, seeded);
     }
 }

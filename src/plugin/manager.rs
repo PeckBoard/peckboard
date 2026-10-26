@@ -75,6 +75,7 @@ pub const FIRST_PARTY_PLUGIN_IDS: &[&str] = &[
     "kimi",
     "codex",
     "ollama",
+    "openai-compat",
     "mock",
     "session-control",
 ];
@@ -483,6 +484,16 @@ fn is_safe_plugin_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// The plugin id of a `.wasm` file whose id now belongs to a first-party
+/// provider crate (e.g. a leftover registry `openai-compat.wasm`). Loading
+/// it would race the crate for the same provider id, so boot skips it; the
+/// file is left on disk.
+fn crate_owned_wasm_id(path: &Path) -> Option<&str> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|id| crate::plugin::crates::is_crate_provider_id(id))
 }
 
 /// Whether `name` is a safe MCP tool name a plugin may declare: lowercase
@@ -1031,6 +1042,13 @@ impl PluginManager {
             let entry = entry?;
             let path = entry.path();
             if path.extension().map_or(false, |e| e == "wasm") {
+                if let Some(id) = crate_owned_wasm_id(&path) {
+                    info!(
+                        "Skipping plugin file {}: '{id}' is a built-in provider now",
+                        path.display()
+                    );
+                    continue;
+                }
                 match self.load_plugin(&path) {
                     Ok(loaded) => {
                         info!(
@@ -3655,6 +3673,40 @@ mod tests {
         assert!(!is_safe_plugin_id("API"));
         assert!(!is_safe_plugin_id("a b"));
         assert!(!is_safe_plugin_id(&"x".repeat(65)));
+    }
+
+    /// A leftover registry `openai-compat.wasm` (now a provider crate) is
+    /// skipped at boot but kept on disk; ordinary plugins still load.
+    #[tokio::test]
+    async fn load_all_skips_wasm_owned_by_a_provider_crate() {
+        assert_eq!(
+            crate_owned_wasm_id(Path::new("/p/openai-compat.wasm")),
+            Some("openai-compat")
+        );
+        assert_eq!(
+            crate_owned_wasm_id(Path::new("/p/ollama.wasm")),
+            Some("ollama")
+        );
+        assert_eq!(
+            crate_owned_wasm_id(Path::new("/p/session-control.wasm")),
+            None
+        );
+        assert_eq!(crate_owned_wasm_id(Path::new("/p/my-plugin.wasm")), None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let leftover = plugins_dir.join("openai-compat.wasm");
+        std::fs::write(&leftover, b"\0asm").unwrap();
+        let mgr = PluginManager::new(tmp.path(), crate::db::Db::in_memory().unwrap());
+        mgr.load_all().await.unwrap();
+        assert!(
+            !mgr.loaded_plugins()
+                .await
+                .iter()
+                .any(|n| n == "openai-compat")
+        );
+        assert!(leftover.exists());
     }
 
     #[tokio::test]

@@ -6,17 +6,14 @@
  * binary are built earlier, at config-eval time in playwright.config.ts.
  */
 export default async function globalSetup() {
-  // NOTE: the openai-compat wasm copy lives in playwright.config.ts, not
-  // here — Playwright launches the webServer BEFORE globalSetup, so any
-  // copy made here lands after the server's plugin load_all and is never
-  // loaded. Config evaluation is the only pre-boot hook.
+  // NOTE: the staged wasm copies live in playwright.config.ts, not here —
+  // Playwright launches the webServer BEFORE globalSetup, so any copy made
+  // here lands after the server's plugin load_all and is never loaded.
+  // Config evaluation is the only pre-boot hook.
   //
   // The flip side: the server is already up NOW, so approve the copied
-  // plugin immediately. Left pending, its approval prompt overlays every
-  // page and times out unrelated UI tests. Approval without settings
-  // registers no provider (the plugin skips — no base_url yet); the
-  // openai-compat spec re-approves after configuring settings, which
-  // re-dispatches provider.register with the stub config.
+  // plugins immediately. Left pending, an approval prompt overlays every
+  // page and times out unrelated UI tests.
   const port = process.env.PECKBOARD_E2E_PORT ?? '4444'
   const baseURL = `http://127.0.0.1:${port}`
 
@@ -48,7 +45,6 @@ export default async function globalSetup() {
   const token = await tokenFor()
   if (token) {
     for (const plugin of [
-      'openai-compat',
       'chicken-coop',
       'app-manager',
       'project-planner',

@@ -118,7 +118,6 @@ const artifactCandidates = (plugin: string) => [
   ),
 ]
 for (const plugin of [
-  'openai-compat',
   'chicken-coop',
   'app-manager',
   'session-control',

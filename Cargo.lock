@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "peckboard"
-version = "0.1.101"
+version = "0.1.102"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4432,6 +4432,7 @@ dependencies = [
  "peckboard-kimi-plugin",
  "peckboard-mock-plugin",
  "peckboard-ollama-plugin",
+ "peckboard-openai-compat-plugin",
  "peckboard-relay",
  "qrcode",
  "rand 0.8.6",
@@ -4539,6 +4540,16 @@ dependencies = [
 
 [[package]]
 name = "peckboard-ollama-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "peck-plugin-native-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "peckboard-openai-compat-plugin"
 version = "0.1.0"
 dependencies = [
  "extism-pdk",
