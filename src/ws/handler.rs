@@ -47,10 +47,24 @@ fn heartbeat_expired(elapsed: Duration) -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientFrame {
-    Auth { token: String },
-    Subscribe { session_id: String },
-    Unsubscribe { session_id: String },
-    Resume { session_id: String, last_seq: i32 },
+    Auth {
+        token: String,
+    },
+    Subscribe {
+        session_id: String,
+    },
+    Unsubscribe {
+        session_id: String,
+    },
+    Resume {
+        session_id: String,
+        last_seq: i32,
+    },
+    /// The page's `document.visibilityState` changed (sent after auth and
+    /// on every change); picks the targets of foreground frames.
+    Visibility {
+        visible: bool,
+    },
 }
 
 /// Outgoing frame types to the client.
@@ -184,7 +198,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
     // Get a broadcast receiver
     let mut broadcast_rx = state.broadcaster.subscribe_all();
-
+    // Per-user frames (`send_to_user`), and this connection's entry in
+    // their target list.
+    let mut user_rx = state.broadcaster.subscribe_user_frames();
+    state.broadcaster.register_connection(client_id, &user_id);
     // Periodic auth session check
     let mut auth_check_interval = tokio::time::interval(Duration::from_secs(10));
     auth_check_interval.tick().await; // consume the immediate first tick
@@ -396,6 +413,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                         }).unwrap().into()
                                     )).await;
                                 }
+                                ClientFrame::Visibility { visible } => {
+                                    state.broadcaster.set_visible(client_id, visible);
+                                }
                                 ClientFrame::Auth { .. } => {
                                     // Already authenticated, ignore
                                 }
@@ -536,6 +556,34 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                     }
                     // Broadcaster gone (shutdown): recv() would return
                     // instantly forever, so stop rather than spin.
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            // Per-user frames (`ui-navigate`, `views-changed`): addressed
+            // to specific connections of one user by `send_to_user`, so
+            // forward only the ones naming this connection.
+            frame = user_rx.recv() => {
+                match frame {
+                    Ok(frame) if frame.is_for(client_id) => {
+                        let ev = frame.event();
+                        let out = serde_json::json!({
+                            "type": ev.event_type,
+                            "session_id": ev.session_id,
+                            "event": ev.data,
+                            "data": ev.data,
+                        });
+                        if sender.send(Message::Text(
+                            serde_json::to_string(&out).unwrap().into()
+                        )).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    // Navigations / refresh hints are not worth a resync:
+                    // the next one supersedes whatever was dropped.
+                    Err(RecvError::Lagged(dropped)) => {
+                        tracing::warn!("WS client {client_id} dropped {dropped} per-user frame(s)");
+                    }
                     Err(RecvError::Closed) => break,
                 }
             }

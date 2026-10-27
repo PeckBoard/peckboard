@@ -77,6 +77,15 @@ impl McpToolRegistry {
             "finish_card" => self.handle_finish_card(args, ctx).await,
             "answer_question" => self.handle_answer_question(args, ctx).await,
             "reattach_worker" => self.handle_reattach_worker(args, ctx).await,
+            "ui_open" => self.handle_ui_open(args, ctx).await,
+            "ui_tabs" => self.handle_ui_tabs(ctx).await,
+            "list_views" => self.handle_list_views(ctx).await,
+            "get_view" => self.handle_get_view(args, ctx).await,
+            "create_view" => self.handle_create_view(args, ctx).await,
+            "update_view" => self.handle_update_view(args, ctx).await,
+            "add_view_widget" => self.handle_add_view_widget(args, ctx).await,
+            "remove_view_widget" => self.handle_remove_view_widget(args, ctx).await,
+            "delete_view" => self.handle_delete_view(args, ctx).await,
             "show_view" => self.handle_show_view(args, ctx).await,
             "voice_queue" => self.handle_voice_queue(args, ctx).await,
             "voice_pronunciation" => self.handle_voice_pronunciation(args, ctx).await,
@@ -664,7 +673,21 @@ mod tests {
         assert!(names.contains(&"reattach_worker"));
         // Hand the user a downloadable file in the chat.
         assert!(names.contains(&"share_file"));
-        assert_eq!(names.len(), 100);
+        // Drive the user's open browser tab(s) and edit their saved views.
+        for t in [
+            "ui_open",
+            "ui_tabs",
+            "list_views",
+            "get_view",
+            "create_view",
+            "update_view",
+            "add_view_widget",
+            "remove_view_widget",
+            "delete_view",
+        ] {
+            assert!(names.contains(&t), "{t}");
+        }
+        assert_eq!(names.len(), 109);
     }
 
     #[test]

@@ -3,22 +3,23 @@
 //! A view is `{id, name, created_at, updated_at, widgets, terminals,
 //! projects, cards}` where `widgets` are [`ViewWidget`] rects on a
 //! 12-column grid (session / terminal panes, project summaries, notes,
-//! reports, and the info widgets in [`WidgetKind`]); `terminals` maps each
+//! reports, and the info widgets in `WidgetKind`); `terminals` maps each
 //! referenced terminal id to its display identity (including soft-closed
 //! ones, so a widget can offer "Reopen on <host>"), `projects` each
 //! referenced project id (pane or scope) to `{name}`, and `cards` each
 //! referenced card id to `{title}`. Views are strictly per-user: another
 //! user's view id answers 404, exactly like a missing one. Widgets may only
-//! reference the caller's own terminals (admins: any), the same rule as
-//! attaching, and existing projects / cards (a card must belong to the
-//! widget's project). A legacy `layout` split tree is still accepted in
-//! request bodies and converted to widgets.
+//! reference sessions the caller may open and the caller's own terminals
+//! (admins: any), and existing projects / cards (a card must belong to the
+//! widget's project) — see [`views::check_widget_refs`]. A legacy `layout`
+//! split tree is still accepted in request bodies and converted to widgets.
+//! Every write sends the owner's open tabs a `views-changed` frame.
 
 use axum::{
     Extension, Json, Router,
     body::Bytes,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware,
     routing::get,
 };
@@ -27,10 +28,9 @@ use std::sync::Arc;
 
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::Db;
-use crate::db::crud::{
-    ViewLayout, ViewWidget, WidgetField, validate_view_name, validate_widgets, widget_refs,
-};
-use crate::db::models::{SessionView, Terminal};
+use crate::db::crud::{ViewLayout, ViewWidget, validate_view_name, validate_widgets};
+use crate::db::models::SessionView;
+use crate::service::views::{self, ViewAction};
 use crate::state::AppState;
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -104,127 +104,39 @@ fn requested_widgets(
     validate_widgets(&widgets).map_err(bad)?;
     Ok(Some(widgets))
 }
-
-fn may_use_terminal(user: &AuthUser, t: &Terminal) -> bool {
-    t.user_id == user.user_id || user.role == "admin"
-}
-
-/// Every terminal the widgets reference must exist and be the caller's
-/// (admins: anyone's), every project must exist, and every card must exist
-/// in its widget's project. Unknown and foreign terminal ids answer the
-/// same 404, like `/api/terminals/{id}`. Soft-closed terminals are allowed
-/// — their widget shows a reopen placeholder.
+/// [`views::check_widget_refs`] as an HTTP answer: a missing or foreign
+/// ref is a 404 naming the kind, like `/api/terminals/{id}`.
 async fn check_widget_refs(
     db: &Db,
     user: &AuthUser,
     widgets: &[ViewWidget],
 ) -> Result<(), ApiError> {
-    for id in widget_refs(widgets, WidgetField::TerminalId) {
-        match db.get_terminal(id).await.map_err(internal)? {
-            Some(t) if may_use_terminal(user, &t) => {}
-            _ => return Err(err(StatusCode::NOT_FOUND, "terminal not found")),
-        }
-    }
-    let projects = widget_refs(widgets, WidgetField::ProjectId);
-    if !projects.is_empty() {
-        let found = db
-            .project_names(projects.iter().map(|s| s.to_string()).collect())
-            .await
-            .map_err(internal)?;
-        if projects.iter().any(|p| !found.contains_key(*p)) {
-            return Err(err(StatusCode::NOT_FOUND, "project not found"));
-        }
-    }
-    let cards = widget_refs(widgets, WidgetField::CardId);
-    if !cards.is_empty() {
-        let found = db
-            .card_titles(cards.iter().map(|s| s.to_string()).collect())
-            .await
-            .map_err(internal)?;
-        let in_project = |w: &ViewWidget| match (&w.card_id, &w.project_id) {
-            (Some(c), Some(p)) => found.get(c).is_some_and(|(_, cp)| cp == p),
-            (Some(_), None) => false,
-            (None, _) => true,
-        };
-        if !widgets.iter().all(in_project) {
-            return Err(err(StatusCode::NOT_FOUND, "card not found"));
-        }
-    }
-    Ok(())
+    views::check_widget_refs(db, &user.user_id, user.role == "admin", widgets)
+        .await
+        .map_err(|e| match e {
+            views::RefError::NotFound(m) => err(StatusCode::NOT_FOUND, m),
+            views::RefError::Internal(e) => internal(e),
+        })
 }
 
-fn summary_json(v: &SessionView) -> serde_json::Value {
-    serde_json::json!({
-        "id": v.id,
-        "name": v.name,
-        "created_at": v.created_at,
-        "updated_at": v.updated_at,
-    })
-}
-
-/// The full view, plus `terminals: {id: {name, host_label, plugin_id,
-/// host_id, closed}}`, `projects: {id: {name}}`, and `cards: {id:
-/// {title}}` for the targets its widgets reference.
 async fn full_json(
     state: &AppState,
     user: &AuthUser,
-    (v, widgets): (SessionView, Vec<ViewWidget>),
+    view: (SessionView, Vec<ViewWidget>),
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut terminals = serde_json::Map::new();
-    for id in widget_refs(&widgets, WidgetField::TerminalId) {
-        if let Some(t) = state.db.get_terminal(id).await.map_err(internal)?
-            && may_use_terminal(user, &t)
-        {
-            terminals.insert(
-                t.id.clone(),
-                serde_json::json!({
-                    "name": t.name,
-                    "host_label": t.host_label,
-                    "plugin_id": t.plugin_id,
-                    "host_id": t.host_id,
-                    "closed": t.closed_at.is_some(),
-                }),
-            );
-        }
-    }
-    let ids = |field| -> Vec<String> {
-        widget_refs(&widgets, field)
-            .into_iter()
-            .map(str::to_string)
-            .collect()
-    };
-    let project_ids = ids(WidgetField::ProjectId);
-    let projects: serde_json::Map<String, serde_json::Value> = if project_ids.is_empty() {
-        serde_json::Map::new()
-    } else {
-        state
-            .db
-            .project_names(project_ids)
-            .await
-            .map_err(internal)?
-            .into_iter()
-            .map(|(id, name)| (id, serde_json::json!({ "name": name })))
-            .collect()
-    };
-    let card_ids = ids(WidgetField::CardId);
-    let cards: serde_json::Map<String, serde_json::Value> = if card_ids.is_empty() {
-        serde_json::Map::new()
-    } else {
-        state
-            .db
-            .card_titles(card_ids)
-            .await
-            .map_err(internal)?
-            .into_iter()
-            .map(|(id, (title, _))| (id, serde_json::json!({ "title": title })))
-            .collect()
-    };
-    let mut out = summary_json(&v);
-    out["widgets"] = serde_json::json!(widgets);
-    out["terminals"] = serde_json::Value::Object(terminals);
-    out["projects"] = serde_json::Value::Object(projects);
-    out["cards"] = serde_json::Value::Object(cards);
-    Ok(Json(out))
+    views::full_json(&state.db, &user.user_id, user.role == "admin", view)
+        .await
+        .map(Json)
+        .map_err(internal)
+}
+
+/// The writing browser tab's id (`X-Peckboard-Tab`), echoed on
+/// `views-changed` so that tab skips its own autosave.
+fn origin_tab(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-peckboard-tab")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty() && v.len() <= 64)
 }
 
 /// GET /api/me/views — `[{id, name, created_at, updated_at}]`, oldest first.
@@ -232,13 +144,13 @@ async fn list_views(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let views = state
+    let list = state
         .db
         .list_session_views(&user.user_id)
         .await
         .map_err(internal)?;
     Ok(Json(serde_json::Value::Array(
-        views.iter().map(summary_json).collect(),
+        list.iter().map(views::summary_json).collect(),
     )))
 }
 
@@ -247,6 +159,7 @@ async fn list_views(
 async fn create_view(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let req: CreateViewRequest = parse_body(&body)?;
@@ -258,10 +171,17 @@ async fn create_view(
         .create_session_view(&user.user_id, &name, widgets)
         .await
         .map_err(internal)?;
+    views::notify_changed(
+        &state.broadcaster,
+        &user.user_id,
+        &view.0.id,
+        ViewAction::Created,
+        origin_tab(&headers),
+    );
     Ok((StatusCode::CREATED, full_json(&state, &user, view).await?))
 }
 
-/// GET /api/me/views/:id — the full view (see [`full_json`]).
+/// GET /api/me/views/:id — the full view (see [`views::full_json`]).
 async fn get_view(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -282,6 +202,7 @@ async fn update_view(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let req: UpdateViewRequest = parse_body(&body)?;
@@ -301,6 +222,13 @@ async fn update_view(
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
+    views::notify_changed(
+        &state.broadcaster,
+        &user.user_id,
+        &id,
+        ViewAction::Updated,
+        origin_tab(&headers),
+    );
     full_json(&state, &user, view).await
 }
 
@@ -309,6 +237,7 @@ async fn delete_view(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     if state
         .db
@@ -316,17 +245,23 @@ async fn delete_view(
         .await
         .map_err(internal)?
     {
+        views::notify_changed(
+            &state.broadcaster,
+            &user.user_id,
+            &id,
+            ViewAction::Deleted,
+            origin_tab(&headers),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(not_found())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::crud::WidgetKind;
-    use crate::db::models::NewUser;
+    use crate::db::models::{NewUser, Terminal};
     fn user(id: &str, role: &str) -> AuthUser {
         AuthUser {
             user_id: id.into(),
@@ -498,5 +433,56 @@ mod tests {
             assert_eq!(status, StatusCode::NOT_FOUND);
             assert_eq!(body["error"], "card not found");
         }
+    }
+
+    #[tokio::test]
+    async fn session_refs_must_be_sessions_the_caller_may_open() {
+        use crate::db::models::{NewFolder, NewSession};
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "F".into(),
+            path: "/tmp/f".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(NewSession {
+            id: "theirs".into(),
+            name: "theirs".into(),
+            folder_id: "f".into(),
+            created_at: ts.clone(),
+            last_activity: ts,
+            user_id: Some("other".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let w = vec![ViewWidget {
+            id: "w".into(),
+            kind: WidgetKind::Session,
+            x: 0,
+            y: 0,
+            w: 6,
+            h: 10,
+            session_id: Some("theirs".into()),
+            ..Default::default()
+        }];
+        let (status, Json(body)) = check_widget_refs(&db, &user("me", "user"), &w)
+            .await
+            .unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "session not found");
+        assert!(
+            check_widget_refs(&db, &user("other", "user"), &w)
+                .await
+                .is_ok()
+        );
+        assert!(
+            check_widget_refs(&db, &user("me", "admin"), &w)
+                .await
+                .is_ok()
+        );
     }
 }

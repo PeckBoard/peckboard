@@ -81,6 +81,15 @@ function sendJson(data: unknown) {
   }
 }
 
+/** Tell the server whether this tab is on screen. It picks the targets of
+ *  agent navigations (`ui-navigate`) from it: every visible tab of the
+ *  user, else only the most recently active one. Sent after auth and on
+ *  every visibility change. */
+function sendVisibility() {
+  if (typeof document === 'undefined') return
+  sendJson({ type: 'visibility', visible: document.visibilityState === 'visible' })
+}
+
 /** Highest seq of the events the chat already holds for `sessionId` (its
  *  HTTP snapshot plus live events), if any. */
 function heldSeq(sessionId: string): number | undefined {
@@ -130,6 +139,7 @@ export const useWsStore = create<WsState>((set, get) => ({
 
       if (msg.type === 'auth_ok') {
         useUiStore.getState().setConnected(true)
+        sendVisibility()
         // Resume subscriptions for all tracked sessions
         const { subscribedSessions, lastSeqBySession } = get()
         for (const sid of subscribedSessions) {
@@ -221,10 +231,17 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
-      if (msg.type === 'voice-navigate') {
-        // The voice assistant's `show_view` tool: rides the voice session's
-        // own stream, so only browsers with the voice panel open get it.
-        window.dispatchEvent(new CustomEvent('peckboard:voice-navigate', { detail: msg.data }))
+      if (msg.type === 'ui-navigate') {
+        // An agent (`ui_open`, the voice assistant's `show_view`) opened
+        // something on the user's screen. Per-user: the server only sends
+        // it to this user's foreground tab(s), so just follow it.
+        window.dispatchEvent(new CustomEvent('peckboard:ui-navigate', { detail: msg.data }))
+        return
+      }
+      if (msg.type === 'views-changed') {
+        // One of this user's saved views was created / updated / deleted
+        // (REST or an agent's view tool). Per-user, ids only.
+        window.dispatchEvent(new CustomEvent('peckboard:views-changed', { detail: msg.data }))
         return
       }
       if (msg.type === 'voice-action') {
@@ -514,6 +531,7 @@ function reconnectNowIfWaiting() {
 // `document`, and neither exists outside a browser.
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
   document.addEventListener('visibilitychange', reconnectNowIfWaiting)
+  document.addEventListener('visibilitychange', sendVisibility)
 }
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
   window.addEventListener('online', reconnectNowIfWaiting)

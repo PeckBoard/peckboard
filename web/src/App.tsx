@@ -64,7 +64,8 @@ import VoiceDock, { VoiceListenButton } from './components/VoiceDock'
 import ConnectionBanner from './components/ConnectionBanner'
 import RestartPendingBanner from './components/RestartPendingBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
-import { parseVoiceNavigate, useVoiceNavStore, VOICE_PAGE_VIEWS } from './voice/navigation'
+import { parseUiNavigate, useVoiceNavStore, UI_PAGE_VIEWS } from './voice/navigation'
+import Toast from './components/Toast'
 import './App.css'
 
 type View =
@@ -420,6 +421,11 @@ function App() {
   // (`/settings/<sub>` or a legacy deep link like `/plugins`); null lands
   // on the default page. SettingsPage validates unknown ids.
   const [settingsSub, setSettingsSub] = useState<string | null>(initialRoute.settingsSub ?? null)
+  // The notice after an agent navigated this tab (`ui-navigate`): what was
+  // opened, by whom, and the URL to go Back to.
+  const [agentNav, setAgentNav] = useState<{ key: number; message: string; from: string } | null>(
+    null,
+  )
   // Plugin-contributed user-menu links (generic; populated from /api/plugins).
   const [uiPanels, setUiPanels] = useState<UiPanel[]>([])
   // Plugin-contributed left-rail entries (generic; same /api/plugins catalog).
@@ -1067,13 +1073,17 @@ function App() {
     return () => window.removeEventListener('peckboard:open-plugin-page', onOpenPluginPage)
   }, [authenticated, navigate])
 
-  // The voice assistant's `show_view` tool switches what the user is looking
-  // at (ids already resolved server-side; see voice/navigation.ts).
+  // An agent opened something on the user's screen: `ui_open`, the voice
+  // assistant's `show_view`, or a view tool's `show` (ids already resolved
+  // server-side, and the server already picked this tab as the one that
+  // follows; see voice/navigation.ts and `UserAudience::Foreground`).
   useEffect(() => {
     if (!authenticated) return
-    const onVoiceNavigate = (e: Event) => {
-      const t = parseVoiceNavigate((e as CustomEvent).detail)
-      if (!t) return
+    const onUiNavigate = (e: Event) => {
+      const parsed = parseUiNavigate((e as CustomEvent).detail)
+      if (!parsed) return
+      const t = parsed.nav
+      const from = window.location.pathname + window.location.search
       if (t.target === 'session') {
         window.dispatchEvent(
           new CustomEvent('peckboard:open-session', { detail: { session_id: t.id } }),
@@ -1093,16 +1103,45 @@ function App() {
       } else if (t.target === 'folder') {
         setActiveFolderId(t.id)
         navigate('folders', t.id, 'repos')
+      } else if (t.target === 'view') {
+        setActiveViewId(t.id)
+        navigate('views', t.id)
+      } else if (t.target === 'settings') {
+        setSettingsSub(t.sub)
+        navigate('settings', t.sub)
+      } else if (t.target === 'plugin_page') {
+        window.dispatchEvent(
+          new CustomEvent('peckboard:open-plugin-page', {
+            detail: { plugin: t.plugin, item: t.item, query: t.query },
+          }),
+        )
       } else {
-        const target = VOICE_PAGE_VIEWS[t.page]
+        const target = UI_PAGE_VIEWS[t.page]
         if (target === 'sessions') setActiveSession(null)
         if (target === 'projects') setActiveProject(null)
+        if (target === 'views') setActiveViewId(null)
+        if (target === 'settings') setSettingsSub(null)
         navigate(target, null)
       }
+      setAgentNav((prev) => ({
+        key: (prev?.key ?? 0) + 1,
+        message: `${parsed.sourceName} opened ${parsed.label}`,
+        from,
+      }))
     }
-    window.addEventListener('peckboard:voice-navigate', onVoiceNavigate)
-    return () => window.removeEventListener('peckboard:voice-navigate', onVoiceNavigate)
+    window.addEventListener('peckboard:ui-navigate', onUiNavigate)
+    return () => window.removeEventListener('peckboard:ui-navigate', onUiNavigate)
   }, [authenticated, navigate, setActiveSession, setActiveProject])
+  const dismissAgentNav = useCallback(() => setAgentNav(null), [])
+  // Back: undo the agent's jump (popstate restores the previous route) —
+  // only when it actually pushed a new URL.
+  const agentNavBack = () => {
+    const from = agentNav?.from
+    setAgentNav(null)
+    if (from !== undefined && window.location.pathname + window.location.search !== from) {
+      history.back()
+    }
+  }
   const lastOpenedProjectTab = useRef<string | null>(null)
   useEffect(() => {
     if (!authenticated) return
@@ -2364,6 +2403,16 @@ function App() {
 
       {authenticated && <SoundsListener />}
       {authenticated && <VoiceDock />}
+      {agentNav && (
+        <Toast
+          key={agentNav.key}
+          message={agentNav.message}
+          actionLabel="Back"
+          onAction={agentNavBack}
+          onDismiss={dismissAgentNav}
+          testId="agent-nav-toast"
+        />
+      )}
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showNewView && (
         <NewViewModal

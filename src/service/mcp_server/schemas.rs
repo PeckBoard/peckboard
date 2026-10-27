@@ -56,6 +56,16 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "show_view",
         "voice_queue",
         "voice_pronunciation",
+        // The user's own screen and dashboards are not a card's business.
+        "ui_open",
+        "ui_tabs",
+        "list_views",
+        "get_view",
+        "create_view",
+        "update_view",
+        "add_view_widget",
+        "remove_view_widget",
+        "delete_view",
         "voice_prompt",
     ]
 }
@@ -205,6 +215,9 @@ fn read_only_tool_names() -> &'static [&'static str] {
         "remote_agent_list",
         "remote_agent_screenshot",
         "background_status",
+        "ui_tabs",
+        "list_views",
+        "get_view",
         "list_background",
     ]
 }
@@ -218,6 +231,7 @@ fn destructive_tool_names() -> &'static [&'static str] {
         "delete_plan",
         "memory_remove",
         "memory_compact",
+        "delete_view",
         "delete_card",
         "delete_project",
         "delete_repeating_task",
@@ -283,6 +297,35 @@ pub fn tool_annotations(name: &str) -> serde_json::Value {
     })
 }
 
+/// Widget rules shared by the view tools' descriptions.
+const VIEW_WIDGETS_HELP: &str = "Widget kinds and the fields each uses: session (sessionId), terminal (terminalId), project (projectId), note (body: markdown), report (reportRef \"<folder>/<file>\", omit for the latest), dependencies (projectId, optional cardId), todos / attention / review_queue / review_quality / workers / worktrees / prs (projectId; omit for all projects), ssh_activity (hostRef, optional), background / repeating / ssh_hosts / orchestrators (none). Grid: 12 columns; x 0-11, w 1-12, x+w <= 12, y >= 0, h 2-40, no overlaps, at most 24 widgets. Omit x/y to auto-place in the first free slot, w/h for the kind's default size, id to generate one. A session must be one the user may open; terminals must be the user's.";
+
+/// JSON Schema of one view widget as the view tools accept it.
+fn view_widget_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["session", "terminal", "project", "note", "report", "background", "repeating", "todos", "attention", "review_queue", "review_quality", "workers", "worktrees", "dependencies", "ssh_activity", "ssh_hosts", "prs", "orchestrators"]
+            },
+            "id": { "type": "string", "description": "Widget id (generated when omitted)." },
+            "x": { "type": "integer" },
+            "y": { "type": "integer" },
+            "w": { "type": "integer" },
+            "h": { "type": "integer" },
+            "sessionId": { "type": "string" },
+            "terminalId": { "type": "string" },
+            "projectId": { "type": "string" },
+            "cardId": { "type": "string" },
+            "reportRef": { "type": "string" },
+            "body": { "type": "string" },
+            "hostRef": { "type": "string" },
+            "filters": { "type": "object", "description": "Widget UI filter state (kinds other than session, terminal, project, note, review_quality)." }
+        },
+        "required": ["kind"]
+    })
+}
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
             McpToolDef {
@@ -2126,17 +2169,17 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "show_view".into(),
-                description: "Voice assistant only: switch the user's screen to a project, session, card, or folder (by id or spoken name, fuzzy-matched), or to a top-level page. Call it whenever the conversation turns to a specific project or session. Returns what was opened, or candidates (and opens nothing) when the name is ambiguous or unmatched.".into(),
+                description: "Voice assistant only: switch the user's screen to a project, session, card, folder, or saved view (by id or spoken name, fuzzy-matched), or to a top-level page. Call it whenever the conversation turns to a specific project or session. Returns what was opened, or candidates (and opens nothing) when the name is ambiguous or unmatched.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "target": {
                             "type": "string",
-                            "enum": ["auto", "project", "session", "card", "folder", "page"],
-                            "description": "What to open. auto (default) searches projects, sessions, and folders by name."
+                            "enum": ["auto", "project", "session", "card", "folder", "view", "page"],
+                            "description": "What to open. auto (default) searches projects, sessions, folders, and saved views by name."
                         },
                         "id": { "type": "string", "description": "Exact id, when known (e.g. from a candidates list)." },
-                        "name": { "type": "string", "description": "Name as the user said it, e.g. \"stashify\". For target page: sessions, projects, folders, settings, reports, repeating_tasks, usage, or agents." }
+                        "name": { "type": "string", "description": "Name as the user said it, e.g. \"stashify\". For target page: sessions, projects, folders, views, settings, reports, repeating_tasks, terminals, review, usage, or agents." }
                     },
                     "additionalProperties": false
                 }),
@@ -2176,6 +2219,123 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "content": { "type": "string", "description": "update: the complete new prompt." },
                         "text": { "type": "string", "description": "append: text added on a new line at the end of the prompt." },
                         "note": { "type": "string", "description": "update/append: one line on why, shown in the prompt history, e.g. \"user asked for shorter answers\"." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "ui_open".into(),
+                description: "Open something in the USER'S own Peckboard browser tab (the tab they are looking at; if none is visible, their most recently active one). Use it when the user asks to see something, or right after you create something they will want to look at. Resolves names server-side (fuzzy); returns what was opened and `delivered` (browser tabs reached, 0 = no tab open), or `candidates` and opens nothing when a name is ambiguous or unmatched. Targets: session, project, card, folder, view (a saved dashboard), auto (searches projects, sessions, folders, views) — by `id` or `name`; settings — `sub` = account, appearance, sounds, assistant, chat, prompts, variables, providers, ssh-keys, plugins, registry, or (admins only) workflows, mcp, remote-access, external-access, server, security, data, tls, users; plugin_page — `id` = plugin id, `sub` = page item id, optional `query`; page — `name` = sessions, projects, folders, views, settings, reports, repeating_tasks, terminals, review, usage, agents. The user sees a notice naming this session, with a Back button.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["session", "project", "card", "folder", "view", "settings", "plugin_page", "page", "auto"],
+                            "description": "What to open (default auto)."
+                        },
+                        "id": { "type": "string", "description": "Exact id (e.g. from a candidates list); for plugin_page the plugin id." },
+                        "name": { "type": "string", "description": "Name to fuzzy-match, e.g. \"stashify\"; for page the page name." },
+                        "sub": { "type": "string", "description": "settings: the sub-page id; plugin_page: the page item id." },
+                        "query": { "type": "string", "description": "plugin_page: optional query string passed to the page, e.g. \"q=graphify\"." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "ui_tabs".into(),
+                description: "List the in-app tabs the user has open (saved per user across devices), most recently active first: [{type: session|project|report|repeating_task|terminal|..., id, last_active}].".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "list_views".into(),
+                description: "List the user's saved views (widget dashboards): [{id, name, created_at, updated_at}], oldest first. Views are per user: only this session's owner's views.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "get_view".into(),
+                description: "One of the user's saved views with its widgets (id, kind, x, y, w, h and the kind's fields) plus display names for the terminals, projects and cards it references. Select it by `id`, or by `name` (fuzzy).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "View id (from list_views)." },
+                        "name": { "type": "string", "description": "View name, when the id is unknown." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "create_view".into(),
+                description: format!("Create a saved view (widget dashboard) for the user. show=true also opens it in their browser. {VIEW_WIDGETS_HELP}"),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "View name (1-100 characters)." },
+                        "widgets": { "type": "array", "items": view_widget_schema(), "description": "Initial widgets (default none)." },
+                        "show": { "type": "boolean", "description": "Open the new view in the user's browser (default false)." }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "update_view".into(),
+                description: format!("Rename a saved view and/or REPLACE its whole widget list (widgets not listed are removed — get_view first, or use add_view_widget / remove_view_widget for single changes). Select by `id`; then `name` is the new name. Without an id, `name` selects the view and `new_name` renames it. {VIEW_WIDGETS_HELP}"),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "View id." },
+                        "name": { "type": "string", "description": "With id: the new name. Without id: selects the view by name." },
+                        "new_name": { "type": "string", "description": "New name (when `name` selects the view)." },
+                        "widgets": { "type": "array", "items": view_widget_schema(), "description": "The complete new widget list." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "add_view_widget".into(),
+                description: format!("Add one widget to a saved view (by `id` or `name`), keeping the others. Omit x/y to place it in the first free slot. Answers the updated view and `added_widget_id`. {VIEW_WIDGETS_HELP}"),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "View id." },
+                        "name": { "type": "string", "description": "View name, when the id is unknown." },
+                        "widget": view_widget_schema()
+                    },
+                    "required": ["widget"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "remove_view_widget".into(),
+                description: "Remove one widget (by its widget id, from get_view) from a saved view, keeping the others.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "View id." },
+                        "name": { "type": "string", "description": "View name, when the id is unknown." },
+                        "widget_id": { "type": "string", "description": "The widget to remove." }
+                    },
+                    "required": ["widget_id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "delete_view".into(),
+                description: "Delete one of the user's saved views (by `id` or `name`). Permanent; the sessions, terminals and projects it showed are untouched.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "View id." },
+                        "name": { "type": "string", "description": "View name, when the id is unknown." }
                     },
                     "additionalProperties": false
                 }),

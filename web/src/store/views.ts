@@ -263,6 +263,9 @@ function toSaved(raw: SavedView): SavedView {
   return { ...raw, widgets: sanitizeWidgets(raw.widgets) }
 }
 
+/** This browser tab's id, sent as `X-Peckboard-Tab` on view writes and
+ *  echoed back on `views-changed` so a tab can skip its own autosaves. */
+export const VIEWS_TAB_ID = `tab-${Math.random().toString(36).slice(2, 12)}`
 interface ViewsState {
   views: ViewSummary[]
   loaded: boolean
@@ -314,7 +317,7 @@ export const useViewsStore = create<ViewsState>((set) => ({
   createView: async (name, widgets) => {
     const res = await authedFetch('/api/me/views', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Peckboard-Tab': VIEWS_TAB_ID },
       body: JSON.stringify({ name, widgets }),
     })
     if (!res.ok) throw await errorOf(res, 'Failed to create view')
@@ -326,7 +329,7 @@ export const useViewsStore = create<ViewsState>((set) => ({
   updateView: async (id, patch) => {
     const res = await authedFetch(`/api/me/views/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Peckboard-Tab': VIEWS_TAB_ID },
       body: JSON.stringify(patch),
     })
     if (!res.ok) throw await errorOf(res, 'Failed to save view')
@@ -336,8 +339,34 @@ export const useViewsStore = create<ViewsState>((set) => ({
   },
 
   deleteView: async (id) => {
-    const res = await authedFetch(`/api/me/views/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    const res = await authedFetch(`/api/me/views/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { 'X-Peckboard-Tab': VIEWS_TAB_ID },
+    })
     if (!res.ok && res.status !== 404) throw await errorOf(res, 'Failed to delete view')
     set((s) => ({ views: s.views.filter((v) => v.id !== id) }))
   },
 }))
+
+/** A `views-changed` frame: one of this user's views changed somewhere. */
+export interface ViewsChanged {
+  view_id: string
+  action: 'created' | 'updated' | 'deleted'
+  /** The writing tab's {@link VIEWS_TAB_ID}; null for agent writes. */
+  origin: string | null
+}
+
+/** Is this frame a write this very tab made (its own autosave)? */
+export function isOwnViewsChange(c: ViewsChanged): boolean {
+  return c.origin === VIEWS_TAB_ID
+}
+
+// Keep the list current when a view changes elsewhere (another tab, an
+// agent's view tools). Only once loaded: the list page fetches on mount.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('peckboard:views-changed', (e) => {
+    const c = (e as CustomEvent<ViewsChanged>).detail
+    if (!c || isOwnViewsChange(c) || !useViewsStore.getState().loaded) return
+    void useViewsStore.getState().fetchViews()
+  })
+}

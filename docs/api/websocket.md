@@ -74,6 +74,18 @@ Worker sessions reject `send` frames as defense-in-depth.
 | interrupted       | sessionId                              | Soft interrupt succeeded       |
 | error             | error                                  | Error message                  |
 
+### Per-User Frames
+
+Sent only to the connections of one user (see
+[MCP Tools](../architecture/mcp-tools.md#driving-the-users-screen-and-views)).
+Clients report `{ type: "visibility", visible }` after auth and on every
+`visibilitychange` so the server can pick foreground tabs.
+
+| Frame         | Fields                    | Description                                                     |
+| ------------- | ------------------------- | --------------------------------------------------------------- |
+| ui-navigate   | target, id?, sub?, source | An agent opened something; foreground tab(s) only               |
+| views-changed | view_id, action, origin   | A saved view was created / updated / deleted; all of the user's |
+
 ## Reconnect Protocol
 
 1. Client opens new WebSocket, sends auth frame

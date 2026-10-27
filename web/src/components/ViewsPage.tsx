@@ -3,6 +3,7 @@ import type { Session } from '../types/api'
 import { useSessionsStore } from '../store/sessions'
 import { useProjectsStore } from '../store/projects'
 import {
+  isOwnViewsChange,
   patchWidget,
   terminalMeta,
   useViewsStore,
@@ -12,6 +13,7 @@ import {
   type ViewSummary,
   type ViewTerminalMeta,
   type ViewWidget,
+  type ViewsChanged,
   type WidgetPatch,
   type WidgetKind,
 } from '../store/views'
@@ -608,6 +610,15 @@ function ViewEditor({
   const [closeError, setCloseError] = useState<string | null>(null)
   const saveTimer = useRef<number | null>(null)
   const pending = useRef<ViewWidget[] | undefined>(undefined)
+  // A save is on its way to the server (its edits are not in a reload).
+  const inFlight = useRef(false)
+  // Reload was picked while that save was on the wire: fetch once it lands.
+  const reloadAfterSave = useRef(false)
+  // Set when the view changed elsewhere while edits here were unsaved.
+  const [stale, setStale] = useState(false)
+  const staleRef = useRef(false)
+  // Bumped to re-fetch the view (a change made elsewhere).
+  const [loadSeq, setLoadSeq] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -629,7 +640,30 @@ function ViewEditor({
     return () => {
       cancelled = true
     }
-  }, [viewId, getView])
+  }, [viewId, getView, loadSeq])
+
+  // A change made elsewhere (another tab, an agent's view tools): reload
+  // when nothing here is unsaved; otherwise hold autosave and ask, so
+  // neither side silently overwrites the other. A delete leaves the page.
+  useEffect(() => {
+    const onChanged = (e: Event) => {
+      const c = (e as CustomEvent<ViewsChanged>).detail
+      if (!c || c.view_id !== viewId || isOwnViewsChange(c)) return
+      if (c.action === 'deleted') {
+        pending.current = undefined
+        onBack()
+        return
+      }
+      if (pending.current !== undefined || inFlight.current) {
+        staleRef.current = true
+        setStale(true)
+      } else {
+        setLoadSeq((n) => n + 1)
+      }
+    }
+    window.addEventListener('peckboard:views-changed', onChanged)
+    return () => window.removeEventListener('peckboard:views-changed', onChanged)
+  }, [viewId, onBack])
 
   const flush = useRef<() => void>(() => {})
   useEffect(() => {
@@ -638,10 +672,14 @@ function ViewEditor({
         window.clearTimeout(saveTimer.current)
         saveTimer.current = null
       }
+      // Changed elsewhere while this tab had unsaved edits: hold the save
+      // until the user picks Reload or Keep mine.
+      if (staleRef.current) return
       const next = pending.current
       if (next === undefined) return
       pending.current = undefined
       setSave('saving')
+      inFlight.current = true
       updateView(viewId, { widgets: next })
         .then((v) => {
           if (v.projects) setProjMeta((m) => ({ ...m, ...v.projects }))
@@ -649,6 +687,14 @@ function ViewEditor({
           setSave(pending.current === undefined ? 'saved' : 'saving')
         })
         .catch(() => setSave('error'))
+        .finally(() => {
+          inFlight.current = false
+          if (reloadAfterSave.current) {
+            reloadAfterSave.current = false
+            setSave('idle')
+            setLoadSeq((n) => n + 1)
+          }
+        })
     }
   }, [viewId, updateView])
   // Leaving the page flushes a pending save rather than dropping it.
@@ -997,6 +1043,29 @@ function ViewEditor({
     )
   }
 
+  /** Drop the unsaved edits here and show the version saved elsewhere. A
+   *  save already on the wire can't be recalled, so the fetch waits for it
+   *  to land — otherwise it could overwrite the version just reloaded and
+   *  the page would show something the server no longer holds. */
+  const reloadFromServer = () => {
+    if (saveTimer.current !== null) {
+      window.clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    pending.current = undefined
+    staleRef.current = false
+    setStale(false)
+    setSave('idle')
+    if (inFlight.current) reloadAfterSave.current = true
+    else setLoadSeq((n) => n + 1)
+  }
+  /** Save this tab's widgets over the change made elsewhere. */
+  const keepMine = () => {
+    staleRef.current = false
+    setStale(false)
+    pending.current = widgetsRef.current
+    flush.current()
+  }
   return (
     <div className="view-editor" data-testid="view-editor" data-view-id={viewId}>
       <ListViewHeader
@@ -1043,6 +1112,32 @@ function ViewEditor({
           </div>
         }
       />
+      {stale && (
+        <div className="announcement-banner" role="alert" data-testid="view-stale-notice">
+          <div className="announcement-content">
+            <strong>Changed elsewhere</strong>
+            <span>This view was edited in another tab or by an agent. Autosave is paused.</span>
+          </div>
+          <div className="view-editor-actions">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={reloadFromServer}
+              data-testid="view-stale-reload"
+            >
+              Reload
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={keepMine}
+              data-testid="view-stale-keep"
+            >
+              Keep mine
+            </button>
+          </div>
+        </div>
+      )}
       <div className="view-dashboard">
         <WidgetGrid
           items={widgets}

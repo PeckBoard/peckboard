@@ -113,3 +113,46 @@ Guards: depth 1 (a subagent may not spawn subagents), max 25 in flight per
 parent, blocked for pre-hatcher sessions by the read-only allowlist.
 Subagent sessions are ordinary sessions — readable with
 `read_worker_session`/`search_sessions`, terminable via session-control.
+
+## Driving the User's Screen and Views
+
+Chat sessions and external OAuth clients can open things in the **user's
+own browser tab** and edit the user's saved views (widget dashboards).
+Worker sessions get none of these tools (hidden and refused). The voice
+assistant may call `ui_open`, `ui_tabs`, `list_views` and `get_view`
+freely; its view writes are parked for an on-screen confirmation like its
+other persistent actions.
+
+| Tool               | Description                                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| ui_open            | Open a session / project / card / folder / view (by id or fuzzy name), a Settings sub-page, a plugin page, or a top-level page |
+| ui_tabs            | The user's saved in-app tabs, most recent first                                                                                |
+| list_views         | The user's saved views                                                                                                         |
+| get_view           | One view with its widgets                                                                                                      |
+| create_view        | Create a view (`show: true` also opens it)                                                                                     |
+| update_view        | Rename and/or replace the whole widget list                                                                                    |
+| add_view_widget    | Add one widget; omitted `x`/`y` auto-place it in the first free slot, omitted `w`/`h` use the kind's default size              |
+| remove_view_widget | Remove one widget by id                                                                                                        |
+| delete_view        | Delete a view                                                                                                                  |
+
+Everything acts for the **calling session's owner** only. Names resolve
+server-side; an ambiguous or unknown name returns `candidates` and opens
+nothing. Admin-only Settings pages are refused for non-admins, and a view
+widget may only reference a session the owner may open (REST enforces the
+same rule).
+
+Delivery is per user (`Broadcaster::send_to_user`), never broadcast:
+
+- `ui-navigate` goes to the owner's **foreground** tabs: every connection
+  whose page last reported itself visible (clients send a `visibility`
+  frame after auth and on every change); when none is visible, only the
+  most recently active connection (last connected or last became visible).
+  The server makes the choice, so `ui_open` returns an accurate
+  `delivered` count and no client-side election is needed. The tab shows
+  "‹session› opened ‹page›" with a Back button.
+- `views-changed {view_id, action, origin}` goes to **all** of the owner's
+  tabs after every view write (REST or MCP). `origin` echoes the writing
+  tab's `X-Peckboard-Tab` header so a tab ignores its own autosaves. An
+  open view reloads in place; if it has unsaved or in-flight edits it shows
+  "Changed elsewhere" and holds autosave until the user picks Reload or
+  Keep mine. A deleted view returns the tab to the views list.

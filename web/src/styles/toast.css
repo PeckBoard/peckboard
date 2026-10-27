@@ -1,0 +1,49 @@
+/* ═══════════════════════════════════════════════════
+   Toast (components/Toast.tsx)
+   ═══════════════════════════════════════════════════ */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 12px 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.toast-message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast-action {
+  flex-shrink: 0;
+}
+
+.toast-dismiss {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: none;
+  background: none;
+  color: var(--text2);
+  font-size: var(--text-lg, 18px);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.toast-dismiss:hover {
+  color: var(--text);
+}

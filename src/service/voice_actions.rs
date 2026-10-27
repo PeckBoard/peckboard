@@ -94,6 +94,11 @@ const FREE_TOOLS: &[&str] = &[
     "voice_queue",
     "voice_pronunciation",
     "voice_prompt",
+    // Driving the user's screen, and reading their saved views.
+    "ui_open",
+    "ui_tabs",
+    "list_views",
+    "get_view",
     // HomeKit / Hue plugin: every tool, locks, doors and pairing included
     // (the user's explicit choice: voice controls the home unconfirmed).
     "homekit_list",
@@ -149,6 +154,12 @@ const GATED_TOOLS: &[&str] = &[
     "ssh_host_update",
     "ssh_host_remove",
     "remote_agent_run",
+    // The user's saved views (dashboards).
+    "create_view",
+    "update_view",
+    "add_view_widget",
+    "remove_view_widget",
+    "delete_view",
 ];
 
 /// The voice session's policy for one call. `voice_prompt` edits and
