@@ -8,7 +8,7 @@ nav_order: 4
 
 [mcpx](https://github.com/PeckBoard/mcpx) is an MCP **client** for the shell, plus a local gateway. It reads the same `mcp.json` you use with Claude, Cursor, or VS Code. Scripts can then list and call any server's tools, and a bot can reach all of them through one authenticated endpoint on `127.0.0.1`.
 
-Install it from **App Manager** (entry `mcpx`). App Manager downloads the sha256-checked release binary to `~/.local/bin/mcpx`. You can also download a static Linux binary (x86_64 or aarch64) from the [releases](https://github.com/PeckBoard/mcpx/releases).
+Install it from **App Manager** (entry `mcpx`) on a Linux or macOS target. App Manager downloads the sha256-checked release binary to `~/.local/bin/mcpx`; on macOS, add `~/.local/bin` to your `PATH` to run it by name. Binaries for Linux (x86_64, aarch64), macOS (Apple silicon, Intel), and Windows (x86_64) are on the [releases](https://github.com/PeckBoard/mcpx/releases) page — on Windows, download `mcpx-windows-x86_64.exe` by hand (see the README's PowerShell snippet); App Manager doesn't drive Windows targets.
 
 ```bash
 mcpx servers                                   # status, serverInfo, capabilities
@@ -19,7 +19,7 @@ mcpx serve --allow 'github__*' --deny '*__delete*'
 ```
 
 - **Servers:** stdio, streamable HTTP, and legacy HTTP+SSE. `${VAR}` is expanded in commands, args, env, URLs, and headers.
-- **OAuth:** follows the MCP Authorization spec — discovery, dynamic client registration, PKCE, refresh, and `client_credentials`. Tokens are stored in `~/.config/mcpx/tokens.json` (mode 0600).
+- **OAuth:** follows the MCP Authorization spec — discovery, dynamic client registration, PKCE, refresh, and `client_credentials`. Tokens are stored in `~/.config/mcpx/tokens.json` (mode 0600; `%APPDATA%\mcpx` on Windows).
 - **Output:** JSON on stdout and errors as JSON on stderr. `call` exits 1 when the tool result is an error.
 
 ## Gateway
