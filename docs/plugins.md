@@ -63,4 +63,4 @@ Every plugin in the official registry. The name links to the plugin's page, whic
 
 Besides WASM plugins, the registry lists ready-made MCP server entries — over a hundred external tool servers such as Playwright, GitHub, Postgres, and Figma that sessions can talk to directly. Adding one from the registry configures it without hand-writing the server command or URL. The full list, grouped by category, is on the [MCP Server Catalog]({{ "/mcp-servers.html" | relative_url }}) page.
 
-To use MCP servers outside PeckBoard — from scripts or a chat bot — install [mcpx]({{ "/mcpx.html" | relative_url }}) from App Manager. It is a command-line MCP client and local gateway that reads the same `mcp.json` and handles OAuth.
+To use MCP servers outside PeckBoard — from scripts or a chat bot — install [mcpx]({{ "/mcpx.html" | relative_url }}) from App Manager. It is a command-line MCP client and local gateway that reads the `mcp.json` format used by Claude, Cursor, and VS Code (not the servers configured in PeckBoard) and handles OAuth. It can also call PeckBoard's own tools through an External Access client.
