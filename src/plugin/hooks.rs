@@ -176,7 +176,7 @@ pub struct PluginManifest {
     /// Extism call timeout includes time spent inside host functions, so a
     /// plugin whose tools legitimately wait on slow host-side work (e.g.
     /// `peckboard_http_request` driving a certificate issuance) declares a
-    /// larger budget here. Clamped at load to core's [2 s default, 180 s max];
+    /// larger budget here. Clamped at load to core's [15 s default, 610 s max];
     /// hooks on hot paths (message dispatch) should keep the default.
     #[serde(default)]
     pub call_timeout_secs: Option<u64>,
@@ -441,7 +441,7 @@ pub const PROVIDER_REGISTER_HOOK: &str = "provider.register";
 
 /// Dispatched to run ONE agent turn on a plugin-registered provider. The
 /// call runs on a dedicated blocking thread with the provider-send budget
-/// (default 300s) rather than the normal 2–180s hook clamp; while it is in
+/// (default 300s) rather than the normal 15 s default hook budget; while it is in
 /// flight the plugin streams `ProviderEvent`s via
 /// `peckboard_emit_provider_event` and polls `peckboard_provider_should_stop`
 /// between chunks. Payload:

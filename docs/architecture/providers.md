@@ -170,7 +170,7 @@ A provider plugin:
 conversation_id}`. The call runs on a dedicated blocking thread with the
    provider-send budget (default 300s, `--provider-send-timeout-secs` /
    `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`) — deliberately above the normal
-   2–180s hook clamp.
+   15 s default hook budget.
 4. While the call is in flight, streams `ProviderEvent`s via
    `peckboard_emit_provider_event` and polls `peckboard_provider_should_stop`
    between chunks for cooperative interrupts.

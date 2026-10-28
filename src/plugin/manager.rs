@@ -39,7 +39,13 @@ const MEMORY_LIMIT_PAGES: u32 = 2048; // 128 MB (64 KB per page)
 /// `PluginBuilder::with_wasmtime_config`, which leaves these memory tunables
 /// untouched (it only overrides epoch/fuel/exceptions/cache).
 const MEMORY_RESERVATION_BYTES: u64 = MEMORY_LIMIT_PAGES as u64 * 64 * 1024; // 128 MB
-const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Default per-call budget for a plugin hook. It is wall-clock and covers the
+/// host calls a plugin makes (DB reads, model listing, exec), not just guest
+/// CPU — and a call that overruns it traps, rebuilds the instance, and fails
+/// the request. The old 2 s default blanked plugin pages whenever a host call
+/// was slow (live incident 2026-10: story-writer `/defaults`, session-control
+/// `/pickers`, pr-review `/state`). Still bounds a genuinely hung plugin.
+const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Ceiling for a manifest-declared `call_timeout_secs`. Bounds how long a
 /// misbehaving plugin can pin one of its per-plugin mutexes, while leaving
 /// room for genuinely slow tool work (e.g. a certificate issuance driven
@@ -55,7 +61,7 @@ const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(610);
 const MAX_PLUGIN_CONCURRENCY: u32 = 4;
 /// Default per-call budget for a `provider.send` dispatch (one full agent
 /// turn, HTTP round-trips included). Deliberately ABOVE the normal
-/// 2–180s hook clamp: extism pins the call timeout per instance, so a plugin
+/// 15 s default hook budget: extism pins the call timeout per instance, so a plugin
 /// declaring `provider.send` is built with at least this budget — which also
 /// raises the ceiling for its ordinary hook calls. Overridable via
 /// `--provider-send-timeout-secs` / `PECKBOARD_PROVIDER_SEND_TIMEOUT_SECS`
@@ -1357,7 +1363,7 @@ impl PluginManager {
         }
 
         // Resolve the per-call budget. A plugin may declare a larger budget
-        // than the 2 s default for slow host-side tool work (see
+        // than the 15 s default for slow host-side tool work (see
         // `PluginManifest::call_timeout_secs`); extism fixes the timeout at
         // construction, so rebuild the instance with the clamped budget when
         // one was declared. Not part of the approval grant: a timeout is not
@@ -1534,7 +1540,7 @@ impl PluginManager {
     /// mutex, so two dispatches for different hooks (or the same hook
     /// against disjoint plugin sets) don't serialise on a single
     /// PluginManager-wide lock — important because each `plugin.call`
-    /// can take up to its call timeout (2 s default; a manifest may raise it
+    /// can take up to its call timeout (15 s default; a manifest may raise it
     /// via `call_timeout_secs`, clamped to `MAX_CALL_TIMEOUT`).
     pub async fn dispatch(&self, hook: &str, payload: serde_json::Value) -> HookResult {
         let targets: Vec<(String, Arc<PluginPool>)> = {

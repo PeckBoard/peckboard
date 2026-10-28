@@ -139,7 +139,7 @@ test.describe('app-manager page', () => {
     // gates on /apps having resolved, so the banner below has settled past
     // its transient "Checking…" state before the skip guard reads it.
     const gitRow = f.locator('.approw').filter({ hasText: 'Distributed version control' })
-    await expect(gitRow).toHaveCount(1)
+    await expect(gitRow).toHaveCount(1, { timeout: 60_000 })
     await expect(gitRow.locator('.badge').first()).toHaveText('Installed', { timeout: 60_000 })
 
     const banner = (await f.locator('#bannerText').textContent()) ?? ''

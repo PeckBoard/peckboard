@@ -51,7 +51,7 @@ pub struct CliArgs {
 
     /// Per-call budget (seconds) for a plugin provider's `provider.send`
     /// hook — one full agent turn, HTTP round-trips included. Sits above
-    /// the normal 2–180s plugin hook clamp; a plugin declaring
+    /// the normal 15 s default plugin hook budget; a plugin declaring
     /// `provider.send` is built with at least this call timeout.
     #[arg(
         long,

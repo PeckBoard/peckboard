@@ -1586,32 +1586,87 @@ impl PluginProviderRuntime {
     }
 }
 
-/// TTL cache over one probe invocation, keyed by the raw request (command +
-/// args + env). Success and failure are cached alike so a broken or slow CLI
-/// stalls at most one catalog request per window — the same discipline the
-/// deleted native providers applied to their discovery probes. Settings and
-/// account merging happen in the plugin on every `provider.models` call;
-/// only the CLI shell-out is memoised here, so a settings or account change
-/// still shows up in the catalog immediately.
+/// Stale-while-revalidate cache over one probe invocation, keyed by the raw
+/// request (command + args + env). Success and failure are cached alike so a
+/// broken or slow CLI stalls at most one catalog request — the same
+/// discipline the deleted native providers applied to their discovery
+/// probes. Settings and account merging happen in the plugin on every
+/// `provider.models` call; only the CLI shell-out is memoised here, so a
+/// settings or account change still shows up in the catalog immediately.
+///
+/// An entry older than [`PROBE_CACHE_TTL`] is still served — instantly — and
+/// refreshed on a background thread; only a cold (or [`PROBE_CACHE_MAX_STALE`]
+/// old) entry blocks. Catalog reads sit on latency-sensitive paths: a plugin
+/// page calling `peckboard_list_models` runs under the plugin call budget,
+/// and a blocking re-probe of every provider CLI blew through it (live
+/// incident 2026-10: story-writer / session-control pages timing out and
+/// rendering blank once the cache had expired).
 const PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Past this age a stale entry is dropped instead of served, so a CLI that
+/// changed long ago can't keep answering from memory.
+const PROBE_CACHE_MAX_STALE: Duration = Duration::from_secs(60 * 60);
 
-static PROBE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (Instant, String)>>> =
-    std::sync::LazyLock::new(Default::default);
+struct ProbeCache {
+    entries: std::sync::Mutex<HashMap<String, (Instant, String)>>,
+    /// Keys with a background refresh in flight — at most one per key.
+    refreshing: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl ProbeCache {
+    fn new() -> Self {
+        Self {
+            entries: Default::default(),
+            refreshing: Default::default(),
+        }
+    }
+
+    fn store(&self, input: &str, out: &str) {
+        if let Ok(mut cache) = self.entries.lock() {
+            cache.retain(|_, (at, _)| at.elapsed() < PROBE_CACHE_MAX_STALE);
+            cache.insert(input.to_string(), (Instant::now(), out.to_string()));
+        }
+    }
+
+    /// Serve `input` from cache: `run` goes inline only on a cold miss, and
+    /// on a background thread (one per key) when the entry is merely stale.
+    fn get(&'static self, input: &str, run: fn(&str) -> String) -> String {
+        let cached = self.entries.lock().ok().and_then(|c| c.get(input).cloned());
+        if let Some((at, out)) = cached {
+            let age = at.elapsed();
+            if age < PROBE_CACHE_TTL {
+                return out;
+            }
+            if age < PROBE_CACHE_MAX_STALE {
+                let first = self
+                    .refreshing
+                    .lock()
+                    .map(|mut r| r.insert(input.to_string()))
+                    .unwrap_or(false);
+                if first {
+                    let key = input.to_string();
+                    std::thread::spawn(move || {
+                        let fresh = run(&key);
+                        self.store(&key, &fresh);
+                        if let Ok(mut r) = self.refreshing.lock() {
+                            r.remove(&key);
+                        }
+                    });
+                }
+                return out;
+            }
+        }
+        let out = run(input);
+        self.store(input, &out);
+        out
+    }
+}
+
+static PROBE_CACHE: std::sync::LazyLock<ProbeCache> = std::sync::LazyLock::new(ProbeCache::new);
 
 /// `peckboard_provider_probe {command, args?, env?, cwd?, timeout_ms?}` — short-lived
 /// CLI capture for `provider.models` discovery. Not tied to a turn.
 pub fn probe_cli_json(input: &str) -> String {
-    if let Some((at, cached)) = PROBE_CACHE.lock().ok().and_then(|c| c.get(input).cloned())
-        && at.elapsed() < PROBE_CACHE_TTL
-    {
-        return cached;
-    }
-    let out = probe_cli_uncached(input);
-    if let Ok(mut cache) = PROBE_CACHE.lock() {
-        cache.retain(|_, (at, _)| at.elapsed() < PROBE_CACHE_TTL);
-        cache.insert(input.to_string(), (Instant::now(), out.clone()));
-    }
-    out
+    PROBE_CACHE.get(input, probe_cli_uncached)
 }
 
 fn probe_cli_uncached(input: &str) -> String {
@@ -2877,5 +2932,48 @@ mod tests {
         );
         assert!(out.contains("no plugin manager"), "got: {out}");
         runtime.end_turn("s1");
+    }
+
+    /// A stale probe entry is served instantly and refreshed once in the
+    /// background — the catalog read never blocks on the CLI again.
+    #[test]
+    fn probe_cache_serves_stale_and_refreshes_in_background() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CACHE: std::sync::LazyLock<ProbeCache> = std::sync::LazyLock::new(ProbeCache::new);
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        fn slow_probe(_: &str) -> String {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+            "fresh".to_string()
+        }
+
+        // Cold: runs inline.
+        assert_eq!(CACHE.get("k", slow_probe), "fresh");
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1);
+
+        // Age the entry past the TTL (but inside max-stale).
+        let old = Instant::now() - PROBE_CACHE_TTL - Duration::from_secs(1);
+        CACHE
+            .entries
+            .lock()
+            .unwrap()
+            .insert("k".into(), (old, "stale".into()));
+
+        let started = Instant::now();
+        assert_eq!(CACHE.get("k", slow_probe), "stale");
+        assert_eq!(CACHE.get("k", slow_probe), "stale");
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "stale read blocked"
+        );
+
+        // Exactly one background refresh lands the fresh value.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while CACHE.entries.lock().unwrap()["k"].1 != "fresh" {
+            assert!(Instant::now() < deadline, "background refresh never landed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(RUNS.load(Ordering::SeqCst), 2);
+        assert_eq!(CACHE.get("k", slow_probe), "fresh");
     }
 }
