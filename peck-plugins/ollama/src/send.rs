@@ -17,7 +17,10 @@ const HISTORY_COLLECTION: &str = "history";
 /// the trimmed transcript, so ids must never repeat within a session.
 const COUNTER_COLLECTION: &str = "counters";
 const MAX_HISTORY_MESSAGES: usize = 100;
-const MAX_TOOL_ROUNDS: usize = 16;
+/// No cap on tool rounds per turn: a busy model may call as many tools as
+/// the task needs. A model that repeats the exact same calls this many
+/// rounds in a row is stuck instead, and the turn ends there.
+const MAX_IDENTICAL_TOOL_ROUNDS: usize = 3;
 const CAPABILITY_PROBE_TIMEOUT_SECS: u64 = 15;
 
 /// Per-turn token rollup. Ollama reports counts once per `/api/chat`
@@ -165,7 +168,9 @@ pub fn run(payload: &Value) -> Result<(), String> {
     let url = format!("{base}/api/chat");
     let mut usage = TurnUsage::default();
 
-    for round in 0..=MAX_TOOL_ROUNDS {
+    let mut last_signature: Option<String> = None;
+    let mut identical_rounds = 0;
+    loop {
         if should_stop(session_id) {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
@@ -284,14 +289,32 @@ pub fn run(payload: &Value) -> Result<(), String> {
         let Some(calls) = last_tool_calls else {
             break;
         };
-        if round == MAX_TOOL_ROUNDS {
-            persist_turn(session_id, &mut history, new_messages);
-            emit_usage(session_id, &model_label, &usage)?;
-            return crash(
+        let signature = tool_call_signature(&calls);
+        if last_signature.as_deref() == Some(signature.as_str()) {
+            identical_rounds += 1;
+        } else {
+            identical_rounds = 1;
+            last_signature = Some(signature);
+        }
+        if identical_rounds >= MAX_IDENTICAL_TOOL_ROUNDS {
+            // Stuck, not busy: end the turn normally without running the
+            // repeat. Its calls are dropped from the stored assistant
+            // message so the history has no dangling tool references.
+            if let Some(obj) = new_messages.last_mut().and_then(Value::as_object_mut) {
+                obj.remove("tool_calls");
+            }
+            emit(
                 session_id,
-                "model kept calling tools past the per-turn cap",
-                CrashKind::Unknown,
-            );
+                &ProviderEvent::System {
+                    text: format!(
+                        "Turn stopped: the model made the same tool call \
+                         {MAX_IDENTICAL_TOOL_ROUNDS} times in a row. Send a message to continue."
+                    ),
+                    subtype: "warning".into(),
+                    detail: Value::Null,
+                },
+            )?;
+            break;
         }
         if run_tool_calls(session_id, &calls, &mut messages, &mut new_messages)? {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
@@ -407,6 +430,30 @@ fn interrupted_exit(
     history.extend(new_messages);
     save_history(session_id, history);
     crash(session_id, "interrupted", CrashKind::Interrupted)
+}
+
+/// What a round asked for — each call's name + canonical arguments, ignoring
+/// any per-call ids — so two rounds compare equal exactly when the model
+/// repeated itself. String arguments are parsed so formatting can't hide a
+/// repeat.
+fn tool_call_signature(calls: &Value) -> String {
+    calls
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|c| {
+            let f = c.get("function").unwrap_or(c);
+            let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let args = match f.get("arguments") {
+                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(json!(s)),
+                Some(v) => v.clone(),
+                None => Value::Null,
+            };
+            format!("{name}\u{0}{args}")
+        })
+        .collect::<Vec<_>>()
+        .join("\u{1}")
 }
 
 /// Append this turn's generated messages to the durable transcript.
@@ -881,5 +928,52 @@ mod tests {
         });
         assert_eq!(a, 0);
         assert_eq!(b, 3);
+    }
+
+    /// A model repeating the exact same call is stopped after
+    /// `MAX_IDENTICAL_TOOL_ROUNDS` rounds: the repeat isn't run, the turn
+    /// completes (not crashes) with a warning, and the stored history ends
+    /// on an assistant message with no dangling `tool_calls`.
+    #[test]
+    fn repeated_identical_tool_calls_end_the_turn() {
+        let host = FakeHost::new(json!({
+            "status": 200,
+            "body": json!({
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{ "function": { "name": "t", "arguments": { "a": 1 } } }],
+                },
+                "done": true,
+            })
+            .to_string(),
+        }));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        assert_eq!(
+            host.chat_bodies.lock().unwrap().len(),
+            MAX_IDENTICAL_TOOL_ROUNDS
+        );
+        let events = host.events.lock().unwrap();
+        let tool_starts = events.iter().filter(|e| e["kind"] == "tool_start").count();
+        assert_eq!(tool_starts, MAX_IDENTICAL_TOOL_ROUNDS - 1);
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"] == "system" && e["subtype"] == "warning")
+        );
+        assert!(events.iter().any(|e| e["kind"] == "completed"));
+        assert!(!events.iter().any(|e| e["kind"] == "crashed"));
+
+        let store = host.store.lock().unwrap();
+        let saved = store
+            .get(&(HISTORY_COLLECTION.to_string(), "s1".to_string()))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        let last = saved.last().unwrap();
+        assert_eq!(last["role"], "assistant");
+        assert!(last.get("tool_calls").is_none());
     }
 }
