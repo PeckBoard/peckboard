@@ -22,6 +22,6 @@ Model ids are used verbatim, so Hugging Face-style ids work: `openai-compat:Qwen
 <details markdown="1">
 <summary>Turn behaviour and failures</summary>
 
-Each turn is a non-streaming `POST /v1/chat/completions`, one request per tool round. The server is stateless, so PeckBoard keeps the conversation history itself; image attachments are sent as `image_url` data-URL parts. `reasoning_content` from reasoning models shows as thinking, and `usage` token counts feed the normal usage pipeline. An HTTP error crashes the turn with the status and the server's error message; interrupts are cooperative and keep the partial answer.
+Each turn is a non-streaming `POST /v1/chat/completions`, one request per tool round. The server is stateless, so PeckBoard keeps the conversation history itself; image attachments are sent as `image_url` data-URL parts. `reasoning_content` from reasoning models shows as thinking, and `usage` token counts feed the normal usage pipeline. An HTTP error crashes the turn with the status and the server's error message; interrupts are cooperative and keep the partial answer. There is no limit on tool rounds per turn; a model that makes the exact same tool call three times in a row is treated as stuck, and the turn ends with a warning (send a message to continue).
 
 </details>

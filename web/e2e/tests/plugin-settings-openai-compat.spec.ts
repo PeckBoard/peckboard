@@ -297,10 +297,12 @@ test.describe('OpenAI-Compatible chat against mock-openai-api', () => {
     expect(ends.map((e) => e.data.toolUseId)).toEqual(starts.map((e) => e.data.toolUseId))
     expect(String(ends[0].data.error)).toContain('get_time')
     // The mock answers every request with the same tool call (it keys on the
-    // last user message), so the turn ends at the per-turn round cap rather
-    // than hanging.
+    // last user message), so the turn stops on the repeated-call guard and
+    // completes with a warning rather than hanging or crashing.
+    expect(starts.length).toBe(2)
+    const warning = events.find((e) => e.kind === 'system' && e.data.subtype === 'warning')
+    expect(String(warning?.data.text)).toContain('same tool call')
     const end = events.find((e) => e.kind === 'agent-end')
-    expect(end?.data.status).toBe('crashed')
-    expect(end?.data.reason).toBe('model kept calling tools past the per-turn cap')
+    expect(end?.data.status).toBe('complete')
   })
 })
