@@ -10,8 +10,12 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension, Json, Router, body::Bytes, extract::State, http::StatusCode, middleware,
-    routing::post,
+    Extension, Json, Router,
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
+    middleware,
+    routing::{get, post},
 };
 use serde::Deserialize;
 
@@ -39,6 +43,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/voice/session", post(voice_session))
         .route("/api/voice/activity", post(voice_activity))
+        .route("/api/voice/topics", get(list_topics))
+        .route("/api/voice/topics/focus", post(focus_topic))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -96,6 +102,83 @@ fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
 
 fn internal(e: impl std::fmt::Display) -> ApiError {
     err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// The voice session's id, or `None` before it was first created.
+async fn voice_session_id(state: &Arc<AppState>) -> Result<Option<String>, ApiError> {
+    Ok(state
+        .db
+        .find_expert_session(VOICE_EXPERT_KIND)
+        .await
+        .map_err(internal)?
+        .map(|s| s.id))
+}
+
+/// GET /api/voice/topics → `{currentId, topics: [AssistantTopic]}`: the
+/// Assistant page's topic ring (`service::voice_topics::payload`), open
+/// topics only, with live status for session / project topics. Empty
+/// before the voice session exists.
+async fn list_topics(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, "the Assistant is admin-only"));
+    }
+    let Some(voice_id) = voice_session_id(&state).await? else {
+        return Ok(Json(serde_json::json!({ "currentId": null, "topics": [] })));
+    };
+    crate::service::voice_topics::payload(&state.db, &voice_id)
+        .await
+        .map(Json)
+        .map_err(internal)
+}
+
+#[derive(Deserialize)]
+struct FocusTopicRequest {
+    id: String,
+}
+
+/// POST /api/voice/topics/focus `{"id"}` — the user picked a topic on the
+/// Assistant page. Makes it current (broadcast as `voice-topics`, the same
+/// path a voice-driven `focus` takes), then tells the assistant "Let's talk
+/// about <title>." through the ordinary session-message dispatch, so it
+/// shows in the chat and the model continues there. → the new ring.
+async fn focus_topic(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<FocusTopicRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use crate::service::{voice_gate, voice_topics};
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, "the Assistant is admin-only"));
+    }
+    let voice_id = voice_session_id(&state)
+        .await?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no Assistant session yet"))?;
+    let topic = state
+        .db
+        .focus_voice_topic(&voice_id, &body.id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no open topic with that id"))?;
+    voice_topics::focus_gate(&state.db, &voice_id, &topic).await;
+    voice_topics::broadcast(&state.db, &state.broadcaster, &voice_id).await;
+    // Started or queued behind a running turn: either way it is in the chat.
+    let _sent = crate::routes::sessions::send_user_text(
+        &state,
+        &voice_id,
+        user,
+        voice_topics::focus_message(&topic.title),
+    )
+    .await?;
+    // As the browser reports for a sent utterance: the assistant owes a
+    // reply, so the relay gate holds relays until it has answered.
+    voice_gate::note_activity(&voice_id, voice_gate::Activity::Sent);
+    voice_topics::payload(&state.db, &voice_id)
+        .await
+        .map(Json)
+        .map_err(internal)
 }
 
 /// POST /api/voice/session — body `{}` or `{"model": "<id>"}` →
@@ -452,5 +535,114 @@ mod tests {
                 .as_deref(),
             Some("mock:happy-path")
         );
+    }
+
+    async fn call(
+        app: &Router,
+        token: &str,
+        method: &str,
+        uri: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn focus_topic_sends_one_user_message_and_broadcasts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        crate::provider::test_double::register_mock_provider(&state.provider_registry).await;
+        let token = seed_authenticated_user(&state, "admin").await;
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f1".into(),
+                name: "f".into(),
+                path: dir.path().to_string_lossy().into(),
+                created_at: "now".into(),
+            })
+            .await
+            .unwrap();
+        let app = router(state.clone()).with_state(state.clone());
+
+        // No voice session yet: an empty ring, not an error.
+        let (status, empty) = call(&app, &token, "GET", "/api/voice/topics", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["topics"], serde_json::json!([]));
+
+        let (_, created) = post(&app, &token, r#"{"model": "mock:echo"}"#).await;
+        let sid = created["session_id"].as_str().unwrap().to_string();
+        let topic = state
+            .db
+            .add_voice_topic(&sid, "conversation", "Dinner plans", None, None)
+            .await
+            .unwrap();
+        let mut rx = state.broadcaster.subscribe_all();
+
+        let (status, ring) = call(
+            &app,
+            &token,
+            "POST",
+            "/api/voice/topics/focus",
+            &serde_json::json!({ "id": topic.id }).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{ring}");
+        assert_eq!(ring["currentId"], topic.id.as_str());
+        assert_eq!(ring["topics"][0]["title"], "Dinner plans");
+
+        let users: Vec<_> = state
+            .db
+            .events_tail(&sid, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user")
+            .collect();
+        assert_eq!(users.len(), 1);
+        assert!(
+            users[0].data.contains("Let's talk about Dinner plans."),
+            "{}",
+            users[0].data
+        );
+
+        let mut topics_events = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.event_type == crate::service::voice_topics::VOICE_TOPICS_EVENT {
+                assert_eq!(ev.session_id, sid);
+                assert_eq!(ev.data["currentId"], topic.id.as_str());
+                topics_events += 1;
+            }
+        }
+        assert_eq!(topics_events, 1);
+
+        let (_, listed) = call(&app, &token, "GET", "/api/voice/topics", "").await;
+        assert_eq!(listed["currentId"], topic.id.as_str());
+        let (status, _) = call(
+            &app,
+            &token,
+            "POST",
+            "/api/voice/topics/focus",
+            r#"{"id": "nope"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

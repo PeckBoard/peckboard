@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel } from './voice-harness'
 
 /**
  * Kokoro clarity: the Settings → Voice "Natural voice speed" slider is
@@ -141,7 +142,7 @@ async function stubKokoro(page: Page) {
 }
 
 async function openPanel(page: Page) {
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   // A click inside the panel is the gesture that unlocks audio output.
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })

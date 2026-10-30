@@ -93,6 +93,7 @@ const FREE_TOOLS: &[&str] = &[
     "show_view",
     "voice_queue",
     "voice_pronunciation",
+    "assistant_topics",
     "voice_prompt",
     // Driving the user's screen, and reading their saved views.
     "ui_open",

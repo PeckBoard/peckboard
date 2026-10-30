@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel } from './voice-harness'
 
 /**
  * "Thinking" feedback in the voice assistant: a soft Web Audio cue from the
@@ -248,7 +249,7 @@ function fillerIndex(c: Clip, fillerBase = 0.6): number {
 
 async function openPanel(page: Page) {
   await page.goto('/')
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   // The gesture that unlocks audio output.
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })

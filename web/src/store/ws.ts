@@ -250,6 +250,12 @@ export const useWsStore = create<WsState>((set, get) => ({
         window.dispatchEvent(new CustomEvent('peckboard:voice-action', { detail: msg.data }))
         return
       }
+      if (msg.type === 'voice-topics') {
+        // The Assistant's topic ring changed (its tool, or a topic picked on
+        // the Assistant page): the full `{currentId, topics}` payload.
+        window.dispatchEvent(new CustomEvent('peckboard:voice-topics', { detail: msg.data }))
+        return
+      }
       if (msg.type === 'plugin-data') {
         // A plugin's data store changed (identifiers only — no values).
         // PluginFullPage / PluginPanelModal forward it into their sandboxed

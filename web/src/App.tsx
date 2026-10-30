@@ -41,6 +41,7 @@ const TerminalsPage = lazy(() => import('./components/terminal/TerminalsPage'))
 const TerminalView = lazy(() => import('./components/terminal/TerminalView'))
 const NewTerminalModal = lazy(() => import('./components/terminal/NewTerminalModal'))
 const AddToViewModal = lazy(() => import('./components/terminal/AddToViewModal'))
+const AssistantPage = lazy(() => import('./components/assistant/AssistantPage'))
 import RepeatingTasksView from './components/RepeatingTasksView'
 import AgentsView from './components/AgentsView'
 import UsageDashboard from './components/UsageDashboard'
@@ -61,6 +62,7 @@ import AskpassDialog from './components/AskpassDialog'
 import EnvUnlockDialog from './components/EnvUnlockDialog'
 import SoundsListener from './components/SoundsListener'
 import VoiceDock, { VoiceListenButton } from './components/VoiceDock'
+import { useVoiceStore } from './store/voice'
 import ConnectionBanner from './components/ConnectionBanner'
 import RestartPendingBanner from './components/RestartPendingBanner'
 import { startTabsAutoSync, useTabsStore, type TabType } from './store/tabs'
@@ -80,6 +82,7 @@ type View =
   | 'plan'
   | 'docReview'
   | 'agents'
+  | 'assistant'
   | 'views'
   | 'terminals'
 
@@ -173,6 +176,9 @@ function parseRoute(): {
       return { view: 'views', activeId: id, sub: 'chat' }
     case 'agents':
       return { view: 'agents', activeId: null, sub: 'chat' }
+    case 'assistant':
+      // ASSISTANT_ROUTE (`voice/assistantContract.ts`): the full-page voice view.
+      return { view: 'assistant', activeId: null, sub: 'chat' }
     case 'folders':
       // `/folders` — the folder list; `/folders/<folderId>/plugin/<itemId>` — a
       // folder-scoped plugin page, same shape as the project/session routes;
@@ -571,6 +577,12 @@ function App() {
     },
     [],
   )
+  // The voice conversation outlives the Assistant page (leaving it keeps
+  // talking, in the compact panel); it ends on sign-out or app unmount.
+  useEffect(() => {
+    if (!authenticated) return
+    return () => useVoiceStore.getState().closePanel()
+  }, [authenticated])
 
   // Terminals: load the list once signed in, and let a plugin page (SSH
   // Fleet's per-host "Terminal" button) open a shell on one of its hosts —
@@ -1873,7 +1885,12 @@ function App() {
           </button>
         </div>
         <div className="rail-bottom">
-          {authenticated && <VoiceListenButton />}
+          {authenticated && (
+            <VoiceListenButton
+              onAssistantPage={view === 'assistant'}
+              onOpenAssistant={() => navigate('assistant')}
+            />
+          )}
           <div
             className={`rail-status ${connected ? 'online' : ''}`}
             title={connected ? 'Connected' : 'Disconnected'}
@@ -2186,6 +2203,11 @@ function App() {
               />
             )}
             {view === 'agents' && <AgentsView />}
+            {view === 'assistant' && (
+              <Suspense fallback={null}>
+                <AssistantPage />
+              </Suspense>
+            )}
             {view === 'views' && (
               <ViewsPage
                 activeViewId={activeViewId}
@@ -2402,7 +2424,11 @@ function App() {
       </main>
 
       {authenticated && <SoundsListener />}
-      {authenticated && <VoiceDock />}
+      {/* On the Assistant page its transcript drawer hosts the panel; anywhere
+          else this is the live conversation's compact view. */}
+      {authenticated && view !== 'assistant' && (
+        <VoiceDock onExpand={() => navigate('assistant')} />
+      )}
       {agentNav && (
         <Toast
           key={agentNav.key}

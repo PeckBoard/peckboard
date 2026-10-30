@@ -349,6 +349,8 @@ export class KokoroEngine implements SpeechEngine {
   /** Set by a `devicechange`: rebuild the context before the next utterance. */
   private ctxStale = false
   private watchingDevices = false
+  /** Pass-through analyser between Web Audio clips and the destination. */
+  private tap: AnalyserNode | null = null
   /** iOS playback element, reused so its gesture unlock sticks. */
   private el: HTMLAudioElement | null = null
   private elUnlocked = false
@@ -565,7 +567,7 @@ export class KokoroEngine implements SpeechEngine {
     if (gen !== this.gen) return 'cancelled'
     const src = ctx.createBufferSource()
     src.buffer = audio
-    src.connect(ctx.destination)
+    src.connect(this.outputNode(ctx))
     let watchdog: ReturnType<typeof setTimeout> | undefined = undefined
     const stop = () => {
       clearTimeout(watchdog)
@@ -724,6 +726,32 @@ export class KokoroEngine implements SpeechEngine {
   audioContext(): AudioContext | null {
     if (playsViaMediaElement() || !this.ctx || this.ctx.state === 'closed') return null
     return this.ctx
+  }
+
+  /** The analyser on the reply's Web Audio output, while a clip plays
+   *  through it (desktop); `null` on the iOS `<audio>` path, with the
+   *  browser voice, and when silent. Read by `voice/levels.ts`. */
+  outputAnalyser(): AnalyserNode | null {
+    if (this.sources.size === 0 || !this.tap || this.tap.context.state !== 'running') return null
+    return this.tap
+  }
+
+  /** Where a Web Audio clip connects: a pass-through analyser on `ctx`
+   *  (rebuilt with the context), else the destination itself. */
+  private outputNode(ctx: AudioContext): AudioNode {
+    if (this.tap?.context !== ctx) {
+      try {
+        const tap = ctx.createAnalyser()
+        tap.fftSize = 512
+        tap.smoothingTimeConstant = 0.5
+        tap.connect(ctx.destination)
+        this.tap = tap
+      } catch {
+        this.tap = null
+        return ctx.destination
+      }
+    }
+    return this.tap ?? ctx.destination
   }
 
   thinkingElement(): HTMLAudioElement | null {

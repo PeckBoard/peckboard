@@ -76,6 +76,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_tts_lexicon_tables(conn)?;
     ensure_voice_prompt_versions_table(conn)?;
     ensure_pending_actions_table(conn)?;
+    ensure_voice_topics_table(conn)?;
     ensure_remote_devices_table(conn)?;
     ensure_remote_device_enrollments_table(conn)?;
     ensure_auth_sessions_remote_device_column(conn)?;
@@ -492,6 +493,39 @@ fn ensure_pending_actions_table(conn: &mut SqliteConnection) -> anyhow::Result<(
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_pending_actions_user_status \
          ON pending_actions (user_id, status)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+/// Heal DBs that predate `1793343758_voice_topics`. `CREATE TABLE IF NOT
+/// EXISTS` is idempotent so this is safe on a fully-migrated DB and only does
+/// work on one that lacks the table. DDL mirrors the migration.
+fn ensure_voice_topics_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "voice_topics")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS voice_topics (
+            id          TEXT PRIMARY KEY NOT NULL,
+            session_id  TEXT NOT NULL,
+            kind        TEXT NOT NULL CHECK (kind IN ('conversation', 'session', 'project')),
+            title       TEXT NOT NULL,
+            summary     TEXT,
+            ref_id      TEXT,
+            status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+            is_current  BOOLEAN NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            CHECK (kind = 'conversation' OR ref_id IS NOT NULL)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_voice_topics_session_status \
+         ON voice_topics (session_id, status)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_topics_one_current \
+         ON voice_topics (session_id) WHERE is_current = 1",
     )
     .execute(conn)?;
     Ok(())

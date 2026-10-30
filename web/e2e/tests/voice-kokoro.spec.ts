@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel } from './voice-harness'
 
 /**
  * Kokoro (server-side) TTS in the voice assistant.
@@ -257,7 +258,7 @@ test('a reply plays through Kokoro audio, and barge-in stops it', async ({ reque
   await stubKokoro(page, { status: 200, body: wav(6) })
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   // A click inside the panel is the gesture that unlocks audio output.
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
@@ -286,7 +287,7 @@ test('a failing Kokoro request falls back to the browser voice', async ({ reques
   await stubKokoro(page, { status: 500 })
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect.poll(() => recognizing(page)).toBe(true)
   // Real speech builds up through a partial result before the final (a
@@ -316,7 +317,7 @@ test('a sentence skipped on a stalled output never plays after a barge-in', asyn
   await page.goto('/')
   const audioLive = () => page.evaluate(() => (window as unknown as StubWindow).__audioLive)
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
   await expect.poll(() => recognizing(page)).toBe(true)

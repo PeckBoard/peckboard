@@ -3,6 +3,7 @@
 //! regardless of which submodule defines them, and the dispatcher in the
 //! parent `mod.rs` routes tool names to the right method.
 
+mod assistant_topics;
 mod background;
 mod browser;
 mod cards;

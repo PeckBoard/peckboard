@@ -1495,6 +1495,28 @@ pub struct PendingAction {
     pub resolved_by: Option<String>,
     pub result_json: Option<String>,
 }
+
+// ── Voice Topics ─────────────────────────────────
+
+/// One topic on the voice assistant's ring (the full-page Assistant view),
+/// curated by the assistant model's `assistant_topics` tool
+/// (`service::voice_topics`). `kind` is `conversation`, `session` or
+/// `project`; the latter two point at `ref_id`. `status` is `open` or
+/// `closed`; at most one topic per voice session `is_current`.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone)]
+#[diesel(table_name = voice_topics)]
+pub struct VoiceTopic {
+    pub id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub title: String,
+    pub summary: Option<String>,
+    pub ref_id: Option<String>,
+    pub status: String,
+    pub is_current: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
 // ── Agent Vars ───────────────────────────────────
 
 /// A user-defined agent variable: plain name/value state agents read AND

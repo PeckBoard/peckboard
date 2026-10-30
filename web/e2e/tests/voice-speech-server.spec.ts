@@ -4,6 +4,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel } from './voice-harness'
 
 /**
  * External speech server (VoiceStudio) voices in the voice assistant.
@@ -34,10 +35,13 @@ test.beforeAll(async () => {
     if (req.url === '/health') return send(200, { status: 'ok', version: '0.5.6', device: 'cuda' })
     if (!authed) return send(401, { detail: 'API key required' })
     if (req.url === '/v1/audio/voices') {
+      // VoiceStudio-shaped: fixed profiles plus an OpenAI alias that maps to
+      // a random speaker per request — the picker must not offer it.
       return send(200, {
         voices: [
-          { voice_id: 'v-ana', name: 'Ana' },
-          { voice_id: 'v-ben', name: 'Ben' },
+          { voice_id: 'alloy', name: 'alloy', type: 'openai_alias' },
+          { voice_id: 'v-ana', name: 'Ana', type: 'profile' },
+          { voice_id: 'v-ben', name: 'Ben', type: 'profile' },
         ],
       })
     }
@@ -247,6 +251,8 @@ test('Settings → Voice saves a speech server, tests it, and lists its voices',
     timeout: 10_000,
   })
   await select.selectOption('studio:v-ben')
+  // VoiceStudio's random-speaker alias is not offered next to its profiles.
+  await expect(select.locator('option[value="studio:alloy"]')).toHaveCount(0)
   await page.reload()
   await expect(page.getByTestId('voice-voice-select')).toHaveValue('studio:v-ben', {
     timeout: 10_000,
@@ -267,7 +273,7 @@ test('a reply plays through the speech server voice', async ({ request, page }) 
   speechRequests.length = 0
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
   await expect

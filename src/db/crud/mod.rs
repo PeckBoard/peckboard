@@ -48,6 +48,7 @@ mod usage;
 mod users;
 mod voice_prompt_versions;
 mod voice_relay_queue;
+mod voice_topics;
 mod workflow_instructions;
 
 pub use account_refs::AccountModelRefs;
@@ -73,6 +74,9 @@ pub use session_views::{
 };
 pub use todos::ProjectCardTodos;
 pub use usage::{UsageRollupRow, UsageWindow};
+pub use voice_topics::{
+    MAX_OPEN_VOICE_TOPICS, MAX_VOICE_TOPIC_SUMMARY_CHARS, MAX_VOICE_TOPIC_TITLE_CHARS,
+};
 
 /// Outcome of `Db::delete_folder_if_empty`. Avoids the older check-then-
 /// act pattern (`list_sessions_by_folder().await` + `delete_folder().await`)

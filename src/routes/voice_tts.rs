@@ -88,7 +88,7 @@ async fn voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .collect();
     let server = speech_server::load(&state.db).await.ok().flatten();
     let studio = match &server {
-        Some(s) => speech_server::voices_cached(s).await,
+        Some(s) => speech_server::pickable(speech_server::voices_cached(s).await),
         None => Vec::new(),
     };
     Json(serde_json::json!({

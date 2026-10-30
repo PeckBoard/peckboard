@@ -117,7 +117,11 @@ impl ToolGate {
         }
         if matches!(
             name,
-            "show_view" | "voice_queue" | "voice_pronunciation" | "voice_prompt"
+            "show_view"
+                | "voice_queue"
+                | "voice_pronunciation"
+                | "voice_prompt"
+                | "assistant_topics"
         ) {
             return self.voice;
         }
@@ -178,6 +182,9 @@ impl ToolGate {
         }
         if name == "voice_prompt" && !self.voice {
             return Some("tool 'voice_prompt' is blocked: only the voice assistant session edits its own prompt.".to_string());
+        }
+        if name == "assistant_topics" && !self.voice {
+            return Some("tool 'assistant_topics' is blocked: only the voice assistant session has a topic ring.".to_string());
         }
         if self.voice && is_browser_tool(name) {
             return Some(format!(
@@ -399,7 +406,12 @@ mod tests {
     #[test]
     fn voice_queue_is_voice_only() {
         let voice = ToolGate::from_session(&session(false, Some("voice"), None));
-        for tool in ["voice_queue", "voice_pronunciation", "voice_prompt"] {
+        for tool in [
+            "voice_queue",
+            "voice_pronunciation",
+            "voice_prompt",
+            "assistant_topics",
+        ] {
             assert!(voice.blocked(tool).is_none());
             assert!(voice.advertised(tool));
             for gate in [

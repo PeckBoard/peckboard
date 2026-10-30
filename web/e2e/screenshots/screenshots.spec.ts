@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expectScreen, spawnSshd, which } from '../tests/ssh-harness'
+import { openVoicePanel } from '../tests/voice-harness'
 
 /**
  * Docs screenshot capture — NOT a test of app behaviour.
@@ -1223,12 +1224,13 @@ test('capture background tasks screenshot @screenshot', async ({ request, page }
   })
 })
 
-// voice-assistant.png — the Voice Assistant panel over the sessions list,
-// mid-conversation: a status question, a question relayed from a worker,
-// and the user's answer. The transcript is a scripted backfill for the
-// voice session (no model runs), speech recognition is stubbed so the
-// panel opens in headless Chromium, and the Kokoro status reads "ready"
-// so the first-use download notice (downloads are off in e2e) stays out.
+// voice-assistant.png — the Voice Assistant's floating panel over the
+// sessions list, mid-conversation: a status question, a question relayed
+// from a worker, and the user's answer. The transcript is a scripted
+// backfill for the voice session (no model runs), speech recognition is
+// stubbed so the panel opens in headless Chromium, and the Kokoro status
+// reads "ready" so the first-use download notice (downloads are off in
+// e2e) stays out.
 test('capture voice assistant screenshot @screenshot', async ({ request, page }) => {
   mkdirSync(OUT_DIR, { recursive: true })
   const { token, authHeader } = await authenticate(request)
@@ -1322,10 +1324,12 @@ test('capture voice assistant screenshot @screenshot', async ({ request, page })
   })
 
   await loadAppAt(page, token, '/')
-  const fab = page.getByTestId('voice-fab')
-  await expect(fab).toBeVisible({ timeout: 15_000 })
-  await fab.click()
+  // The Listen button opens the Assistant page; going back to the sessions
+  // list keeps the conversation, now in the floating panel.
+  await openVoicePanel(page)
+  await page.locator('.rail-top').getByRole('button', { name: 'Sessions' }).click()
   const panel = page.getByTestId('voice-panel')
+  await expect(page.getByTestId('voice-expand')).toBeVisible()
   await expect(panel).toContainText('three retries or five')
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect(page.getByText('Storefront search facets')).toBeVisible()

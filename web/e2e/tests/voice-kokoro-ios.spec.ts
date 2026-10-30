@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel } from './voice-harness'
 
 /**
  * Kokoro on iPhone/iPad. Web Audio on iOS shares the audio session with the
@@ -327,7 +328,7 @@ test('on iPhone a reply plays through an <audio> element, and barge-in stops it'
   await stubKokoro(page, wav(6))
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   // A click inside the panel is the gesture that unlocks the element.
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
@@ -397,7 +398,7 @@ async function mediaPlays(page: Page, fillerBase: number) {
 
 async function openPanel(page: Page) {
   await page.goto('/')
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
   await expect.poll(() => recognizing(page)).toBe(true)

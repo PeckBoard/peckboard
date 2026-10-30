@@ -638,6 +638,20 @@ diesel::table! {
     }
 }
 diesel::table! {
+    voice_topics (id) {
+        id -> Text,
+        session_id -> Text,
+        kind -> Text,
+        title -> Text,
+        summary -> Nullable<Text>,
+        ref_id -> Nullable<Text>,
+        status -> Text,
+        is_current -> Bool,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -916,6 +930,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     tts_lexicon_seeded,
     tts_unknown_words,
     pending_actions,
+    voice_topics,
     voice_prompt_versions,
     session_view_nodes,
     view_widgets,

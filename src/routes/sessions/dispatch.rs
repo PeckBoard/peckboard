@@ -112,6 +112,33 @@ fn client_voice_source(source: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Send `text` to `session_id` as `user` through the exact
+/// `POST /api/sessions/:id/message` path (user event, broadcast, dispatch or
+/// queue) — for server-side features that speak for the user, e.g. picking a
+/// topic on the Assistant page.
+pub(crate) async fn send_user_text(
+    state: &Arc<AppState>,
+    session_id: &str,
+    user: AuthUser,
+    text: String,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    send_message(
+        State(state.clone()),
+        Path(session_id.to_string()),
+        Extension(user),
+        None,
+        axum::http::HeaderMap::new(),
+        Json(SendMessageRequest {
+            text,
+            attachment_ids: None,
+            model: None,
+            effort: None,
+            source: None,
+        }),
+    )
+    .await
+}
+
 /// POST /api/sessions/:id/message -- send a message to spawn a Claude CLI process.
 /// Appends a user event, spawns the CLI in the background (which emits its own
 /// agent-start event via the stream parser), and returns 200 immediately.
@@ -122,7 +149,7 @@ pub(super) async fn send_message(
     connect: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<SendMessageRequest>,
-) -> impl IntoResponse {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let voice_source = client_voice_source(body.source.as_deref());
     if let Some(source) = voice_source {
         // Voice sends carry who sent them, so an utterance the user never
@@ -1153,7 +1180,7 @@ pub(super) async fn get_session_status(
 }
 
 /// Walk the event tail to derive the current agent status.
-fn derive_status(events: &[crate::db::models::Event]) -> &'static str {
+pub(crate) fn derive_status(events: &[crate::db::models::Event]) -> &'static str {
     // Track the latest lifecycle positions
     let mut last_agent_start: Option<usize> = None;
     let mut last_agent_end: Option<usize> = None;

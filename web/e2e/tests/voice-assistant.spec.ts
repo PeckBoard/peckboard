@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel, voiceTypeInput } from './voice-harness'
 
 /**
  * Voice assistant e2e.
@@ -252,16 +253,11 @@ test('Listen opens an always-on mic; an utterance is answered, spoken, and the m
   await primePage(page, token)
   await page.goto('/')
 
-  const fab = page.getByTestId('voice-fab')
-  await expect(fab).toBeVisible({ timeout: 10_000 })
-  await fab.click()
-
-  const panel = page.getByTestId('voice-panel')
-  await expect(panel).toBeVisible()
+  const panel = await openVoicePanel(page)
   await expect(panel.locator('.voice-panel-title')).toHaveText('Assistant')
   // No mic press needed: opening the panel starts continuous listening.
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
-  await expect(page.getByTestId('voice-mic')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('assistant-listen')).toHaveAttribute('aria-pressed', 'true')
   await expect
     .poll(() => page.evaluate(() => (window as unknown as StubWindow).__recStarts))
     .toBeGreaterThan(0)
@@ -289,15 +285,19 @@ test('Listen opens an always-on mic; an utterance is answered, spoken, and the m
   await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('second turn please'))
   await expect.poll(async () => spoken(page), { timeout: 15_000 }).toContain('second turn please')
 
-  // The mic button mutes the always-on mic.
-  await page.getByTestId('voice-mic').click()
+  // The page's Listen button mutes the always-on mic.
+  const listen = page.getByTestId('assistant-listen')
+  await listen.click()
   await expect(page.getByTestId('voice-status')).toHaveText('Idle')
-  await expect(page.getByTestId('voice-mic')).toHaveAttribute('aria-pressed', 'false')
+  await expect(listen).toHaveAttribute('aria-pressed', 'false')
 
-  // Close stops everything and brings the button back.
-  await page.getByTestId('voice-close').click()
+  // On the Assistant page the rail's Listen button ends the conversation:
+  // the panel goes and the button is no longer pressed.
+  const fab = page.getByTestId('voice-fab')
+  await expect(fab).toHaveAttribute('title', 'End the conversation')
+  await fab.click()
   await expect(panel).toBeHidden()
-  await expect(fab).toBeVisible()
+  await expect(fab).toHaveAttribute('aria-pressed', 'false')
 })
 
 test('typed fallback sends without the microphone', async ({ request, page }) => {
@@ -306,8 +306,8 @@ test('typed fallback sends without the microphone', async ({ request, page }) =>
   await primePage(page, token)
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
-  await page.getByTestId('voice-type-input').fill('typed hello')
+  await openVoicePanel(page)
+  await voiceTypeInput(page).fill('typed hello')
   await page.getByTestId('voice-type-send').click()
   await expect(page.getByTestId('voice-line-user').last()).toContainText('typed hello')
   await expect(page.getByTestId('voice-line-assistant').last()).toContainText('typed hello', {
@@ -327,8 +327,7 @@ test('relayed updates render muted and are not spoken; the reply to them is', as
   await primePage(page, token)
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
-  await expect(page.getByTestId('voice-panel')).toBeVisible()
+  await openVoicePanel(page)
 
   // Simulate the backend injecting a relay line: a user-role message with
   // the `[relay] ` prefix. `mock:happy-path` ignores its input and replies
@@ -375,7 +374,7 @@ test('speech streams while the turn runs; talking over it ignores echo, then bar
   await page.goto('/')
   const cancels = () => page.evaluate(() => (window as unknown as StubWindow).__cancels)
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await page.evaluate(() => {
     ;(window as unknown as StubWindow).__ttsHold = true
@@ -446,7 +445,7 @@ test('an interrupted reply is never spoken again, and the model is told it was c
   await primePage(page, token)
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect
     .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
@@ -530,7 +529,7 @@ test('a sentence heard before a barge-in is never read again', async ({ request,
   await primePage(page, token)
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect
     .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
@@ -613,7 +612,7 @@ test('Kokoro audio fetched before a barge-in never plays after it', async ({ req
   const audioStarts = () =>
     page.evaluate(() => (window as unknown as { __audioStarts: number }).__audioStarts)
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   // A click inside the panel is the gesture that unlocks audio output.
   await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
@@ -665,7 +664,7 @@ test('a relay arriving mid-utterance is not spoken over the user and does not sp
   await primePage(page, token)
   await page.goto('/')
 
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect
     .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
@@ -732,7 +731,7 @@ test('a relay arriving mid-utterance is not spoken over the user and does not sp
 
 /** Open the panel and wait for the always-on mic to be live. */
 async function openListening(page: Page) {
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
   await expect
     .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
@@ -953,11 +952,11 @@ test('pronunciation hints show as plain words but reach Kokoro intact, even spli
       .catch(() => undefined)
   })
   await page.goto('/')
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
 
   const sentences = ['Open [Peckboard](/pˈɛkbˌɔɹd/) now.', 'Then say [Kokoro](/kOkˈOɹO/) twice.']
-  await page.getByTestId('voice-type-input').fill(sentences.join(' '))
+  await voiceTypeInput(page).fill(sentences.join(' '))
   await page.getByTestId('voice-type-send').click()
 
   const line = page.getByTestId('voice-line-assistant').last()
@@ -991,14 +990,14 @@ test('a fully hinted reply streamed in small chunks shows plain words and is spo
       .catch(() => undefined)
   })
   await page.goto('/')
-  await page.getByTestId('voice-fab').click()
+  await openVoicePanel(page)
   await expect(page.getByTestId('voice-status')).toHaveText('Listening')
 
   const sentences = [
     "[Got](/ɡˈɑt/) [it](/ɪt/), [I'll](/ˈIl/) [check](/ʧˈɛk/) [Stashify](/stˈæʃɪfˌI/) [now](/nˈW/).",
     '[Should](/ʃˈʊd/) [I](/ˈI/) [send](/sˈɛnd/) [it](/ɪt/)?',
   ]
-  await page.getByTestId('voice-type-input').fill(sentences.join(' '))
+  await voiceTypeInput(page).fill(sentences.join(' '))
   await page.getByTestId('voice-type-send').click()
 
   const line = page.getByTestId('voice-line-assistant').last()
@@ -1018,8 +1017,8 @@ test('the browser voice reads a hinted word without the markup', async ({ reques
   await setVoiceModel(request, token, 'mock:echo')
   await primePage(page, token)
   await page.goto('/')
-  await page.getByTestId('voice-fab').click()
-  await page.getByTestId('voice-type-input').fill('Ask [Grok](/ɡɹˈɑk/) about it.')
+  await openVoicePanel(page)
+  await voiceTypeInput(page).fill('Ask [Grok](/ɡɹˈɑk/) about it.')
   await page.getByTestId('voice-type-send').click()
   await expect(page.getByTestId('voice-line-assistant').last()).toHaveText(/Ask Grok about it\./, {
     timeout: 15_000,

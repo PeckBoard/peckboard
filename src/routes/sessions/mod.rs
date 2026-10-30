@@ -19,7 +19,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-pub(crate) use dispatch::dismiss_pending_questions;
+pub(crate) use dispatch::{derive_status, dismiss_pending_questions, send_user_text};
 use serde::Deserialize;
 use std::sync::Arc;
 

@@ -50,11 +50,42 @@ pub struct SpeechServerView {
     pub model: String,
     pub has_api_key: bool,
 }
-
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Voice {
     pub id: String,
     pub name: String,
+    /// VoiceStudio's `type: "openai_alias"`: an OpenAI name (`alloy`, …)
+    /// mapped to the engine default, which may be a random speaker.
+    #[serde(skip)]
+    pub alias: bool,
+}
+
+/// The voice list from a `/v1/audio/voices` body, fixed voices first.
+fn parse_voices(v: &serde_json::Value) -> Vec<Voice> {
+    let list = v
+        .get("voices")
+        .or_else(|| v.get("data"))
+        .unwrap_or(v)
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut voices: Vec<Voice> = list
+        .iter()
+        .filter_map(|x| {
+            let id = x["voice_id"].as_str().or_else(|| x["id"].as_str())?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let name = x["name"].as_str().map(str::trim).filter(|n| !n.is_empty());
+            Some(Voice {
+                id: id.to_string(),
+                name: name.unwrap_or(id).to_string(),
+                alias: x["type"].as_str() == Some("openai_alias"),
+            })
+        })
+        .collect();
+    voices.sort_by_key(|v| v.alias); // stable: keeps the server's order otherwise
+    voices
 }
 
 /// Normalise a user-entered URL to the service root: http(s) only, no
@@ -193,7 +224,8 @@ impl SpeechServer {
     }
 
     /// `GET /v1/audio/voices`. Accepts `{voices:[…]}`, `{data:[…]}` or a
-    /// bare array; each voice's id is `voice_id` or `id`.
+    /// bare array; each voice's id is `voice_id` or `id`. Fixed voices
+    /// (VoiceStudio `type: "profile"`) come first.
     pub async fn fetch_voices(&self) -> anyhow::Result<Vec<Voice>> {
         let resp = self
             .authed(client(Duration::from_secs(10))?.get(format!("{}/v1/audio/voices", self.root)))
@@ -203,43 +235,42 @@ impl SpeechServer {
             return Err(Self::upstream_error(resp).await);
         }
         let v: serde_json::Value = resp.json().await?;
-        let list = v
-            .get("voices")
-            .or_else(|| v.get("data"))
-            .unwrap_or(&v)
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        Ok(list
-            .iter()
-            .filter_map(|x| {
-                let id = x["voice_id"].as_str().or_else(|| x["id"].as_str())?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                let name = x["name"].as_str().map(str::trim).filter(|n| !n.is_empty());
-                Some(Voice {
-                    id: id.to_string(),
-                    name: name.unwrap_or(id).to_string(),
-                })
-            })
-            .collect())
+        Ok(parse_voices(&v))
     }
 
     /// `POST /v1/audio/speech` as raw 24 kHz PCM, wrapped in a WAV header
     /// so the client plays it exactly like a Kokoro clip.
+    ///
+    /// VoiceStudio's OpenAI aliases (`alloy` & co.) pick a random speaker
+    /// per request and start clips abruptly loud, so a request for one —
+    /// only a stale saved choice now, the picker hides them — is served by
+    /// the server's first fixed profile instead; with no profile it at
+    /// least gets VoiceStudio's `seed` extension so it keeps one speaker.
+    /// Real OpenAI-style servers never report aliases, so nothing changes
+    /// for them.
     pub async fn speak(&self, text: &str, voice: &str, speed: f32) -> anyhow::Result<Vec<u8>> {
+        let voices = voices_cached(self).await;
+        let is_alias = voices.iter().any(|v| v.alias && v.id == voice);
+        let profile = voices.iter().find(|v| !v.alias).map(|v| v.id.as_str());
+        let voice = match (is_alias, profile) {
+            (true, Some(p)) => p,
+            _ => voice,
+        };
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "input": text,
+            "voice": voice,
+            "response_format": "pcm",
+            "speed": speed,
+        });
+        if is_alias && profile.is_none() {
+            body["seed"] = alias_seed(voice).into();
+        }
         let resp = self
             .authed(
                 client(Duration::from_secs(60))?
                     .post(format!("{}/v1/audio/speech", self.root))
-                    .json(&serde_json::json!({
-                        "model": self.model,
-                        "input": text,
-                        "voice": voice,
-                        "response_format": "pcm",
-                        "speed": speed,
-                    })),
+                    .json(&body),
             )
             .send()
             .await?;
@@ -250,6 +281,8 @@ impl SpeechServer {
         if pcm.len() > MAX_AUDIO_BYTES {
             anyhow::bail!("speech server returned too much audio");
         }
+        let mut pcm = pcm.to_vec();
+        fade_in_pcm16(&mut pcm, PCM_RATE, 10);
         Ok(pcm16_to_wav(&pcm, PCM_RATE))
     }
 
@@ -272,11 +305,22 @@ impl SpeechServer {
         match self.fetch_voices().await {
             Ok(v) => {
                 out["ok"] = true.into();
-                out["voices"] = v.len().into();
+                out["voices"] = pickable(v).len().into();
             }
             Err(e) => out["error"] = e.to_string().into(),
         }
         out
+    }
+}
+/// Ramp the first `ms` of signed 16-bit LE PCM up from silence. Some
+/// engines (VoiceStudio's random-speaker aliases) start a clip at near full
+/// scale on the very first sample, which plays as a loud click/burst.
+pub fn fade_in_pcm16(pcm: &mut [u8], rate: u32, ms: u32) {
+    let n = ((rate * ms / 1000) as usize).min(pcm.len() / 2);
+    for i in 0..n {
+        let s = i16::from_le_bytes([pcm[2 * i], pcm[2 * i + 1]]);
+        let scaled = (f32::from(s) * (i as f32 / n as f32)) as i16;
+        pcm[2 * i..2 * i + 2].copy_from_slice(&scaled.to_le_bytes());
     }
 }
 
@@ -313,8 +357,9 @@ async fn invalidate_voices() {
     *VOICES.lock().await = None;
 }
 
-/// The server's voices, cached for a minute. Empty when unreachable — the
-/// voice picker then just shows Kokoro and the browser voices.
+/// The server's voices (aliases included), cached for a minute. Empty when
+/// unreachable — the voice picker then just shows Kokoro and the browser
+/// voices.
 pub async fn voices_cached(server: &SpeechServer) -> Vec<Voice> {
     let mut cache = VOICES.lock().await;
     if let Some(c) = cache.as_ref()
@@ -336,6 +381,30 @@ pub async fn voices_cached(server: &SpeechServer) -> Vec<Voice> {
         voices: voices.clone(),
     });
     voices
+}
+
+/// The voices to offer in the picker. When the server has fixed voice
+/// profiles, its OpenAI aliases are dropped: VoiceStudio maps every alias
+/// to the active engine's default voice, which for OmniVoice samples a new
+/// random speaker per request — each sentence would sound like someone
+/// else.
+pub fn pickable(voices: Vec<Voice>) -> Vec<Voice> {
+    if voices.iter().any(|v| !v.alias) {
+        voices.into_iter().filter(|v| !v.alias).collect()
+    } else {
+        voices
+    }
+}
+
+/// A stable sampling seed for an alias voice (FNV-1a of its id), so a
+/// speaker an alias lands on stays the same from sentence to sentence.
+fn alias_seed(voice: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in voice.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h & 0x7fff_ffff
 }
 
 #[cfg(test)]
@@ -363,6 +432,28 @@ mod tests {
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 4); // odd byte dropped
         assert_eq!(wav.len(), 48);
+    }
+
+    #[test]
+    fn voicestudio_random_aliases_are_hidden_behind_fixed_profiles() {
+        // VoiceStudio 0.5.6: aliases map to the engine default (a random
+        // speaker per request), profiles are fixed voices.
+        let body = serde_json::json!({ "voices": [
+            { "voice_id": "alloy", "name": "alloy", "type": "openai_alias" },
+            { "voice_id": "demo0001", "name": "VoiceStudio Demo Voice", "type": "profile" },
+            { "voice_id": "nova", "type": "openai_alias" },
+        ]});
+        let voices = parse_voices(&body);
+        assert_eq!(voices[0].id, "demo0001", "profiles first");
+        let ids: Vec<_> = pickable(voices).into_iter().map(|v| v.id).collect();
+        assert_eq!(ids, ["demo0001"]);
+
+        // Aliases only (or a plain OpenAI-style server): nothing is hidden.
+        let only = parse_voices(&serde_json::json!([{ "id": "alloy", "type": "openai_alias" }]));
+        assert_eq!(pickable(only).len(), 1);
+        // An alias keeps one seed, so it keeps one speaker.
+        assert_eq!(alias_seed("alloy"), alias_seed("alloy"));
+        assert_ne!(alias_seed("alloy"), alias_seed("nova"));
     }
 
     #[tokio::test]

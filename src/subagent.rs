@@ -196,6 +196,16 @@ pub async fn handle_subagent_done(
         defer_auth_crash(state, session, error).await;
         return;
     }
+    // A message waiting in the durable queue means the drain after this
+    // listener starts another turn. For a crash that is typically the
+    // follow-up that interrupted it (a provider without live injection
+    // ends the turn and re-queues the untaken message): the child is not
+    // dead, so neither report it CRASHED nor stop its tasks — the next
+    // turn's completion reports instead.
+    let has_queued = matches!(state.db.next_queued_message(&session.id).await, Ok(Some(_)));
+    if !completed && has_queued {
+        return;
+    }
     let background = crate::background::global();
     if !completed && let Some(bg) = &background {
         bg.stop_session_silently(&session.id);
@@ -205,8 +215,7 @@ pub async fn handle_subagent_done(
     // the drain after this listener starts another turn, whose result must
     // not be dropped by an early claim.
     let has_running_tasks = completed
-        && (background.is_some_and(|bg| bg.has_running_for_session(&session.id))
-            || matches!(state.db.next_queued_message(&session.id).await, Ok(Some(_))));
+        && (background.is_some_and(|bg| bg.has_running_for_session(&session.id)) || has_queued);
     let Some((parent_id, text)) =
         claim_and_compose(&state.db, session, completed, error, has_running_tasks).await
     else {

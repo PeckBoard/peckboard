@@ -56,6 +56,7 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "show_view",
         "voice_queue",
         "voice_pronunciation",
+        "assistant_topics",
         // The user's own screen and dashboards are not a card's business.
         "ui_open",
         "ui_tabs",
@@ -97,6 +98,7 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "show_view",
         "voice_queue",
         "voice_pronunciation",
+        "assistant_topics",
         "voice_prompt",
     ]
 }
@@ -2205,6 +2207,22 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "word": { "type": "string", "description": "The word as written, e.g. \"Peckboard\". Required for add and remove." },
                         "respelling": { "type": "string", "description": "add: how it sounds, e.g. \"PECK-board\". Give this or phonemes." },
                         "phonemes": { "type": "string", "description": "add: raw Kokoro/misaki phonemes, e.g. \"pˈɛkbˌɔːɹd\". Give this or respelling." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "assistant_topics".into(),
+                description: "Voice assistant only: the topic ring the user sees on the Assistant page. You curate it entirely. action list = the open topics (id, kind, title, current, live status of a linked session/project). action add = put a topic on the ring: kind conversation (a thread of this conversation), or session / project with ref_id (live work you are discussing or coordinating; the server shows its live status). action update = retitle or re-summarise. action close = take a finished topic off. action focus = mark the topic the conversation is on now. Titles: a few words, at most 60 chars; at most 12 open topics. Returns the updated ring.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["list", "add", "update", "close", "focus"], "description": "list (default), add, update, close, or focus." },
+                        "id": { "type": "string", "description": "update/close/focus: the topic id (from list)." },
+                        "kind": { "type": "string", "enum": ["conversation", "session", "project"], "description": "add: what the topic is (default conversation)." },
+                        "title": { "type": "string", "description": "add/update: a few words, e.g. \"Dinner plans\" or \"Stashify build\"." },
+                        "summary": { "type": "string", "description": "add/update: optional one line shown on hover; empty clears it." },
+                        "ref_id": { "type": "string", "description": "add, kind session/project: the session or project id." }
                     },
                     "additionalProperties": false
                 }),

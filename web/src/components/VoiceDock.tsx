@@ -32,13 +32,21 @@ function MicIcon({ size = 18 }: { size?: number }) {
 
 /**
  * The "Listen" trigger: a rail button (rendered inside the navigation
- * rail's bottom cluster, next to the connection dot and the user avatar)
- * that toggles the voice panel. It lives in the rail rather than floating
- * over the page so it can never sit on top of the composer's Send button,
- * a queued-message chip, or a failed-send Retry — anything fixed to the
- * bottom-right corner collides with those.
+ * rail's bottom cluster, next to the connection dot and the user avatar).
+ * It lives in the rail rather than floating over the page so it can never
+ * sit on top of the composer's Send button, a queued-message chip, or a
+ * failed-send Retry — anything fixed to the bottom-right corner collides
+ * with those. Away from the Assistant page it starts the conversation
+ * (inside the click, which unlocks the mic and speech) and opens the page;
+ * on the page it starts / ends the conversation.
  */
-export function VoiceListenButton() {
+export function VoiceListenButton({
+  onAssistantPage,
+  onOpenAssistant,
+}: {
+  onAssistantPage: boolean
+  onOpenAssistant: () => void
+}) {
   const supported = useVoiceStore((s) => s.recognitionSupported)
   const panelOpen = useVoiceStore((s) => s.panelOpen)
   const status = useVoiceStore((s) => s.status)
@@ -46,24 +54,27 @@ export function VoiceListenButton() {
   const closePanel = useVoiceStore((s) => s.closePanel)
 
   const title = supported
-    ? panelOpen
-      ? 'Close Assistant'
+    ? onAssistantPage && panelOpen
+      ? 'End the conversation'
       : 'Assistant'
     : 'The Assistant needs a browser with speech recognition (Chrome, Edge, or Safari).'
 
   return (
     <button
       type="button"
-      className={`rail-btn voice-rail-btn${panelOpen ? ' active' : ''}`}
+      className={`rail-btn voice-rail-btn${onAssistantPage ? ' active' : ''}`}
       data-testid="voice-fab"
       data-status={status}
       title={title}
       aria-label="Listen"
-      aria-expanded={panelOpen}
+      aria-pressed={panelOpen}
       aria-disabled={!supported}
       onClick={() => {
         if (!supported) return
-        if (panelOpen) closePanel()
+        if (!onAssistantPage) {
+          if (!panelOpen) void openPanel()
+          onOpenAssistant()
+        } else if (panelOpen) closePanel()
         else void openPanel()
       }}
     >
@@ -74,12 +85,17 @@ export function VoiceListenButton() {
 }
 
 /**
- * Assistant panel: docked top-right, non-blocking, with the voice
- * session's transcript, a status indicator, the mic toggle, and a typed
- * fallback. The speech loop itself lives in `store/voice.ts`; this
- * component only renders it. Opened from [`VoiceListenButton`].
+ * Assistant panel: the voice session's transcript, a status indicator, the
+ * mic toggle, and a typed fallback. The speech loop itself lives in
+ * `store/voice.ts`; this component only renders it. It is the Assistant
+ * page's transcript drawer, and — with `onExpand` — the compact view of a
+ * conversation still running after the user left that page. Unmounting it
+ * never ends the conversation (App does, on sign-out).
  */
-export default function VoiceDock() {
+export default function VoiceDock({
+  onExpand,
+  inputTestId = 'voice-type-input',
+}: { onExpand?: () => void; inputTestId?: string } = {}) {
   const supported = useVoiceStore((s) => s.recognitionSupported)
   const panelOpen = useVoiceStore((s) => s.panelOpen)
   const status = useVoiceStore((s) => s.status)
@@ -118,9 +134,6 @@ export default function VoiceDock() {
     if (el) el.scrollTop = el.scrollHeight
   }, [transcript, interim, heard])
 
-  // Close the panel (and stop the mic / speech) when the app unmounts.
-  useEffect(() => () => useVoiceStore.getState().closePanel(), [])
-
   const submitDraft = () => {
     const text = draft.trim()
     if (!text) return
@@ -150,6 +163,18 @@ export default function VoiceDock() {
           <span className="voice-status-dot" aria-hidden />
           {STATUS_LABEL[status]}
         </span>
+        {onExpand && (
+          <button
+            type="button"
+            className="voice-panel-close"
+            data-testid="voice-expand"
+            aria-label="Open the Assistant page"
+            title="Open the Assistant page"
+            onClick={onExpand}
+          >
+            ⤢
+          </button>
+        )}
         <button
           type="button"
           className="voice-panel-close"
@@ -261,7 +286,7 @@ export default function VoiceDock() {
         <input
           type="text"
           className="form-input voice-type-input"
-          data-testid="voice-type-input"
+          data-testid={inputTestId}
           placeholder="Or type instead…"
           aria-label="Type a message to the Assistant"
           value={draft}

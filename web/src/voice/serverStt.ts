@@ -151,6 +151,29 @@ export class Pcm16Downsampler {
   }
 }
 
+/** RMS (0..1) of the newest microphone frame, and when it arrived. */
+let micRms = 0
+let micAt = -Infinity
+/** A frame older than this no longer counts as the live level. */
+const MIC_LEVEL_STALE_MS = 400
+
+function noteMicFrame(frame: ArrayBuffer): void {
+  const pcm = new Int16Array(frame)
+  let sum = 0
+  for (let i = 0; i < pcm.length; i++) {
+    const v = pcm[i] / 32768
+    sum += v * v
+  }
+  micRms = pcm.length > 0 ? Math.sqrt(sum / pcm.length) : 0
+  micAt = performance.now()
+}
+
+/** The microphone's raw level (RMS, 0..1) while server recognition is
+ *  capturing, from the same PCM frames it streams; 0 otherwise. */
+export function serverMicLevel(): number {
+  return performance.now() - micAt < MIC_LEVEL_STALE_MS ? micRms : 0
+}
+
 interface Capture {
   /** Where frames go; the active session swaps itself in and out. */
   onFrame: ((frame: ArrayBuffer) => void) | null
@@ -176,11 +199,15 @@ async function openCapture(): Promise<Capture> {
       close: () => {
         cap.onFrame = null
         cap.onLost = null
+        micAt = -Infinity
         for (const t of stream.getTracks()) t.stop()
         void audio.close().catch(() => {})
       },
     }
-    const deliver = (frame: ArrayBuffer) => cap.onFrame?.(frame)
+    const deliver = (frame: ArrayBuffer) => {
+      noteMicFrame(frame)
+      cap.onFrame?.(frame)
+    }
     const source = audio.createMediaStreamSource(stream)
     let node: AudioNode
     if (audio.audioWorklet && typeof AudioWorkletNode !== 'undefined') {

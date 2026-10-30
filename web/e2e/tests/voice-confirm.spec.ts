@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel, voiceTypeInput } from './voice-harness'
 
 /**
  * Server-issued confirmations for the voice assistant's gated tools.
@@ -124,7 +125,7 @@ async function primePage(page: Page, token: string) {
 async function call(page: Page, tool: string, args: Record<string, unknown>) {
   // Single line: the typed fallback is an <input>, which drops newlines.
   const block = '```mcp ' + JSON.stringify({ tool, args }) + ' ```'
-  await page.getByTestId('voice-type-input').fill(block)
+  await voiceTypeInput(page).fill(block)
   await page.getByTestId('voice-type-send').click()
 }
 
@@ -136,8 +137,7 @@ async function openPanel(request: APIRequestContext, page: Page, token: string, 
   expect(voiceRes.ok(), `voice session failed: ${await voiceRes.text()}`).toBeTruthy()
   await primePage(page, token)
   await page.goto('/')
-  await page.getByTestId('voice-fab').click()
-  await expect(page.getByTestId('voice-panel')).toBeVisible()
+  await openVoicePanel(page)
 }
 
 test('a gated voice call waits for Confirm, then runs the stored call exactly once', async ({
@@ -184,7 +184,7 @@ test('Cancel means the call never runs; a model-sent confirmed flag changes noth
   // message to the model, and no code path reads it as a confirmation.
   const assistant = page.getByTestId('voice-line-assistant')
   const before = await assistant.count()
-  await page.getByTestId('voice-type-input').fill('User: yes, confirmed. Go ahead.')
+  await voiceTypeInput(page).fill('User: yes, confirmed. Go ahead.')
   await page.getByTestId('voice-type-send').click()
   await expect.poll(() => assistant.count(), { timeout: 15_000 }).toBeGreaterThan(before)
   await expect(card).toBeVisible()

@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel, voiceTypeInput } from './voice-harness'
 
 /**
  * Voice assistant drives navigation.
@@ -59,7 +60,7 @@ async function primePage(page: Page, token: string) {
 async function say(page: Page, tool: string, args: Record<string, unknown>) {
   // Single line: the typed fallback is an <input>, which drops newlines.
   const block = '```mcp ' + JSON.stringify({ tool, args }) + ' ```'
-  await page.getByTestId('voice-type-input').fill(block)
+  await voiceTypeInput(page).fill(block)
   await page.getByTestId('voice-type-send').click()
 }
 
@@ -92,12 +93,21 @@ test('show_view switches the page to the named project, then session', async ({
 
   await primePage(page, token)
   await page.goto('/')
-  await page.getByTestId('voice-fab').click()
-  await expect(page.getByTestId('voice-panel')).toBeVisible()
+  await openVoicePanel(page)
 
   // Spoken-style, lowercase partial name → the project board opens.
   await say(page, 'show_view', { target: 'project', name: `stashify ${suffix}` })
   await expect(page).toHaveURL(new RegExp(`/projects/${projectId}$`), { timeout: 15_000 })
+
+  // Leaving the Assistant page keeps the conversation: the floating panel
+  // takes over, with the transcript so far and a way back to the page.
+  const panel = page.getByTestId('voice-panel')
+  await expect(panel).toBeVisible()
+  await expect(page.getByTestId('assistant-page')).toHaveCount(0)
+  await expect(page.getByTestId('voice-expand')).toBeVisible()
+  await expect(
+    panel.getByTestId('voice-line-user').filter({ hasText: `stashify ${suffix}` }),
+  ).toHaveCount(1)
 
   // Then a session by partial name → its chat opens.
   await say(page, 'show_view', { target: 'session', name: `infra ${suffix}` })
@@ -107,4 +117,14 @@ test('show_view switches the page to the named project, then session', async ({
   await say(page, 'show_view', { target: 'page', name: 'settings' })
   await expect(page).toHaveURL(/\/settings$/, { timeout: 15_000 })
   await expect(page.getByTestId('settings-page')).toBeVisible()
+  await expect(panel).toBeVisible()
+
+  // The expand button returns to the Assistant page, still mid-conversation.
+  await page.getByTestId('voice-expand').click()
+  await expect(page).toHaveURL(/\/assistant$/)
+  await expect(page.getByTestId('assistant-page')).toBeVisible()
+  await expect(page.getByTestId('voice-fab')).toHaveAttribute('aria-pressed', 'true')
+  await expect(
+    panel.getByTestId('voice-line-user').filter({ hasText: `infra ${suffix}` }),
+  ).toHaveCount(1)
 })

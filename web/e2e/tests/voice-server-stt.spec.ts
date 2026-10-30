@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { openVoicePanel } from './voice-harness'
 
 /**
  * Speech recognition through the speech server (Settings → Speech Server →
@@ -209,7 +210,7 @@ test('speech-server recognition streams the mic and sends a recognized utterance
     await expect(page.getByTestId('voice-unsupported')).toHaveCount(0)
 
     await page.goto('/')
-    await page.getByTestId('voice-fab').click()
+    await openVoicePanel(page)
     await expect(page.getByTestId('voice-status')).toHaveText('Listening')
     await expect
       .poll(() => stub(page, '__sttSent'))

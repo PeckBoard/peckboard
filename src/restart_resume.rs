@@ -693,6 +693,40 @@ mod tests {
             "{parent_users:?}"
         );
     }
+    #[tokio::test]
+    async fn a_subagent_interrupted_by_a_follow_up_is_not_reported_crashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = fixture(dir.path()).await;
+        seed_killed(&state, "parent", Some("conv-p"), None, None).await;
+        seed_killed(&state, "kid", Some("conv-k"), Some("parent"), None).await;
+        // The follow-up that ended the turn waits in the queue; the drain
+        // after the completion listener starts the next turn with it.
+        state
+            .db
+            .enqueue_message(crate::db::models::NewQueuedMessage {
+                session_id: "kid".into(),
+                text: "follow-up".into(),
+                queued_at: chrono::Utc::now().to_rfc3339(),
+                user_event_appended: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let kid = state.db.get_session("kid").await.unwrap().unwrap();
+
+        crate::subagent::handle_subagent_done(&state, &kid, false, false, None).await;
+
+        let kid = state.db.get_session("kid").await.unwrap().unwrap();
+        assert!(
+            kid.subagent_completed_at.is_none(),
+            "still a running subagent"
+        );
+        let parent_users = texts(&state, "parent", "user").await;
+        assert!(
+            !parent_users.iter().any(|t| t.contains("CRASHED")),
+            "{parent_users:?}"
+        );
+    }
 
     #[tokio::test]
     async fn a_subagent_that_cannot_resume_wakes_its_parent_with_a_notice() {
