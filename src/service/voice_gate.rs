@@ -179,6 +179,12 @@ impl Gate {
 
 static GATES: LazyLock<Mutex<HashMap<String, Gate>>> = LazyLock::new(Default::default);
 
+/// Tests that drive [`GATES`] hold this: the map is process-wide and
+/// [`tick_at`] evaluates every gate in it, so two tests ticking in parallel
+/// (each on its own in-memory DB) would release each other's relays.
+#[cfg(test)]
+pub(crate) static GATE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn gates() -> std::sync::MutexGuard<'static, HashMap<String, Gate>> {
     GATES.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -655,6 +661,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_topic_waits_for_quiet_gap_and_user_speech() {
+        let _serial = GATE_TEST_LOCK.lock().await;
         let (db, bc) = setup().await;
         let voice = seed(&db, "Voice", true).await;
         let dev = seed(&db, "dev", false).await;
@@ -685,6 +692,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_topic_is_held_until_idle_one_topic_at_a_time_questions_first() {
+        let _serial = GATE_TEST_LOCK.lock().await;
         let (db, bc) = setup().await;
         let voice = seed(&db, "Voice", true).await;
         let a = seed(&db, "alpha", false).await;
@@ -741,6 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn voice_queue_next_releases_the_next_topic_now() {
+        let _serial = GATE_TEST_LOCK.lock().await;
         let (db, _bc) = setup().await;
         let voice = seed(&db, "Voice", true).await;
         let a = seed(&db, "alpha", false).await;
@@ -762,6 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn held_relays_survive_a_restart_and_answered_questions_drop() {
+        let _serial = GATE_TEST_LOCK.lock().await;
         let (db, _bc) = setup().await;
         let voice = seed(&db, "Voice", true).await;
         let a = seed(&db, "alpha", false).await;

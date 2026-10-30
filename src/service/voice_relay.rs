@@ -649,6 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn relays_question_then_update_into_voice_session() {
+        let _serial = crate::service::voice_gate::GATE_TEST_LOCK.lock().await;
         let db = Db::in_memory().unwrap();
         let bc = Broadcaster::new();
         db.create_folder(NewFolder {
@@ -794,6 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn voice_only_links_sessions_of_its_own_owner() {
+        let _serial = crate::service::voice_gate::GATE_TEST_LOCK.lock().await;
         let db = Db::in_memory().unwrap();
         db.create_folder(NewFolder {
             id: "f1".into(),

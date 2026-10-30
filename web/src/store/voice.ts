@@ -3,7 +3,13 @@ import type { Event } from '../types/api'
 import { authedFetch } from './auth'
 import { useWsStore } from './ws'
 import { getSpeechEngine, MIN_FINAL_CONFIDENCE, voiceLog, type HeardMeta } from '../voice/engine'
-import { DEFAULT_KOKORO_VOICE, installKokoroEngine, useKokoroDevicePrefs } from '../voice/kokoro'
+import {
+  DEFAULT_KOKORO_VOICE,
+  installKokoroEngine,
+  isStudioVoice,
+  MAX_STUDIO_TEXT_CHARS,
+  useKokoroDevicePrefs,
+} from '../voice/kokoro'
 import { useSpeechRecognitionPrefs } from '../voice/serverStt'
 import {
   closeOpenHint,
@@ -189,6 +195,14 @@ const engine = () => getSpeechEngine()
 let speakQueue: string[] = []
 /** Streamed text not yet cut into a speakable chunk. */
 let speakBuffer = ''
+/** Speech-server voices speak a reply as two clips: its first sentence at
+ *  once, then everything after it merged into one clip (sent at the turn's
+ *  end, before a tool call, or when the speech server's per-request cap
+ *  `MAX_STUDIO_TEXT_CHARS` would be exceeded) — one
+ *  continuous take instead of a seam per sentence. */
+let mergeBuffer = ''
+/** This turn's first sentence has been queued. */
+let turnFirstQueued = false
 let speakingNow = false
 /** Text of the utterance being spoken right now. */
 let currentUtterance: string | null = null
@@ -451,10 +465,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   }
 
   const enqueue = (chunks: string[]) => {
+    const merge = isStudioVoice(get().prefs.voiceURI)
     for (const c of chunks) {
       const spoken = stripForSpeech(c)
-      if (spoken) speakQueue.push(spoken)
+      if (!spoken) continue
+      if (!merge || !turnFirstQueued) {
+        turnFirstQueued = true
+        speakQueue.push(spoken)
+        continue
+      }
+      // Never let one more sentence push the clip past the server's cap.
+      if (mergeBuffer && mergeBuffer.length + 1 + spoken.length > MAX_STUDIO_TEXT_CHARS) {
+        speakQueue.push(mergeBuffer)
+        mergeBuffer = ''
+      }
+      mergeBuffer = mergeBuffer ? `${mergeBuffer} ${spoken}` : spoken
     }
+    pump()
+    prefetchNext()
+  }
+
+  /** Queue the merged rest of the reply (turn end, or a tool call ahead). */
+  const flushMerged = () => {
+    if (!mergeBuffer) return
+    speakQueue.push(mergeBuffer)
+    mergeBuffer = ''
     pump()
     prefetchNext()
   }
@@ -552,6 +587,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     if (currentUtterance) rememberSpoken(currentUtterance)
     speakQueue = []
     speakBuffer = ''
+    mergeBuffer = ''
     speakingNow = false
     currentUtterance = null
     clearFlushTimer()
@@ -869,6 +905,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         agentRunning = true
         muteTurn = false
         speakBuffer = ''
+        mergeBuffer = ''
+        turnFirstQueued = false
         refreshStatus()
         break
       }
@@ -891,12 +929,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       case 'question': {
         // Text before a tool call is complete — say it now rather than
         // after the tool returns.
-        if (!muteTurn) flushBuffer()
+        if (!muteTurn) {
+          flushBuffer()
+          flushMerged()
+        }
+        // What the agent says after the tool starts a fresh first sentence.
+        turnFirstQueued = false
         break
       }
       case 'agent-end': {
-        if (!muteTurn) flushBuffer()
-        else speakBuffer = ''
+        if (!muteTurn) {
+          flushBuffer()
+          flushMerged()
+        } else {
+          speakBuffer = ''
+          mergeBuffer = ''
+        }
         agentRunning = false
         awaitingReply = false
         muteTurn = false

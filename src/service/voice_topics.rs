@@ -87,20 +87,11 @@ pub async fn live_status(db: &Db, topic: &VoiceTopic) -> Option<String> {
 /// folder, so existence is the visibility check; it may not point at
 /// itself.
 pub async fn check_ref(db: &Db, voice_id: &str, kind: &str, ref_id: &str) -> anyhow::Result<()> {
-    match kind {
-        "session" => {
-            if ref_id == voice_id || db.get_session(ref_id).await?.is_none() {
-                anyhow::bail!(
-                    "no session with id '{ref_id}'; find it with find_session or list_sessions"
-                );
-            }
-        }
-        "project" => {
-            if db.get_project(ref_id).await?.is_none() {
-                anyhow::bail!("no project with id '{ref_id}'; find it with list_projects");
-            }
-        }
-        _ => {}
+    if kind == "session" && (ref_id == voice_id || db.get_session(ref_id).await?.is_none()) {
+        anyhow::bail!("no session with id '{ref_id}'; find it with find_session or list_sessions");
+    }
+    if kind == "project" && db.get_project(ref_id).await?.is_none() {
+        anyhow::bail!("no project with id '{ref_id}'; find it with list_projects");
     }
     Ok(())
 }

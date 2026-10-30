@@ -69,6 +69,13 @@ export function serverVoiceId(voiceURI: string): string {
 /** Real (non-503) failures before Kokoro is disabled for the session. */
 /** Server-side cap on one request (`service::tts::MAX_TEXT_CHARS`). */
 const MAX_TEXT_CHARS = 500
+/** The speech server's cap (`speech_server::MAX_TEXT_CHARS`): replies after
+ *  the first sentence go to it as one merged clip. */
+export const MAX_STUDIO_TEXT_CHARS = 1500
+
+function maxTextChars(voiceURI: string): number {
+  return isStudioVoice(voiceURI) ? MAX_STUDIO_TEXT_CHARS : MAX_TEXT_CHARS
+}
 const MAX_FAILURES = 3
 
 export interface KokoroStatus {
@@ -467,14 +474,14 @@ export class KokoroEngine implements SpeechEngine {
 
   /** Start fetching the next sentence while the current one plays. */
   prefetch(text: string, opts: SpeakOptions): void {
-    if (!text || text.length > MAX_TEXT_CHARS || !this.useKokoro(opts.voiceURI)) return
+    if (!text || text.length > maxTextChars(opts.voiceURI) || !this.useKokoro(opts.voiceURI)) return
     this.request(text, opts)
   }
 
   speak(text: string, opts: SpeakOptions): void {
     // The server caps a request; an over-long chunk is rare, so it just
     // uses the browser voice.
-    if (text.length > MAX_TEXT_CHARS || !this.useKokoro(opts.voiceURI)) {
+    if (text.length > maxTextChars(opts.voiceURI) || !this.useKokoro(opts.voiceURI)) {
       this.web.speak(text, this.webOpts(opts))
       return
     }

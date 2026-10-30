@@ -296,3 +296,43 @@ test('a reply plays through the speech server voice', async ({ request, page }) 
 
   await setServer(request, token, { base_url: '', api_key: '' })
 })
+test('a speech-server reply is its first sentence, then the rest as one clip', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  await setServer(request, token, { base_url: fakeUrl, api_key: KEY })
+  const res = await request.post('/api/voice/session', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { model: 'mock:echo' },
+  })
+  expect(res.ok(), `voice session failed: ${await res.text()}`).toBeTruthy()
+  await primePage(page, token, 'studio:v-ana')
+  await page.goto('/')
+
+  await openVoicePanel(page)
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+  await page.getByTestId('voice-panel').click({ position: { x: 10, y: 10 } })
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as StubWindow).__voiceRec !== null))
+    .toBe(true)
+  speechRequests.length = 0
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceInterim('First'))
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceSay(
+      'First sentence here. Then a second one. And finally a third.',
+    ),
+  )
+
+  // The thinking fillers ("One sec." …) are synthesized in the background;
+  // only the reply's own clips matter here.
+  const replyClips = () =>
+    speechRequests.map((r) => r.input).filter((t) => t.startsWith('First') || t.startsWith('Then'))
+  await expect
+    .poll(replyClips, { timeout: 15_000 })
+    .toEqual(['First sentence here.', 'Then a second one. And finally a third.'])
+  // Spoken by the speech server, not the browser voice.
+  expect(await page.evaluate(() => (window as unknown as StubWindow).__spoken)).toEqual([])
+
+  await setServer(request, token, { base_url: '', api_key: '' })
+})

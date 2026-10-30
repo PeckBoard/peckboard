@@ -33,6 +33,13 @@ const KEY_API_KEY: &str = "api_key";
 const KEY_MODEL: &str = "model";
 const VOICES_TTL: Duration = Duration::from_secs(60);
 const MAX_AUDIO_BYTES: usize = 32 * 1024 * 1024;
+/// Longest text one speech-server request takes. The client speaks a reply
+/// as its first sentence plus the rest merged into one clip, so this is far
+/// above Kokoro's per-sentence cap (`tts::MAX_TEXT_CHARS`).
+pub const MAX_TEXT_CHARS: usize = 1500;
+/// A merged clip can take a while on a small GPU (~2.5 s per sentence on an
+/// RTX 3050 with VoiceStudio).
+const SPEAK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A configured speech server.
 #[derive(Clone, Debug, PartialEq)]
@@ -268,7 +275,7 @@ impl SpeechServer {
         }
         let resp = self
             .authed(
-                client(Duration::from_secs(60))?
+                client(SPEAK_TIMEOUT)?
                     .post(format!("{}/v1/audio/speech", self.root))
                     .json(&body),
             )

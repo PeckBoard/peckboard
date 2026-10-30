@@ -170,10 +170,13 @@ async fn synthesize_remote(state: &AppState, body: &TtsRequest, voice: &str) -> 
     if text.is_empty() || voice.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "text and voice are required");
     }
-    if text.chars().count() > tts::MAX_TEXT_CHARS {
+    if text.chars().count() > speech_server::MAX_TEXT_CHARS {
         return json_err(
             StatusCode::BAD_REQUEST,
-            &format!("text is longer than {} characters", tts::MAX_TEXT_CHARS),
+            &format!(
+                "text is longer than {} characters",
+                speech_server::MAX_TEXT_CHARS
+            ),
         );
     }
     let server = match speech_server::load(&state.db).await {
@@ -446,5 +449,12 @@ mod tests {
             .unwrap();
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(bytes.len(), 44 + 480);
+
+        // A merged reply clip may be long, but not unbounded.
+        let long = "a".repeat(speech_server::MAX_TEXT_CHARS + 1);
+        let body = format!(r#"{{"text":"{long}","voice":"studio:v-ana"}}"#);
+        let (s, v) = call(&app, &token, "POST", "/api/voice/tts", &body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().contains("1500"), "{v}");
     }
 }
