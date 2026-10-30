@@ -103,6 +103,9 @@ interface SpeechRecognitionLike {
   onresult: ((ev: SpeechRecognitionEventLike) => void) | null
   onend: (() => void) | null
   onerror: ((ev: { error: string }) => void) | null
+  onaudiostart?: (() => void) | null
+  onsoundstart?: (() => void) | null
+  onspeechstart?: (() => void) | null
   start(): void
   stop(): void
   abort(): void
@@ -125,6 +128,8 @@ function synthesis(): SpeechSynthesis | null {
 
 /** Pause between `cancel()` and the next `speak()` (see `speak`). */
 const CANCEL_SETTLE_MS = 120
+/** A live recognition session with no event at all this long has wedged. */
+const RECOGNITION_STALL_MS = 90_000
 
 /** Console trace for the speech loop — every speak / cancel / recognition
  *  transition, so a silent assistant can be diagnosed from DevTools. */
@@ -206,6 +211,7 @@ export class WebSpeechEngine implements SpeechEngine {
     const gen = ++this.recGen
     const startedAt = Date.now()
     rec.onresult = (ev) => {
+      lastEventAt = Date.now()
       let interim = ''
       let interimConfidence = 0
       let finalConfidence = 0
@@ -249,18 +255,44 @@ export class WebSpeechEngine implements SpeechEngine {
       }
     }
     rec.onerror = (ev) => {
+      lastEventAt = Date.now()
       voiceLog('recognition error:', ev.error)
       cb.onError(ev.error)
     }
     rec.onend = () => {
+      clearInterval(watchdog)
       voiceLog('recognition ended')
       if (this.recognition === rec) this.recognition = null
       cb.onEnd()
     }
+    // Stall watchdog: Chrome ends an idle continuous session on its own
+    // (~a minute), and fires audio/sound/speech/result events while it
+    // works. Nothing at all for this long means it wedged without `onend`
+    // (seen after a network error or an audio device switch) — the mic
+    // would read "Listening" while dead. End it so the caller reopens one.
+    let lastEventAt = Date.now()
+    const touch = () => {
+      lastEventAt = Date.now()
+    }
+    rec.onaudiostart = touch
+    rec.onsoundstart = touch
+    rec.onspeechstart = touch
+    const watchdog = setInterval(() => {
+      if (this.recognition !== rec) {
+        clearInterval(watchdog)
+        return
+      }
+      if (Date.now() - lastEventAt < RECOGNITION_STALL_MS) return
+      clearInterval(watchdog)
+      voiceLog(`recognition stalled: no events for ${RECOGNITION_STALL_MS} ms — restarting`)
+      this.stopListening()
+      cb.onEnd()
+    }, 5000)
     try {
       voiceLog('recognition start', { continuous: rec.continuous, lang: rec.lang || '(default)' })
       rec.start()
     } catch (e) {
+      clearInterval(watchdog)
       this.recognition = null
       cb.onError(e instanceof Error ? e.message : 'start-failed')
       cb.onEnd()

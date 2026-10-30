@@ -10,7 +10,12 @@ import {
   MAX_STUDIO_TEXT_CHARS,
   useKokoroDevicePrefs,
 } from '../voice/kokoro'
-import { useSpeechRecognitionPrefs } from '../voice/serverStt'
+import {
+  serverSttProblem,
+  STALLED,
+  STT_UNAVAILABLE,
+  useSpeechRecognitionPrefs,
+} from '../voice/serverStt'
 import {
   closeOpenHint,
   echoOverlap,
@@ -40,6 +45,11 @@ import {
 /** How long a stream stalled inside a pronunciation hint is waited on
  *  before the tail is spoken anyway (with the hint's bare word). */
 const OPEN_HINT_HOLD_MS = 6000
+/** How often the always-on mic checks that something is actually listening. */
+const RECOGNITION_SELF_HEAL_MS = 4000
+/** Recognition sessions that fail in a row before the mic gives up and
+ *  says why (each retry backs off), instead of flapping on and off. */
+const MAX_RECOGNITION_FAILURES = 6
 
 /** Per-browser voice preferences. localStorage, not the DB — they describe
  *  this browser's speech engine (its voices, its microphone language). */
@@ -821,11 +831,19 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     if (!micWanted || !get().panelOpen || recActive) return
     recActive = true
     recStartedAt = Date.now()
+    let heard = false
+    let lastError = ''
     engine().startListening(
       { lang: get().prefs.lang, continuous: true },
       {
-        onInterim: (text, meta) => onHeard(text, false, meta),
-        onFinal: (text, meta) => onHeard(text, true, meta),
+        onInterim: (text, meta) => {
+          heard = true
+          onHeard(text, false, meta)
+        },
+        onFinal: (text, meta) => {
+          heard = true
+          onHeard(text, true, meta)
+        },
         onEnd: () => {
           recActive = false
           if (get().interim) {
@@ -837,30 +855,52 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
           }
           if (!micWanted || !get().panelOpen) return
           // Engines end sessions on their own (silence, a finished
-          // utterance, network hiccups): reopen right away, backing off
-          // only when sessions die immediately after starting.
-          restartFailures = Date.now() - recStartedAt < 1000 ? restartFailures + 1 : 0
-          const delay = Math.min(5000, 100 * 2 ** restartFailures)
+          // utterance, network hiccups): reopen right away. A session that
+          // died at once, or errored before hearing anything, is a failure:
+          // back off, and stop after a run of them rather than flap the mic
+          // on and off forever.
+          const failed = Date.now() - recStartedAt < 1000 || (lastError !== '' && !heard)
+          restartFailures = failed ? restartFailures + 1 : 0
+          if (restartFailures >= MAX_RECOGNITION_FAILURES) {
+            voiceLog(`recognition keeps failing (${lastError || 'ends at once'}): stopping the mic`)
+            micWanted = false
+            set({
+              micOn: false,
+              interim: '',
+              error: `Speech recognition keeps failing${lastError ? ` (${lastError})` : ''}. Turn the mic back on to try again.`,
+            })
+            refreshStatus()
+            return
+          }
+          const delay = failed ? Math.min(30_000, 250 * 2 ** restartFailures) : 100
+          if (failed)
+            voiceLog(`recognition failed (${restartFailures} in a row): retrying in ${delay} ms`)
           restartTimer = setTimeout(startRecognition, delay)
         },
         onError: (code) => {
-          if (code === 'no-speech' || code === 'aborted') return
+          // Benign ends: silence, a caller abort, or the server-recognizer
+          // stall watchdog reconnecting (never a failure — see STALLED).
+          if (code === 'no-speech' || code === 'aborted' || code === STALLED) return
+          lastError = code
           if (
             code === 'not-allowed' ||
             code === 'service-not-allowed' ||
             code === 'audio-capture' ||
-            code === 'unsupported'
+            code === 'unsupported' ||
+            code === STT_UNAVAILABLE
           ) {
             micWanted = false
             set({
               micOn: false,
               interim: '',
               error:
-                code === 'audio-capture'
-                  ? 'No microphone was found. Connect one and turn the mic back on.'
-                  : code === 'unsupported'
-                    ? 'Speech recognition is not available in this browser.'
-                    : 'Microphone access was denied. Allow the microphone for this site and try again.',
+                code === STT_UNAVAILABLE
+                  ? `Speech-server recognition isn't available: ${serverSttProblem()}. Choose Browser under Speech recognition in Settings → Voice, or fix the speech server.`
+                  : code === 'audio-capture'
+                    ? 'No microphone was found. Connect one and turn the mic back on.'
+                    : code === 'unsupported'
+                      ? 'Speech recognition is not available in this browser.'
+                      : 'Microphone access was denied. Allow the microphone for this site and try again.',
             })
             refreshStatus()
             return
@@ -878,6 +918,16 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     if (get().interim) set({ interim: '' })
   }
 
+  // Self-heal: the mic is wanted and the panel open, yet no recognition
+  // session is live and no restart is scheduled — an engine ended down a
+  // path that skipped the restart. Reopen it rather than leave a dead mic
+  // that only a manual mic toggle would revive.
+  setInterval(() => {
+    if (!micWanted || !get().panelOpen || recActive || restartTimer) return
+    voiceLog('recognition self-heal: the mic is on but nothing is listening — restarting')
+    restartFailures = 0
+    startRecognition()
+  }, RECOGNITION_SELF_HEAL_MS)
   const setMic = (on: boolean) => {
     micWanted = on
     set({ micOn: on })

@@ -244,3 +244,87 @@ test('speech-server recognition streams the mic and sends a recognized utterance
     await setSpeechServer(request, token, '')
   }
 })
+
+test('a speech-server recognizer that stops answering is reopened without a mic toggle', async ({
+  request,
+  page,
+}) => {
+  test.setTimeout(90_000)
+  const token = await authenticate(request)
+  const voice = await request.post('/api/voice/session', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { model: 'mock:echo' },
+  })
+  expect(voice.ok(), `voice session failed: ${await voice.text()}`).toBeTruthy()
+  await setSpeechServer(request, token, 'http://127.0.0.1:9')
+  try {
+    await primePage(page, token)
+    await page.goto('/')
+    await openVoicePanel(page)
+    await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+    await expect.poll(() => stub(page, '__sttSockets')).toBe(1)
+
+    // The fake recognizer says "ready" and then never answers, while the
+    // (oscillator) mic streams speech-level audio: a hung recognizer. The
+    // page must give up on it and open a fresh session by itself.
+    await expect
+      .poll(() => stub(page, '__sttSockets'), { timeout: 45_000 })
+      .toBeGreaterThanOrEqual(2)
+    await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+    await expect(page.getByTestId('voice-fab')).toHaveAttribute('aria-pressed', 'true')
+
+    // The new session works: what it hears is sent.
+    const said = 'Back after the stall.'
+    await page.evaluate((t) => {
+      const w = window as unknown as StubWindow
+      w.__sttEmit({ type: 'partial', text: 'Back after' })
+      w.__sttEmit({ type: 'final', final_kind: 'utterance', text: t })
+    }, said)
+    await expect(page.getByTestId('voice-line-user').last()).toContainText(said, {
+      timeout: 15_000,
+    })
+  } finally {
+    await setSpeechServer(request, token, '')
+  }
+})
+
+test('a speech server that cannot recognize speech stops the mic with its reason instead of flapping', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const voice = await request.post('/api/voice/session', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { model: 'mock:echo' },
+  })
+  expect(voice.ok(), `voice session failed: ${await voice.text()}`).toBeTruthy()
+  await setSpeechServer(request, token, 'http://127.0.0.1:9')
+  try {
+    await primePage(page, token)
+    await page.goto('/')
+    await openVoicePanel(page)
+    await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+    await expect.poll(() => stub(page, '__sttSockets')).toBe(1)
+
+    // What the relay sends when VoiceStudio has no speech-to-text model
+    // (VoiceStudio's `asr_model_missing`): a setup problem, not a hiccup.
+    await page.evaluate(() =>
+      (window as unknown as StubWindow).__sttEmit({
+        type: 'error',
+        error: 'speech server: No speech-to-text model is installed.',
+        code: 'stt-unavailable',
+      }),
+    )
+    await expect(page.getByTestId('voice-fab')).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByTestId('voice-error')).toContainText(
+      'No speech-to-text model is installed',
+    )
+    await expect(page.getByTestId('voice-error')).toContainText('Settings → Voice')
+    await expect(page.getByTestId('voice-status')).not.toHaveText('Listening')
+    // No reconnect loop: the mic stays off, one socket only.
+    await page.waitForTimeout(3000)
+    expect(await stub(page, '__sttSockets')).toBe(1)
+  } finally {
+    await setSpeechServer(request, token, '')
+  }
+})

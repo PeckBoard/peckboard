@@ -94,6 +94,20 @@ fn stream_url(server: &SpeechServer) -> String {
     };
     format!("{root}/v1/audio/transcriptions/stream?pcm=1&sr={STT_RATE}")
 }
+/// `code` on an error the client must not retry: a setup problem (no
+/// speech-to-text model installed, no server configured, a rejected key, no
+/// streaming endpoint) that would fail every reconnect the same way — the
+/// mic would flap on and off forever instead of saying what is wrong.
+pub const STT_UNAVAILABLE: &str = "stt-unavailable";
+
+/// An upstream error frame describing a setup problem rather than a hiccup.
+/// VoiceStudio reports e.g. `{"error":"asr_model_missing","kind":…}`.
+fn is_setup_error(v: &Value) -> bool {
+    [v["kind"].as_str(), v["error"].as_str(), v["code"].as_str()]
+        .into_iter()
+        .flatten()
+        .any(|c| c.contains("missing") || c.contains("not_installed") || c == "unauthorized")
+}
 
 /// An upstream text frame as the client frame to forward (`None` = drop),
 /// and whether it ends the session.
@@ -118,16 +132,19 @@ fn map_upstream(text: &str) -> (Option<Value>, bool) {
             )
         }
         Some("error") => {
+            // VoiceStudio: `error`/`kind` is a code (`asr_model_missing`),
+            // `message` the sentence a person should read.
             let msg = v["error"]["message"]
                 .as_str()
-                .or_else(|| v["error"].as_str())
                 .or_else(|| v["message"].as_str())
                 .or_else(|| v["detail"].as_str())
+                .or_else(|| v["error"].as_str())
                 .unwrap_or("speech server error");
-            (
-                Some(json!({ "type": "error", "error": format!("speech server: {msg}") })),
-                true,
-            )
+            let mut out = json!({ "type": "error", "error": format!("speech server: {msg}") });
+            if is_setup_error(&v) {
+                out["code"] = json!(STT_UNAVAILABLE);
+            }
+            (Some(out), true)
         }
         _ => (None, false),
     }
@@ -218,12 +235,15 @@ async fn handle_stt_socket(socket: WebSocket, state: Arc<AppState>) {
     let upstream = match upstream {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(res))) => {
-            let msg = match res.status().as_u16() {
+            let status = res.status().as_u16();
+            let msg = match status {
                 401 | 403 => "the speech server rejected the API key".to_string(),
                 404 => "the speech server has no streaming transcription endpoint".to_string(),
                 s => format!("the speech server answered HTTP {s}"),
             };
-            fail(&mut sender, &msg, None).await;
+            // A key or endpoint problem fails every reconnect the same way.
+            let code = matches!(status, 401 | 403 | 404).then_some(STT_UNAVAILABLE);
+            fail(&mut sender, &msg, code).await;
             return;
         }
         Ok(Err(e)) => {
@@ -339,6 +359,12 @@ mod tests {
     use axum::{Router, routing::get};
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
+    fn v_code_is_none(frame: &str) -> bool {
+        map_upstream(frame)
+            .0
+            .is_some_and(|v| v.get("code").is_none())
+    }
+
     #[test]
     fn maps_upstream_frames() {
         let (v, done) = map_upstream(r#"{"type":"partial","text":" hel ","session_id":"s"}"#);
@@ -348,6 +374,21 @@ mod tests {
         assert_eq!(v.unwrap()["final_kind"], "summary");
         let (v, done) = map_upstream(r#"{"type":"error","error":"model not loaded"}"#);
         assert_eq!(v.unwrap()["error"], "speech server: model not loaded");
+        assert!(done);
+        assert!(v_code_is_none(
+            r#"{"type":"error","error":"model not loaded"}"#
+        ));
+        // VoiceStudio 0.5.6 with no speech-to-text model (captured live):
+        // the person reads the message, and the client must not retry.
+        let (v, done) = map_upstream(
+            r#"{"type":"error","kind":"asr_model_missing","message":"No speech-to-text model is installed.","error":"asr_model_missing"}"#,
+        );
+        let v = v.unwrap();
+        assert_eq!(
+            v["error"],
+            "speech server: No speech-to-text model is installed."
+        );
+        assert_eq!(v["code"], STT_UNAVAILABLE);
         assert!(done);
         assert_eq!(map_upstream(r#"{"type":"session.started"}"#).0, None);
         assert_eq!(map_upstream("not json").0, None);

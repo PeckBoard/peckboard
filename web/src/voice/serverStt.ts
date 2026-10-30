@@ -55,6 +55,16 @@ export const STABLE_PARTIAL_MS = 900
 const END_TIMEOUT_MS = 10_000
 /** Keep the microphone open this long after a session ends on its own. */
 const RELEASE_CAPTURE_MS = 4000
+/** The server must say `ready` this soon after the socket opens. */
+const READY_TIMEOUT_MS = 8000
+/** Mic RMS above this counts as speech for the stall watchdog. */
+const VOICED_RMS = 0.02
+/** Speech-level frames (100 ms each) sent with no server reply… */
+const STALL_VOICED_FRAMES = 80
+/** …and this long since the server's last message: its recognizer hung. */
+const STALL_SILENCE_MS = 15_000
+/** Error code of a session the stall watchdog ended (benign: reconnect). */
+export const STALLED = 'stalled'
 
 function loadSource(): RecognitionSource {
   try {
@@ -298,6 +308,12 @@ interface Session {
   heardInterim: boolean
   lastPartial: string
   timer: ReturnType<typeof setTimeout> | null
+  /** Gives up when the server never says `ready`. */
+  readyTimer: ReturnType<typeof setTimeout> | null
+  /** `performance.now()` of the server's last message (stall watchdog). */
+  lastServerAt: number
+  /** Speech-level frames sent since the server's last message. */
+  voicedSinceServer: number
   sendFrame: (frame: ArrayBuffer) => void
   finish: (error?: string) => void
 }
@@ -314,6 +330,8 @@ function detach(s: Session): void {
   s.done = true
   if (s.timer) clearTimeout(s.timer)
   s.timer = null
+  if (s.readyTimer) clearTimeout(s.readyTimer)
+  s.readyTimer = null
   if (current === s) current = null
   void capture?.then(
     (cap) => {
@@ -392,9 +410,26 @@ function onServerFrame(s: Session, raw: string): void {
     case 'error':
       if (msg.code === 'not-configured') setSpeechServerConfigured(false)
       console.warn('[voice] speech server recognition:', msg.error ?? 'error')
+      // A setup problem (no speech-to-text model, no server, a rejected
+      // key) fails every reconnect the same way: report it as such so the
+      // caller stops instead of flapping the mic on and off.
+      if (msg.code === 'stt-unavailable' || msg.code === 'not-configured') {
+        sttProblem = msg.error ?? 'the speech server cannot recognize speech'
+        s.finish(STT_UNAVAILABLE)
+        return
+      }
       s.finish('network')
       return
   }
+}
+
+/** Error code a recognition session ends with on a setup problem. */
+export const STT_UNAVAILABLE = 'stt-unavailable'
+let sttProblem = ''
+
+/** The speech server's own words for the last setup problem. */
+export function serverSttProblem(): string {
+  return sttProblem
 }
 
 export function startServerListening(opts: RecognitionOptions, cb: RecognitionCallbacks): void {
@@ -421,6 +456,9 @@ export function startServerListening(opts: RecognitionOptions, cb: RecognitionCa
     heardInterim: false,
     lastPartial: '',
     timer: null,
+    readyTimer: null,
+    lastServerAt: performance.now(),
+    voicedSinceServer: 0,
     sendFrame: (frame) => {
       if (s.done || s.ending) return
       if (!s.ready) {
@@ -429,6 +467,23 @@ export function startServerListening(opts: RecognitionOptions, cb: RecognitionCa
         return
       }
       if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < MAX_BUFFERED_BYTES) ws.send(frame)
+      // Stall watchdog: the server answers speech with partials. Seconds of
+      // speech sent with no word back means its recognizer hung (the socket
+      // can stay open) — end the session so the caller opens a fresh one
+      // instead of sitting on a dead mic that still reads "Listening".
+      if (micRms >= VOICED_RMS) s.voicedSinceServer++
+      if (
+        s.voicedSinceServer >= STALL_VOICED_FRAMES &&
+        performance.now() - s.lastServerAt > STALL_SILENCE_MS
+      ) {
+        voiceLog('server recognition stalled: speech sent, no reply — restarting', {
+          voicedFrames: s.voicedSinceServer,
+          silentMs: Math.round(performance.now() - s.lastServerAt),
+        })
+        // Benign: a noisy room can look like this too, so it must never
+        // count toward the caller's give-up limit — it just reconnects.
+        s.finish(STALLED)
+      }
     },
     finish: (error) => {
       if (s.done) return
@@ -444,11 +499,22 @@ export function startServerListening(opts: RecognitionOptions, cb: RecognitionCa
     },
   }
   current = s
+  // A server that never says `ready` would buffer the mic forever while the
+  // UI shows "Listening": give up and let the caller restart.
+  s.readyTimer = setTimeout(() => {
+    if (s.done || s.ready) return
+    voiceLog(`server recognition: no "ready" within ${READY_TIMEOUT_MS} ms — restarting`)
+    s.finish('network')
+  }, READY_TIMEOUT_MS)
   ws.onopen = () => {
     if (!s.done) ws.send(JSON.stringify({ type: 'auth', token: getToken() ?? '' }))
   }
   ws.onmessage = (ev: MessageEvent) => {
-    if (!s.done && typeof ev.data === 'string') onServerFrame(s, ev.data)
+    if (s.done || typeof ev.data !== 'string') return
+    // Any word from the server means it is alive: reset the stall count.
+    s.lastServerAt = performance.now()
+    s.voicedSinceServer = 0
+    onServerFrame(s, ev.data)
   }
   ws.onclose = () => s.finish(s.ending ? undefined : 'network')
   voiceLog('recognition start (speech server)', { continuous: s.continuous })
