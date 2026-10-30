@@ -159,7 +159,7 @@ mod tests {
         let session = db.get_session("vp-voice").await.unwrap().unwrap();
         assert_eq!(
             session.system_prompt.as_deref(),
-            Some(active.content.as_str())
+            Some(voice_prompt::with_builtin_rules(&active.content).as_str())
         );
         let history = voice_prompt::history(&db).await.unwrap();
         assert_eq!(history[0].note.as_deref(), Some("asked"));

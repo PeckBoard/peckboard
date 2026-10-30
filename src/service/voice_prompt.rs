@@ -19,7 +19,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::db::Db;
 use crate::db::models::VoicePromptVersion;
 use crate::provider::registry::ProviderRegistry;
-use crate::service::voice_relay::{VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT};
+use crate::service::voice_relay::{VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT, VOICE_TOPIC_RING_RULES};
 
 pub const SOURCE_DEFAULT: &str = "default";
 pub const SOURCE_USER: &str = "user";
@@ -265,6 +265,22 @@ pub async fn version(db: &Db, id: &str) -> anyhow::Result<Option<VersionDetail>>
     }))
 }
 
+/// The active prompt plus the built-in tool rules the user can't edit
+/// ([`VOICE_TOPIC_RING_RULES`]) — what the voice session actually runs with.
+/// A custom prompt saved from a default that already carried the rules
+/// (0.1.108–0.1.111) is left as is rather than given them twice.
+pub fn with_builtin_rules(content: &str) -> String {
+    if content.contains("assistant_topics") {
+        return content.to_string();
+    }
+    format!("{}\n\n{VOICE_TOPIC_RING_RULES}", content.trim_end())
+}
+
+/// The system prompt to store on the voice session.
+pub async fn session_prompt(db: &Db) -> anyhow::Result<String> {
+    Ok(with_builtin_rules(&active_content(db).await?))
+}
+
 /// Bring the voice session's stored prompt in line with the active one. With
 /// a `registry`, a changed prompt also winds the session's live agent down
 /// after its current turn so the next turn spawns with the new prompt.
@@ -276,7 +292,7 @@ pub async fn apply_to_voice_session(
     let Some(session) = db.find_expert_session(VOICE_EXPERT_KIND).await? else {
         return Ok(false);
     };
-    let content = active_content(db).await?;
+    let content = session_prompt(db).await?;
     if session.system_prompt.as_deref() == Some(content.as_str()) {
         return Ok(false);
     }
@@ -361,7 +377,8 @@ mod tests {
         assert_eq!(a.content, custom);
         assert!(apply_to_voice_session(&db, None).await.unwrap());
         let s = db.get_session("voice").await.unwrap().unwrap();
-        assert_eq!(s.system_prompt.as_deref(), Some(custom.as_str()));
+        let expected = with_builtin_rules(&custom);
+        assert_eq!(s.system_prompt.as_deref(), Some(expected.as_str()));
 
         // Saving the same text again is a no-op.
         let same = save(&db, &custom, SOURCE_USER, None, None).await.unwrap();
@@ -382,7 +399,8 @@ mod tests {
         assert_eq!(a.content, VOICE_SYSTEM_PROMPT);
         assert!(apply_to_voice_session(&db, None).await.unwrap());
         let s = db.get_session("voice").await.unwrap().unwrap();
-        assert_eq!(s.system_prompt.as_deref(), Some(VOICE_SYSTEM_PROMPT));
+        let builtin = with_builtin_rules(VOICE_SYSTEM_PROMPT);
+        assert_eq!(s.system_prompt.as_deref(), Some(builtin.as_str()));
 
         // A second reset while on the default does nothing.
         assert!(!reset(&db, None).await.unwrap().changed);
@@ -401,5 +419,23 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_content(&db).await.unwrap(), VOICE_SYSTEM_PROMPT);
+    }
+
+    /// A prompt customised before the topic ring existed still gets its
+    /// rules; one saved from a default that had them doesn't get them twice.
+    #[tokio::test]
+    async fn custom_prompt_keeps_the_topic_ring_rules() {
+        let db = voice_db().await;
+        save(&db, "Be a pirate.", SOURCE_USER, None, None)
+            .await
+            .unwrap();
+        assert!(apply_to_voice_session(&db, None).await.unwrap());
+        let s = db.get_session("voice").await.unwrap().unwrap();
+        let prompt = s.system_prompt.unwrap();
+        assert!(prompt.starts_with("Be a pirate."));
+        assert!(prompt.contains(VOICE_TOPIC_RING_RULES));
+
+        let carried = format!("Be brief.\n\n{VOICE_TOPIC_RING_RULES}");
+        assert_eq!(with_builtin_rules(&carried), carried);
     }
 }

@@ -239,7 +239,7 @@ async fn voice_session(
         }
         None => {
             let folder_id = pick_folder(&state, &user.user_id).await?;
-            let prompt = crate::service::voice_prompt::active_content(&state.db)
+            let prompt = crate::service::voice_prompt::session_prompt(&state.db)
                 .await
                 .map_err(internal)?;
             let model = match requested {
@@ -518,7 +518,8 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(session.name, VOICE_SESSION_TITLE);
         assert_eq!(session.user_id.as_deref(), Some("u1"));
-        assert_eq!(session.system_prompt.as_deref(), Some(VOICE_SYSTEM_PROMPT));
+        let expected = crate::service::voice_prompt::with_builtin_rules(VOICE_SYSTEM_PROMPT);
+        assert_eq!(session.system_prompt.as_deref(), Some(expected.as_str()));
 
         let (status, switched) = post(&app, &token, r#"{"model": "mock:happy-path"}"#).await;
         assert_eq!(status, StatusCode::OK, "{switched}");
