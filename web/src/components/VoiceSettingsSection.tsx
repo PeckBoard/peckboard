@@ -6,10 +6,13 @@ import {
   KOKORO_SPEED_MAX,
   KOKORO_SPEED_MIN,
   isKokoroVoice,
+  isServerVoice,
+  isStudioVoice,
   setKokoroSpeed,
   useKokoroDevicePrefs,
 } from '../voice/kokoro'
 import ModelPicker from './ModelPicker'
+import SpeechServerSection from './SpeechServerSection'
 import VoicePronunciations from './VoicePronunciations'
 import VoicePromptEditor from './VoicePromptEditor'
 
@@ -120,7 +123,8 @@ export default function VoiceSettingsSection() {
         {!recognitionSupported && (
           <p className="form-error" role="alert" data-testid="voice-unsupported">
             This browser has no speech recognition. Replies can still be read aloud, but the Listen
-            button stays disabled — try Chrome, Edge, or Safari.
+            button stays disabled — try Chrome, Edge, or Safari, or recognize speech on a Speech
+            Server (below).
           </p>
         )}
         <div className="settings-info-grid">
@@ -147,10 +151,21 @@ export default function VoiceSettingsSection() {
                     ))}
                 </optgroup>
               )}
+              {voices.some((v) => isStudioVoice(v.voiceURI)) && (
+                <optgroup label="Speech server" data-testid="voice-studio-group">
+                  {voices
+                    .filter((v) => isStudioVoice(v.voiceURI))
+                    .map((v) => (
+                      <option key={v.voiceURI} value={v.voiceURI}>
+                        {v.name}
+                      </option>
+                    ))}
+                </optgroup>
+              )}
               <optgroup label="Browser">
                 <option value="">Browser default</option>
                 {voices
-                  .filter((v) => !isKokoroVoice(v.voiceURI))
+                  .filter((v) => !isServerVoice(v.voiceURI))
                   .map((v) => (
                     <option key={v.voiceURI} value={v.voiceURI}>
                       {v.name} ({v.lang}){v.default ? ' — default' : ''}
@@ -161,7 +176,7 @@ export default function VoiceSettingsSection() {
           </label>
           <label className="settings-row voice-settings-row">
             <span className="settings-label">
-              {isKokoroVoice(prefs.voiceURI) ? 'Browser voice rate' : 'Rate'}
+              {isServerVoice(prefs.voiceURI) ? 'Browser voice rate' : 'Rate'}
             </span>
             <input
               type="range"
@@ -178,7 +193,7 @@ export default function VoiceSettingsSection() {
               {prefs.rate.toFixed(1)}×
             </span>
           </label>
-          {isKokoroVoice(prefs.voiceURI) && (
+          {isServerVoice(prefs.voiceURI) && (
             <label className="settings-row voice-settings-row">
               <span className="settings-label">Natural voice speed</span>
               <input
@@ -291,6 +306,8 @@ export default function VoiceSettingsSection() {
           </button>
         </div>
       </section>
+
+      <SpeechServerSection />
 
       <section
         className="settings-section"

@@ -97,6 +97,8 @@ impl AppExpertDispatcher {
             .await?;
 
         let mut attachment_ids = Vec::with_capacity(attachments.len());
+        // Bubble metadata for the attachments that actually persisted.
+        let mut attachment_meta = Vec::with_capacity(attachments.len());
         for a in &attachments {
             match crate::routes::attachments::store_attachment_payload(
                 &state.config.data_dir,
@@ -107,7 +109,14 @@ impl AppExpertDispatcher {
             )
             .await
             {
-                Ok((aid, _)) => attachment_ids.push(aid),
+                Ok((aid, _)) => {
+                    attachment_meta.push(serde_json::json!({
+                        "id": aid,
+                        "filename": a.filename,
+                        "mime_type": a.mime_type,
+                    }));
+                    attachment_ids.push(aid);
+                }
                 Err(e) => tracing::warn!(
                     session_id = %session_id,
                     filename = %a.filename,
@@ -116,14 +125,25 @@ impl AppExpertDispatcher {
             }
         }
 
+        // Record the message in the target's chat up front, like the
+        // `/message` route: `send_or_queue` only appends the `user` event
+        // when it queues (at drain), so an idle target would run the
+        // message without it ever showing in its transcript.
+        let mut user_data = serde_json::json!({ "text": text });
+        if !attachment_ids.is_empty() {
+            user_data["attachmentIds"] = serde_json::json!(attachment_ids);
+            user_data["attachments"] = serde_json::Value::Array(attachment_meta);
+        }
+        broadcast_session_event(state, session_id, "user", user_data).await;
+
         let message = crate::provider::message::UserMessage {
             text,
             attachments,
             attachment_ids,
         };
         // Queue while busy: an agent-to-agent message never interrupts
-        // the target's in-flight work. No user event exists yet, so the
-        // drain appends one at delivery.
+        // the target's in-flight work. The user event is already recorded,
+        // so the drain must not append a second one.
         state
             .session_manager
             .send_or_queue(
@@ -133,7 +153,7 @@ impl AppExpertDispatcher {
                 &state.broadcaster,
                 config,
                 crate::provider::manager::MidTurnPolicy::Queue,
-                false,
+                true,
             )
             .await?;
         Ok(())
@@ -604,6 +624,11 @@ impl AppExpertDispatcher {
     /// Resume exactly like a user message: send_or_queue spawns a fresh run
     /// if idle, or parks the text in the durable queue if a turn is in
     /// flight (delivered when it finishes — never interrupts).
+    ///
+    /// Unless the caller already recorded it, the `user` event is appended
+    /// here, up front, like the `/message` route does: `send_or_queue` only
+    /// writes it on the queued path (at drain), so an idle target would
+    /// otherwise run the message without it ever showing in its chat.
     async fn resume(
         &self,
         session_id: &str,
@@ -614,6 +639,15 @@ impl AppExpertDispatcher {
         let config = self
             .spawn_config_for(session_id, serde_json::Value::Null)
             .await?;
+        if !user_event_appended {
+            broadcast_session_event(
+                state,
+                session_id,
+                "user",
+                serde_json::json!({ "text": text }),
+            )
+            .await;
+        }
         state
             .session_manager
             .send_or_queue(
@@ -623,9 +657,90 @@ impl AppExpertDispatcher {
                 &state.broadcaster,
                 config,
                 crate::provider::manager::MidTurnPolicy::Queue,
-                user_event_appended,
+                true,
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::{NewFolder, NewSession};
+
+    async fn idle_session(dir: &std::path::Path) -> Arc<AppState> {
+        let state = crate::auth::middleware::tests::test_state(dir);
+        crate::provider::test_double::register_mock_provider(&state.provider_registry).await;
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f1".into(),
+                name: "F".into(),
+                path: dir.to_string_lossy().to_string(),
+                created_at: now.clone(),
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .create_session(NewSession {
+                id: "target".into(),
+                name: "Target".into(),
+                folder_id: "f1".into(),
+                model: Some("mock:echo".into()),
+                created_at: now.clone(),
+                last_activity: now,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+    }
+
+    async fn user_texts(state: &Arc<AppState>) -> Vec<String> {
+        state
+            .db
+            .list_events_by_session("target", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user")
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+            .filter_map(|d| d.get("text")?.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// A message from another session to an IDLE target must show in the
+    /// target's chat — `send_or_queue` only records it on the queued path.
+    #[tokio::test]
+    async fn agent_to_agent_messages_show_in_an_idle_targets_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = idle_session(dir.path()).await;
+        let d = AppExpertDispatcher::new(state.clone());
+
+        d.send_message_with_attachments("target", "from another session".into(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(user_texts(&state).await, vec!["from another session"]);
+
+        // Wait out that turn so the next send also hits an idle target.
+        for _ in 0..200 {
+            if !state.session_manager.is_running("target").await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        d.resume_session("target", "plugin follow-up")
+            .await
+            .unwrap();
+        // `resume_session_appended`: the caller recorded it — no second copy.
+        d.resume_session_appended("target", "already recorded")
+            .await
+            .ok();
+        let texts = user_texts(&state).await;
+        assert_eq!(texts.iter().filter(|t| *t == "plugin follow-up").count(), 1);
+        assert!(!texts.iter().any(|t| t == "already recorded"));
     }
 }

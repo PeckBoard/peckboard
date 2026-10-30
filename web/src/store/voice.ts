@@ -4,6 +4,7 @@ import { authedFetch } from './auth'
 import { useWsStore } from './ws'
 import { getSpeechEngine, MIN_FINAL_CONFIDENCE, voiceLog, type HeardMeta } from '../voice/engine'
 import { DEFAULT_KOKORO_VOICE, installKokoroEngine, useKokoroDevicePrefs } from '../voice/kokoro'
+import { useSpeechRecognitionPrefs } from '../voice/serverStt'
 import {
   closeOpenHint,
   echoOverlap,
@@ -1220,5 +1221,15 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     clearError: () => set({ error: null }),
 
     unlockSpeech: () => engine().unlockSynthesis(),
+  }
+})
+
+// Choosing speech-server recognition (or learning that no server is saved)
+// changes whether this browser can listen at all — e.g. an Android WebView
+// with no webkitSpeechRecognition.
+useSpeechRecognitionPrefs.subscribe(() => {
+  const recognitionSupported = engine().supportsRecognition()
+  if (useVoiceStore.getState().recognitionSupported !== recognitionSupported) {
+    useVoiceStore.setState({ recognitionSupported })
   }
 })

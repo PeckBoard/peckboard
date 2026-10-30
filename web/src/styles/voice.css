@@ -361,6 +361,24 @@
   margin-top: 12px;
 }
 
+/* Settings → Voice → Speech server */
+.speech-server-field {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  max-width: 420px;
+}
+.voice-settings-row > input.form-input {
+  flex: 1;
+  max-width: 420px;
+}
+.voice-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Settings → Voice → Pronunciations */
 .voice-lexicon-mono {
   font-family: var(--font-mono, ui-monospace, monospace);

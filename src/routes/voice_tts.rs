@@ -1,13 +1,20 @@
-//! `/api/voice/tts*` — server-side Kokoro speech for the voice assistant
-//! (see `service::tts`). Admin-only like the rest of the voice surface.
+//! `/api/voice/tts*` — server-side speech for the voice assistant: Kokoro
+//! (see `service::tts`) and an external speech server such as VoiceStudio
+//! (see `service::speech_server`). Admin-only like the rest of the voice
+//! surface.
 //!
 //! - `GET  /api/voice/tts/status`  → `{state, progress, error}`
 //! - `POST /api/voice/tts/prepare` → start the first-use download/load
-//! - `GET  /api/voice/tts/voices`  → `[{id, name, lang}]`
+//! - `GET  /api/voice/tts/voices`  → `{default, voices, studio_configured,
+//!   studio_voices}`
 //! - `POST /api/voice/tts {text, voice?, speed?}` → `audio/wav`, or 503
-//!   `{status}` until the model is ready.
+//!   `{status}` until the model is ready. A `studio:<id>` voice goes to
+//!   the speech server (502 `{error}` when it fails).
 //! - `POST /api/voice/tts {text, phonemes}` → speaks exactly `phonemes`
 //!   (Kokoro vocab only, else 400) — the Settings → Voice draft preview.
+//! - `GET|PUT /api/voice/speech-server` → `{base_url, model, has_api_key}`
+//!   (the key is write-only); `POST /api/voice/speech-server/test` →
+//!   `{ok, voices?, version?, device?, error?}`.
 
 use std::sync::Arc;
 
@@ -22,6 +29,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::auth::middleware::{require_admin, require_auth};
+use crate::service::speech_server;
 use crate::service::tts::{self, TtsError};
 use crate::state::AppState;
 
@@ -44,6 +52,11 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/voice/tts/status", get(status))
         .route("/api/voice/tts/prepare", post(prepare))
         .route("/api/voice/tts/voices", get(voices))
+        .route(
+            "/api/voice/speech-server",
+            get(get_speech_server).put(put_speech_server),
+        )
+        .route("/api/voice/speech-server/test", post(test_speech_server))
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
@@ -58,7 +71,10 @@ async fn prepare(State(state): State<Arc<AppState>>) -> Json<tts::TtsStatus> {
     Json(svc.status())
 }
 
-async fn voices() -> Json<serde_json::Value> {
+/// Kokoro's voices, plus the speech server's under `studio_voices` (ids
+/// without the `studio:` prefix; empty when none is configured or it is
+/// unreachable).
+async fn voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let list: Vec<_> = tts::VOICES
         .iter()
         .map(|(id, name)| {
@@ -70,10 +86,27 @@ async fn voices() -> Json<serde_json::Value> {
             serde_json::json!({ "id": id, "name": name, "lang": lang })
         })
         .collect();
-    Json(serde_json::json!({ "default": tts::DEFAULT_VOICE, "voices": list }))
+    let server = speech_server::load(&state.db).await.ok().flatten();
+    let studio = match &server {
+        Some(s) => speech_server::voices_cached(s).await,
+        None => Vec::new(),
+    };
+    Json(serde_json::json!({
+        "default": tts::DEFAULT_VOICE,
+        "voices": list,
+        "studio_configured": server.is_some(),
+        "studio_voices": studio,
+    }))
 }
 
 async fn synthesize(State(state): State<Arc<AppState>>, Json(body): Json<TtsRequest>) -> Response {
+    if let Some(voice) = body
+        .voice
+        .as_deref()
+        .and_then(|v| v.strip_prefix(speech_server::VOICE_PREFIX))
+    {
+        return synthesize_remote(&state, &body, voice).await;
+    }
     let svc = tts::service_for(&state.config.data_dir);
     let started = std::time::Instant::now();
     let lex = match tts::lexicon::store(&state.db).await {
@@ -123,6 +156,100 @@ async fn synthesize(State(state): State<Arc<AppState>>, Json(body): Json<TtsRequ
             )
                 .into_response()
         }
+    }
+}
+fn json_err(status: StatusCode, msg: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// A `studio:<id>` voice: forwarded to the speech server. Pronunciation
+/// hints are Kokoro phonemes, so the server gets the plain words.
+async fn synthesize_remote(state: &AppState, body: &TtsRequest, voice: &str) -> Response {
+    let text = tts::hints::strip(body.text.trim());
+    let text = text.trim();
+    if text.is_empty() || voice.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "text and voice are required");
+    }
+    if text.chars().count() > tts::MAX_TEXT_CHARS {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            &format!("text is longer than {} characters", tts::MAX_TEXT_CHARS),
+        );
+    }
+    let server = match speech_server::load(&state.db).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return json_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no speech server is configured (Settings → Voice → Speech server)",
+            );
+        }
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let started = std::time::Instant::now();
+    let speed = body.speed.unwrap_or(1.0).clamp(0.5, 2.0);
+    match server.speak(text, voice, speed).await {
+        Ok(wav) => {
+            tracing::debug!(
+                ms = started.elapsed().as_millis() as u64,
+                bytes = wav.len(),
+                "speech server tts"
+            );
+            ([(header::CONTENT_TYPE, "audio/wav")], wav).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "speech server tts failed");
+            json_err(StatusCode::BAD_GATEWAY, &e.to_string())
+        }
+    }
+}
+
+async fn get_speech_server(State(state): State<Arc<AppState>>) -> Response {
+    match speech_server::view(&state.db).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct SpeechServerBody {
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `PUT` — absent fields stay as they are; `""` clears one (an empty
+/// `base_url` switches the speech server off).
+async fn put_speech_server(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SpeechServerBody>,
+) -> Response {
+    match speech_server::save(
+        &state.db,
+        body.base_url.as_deref(),
+        body.api_key.as_deref(),
+        body.model.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => json_err(StatusCode::BAD_REQUEST, &e.to_string()),
+    }
+}
+
+/// Probe the saved server: `{ok, voices?, version?, device?, error?}`.
+async fn test_speech_server(State(state): State<Arc<AppState>>) -> Response {
+    match speech_server::load(&state.db).await {
+        Ok(Some(s)) => Json(s.test().await).into_response(),
+        Ok(None) => Json(serde_json::json!({
+            "ok": false,
+            "error": "set the speech server URL first",
+        }))
+        .into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
@@ -209,5 +336,115 @@ mod tests {
         let app = router(state.clone()).with_state(state);
         let (s, _) = call(&app, &token, "GET", "/api/voice/tts/status", "").await;
         assert_eq!(s, StatusCode::FORBIDDEN);
+    }
+
+    /// A stand-in VoiceStudio: voices + 24 kHz PCM speech, bearer-gated.
+    async fn fake_speech_server() -> String {
+        use axum::http::HeaderMap;
+        fn authed(h: &HeaderMap) -> bool {
+            h.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer k1")
+        }
+        let app = Router::new()
+            .route(
+                "/v1/audio/voices",
+                get(|h: HeaderMap| async move {
+                    if !authed(&h) {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({"detail": "API key required"})),
+                        )
+                            .into_response();
+                    }
+                    Json(serde_json::json!({"voices": [{"voice_id": "v-ana", "name": "Ana"}]}))
+                        .into_response()
+                }),
+            )
+            .route(
+                "/v1/audio/speech",
+                post(
+                    |h: HeaderMap, Json(b): Json<serde_json::Value>| async move {
+                        assert!(authed(&h));
+                        assert_eq!(b["response_format"], "pcm");
+                        assert_eq!(b["voice"], "v-ana");
+                        // Hint markup is stripped before it leaves Peckboard.
+                        assert_eq!(b["input"], "Hello Kubernetes.");
+                        vec![0u8; 480].into_response()
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/v1")
+    }
+
+    #[tokio::test]
+    async fn studio_voices_are_served_by_the_speech_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let app = router(state.clone()).with_state(state);
+        let url = fake_speech_server().await;
+
+        // Unconfigured: 503 with a pointer to the setting.
+        let (s, v) = call(
+            &app,
+            &token,
+            "POST",
+            "/api/voice/tts",
+            r#"{"text":"Hi.","voice":"studio:v-ana"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(v["error"].as_str().unwrap().contains("Speech server"));
+
+        // A wrong key fails the connection test with the server's message.
+        let body = format!(r#"{{"base_url":"{url}","api_key":"bad"}}"#);
+        let (s, v) = call(&app, &token, "PUT", "/api/voice/speech-server", &body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["has_api_key"], true);
+        assert!(v.get("api_key").is_none());
+        assert!(!v["base_url"].as_str().unwrap().ends_with("/v1"));
+        let (_, v) = call(&app, &token, "POST", "/api/voice/speech-server/test", "").await;
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("API key required"));
+
+        let (_, v) = call(
+            &app,
+            &token,
+            "PUT",
+            "/api/voice/speech-server",
+            r#"{"api_key":"k1"}"#,
+        )
+        .await;
+        assert_eq!(v["has_api_key"], true);
+        let (_, v) = call(&app, &token, "POST", "/api/voice/speech-server/test", "").await;
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["voices"], 1);
+
+        let (_, v) = call(&app, &token, "GET", "/api/voice/tts/voices", "").await;
+        assert_eq!(v["studio_configured"], true);
+        assert_eq!(
+            v["studio_voices"][0],
+            serde_json::json!({"id": "v-ana", "name": "Ana"})
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/voice/tts")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"text":"Hello [Kubernetes](/kˌʌbənˈɛɹnətəs/).","voice":"studio:v-ana"}"#,
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "audio/wav");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(bytes.len(), 44 + 480);
     }
 }

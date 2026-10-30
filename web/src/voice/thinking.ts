@@ -19,8 +19,8 @@ import { authedFetch } from '../store/auth'
 import { voiceLog } from './engine'
 import {
   FIRST_CLIP_PREROLL_MS,
-  KOKORO_PREFIX,
-  isKokoroVoice,
+  isServerVoice,
+  serverVoiceId,
   useKokoroDevicePrefs,
   wavBlob,
   wavSeconds,
@@ -187,7 +187,7 @@ function currentKey(voiceURI: string): string {
  * leave the filler missing — the next call retries.
  */
 export function prepareFillers(voiceURI: string, out: ThinkingOutput | null): void {
-  if (!isKokoroVoice(voiceURI) || !out) return
+  if (!isServerVoice(voiceURI) || !out) return
   const key = currentKey(voiceURI)
   if (key !== cacheKey) {
     cacheKey = key
@@ -206,7 +206,7 @@ export function prepareFillers(voiceURI: string, out: ThinkingOutput | null): vo
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             text: f.spoken,
-            voice: voiceURI.slice(KOKORO_PREFIX.length),
+            voice: serverVoiceId(voiceURI),
             speed,
           }),
         })

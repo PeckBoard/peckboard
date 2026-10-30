@@ -4,7 +4,8 @@
  *
  * Voices are addressed as `kokoro:<id>` voice URIs, so one engine serves
  * both families: a `kokoro:` voice goes through the server, anything else
- * (and all recognition) is delegated to the browser `WebSpeechEngine`.
+ * (and recognition, unless it goes to the speech server — `serverStt.ts`)
+ * is delegated to the browser `WebSpeechEngine`.
  * `onEnd` / `onError` fire exactly as the browser engine fires them, so
  * the store's speak queue, barge-in and echo filtering are unchanged.
  *
@@ -25,12 +26,44 @@ import {
   type SpeechEngine,
   type VoiceOption,
 } from './engine'
+import {
+  setSpeechServerConfigured,
+  startServerListening,
+  stopServerListening,
+  wantsServerRecognition,
+} from './serverStt'
 
 export const KOKORO_PREFIX = 'kokoro:'
 export const DEFAULT_KOKORO_VOICE = 'kokoro:af_heart'
+/** Voices of the external speech server (VoiceStudio or any OpenAI-
+ *  compatible one, Settings → Voice → Speech server). The server proxies
+ *  them, so they play exactly like Kokoro clips. */
+export const STUDIO_PREFIX = 'studio:'
 
 export function isKokoroVoice(voiceURI: string): boolean {
   return voiceURI.startsWith(KOKORO_PREFIX)
+}
+
+export function isStudioVoice(voiceURI: string): boolean {
+  return voiceURI.startsWith(STUDIO_PREFIX)
+}
+
+/** Synthesized by Peckboard's server (`/api/voice/tts`), not the browser. */
+export function isServerVoice(voiceURI: string): boolean {
+  return isKokoroVoice(voiceURI) || isStudioVoice(voiceURI)
+}
+
+/** The voice's family prefix, or '' for a browser voice. */
+function voiceFamily(voiceURI: string): string {
+  if (isKokoroVoice(voiceURI)) return KOKORO_PREFIX
+  if (isStudioVoice(voiceURI)) return STUDIO_PREFIX
+  return ''
+}
+
+/** `voice` for `/api/voice/tts`: a Kokoro id bare, a speech-server voice
+ *  with its `studio:` prefix (the server routes on it). */
+export function serverVoiceId(voiceURI: string): string {
+  return isKokoroVoice(voiceURI) ? voiceURI.slice(KOKORO_PREFIX.length) : voiceURI
 }
 
 /** Real (non-503) failures before Kokoro is disabled for the session. */
@@ -332,10 +365,12 @@ export class KokoroEngine implements SpeechEngine {
   /** In-flight fetches: the one being spoken plus at most one prefetch. */
   private pending: Pending[] = []
   private gen = 0
-  private failures = 0
+  /** Consecutive real failures per voice family (`kokoro:` / `studio:`). */
+  private failures = new Map<string, number>()
   /** When the last utterance ended (`performance.now()`), for burst pre-roll. */
   private lastEnd = -Infinity
-  private disabled = false
+  /** Families switched off for the session after repeated failures. */
+  private disabled = new Set<string>()
   private voices: VoiceOption[] = []
   private voicesLoading = false
   private voicesLoadedAt = 0
@@ -345,8 +380,10 @@ export class KokoroEngine implements SpeechEngine {
     this.web = web
   }
 
+  /** Recognition goes to the speech server when the user chose it
+   *  (Settings → Speech Server) and one is saved — see `serverStt.ts`. */
   supportsRecognition(): boolean {
-    return this.web.supportsRecognition()
+    return wantsServerRecognition() || this.web.supportsRecognition()
   }
 
   supportsSynthesis(): boolean {
@@ -354,28 +391,33 @@ export class KokoroEngine implements SpeechEngine {
   }
 
   startListening(opts: RecognitionOptions, cb: RecognitionCallbacks): void {
-    this.web.startListening(opts, cb)
+    if (wantsServerRecognition()) {
+      this.web.stopListening()
+      startServerListening(opts, cb)
+    } else {
+      stopServerListening()
+      this.web.startListening(opts, cb)
+    }
   }
 
   stopListening(): void {
+    stopServerListening()
     this.web.stopListening()
   }
 
-  /** Kokoro for a `kokoro:` voice, unless it failed repeatedly this session
-   *  or the server reported it unavailable (a later `prepareKokoro` — e.g.
-   *  reopening the panel — retries). */
+  /** The server for a `kokoro:` / `studio:` voice, unless that family
+   *  failed repeatedly this session, or (Kokoro) the server reported the
+   *  model unavailable (a later `prepareKokoro` — e.g. reopening the panel
+   *  — retries). */
   private useKokoro(voiceURI: string): boolean {
-    return (
-      isKokoroVoice(voiceURI) &&
-      !this.disabled &&
-      useKokoroStatus.getState().state !== 'unavailable' &&
-      canPlayKokoro()
-    )
+    const family = voiceFamily(voiceURI)
+    if (!family || this.disabled.has(family) || !canPlayKokoro()) return false
+    return family !== KOKORO_PREFIX || useKokoroStatus.getState().state !== 'unavailable'
   }
 
-  /** Browser-engine options for a fallback: a Kokoro URI means "default". */
+  /** Browser-engine options for a fallback: a server URI means "default". */
   private webOpts(opts: SpeakOptions): SpeakOptions {
-    return isKokoroVoice(opts.voiceURI) ? { ...opts, voiceURI: '' } : opts
+    return isServerVoice(opts.voiceURI) ? { ...opts, voiceURI: '' } : opts
   }
 
   private key(text: string, opts: SpeakOptions): string {
@@ -402,7 +444,7 @@ export class KokoroEngine implements SpeechEngine {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
-        voice: opts.voiceURI.slice(KOKORO_PREFIX.length),
+        voice: serverVoiceId(opts.voiceURI),
         // Kokoro has its own speed (Settings → Voice); `opts.rate` is the
         // browser voice's, used on fallback.
         speed: useKokoroDevicePrefs.getState().speed,
@@ -461,7 +503,7 @@ export class KokoroEngine implements SpeechEngine {
           return finish()
         }
         if (ok === 'cancelled') return finish()
-        this.failures = 0
+        this.failures.delete(voiceFamily(opts.voiceURI))
         opts.onStart?.()
         voiceLog('kokoro speak: started', JSON.stringify(text), {
           latencyMs: Math.round(performance.now() - started),
@@ -475,15 +517,19 @@ export class KokoroEngine implements SpeechEngine {
           voiceLog('kokoro speak: cancelled', JSON.stringify(text))
           return finish()
         }
-        if (err instanceof TtsHttpError && err.status === 503) {
+        const family = voiceFamily(opts.voiceURI)
+        if (err instanceof TtsHttpError && err.status === 503 && family === KOKORO_PREFIX) {
           voiceLog('kokoro: natural voice not ready yet — using the browser voice')
           void prepareKokoro()
         } else {
-          this.failures++
-          console.warn('[voice] kokoro failed; falling back to the browser voice:', err)
-          if (this.failures >= MAX_FAILURES) {
-            this.disabled = true
-            console.warn('[voice] kokoro: disabled for this session after repeated failures')
+          const n = (this.failures.get(family) ?? 0) + 1
+          this.failures.set(family, n)
+          console.warn(`[voice] ${family} voice failed; falling back to the browser voice:`, err)
+          if (n >= MAX_FAILURES) {
+            this.disabled.add(family)
+            console.warn(
+              `[voice] ${family} voices: disabled for this session after repeated failures`,
+            )
           }
         }
         // Hand the utterance to the browser voice; its onEnd ends ours.
@@ -732,19 +778,41 @@ export class KokoroEngine implements SpeechEngine {
         const body = (await res.json()) as {
           default: string
           voices: { id: string; name: string; lang: string }[]
+          studio_voices?: { id: string; name: string }[]
+          studio_configured?: boolean
         }
-        this.voices = body.voices.map((v) => ({
-          voiceURI: KOKORO_PREFIX + v.id,
-          name: `Kokoro — ${v.name} (${langLabel(v.lang)})`,
-          lang: v.lang,
-          default: v.id === body.default,
-        }))
+        if (typeof body.studio_configured === 'boolean') {
+          setSpeechServerConfigured(body.studio_configured)
+        }
+        this.voices = [
+          ...body.voices.map((v) => ({
+            voiceURI: KOKORO_PREFIX + v.id,
+            name: `Kokoro — ${v.name} (${langLabel(v.lang)})`,
+            lang: v.lang,
+            default: v.id === body.default,
+          })),
+          ...(body.studio_voices ?? []).map((v) => ({
+            voiceURI: STUDIO_PREFIX + v.id,
+            name: `Speech server — ${v.name}`,
+            lang: '',
+            default: false,
+          })),
+        ]
         for (const cb of this.listeners) cb()
       })
       .catch(() => {})
       .finally(() => {
         this.voicesLoading = false
       })
+  }
+
+  /** Re-read the voice list now (after the speech server settings change),
+   *  and give the server family another chance if it was switched off. */
+  reloadVoices(): void {
+    this.voicesLoadedAt = 0
+    this.disabled.delete(STUDIO_PREFIX)
+    this.failures.delete(STUDIO_PREFIX)
+    this.loadVoices()
   }
 
   getVoices(): VoiceOption[] {
@@ -762,11 +830,16 @@ export class KokoroEngine implements SpeechEngine {
   }
 }
 
-let installed = false
+let installed: KokoroEngine | null = null
 
 /** Make the Kokoro engine the app's speech engine (idempotent). */
 export function installKokoroEngine(): void {
   if (installed) return
-  installed = true
-  setSpeechEngine(new KokoroEngine())
+  installed = new KokoroEngine()
+  setSpeechEngine(installed)
+}
+
+/** Refresh the voice picker after the speech server settings change. */
+export function reloadServerVoices(): void {
+  installed?.reloadVoices()
 }

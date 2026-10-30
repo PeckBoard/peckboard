@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.106"
+version = "0.1.107"
 edition = "2024"
 
 [dependencies]
@@ -88,6 +88,9 @@ async-trait = "0.1"
 regex = "1.12.3"
 similar = "2"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
+# WS client for the speech server's live transcription stream
+# (ws::voice_stt). Already in the tree via the test suite; rustls for wss.
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 urlencoding = "2"
 tar = "0.4"
 flate2 = "1"
@@ -142,7 +145,6 @@ tempfile = "3.27.0"
 time = "0.3.47"
 # test-util enables tokio::test(start_paused) for timeout tests.
 tokio = { version = "1", features = ["full", "test-util"] }
-tokio-tungstenite = "0.30.0"
 
 # Trim debug info so `target/debug` doesn't fill the disk every few
 # builds. Backtraces still show file:line; we lose pretty struct

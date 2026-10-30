@@ -56,6 +56,7 @@ use crate::ws::agent::agent_ws_handler;
 use crate::ws::handler::ws_handler;
 use crate::ws::plugin_ui::plugin_ws_handler;
 use crate::ws::terminal::terminal_ws_handler;
+use crate::ws::voice_stt::voice_stt_ws_handler;
 use axum::{Router, routing::get};
 use std::sync::Arc;
 
@@ -71,6 +72,11 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Interactive SSH terminal WS: JWT in the first frame (like /ws),
         // owner-only. See src/ws/terminal.rs + src/terminal/.
         .route("/ws/terminal/{id}", get(terminal_ws_handler))
+        // Voice assistant speech recognition, relayed to the speech server:
+        // JWT in the first frame (like /ws), admin-only. Outside the
+        // header-authed voice router — browsers can't set WS headers. See
+        // src/ws/voice_stt.rs.
+        .route("/api/voice/stt", get(voice_stt_ws_handler))
         // Remote-control daemon WS: authenticated by the device's enrollment
         // token (hashed against devices.secret_hash) BEFORE the upgrade —
         // never by JWT. Daemons send no Origin, so origin_check passes them.
