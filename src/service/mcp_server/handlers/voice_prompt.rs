@@ -87,7 +87,6 @@ mod tests {
     use crate::db::Db;
     use crate::db::models::{NewFolder, NewSession};
     use crate::service::mcp_server::{McpToolRegistry, ToolCallContext};
-    use crate::service::voice_actions::{ToolPolicy, policy};
     use crate::service::voice_prompt;
     use crate::service::voice_relay::VOICE_SYSTEM_PROMPT;
 
@@ -107,7 +106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_prompt_is_gated_and_voice_only() {
+    async fn voice_prompt_is_voice_only() {
         let db = Db::in_memory().unwrap();
         db.create_folder(NewFolder {
             id: "f1".into(),
@@ -145,15 +144,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("voice"), "{err}");
-        // The dispatch gate: get is free; append is parked for the user.
-        assert_eq!(
-            policy("voice_prompt", &serde_json::json!({"action": "get"})),
-            ToolPolicy::Free
-        );
-        assert_eq!(
-            policy("voice_prompt", &serde_json::json!({"action": "append"})),
-            ToolPolicy::Gated
-        );
         let confirmed =
             serde_json::json!({"action": "append", "text": "Be brief.", "note": "asked"});
 

@@ -445,11 +445,6 @@ mod tests {
         let mut scoped = ctx(&db, "voice");
         scoped.project_id = Some(pid.clone());
         assert!(scoped.scope_project(Some(&pid)).await.is_err());
-
-        use crate::service::voice_actions::{ToolPolicy, policy};
-        for tool in ["move_card_to_wont_do", "pause_project"] {
-            assert_eq!(policy(tool, &serde_json::json!({})), ToolPolicy::Gated);
-        }
     }
 
     /// An orchestrating chat may answer a worker question in a project of

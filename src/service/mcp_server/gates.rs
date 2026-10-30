@@ -28,7 +28,7 @@ pub struct ToolGate {
     pre_hatcher: bool,
     doc_review: bool,
     /// Voice assistant session (`expert_kind == "voice"`): the only role
-    /// that may call `show_view`, and the one role with no browser.
+    /// that may call `show_view`; otherwise the full chat tool surface.
     voice: bool,
     /// Backing session of an external OAuth client
     /// (`expert_kind == "external_mcp"`): no agent process behind it, so
@@ -125,11 +125,6 @@ impl ToolGate {
         ) {
             return self.voice;
         }
-        if self.voice {
-            // An allowlist: only the voice session's free and gated tools
-            // (`voice_actions::policy`); no browser, shell, or file tools.
-            return crate::service::voice_actions::tool_allowed(name);
-        }
         if self.is_worker && self.worker_denied_plugin_tools.contains(name) {
             return false;
         }
@@ -185,18 +180,6 @@ impl ToolGate {
         }
         if name == "assistant_topics" && !self.voice {
             return Some("tool 'assistant_topics' is blocked: only the voice assistant session has a topic ring.".to_string());
-        }
-        if self.voice && is_browser_tool(name) {
-            return Some(format!(
-                "tool '{name}' is blocked: the voice assistant has no browser. \
-                 Route browser work to another session with send_message."
-            ));
-        }
-        if self.voice && !crate::service::voice_actions::tool_allowed(name) {
-            return Some(format!(
-                "tool '{name}' is not available to the voice assistant. \
-                 Route that work to another session with send_message."
-            ));
         }
         if matches!(name, "get_model_guidance" | "switch_session_model") && !self.autoswitch_on {
             return Some(format!(
@@ -378,17 +361,19 @@ mod tests {
         let voice = ToolGate::from_session(&session(false, Some("voice"), None));
         assert!(voice.blocked("answer_question").is_none());
         assert!(voice.advertised("answer_question"));
-        // Voice keeps the ordinary chat tool surface, minus the browser.
+        // Voice gets every tool a chat session has, browser included.
         assert!(voice.advertised("list_sessions"));
-        assert!(voice.blocked("browser_open").is_some());
-        assert!(!voice.advertised("browser_act"));
-        // An allowlist: gated tools stay callable (the dispatch gate parks
-        // them for confirmation); anything unlisted is refused outright.
-        assert!(voice.blocked("delete_project").is_none());
-        assert!(voice.advertised("run_command"));
-        for tool in ["read_file", "spawn_subagent", "fetch_url", "git"] {
-            assert!(voice.blocked(tool).is_some(), "{tool}");
-            assert!(!voice.advertised(tool), "{tool}");
+        for tool in [
+            "browser_open",
+            "delete_project",
+            "run_command",
+            "read_file",
+            "spawn_subagent",
+            "fetch_url",
+            "git",
+        ] {
+            assert!(voice.blocked(tool).is_none(), "{tool}");
+            assert!(voice.advertised(tool), "{tool}");
         }
         let chat = ToolGate::from_session(&session(false, None, None));
         assert!(chat.blocked("browser_open").is_none());

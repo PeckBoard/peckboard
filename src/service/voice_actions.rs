@@ -1,10 +1,11 @@
 //! The voice assistant's tool policy and server-issued one-time
 //! confirmations ("pending actions").
 //!
-//! The voice session is global: it can reach every session in every folder,
-//! and text from those sessions flows back into it as relays. So it gets an
-//! explicit allowlist ([`policy`]) instead of a destructive blocklist, and a
-//! gated call is never trusted to the model's own say-so:
+//! The voice session is global: it can reach every session in every folder.
+//! It may call every MCP tool Peckboard offers, unconfirmed ([`policy`]
+//! returns [`ToolPolicy::Free`] for all of them). The gated path below is
+//! kept for channels that need a confirmation; a gated call is never
+//! trusted to the model's own say-so:
 //!
 //! 1. The voice session calls a [`ToolPolicy::Gated`] tool. [`gate_call`]
 //!    does NOT run it: it stores the exact call (tool + args) as a
@@ -44,142 +45,19 @@ pub const VOICE_ACTION_EVENT: &str = "voice-action";
 /// What the voice session may do with a tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPolicy {
-    /// Runs immediately: read-only, navigation, and routing work the user
-    /// asked for (the prompt requires an explicit request for sends).
+    /// Runs immediately.
     Free,
-    /// Destructive or persistent: parked for a human confirmation.
+    /// Parked for a human confirmation. No tool is gated today (see
+    /// [`policy`]); the variant and the confirm / cancel flow stay for
+    /// channels that need them.
     Gated,
-    /// Not available to the voice session at all.
-    Denied,
 }
 
-/// Read-only lookups, navigation, conversation routing, and the voice
-/// session's own queue / pronunciation tools. Everything here either reads
-/// or hands work to a session the user named.
-const FREE_TOOLS: &[&str] = &[
-    // Sessions, projects, board: read-only.
-    "list_sessions",
-    "find_session",
-    "search_sessions",
-    "read_session",
-    "read_worker_session",
-    "list_worker_sessions",
-    "list_managed_sessions",
-    "list_projects",
-    "list_cards",
-    "list_card_dependencies",
-    "get_card_dependency_tree",
-    "list_folders",
-    "list_workflows",
-    "list_models",
-    "list_system_prompts",
-    "list_repeating_tasks",
-    "list_project_reports",
-    "read_report",
-    "list_variables",
-    "math",
-    // Routing work (only when the user asked; see VOICE_SYSTEM_PROMPT).
-    "send_message",
-    "send_image",
-    "create_session",
-    "create_card",
-    // Non-approval questions only; the handler refuses approval prompts
-    // and the voice session's own questions.
-    "answer_question",
-    "watch_session",
-    "unwatch_session",
-    // The voice session's own tools (`voice_prompt` edits and
-    // `voice_pronunciation remove` are gated per action in [`policy`]).
-    "show_view",
-    "voice_queue",
-    "voice_pronunciation",
-    "assistant_topics",
-    "voice_prompt",
-    // Driving the user's screen, and reading their saved views.
-    "ui_open",
-    "ui_tabs",
-    "list_views",
-    "get_view",
-    // HomeKit / Hue plugin: every tool, locks, doors and pairing included
-    // (the user's explicit choice: voice controls the home unconfirmed).
-    "homekit_list",
-    "homekit_get",
-    "homekit_discover",
-    "homekit_identify",
-    "homekit_rooms",
-    "homekit_room_set",
-    "homekit_scenes",
-    "homekit_scene_recall",
-    "homekit_hue_bridges",
-    "homekit_set",
-    "homekit_pair",
-    "homekit_unpair",
-    "homekit_hue_link",
-];
-
-/// Destructive or persistent beyond the conversation: deletes, clears,
-/// kills and interrupts, board / project state, settings, schedules,
-/// prompts, variables, plugins, files, and commands (local, SSH, remote).
-const GATED_TOOLS: &[&str] = &[
-    "delete_card",
-    "delete_project",
-    "delete_repeating_task",
-    "delete_variable",
-    "clear_session",
-    "terminate_agent",
-    "interrupt_session",
-    "update_card",
-    "move_card_to_done",
-    "move_card_to_wont_do",
-    "create_project",
-    "update_project",
-    "pause_project",
-    "resume_project",
-    "create_folder",
-    "set_session_system_prompt",
-    "set_workflow_instructions",
-    "set_variable",
-    "create_repeating_task",
-    "update_repeating_task",
-    "upgrade_plugin",
-    "app_install",
-    "app_remove",
-    "run_command",
-    "write_file",
-    "edit_file",
-    "ssh_run",
-    "ssh_run_many",
-    "ssh_write_file",
-    "ssh_edit_file",
-    "ssh_host_add",
-    "ssh_host_update",
-    "ssh_host_remove",
-    "remote_agent_run",
-    // The user's saved views (dashboards).
-    "create_view",
-    "update_view",
-    "add_view_widget",
-    "remove_view_widget",
-    "delete_view",
-];
-
-/// The voice session's policy for one call. `voice_prompt` edits and
-/// `voice_pronunciation remove` are gated; their reads stay free.
-pub fn policy(tool: &str, args: &Value) -> ToolPolicy {
-    let action = args.get("action").and_then(|v| v.as_str());
-    match tool {
-        "voice_prompt" if !matches!(action, None | Some("get")) => ToolPolicy::Gated,
-        "voice_pronunciation" if action == Some("remove") => ToolPolicy::Gated,
-        _ if FREE_TOOLS.contains(&tool) => ToolPolicy::Free,
-        _ if GATED_TOOLS.contains(&tool) => ToolPolicy::Gated,
-        _ => ToolPolicy::Denied,
-    }
-}
-
-/// Whether the voice session may call `tool` at all (free or gated) — the
-/// name-only check `ToolGate` advertises and blocks by.
-pub fn tool_allowed(tool: &str) -> bool {
-    FREE_TOOLS.contains(&tool) || GATED_TOOLS.contains(&tool)
+/// The voice session's policy for one call. Every MCP tool Peckboard offers
+/// runs unconfirmed for the voice assistant — the user's explicit choice:
+/// it has the same tool surface as any chat session, browser included.
+pub fn policy(_tool: &str, _args: &Value) -> ToolPolicy {
+    ToolPolicy::Free
 }
 
 /// Outcome of [`gate_call`].
@@ -204,9 +82,9 @@ fn now() -> String {
 }
 
 /// The voice-session gate at dispatch. A no-op for every other session.
-/// For the voice session: denied tools fail, free tools proceed, gated
-/// tools are parked as a pending action. A model-sent `confirmed` argument
-/// is dropped and means nothing.
+/// For the voice session: free tools proceed, gated tools are parked as a
+/// pending action. A model-sent `confirmed` argument is dropped and means
+/// nothing.
 pub async fn gate_call(
     db: &Db,
     broadcaster: &Broadcaster,
@@ -223,10 +101,6 @@ pub async fn gate_call(
     }
     match policy(tool, args) {
         ToolPolicy::Free => Ok(Gate::Proceed),
-        ToolPolicy::Denied => anyhow::bail!(
-            "tool '{tool}' is not available to the voice assistant. Route that work to \
-             another session with send_message."
-        ),
         ToolPolicy::Gated => {
             let action = create(db, &session, CHANNEL_WEB, tool, args).await?;
             broadcast(broadcaster, &action);
@@ -570,104 +444,51 @@ mod tests {
     }
 
     #[test]
-    fn voice_policy_is_an_allowlist() {
-        let none = json!({});
-        assert_eq!(policy("list_sessions", &none), ToolPolicy::Free);
-        assert_eq!(policy("send_message", &none), ToolPolicy::Free);
+    fn voice_may_call_every_tool_unconfirmed() {
         for t in [
+            "list_sessions",
             "delete_project",
-            "clear_session",
-            "terminate_agent",
-            "interrupt_session",
-            "set_session_system_prompt",
-            "create_repeating_task",
-            "update_repeating_task",
-            "upgrade_plugin",
-            "app_install",
-            "ssh_run",
             "run_command",
-            "write_file",
-            "edit_file",
-            "set_variable",
-        ] {
-            assert_eq!(policy(t, &none), ToolPolicy::Gated, "{t}");
-        }
-        // Unknown and unlisted tools are denied, not merely gated.
-        for t in [
             "browser_open",
-            "spawn_subagent",
-            "fetch_url",
             "read_file",
             "git",
-            "made_up",
+            "spawn_subagent",
+            "homekit_set",
+            "made_up_plugin_tool",
         ] {
-            assert_eq!(policy(t, &none), ToolPolicy::Denied, "{t}");
-            assert!(!tool_allowed(t));
+            assert_eq!(policy(t, &json!({})), ToolPolicy::Free, "{t}");
         }
-        assert_eq!(
-            policy("voice_prompt", &json!({"action": "get"})),
-            ToolPolicy::Free
-        );
-        assert_eq!(policy("voice_prompt", &none), ToolPolicy::Free);
         assert_eq!(
             policy("voice_prompt", &json!({"action": "append"})),
-            ToolPolicy::Gated
-        );
-        assert_eq!(
-            policy("voice_pronunciation", &json!({"action": "remove"})),
-            ToolPolicy::Gated
-        );
-        assert_eq!(
-            policy("voice_pronunciation", &json!({"action": "add"})),
             ToolPolicy::Free
         );
-        // HomeKit: every tool runs unconfirmed, locks and pairing included;
-        // the remote-agent and command tools stay gated.
-        for t in ["homekit_list", "homekit_room_set", "homekit_pair"] {
-            assert_eq!(policy(t, &none), ToolPolicy::Free, "{t}");
-        }
-        let unlock = json!({"device": "Door", "characteristic": "lock", "value": "unlocked"});
-        assert_eq!(policy("homekit_set", &unlock), ToolPolicy::Free);
-        assert_eq!(policy("remote_agent_run", &none), ToolPolicy::Gated);
     }
 
     #[tokio::test]
-    async fn gated_voice_call_parks_and_confirms_exactly_once() {
+    async fn voice_calls_proceed_and_parked_actions_confirm_exactly_once() {
         let db = setup().await;
         let bc = Broadcaster::new();
 
-        // Non-voice callers are untouched.
-        let mut args = json!({"project_id": "p"});
-        assert!(matches!(
-            gate_call(&db, &bc, "chat", "delete_project", &mut args)
-                .await
-                .unwrap(),
-            Gate::Proceed
-        ));
-        // Voice: denied tools fail, free tools proceed.
-        assert!(
-            gate_call(&db, &bc, "voice", "browser_open", &mut json!({}))
-                .await
-                .is_err()
-        );
-        assert!(matches!(
-            gate_call(&db, &bc, "voice", "list_sessions", &mut json!({}))
-                .await
-                .unwrap(),
-            Gate::Proceed
-        ));
+        // Every tool proceeds, for chat and voice alike; a model-sent
+        // `confirmed` flag is still dropped.
+        for caller in ["chat", "voice"] {
+            for tool in ["delete_project", "browser_open", "read_file"] {
+                let mut args = json!({"project_id": "p", "confirmed": true});
+                assert!(matches!(
+                    gate_call(&db, &bc, caller, tool, &mut args).await.unwrap(),
+                    Gate::Proceed
+                ));
+            }
+        }
+        assert!(list_open(&db, "u1").await.unwrap().is_empty());
 
-        // A model-asserted `confirmed: true` changes nothing: still parked,
-        // and the flag is not stored.
-        let mut args = json!({"session_id": "chat", "confirmed": true});
-        let Gate::Parked(out) = gate_call(&db, &bc, "voice", "clear_session", &mut args)
+        // The dormant confirm path still runs a parked call once, owner only.
+        let voice = db.get_session("voice").await.unwrap().unwrap();
+        let args = json!({"session_id": "chat"});
+        let action = create(&db, &voice, CHANNEL_WEB, "clear_session", &args)
             .await
-            .unwrap()
-        else {
-            panic!("expected parked");
-        };
-        assert_eq!(out["status"], "awaiting_confirmation");
-        let id = out["action_id"].as_str().unwrap().to_string();
+            .unwrap();
+        let id = action.id.clone();
         let open = list_open(&db, "u1").await.unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].summary, "Clear session, session \"chat\"");

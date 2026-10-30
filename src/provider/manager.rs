@@ -655,8 +655,8 @@ impl SessionManager {
         // escape hatch applies host-wide regardless of backend.
         // The voice assistant gets no forced bypass: it is a router, so the
         // CLI's native shell / file / agent tools are denied outright
-        // (`voice_lockdown`, read by the Claude provider's argv builder),
-        // and its gated MCP tools wait for a human confirmation
+        // (`voice_lockdown`, read by the Claude provider's argv builder);
+        // every Peckboard MCP tool stays available to it
         // (`service::voice_actions`). The host-wide escape hatch still
         // applies to it like any other session.
         let is_voice =
@@ -676,15 +676,13 @@ impl SessionManager {
         // per-session config file here — the one spot every dispatch path
         // crosses AFTER the model (hence provider) is resolved; the
         // construction sites often only know `model: "default"`. Pre-hatcher
-        // research sessions stay locked to the built-in read-only toolset;
-        // the voice assistant has no browser, so browser servers are dropped.
+        // research sessions stay locked to the built-in read-only toolset.
         if !final_config.is_pre_hatcher {
             if let Some(path) = &final_config.mcp_config_path {
                 crate::service::mcp_server::user_servers::append_user_mcp_servers(
                     path,
                     db,
                     &provider_id,
-                    is_voice,
                 )
                 .await;
             }
