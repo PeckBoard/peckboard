@@ -232,6 +232,15 @@ function parseRoute(): {
   }
 }
 
+/** The card a project URL opens: `/projects/<pid>?card=<id>` (what link
+ *  previews and shared links use) or `/projects/<pid>/cards/<id>`. */
+function routeCardId(): string | null {
+  const segments = window.location.pathname.split('/').filter(Boolean)
+  if (segments[0] !== 'projects') return null
+  if (segments[2] === 'cards' && segments[3]) return segments[3]
+  return new URLSearchParams(window.location.search).get('card')
+}
+
 /** Build a URL path for a given view, optional ID, and optional sub-view. */
 function buildPath(view: View, activeId?: string | null, sub?: SessionSub): string {
   if ((view === 'sessions' || view === 'projects') && activeId && sub === 'todos') {
@@ -613,6 +622,8 @@ function App() {
         setActiveSession(initialRoute.activeId)
       } else if (initialRoute.view === 'projects') {
         setActiveProject(initialRoute.activeId)
+        const cardId = routeCardId()
+        if (cardId) useVoiceNavStore.getState().requestCard(initialRoute.activeId, cardId)
       }
     }
   }, [authenticated, initialRoute, setActiveSession, setActiveProject])
@@ -628,6 +639,9 @@ function App() {
         setActiveSession(route.activeId)
       } else if (route.view === 'projects') {
         setActiveProject(route.activeId)
+        const cardId = routeCardId()
+        if (route.activeId && cardId)
+          useVoiceNavStore.getState().requestCard(route.activeId, cardId)
       } else if (route.view === 'repeatingTasks') {
         setActiveRepeatingTaskId(route.activeId)
       } else if (route.view === 'reports') {

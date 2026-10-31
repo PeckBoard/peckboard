@@ -153,6 +153,12 @@ pub enum StartOutcome {
     /// readable reason for log/UI surfacing. Only Scheduler-triggered
     /// runs can be throttled.
     Throttled(String),
+    /// An Assistant-target task was queued for the voice session (no new
+    /// session is created).
+    QueuedForAssistant,
+    /// An Assistant-target task fired but no Assistant session exists yet.
+    /// Recorded as a failed run.
+    NoAssistant,
 }
 
 /// Proof token: the bearer holds the per-task lock for `task_id`.
@@ -454,6 +460,13 @@ impl RepeatingTaskManager {
             .await;
             return Ok(StartOutcome::Throttled(reason));
         }
+        // The Assistant performs this task itself: no new session, so
+        // none of the session checks below apply.
+        if task.target.as_deref() == Some(TARGET_ASSISTANT) {
+            return self
+                .queue_for_assistant_locked(lock, &task, ctx, trigger)
+                .await;
+        }
 
         // Existence check: any session previously spawned by this task
         // that's still being processed by the provider. We scan the rows
@@ -698,6 +711,120 @@ impl RepeatingTaskManager {
 
         Ok(StartOutcome::Spawned)
     }
+
+    /// **Private.** The Assistant branch of [`Self::start_run_locked`]: no
+    /// new session. The task prompt is queued into the voice relay gate as a
+    /// `scheduled` relay, so the Assistant performs it at the next quiet
+    /// gap and never talks over the user. Takes the `&TaskLock` like its
+    /// caller, so it is serialised against every other dispatch of the task.
+    ///
+    /// There is no "previous run still running" check: the voice session
+    /// is shared, and its own queue serialises the turns.
+    async fn queue_for_assistant_locked(
+        &self,
+        _lock: &TaskLock,
+        task: &RepeatingTask,
+        ctx: &RunContext<'_>,
+        trigger: RunTrigger,
+    ) -> anyhow::Result<StartOutcome> {
+        use crate::service::voice_relay::{VOICE_EXPERT_KIND, format_scheduled};
+        let db = ctx.db;
+        let now_dt = Utc::now();
+        let now = now_dt.to_rfc3339();
+        let voice = db.find_expert_session(VOICE_EXPERT_KIND).await?;
+
+        // Advance the schedule whether or not the Assistant exists, like a
+        // failed dispatch: otherwise a missing voice session would re-fire
+        // the task every tick.
+        let (next, disable) = next_run_fields(task, now_dt);
+        let _ = db
+            .update_repeating_task(
+                &task.id,
+                UpdateRepeatingTask {
+                    last_run_at: Some(Some(now.clone())),
+                    next_run_at: Some(next),
+                    enabled: disable,
+                    updated_at: Some(now.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        if trigger == RunTrigger::Scheduler {
+            ctx.auditor
+                .record_scheduler_dispatch(&task.id, now_dt)
+                .await;
+        }
+
+        let Some(voice) = voice else {
+            tracing::warn!(task_id = %task.id, "Assistant-target task fired with no Assistant session");
+            record_run(
+                db,
+                &task.id,
+                None,
+                "failed",
+                trigger,
+                Some(NO_ASSISTANT_REASON.to_string()),
+            )
+            .await;
+            return Ok(StartOutcome::NoAssistant);
+        };
+
+        let text = format_scheduled(&task.name, &task.prompt);
+        let summary = format!("{}: {}", task.name, task.prompt);
+        crate::service::voice_gate::enqueue_scheduled(db, &voice.id, &text, &summary).await;
+        record_run(
+            db,
+            &task.id,
+            Some(&voice.id),
+            "spawned",
+            trigger,
+            Some("queued for the Assistant".to_string()),
+        )
+        .await;
+        ctx.broadcaster.broadcast(WsEvent {
+            event_type: "repeating-task-run".into(),
+            session_id: task.id.clone(),
+            data: serde_json::json!({
+                "taskId": task.id,
+                "sessionId": voice.id,
+                "startedAt": now,
+                "target": TARGET_ASSISTANT,
+            }),
+        });
+        Ok(StartOutcome::QueuedForAssistant)
+    }
+}
+
+/// `repeating_tasks.target` of a task the Assistant performs (NULL = a
+/// fresh session per run).
+pub const TARGET_ASSISTANT: &str = "assistant";
+
+/// Run-history detail when an Assistant-target task fires before any
+/// Assistant (voice) session exists.
+pub const NO_ASSISTANT_REASON: &str =
+    "no Assistant session yet: open the Assistant page once, then run it again";
+
+/// The server's own IANA zone: `TZ`, else the `/etc/localtime` symlink,
+/// else `/etc/timezone`. `None` when none of them names a zone chrono-tz
+/// knows (the schedule then runs in UTC). The default timezone for tasks
+/// created over MCP, where no browser reports the user's zone.
+pub fn server_timezone() -> Option<String> {
+    fn valid(z: &str) -> Option<String> {
+        let z = z.trim().trim_start_matches(':');
+        z.parse::<chrono_tz::Tz>().ok().map(|_| z.to_string())
+    }
+    if let Some(z) = std::env::var("TZ").ok().and_then(|z| valid(&z)) {
+        return Some(z);
+    }
+    if let Ok(link) = std::fs::read_link("/etc/localtime")
+        && let Some((_, zone)) = link.to_string_lossy().split_once("zoneinfo/")
+        && let Some(z) = valid(zone)
+    {
+        return Some(z);
+    }
+    std::fs::read_to_string("/etc/timezone")
+        .ok()
+        .and_then(|z| valid(&z))
 }
 
 /// Parse + sanity-check a schedule descriptor. Used both at create/edit
@@ -1607,6 +1734,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             timezone: None,
+            target: None,
         }
     }
 
@@ -1946,6 +2074,7 @@ mod tests {
             created_at: ts.clone(),
             updated_at: ts.clone(),
             timezone: None,
+            target: None,
         })
         .await
         .unwrap();
@@ -2016,6 +2145,7 @@ mod tests {
             created_at: ts.clone(),
             updated_at: ts.clone(),
             timezone: None,
+            target: None,
         })
         .await
         .unwrap();
@@ -2077,6 +2207,7 @@ mod tests {
             created_at: ts.clone(),
             updated_at: ts.clone(),
             timezone: None,
+            target: None,
         })
         .await
         .unwrap();

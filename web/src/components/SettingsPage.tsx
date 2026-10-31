@@ -52,6 +52,7 @@ import UserManagement from './UserManagement'
 import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
 import RetentionSettingsSection from './RetentionSettingsSection'
+import LinkPreviewSettingsSection from './LinkPreviewSettingsSection'
 import TlsSettingsSection from './TlsSettingsSection'
 import EnvVarsSection from './EnvVarsSection'
 import SshKeysSection from './SshKeysSection'
@@ -59,6 +60,7 @@ import RemoteAccessSection from './RemoteAccessSection'
 import ExternalAccessSection from './ExternalAccessSection'
 import AgentVarsSection from './AgentVarsSection'
 import AssistantMirrorSection from './AssistantMirrorSection'
+import PushNotificationsSection from './PushNotificationsSection'
 import ConfirmDialog from './ConfirmDialog'
 import ProviderBasePrompt, { type ProviderPrompt } from './ProviderBasePrompt'
 import VoiceSettingsSection from './VoiceSettingsSection'
@@ -370,6 +372,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'Pre-hatcher Model',
     anchor: 'prehatch',
     keywords: 'research cheapest before message',
+  },
+  {
+    page: 'chat',
+    section: 'Link Previews',
+    anchor: 'link-previews',
+    keywords: 'link preview embed youtube auto-load trusted hosts screenshot unfurl',
   },
   {
     page: 'prompts',
@@ -1456,6 +1464,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                 </p>
               )}
             </section>
+            <LinkPreviewSettingsSection isAdmin={isAdmin} />
           </>
         )}
 
@@ -1463,6 +1472,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           <>
             <VoiceSettingsSection />
             {isAdmin && <AssistantMirrorSection />}
+            {isAdmin && <PushNotificationsSection />}
           </>
         )}
 

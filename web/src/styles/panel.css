@@ -80,6 +80,11 @@
   background: var(--surface3);
   color: var(--text3);
 }
+/* A repeating task the Assistant performs. */
+.status-assistant {
+  background: var(--accent-bg, var(--surface3));
+  color: var(--accent);
+}
 
 /* Repeating-task run-history outcomes. */
 .status-spawned {

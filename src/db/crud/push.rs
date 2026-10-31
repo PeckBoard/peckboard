@@ -5,6 +5,8 @@ use crate::db::models::*;
 use crate::db::schema::*;
 
 impl Db {
+    /// Insert, or refresh the keys of, the subscription for `new.endpoint`
+    /// (a browser re-subscribing hands out the same endpoint again).
     pub async fn create_push_subscription(
         &self,
         new: NewPushSubscription,
@@ -12,6 +14,12 @@ impl Db {
         self.with_conn(move |conn| {
             diesel::insert_into(push_subscriptions::table)
                 .values(&new)
+                .on_conflict(push_subscriptions::endpoint)
+                .do_update()
+                .set((
+                    push_subscriptions::p256dh.eq(&new.p256dh),
+                    push_subscriptions::auth_key.eq(&new.auth_key),
+                ))
                 .returning(PushSubscription::as_returning())
                 .get_result(conn)
                 .map_err(Into::into)

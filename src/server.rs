@@ -546,7 +546,14 @@ pub async fn run_server(
     // Assistant mirror: copies the voice conversation to Slack / Discord
     // and emails unwatched turns (see `service::assistant_mirror`). Sends
     // messages only; it never starts an agent.
-    crate::service::assistant_mirror::AssistantMirror::of(&state).await;
+    let mirror = crate::service::assistant_mirror::AssistantMirror::of(&state).await;
+    // Assistant web push: relay turns delivered while no Assistant panel is
+    // visible notify the subscribed browsers (see `service::push`).
+    crate::service::push::install_assistant_notifier(
+        state.db.clone(),
+        state.push_service.clone(),
+        move || mirror.is_watched(),
+    );
     // TTS pronunciation lexicon: seed defaults, load the cache, and start
     // the unknown-word flusher (see `service::tts::lexicon`).
     if let Err(e) = crate::service::tts::lexicon::store(&state.db).await {

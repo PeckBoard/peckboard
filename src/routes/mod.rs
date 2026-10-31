@@ -17,6 +17,7 @@ pub mod env_vars;
 pub mod folders;
 pub mod grok_accounts;
 pub mod kimi_accounts;
+pub mod link_preview;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod me;
@@ -110,6 +111,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(notifications::router(state.clone()))
         .merge(background::router(state.clone()))
         .merge(dashboard_cards::router(state.clone()))
+        // Signed image-proxy GET is public (the HMAC is the credential);
+        // the preview itself is JWT'd, its settings admin-only.
+        .merge(link_preview::router(state.clone()))
         // Signed-URL GET is public (the HMAC is the credential); minting
         // the URL is JWT + session-access gated.
         .merge(shared_files::router(state.clone()))

@@ -88,7 +88,12 @@ export interface RepeatingTask {
   updated_at: string
   /** IANA zone name (e.g. "America/New_York"). `null` means UTC. */
   timezone: string | null
+  /** `'assistant'` = the Assistant performs each run; `null` = a fresh session. */
+  target?: 'assistant' | null
 }
+
+/** Where a repeating task's runs happen (the `target` sent to the API). */
+export type RepeatingTaskTarget = 'session' | 'assistant'
 
 export type RepeatingTaskRunStatus =
   | 'spawned'

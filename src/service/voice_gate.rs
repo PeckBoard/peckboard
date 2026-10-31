@@ -18,6 +18,11 @@
 //! assistant asks for it with the `voice_queue` tool — and then only one
 //! topic (source session) at a time, questions first.
 //!
+//! A due Assistant-target repeating task ([`enqueue_scheduled`]) is held
+//! here too, as a source-less `scheduled` relay: it waits for the same
+//! quiet gap, but counts as on-topic whatever the focus, so it is spoken
+//! at the first quiet moment rather than after the idle window.
+//!
 //! Durability: every held relay is a row in `voice_relay_queue` (deleted on
 //! delivery) and [`spawn_ticker`] reloads the table at boot, so nothing is
 //! lost across a restart. Held questions have no timeout: a question stays
@@ -55,6 +60,8 @@ const SUMMARY_CHARS: usize = 120;
 pub enum RelayKind {
     Question,
     Update,
+    /// A due Assistant-target repeating task (no source session).
+    Scheduled,
 }
 
 impl RelayKind {
@@ -62,9 +69,13 @@ impl RelayKind {
         match self {
             RelayKind::Question => "question",
             RelayKind::Update => "update",
+            RelayKind::Scheduled => "scheduled",
         }
     }
 }
+
+/// `source_name` of a scheduled relay (it has no source session).
+const SCHEDULED_SOURCE_NAME: &str = "scheduled task";
 
 /// What the browser reports about the conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +110,8 @@ impl Activity {
 #[derive(Clone, Debug)]
 pub struct Held {
     pub id: String,
-    pub source_session_id: String,
+    /// `None` only for [`RelayKind::Scheduled`].
+    pub source_session_id: Option<String>,
     pub source_name: String,
     pub source_project_id: Option<String>,
     pub source_parent_id: Option<String>,
@@ -128,21 +140,25 @@ impl Focus {
 
     fn of_held(h: &Held) -> Self {
         Focus {
-            session_id: Some(h.source_session_id.clone()),
+            session_id: h.source_session_id.clone(),
             parent_id: h.source_parent_id.clone(),
             project_id: h.source_project_id.clone(),
         }
     }
 
     /// The focused session itself, its parent, its subagents, or anything
-    /// in the focused project.
+    /// in the focused project. A scheduled relay is always due: the user
+    /// asked for it at this time.
     fn covers(&self, h: &Held) -> bool {
+        if h.kind == RelayKind::Scheduled {
+            return true;
+        }
         if let Some(f) = &self.session_id
-            && (h.source_session_id == *f || h.source_parent_id.as_ref() == Some(f))
+            && (h.source_session_id.as_ref() == Some(f) || h.source_parent_id.as_ref() == Some(f))
         {
             return true;
         }
-        if self.parent_id.as_ref() == Some(&h.source_session_id) {
+        if self.parent_id.is_some() && self.parent_id == h.source_session_id {
             return true;
         }
         matches!((&self.project_id, &h.source_project_id), (Some(a), Some(b)) if a == b)
@@ -265,22 +281,42 @@ fn summarize(s: &str) -> String {
     }
 }
 
-fn held_from(item: &VoiceRelayItem, source: &Session) -> Held {
+/// `source` is `None` only for a `scheduled` row.
+fn held_from(item: &VoiceRelayItem, source: Option<&Session>) -> Held {
+    let kind = match item.kind.as_str() {
+        "question" => RelayKind::Question,
+        "scheduled" => RelayKind::Scheduled,
+        _ => RelayKind::Update,
+    };
     Held {
         id: item.id.clone(),
-        source_session_id: source.id.clone(),
-        source_name: source.name.clone(),
-        source_project_id: source.project_id.clone(),
-        source_parent_id: source.parent_session_id.clone(),
-        kind: if item.kind == "question" {
-            RelayKind::Question
-        } else {
-            RelayKind::Update
-        },
+        source_session_id: source.map(|s| s.id.clone()),
+        source_name: source.map_or_else(|| SCHEDULED_SOURCE_NAME.to_string(), |s| s.name.clone()),
+        source_project_id: source.and_then(|s| s.project_id.clone()),
+        source_parent_id: source.and_then(|s| s.parent_session_id.clone()),
+        kind,
         question_event_id: item.question_event_id.clone(),
         text: item.text.clone(),
         summary: item.summary.clone(),
     }
+}
+
+/// Persist `item` (best effort) and hold it in memory.
+async fn hold(db: &Db, item: VoiceRelayItem, source: Option<&Session>) {
+    let voice_id = item.voice_session_id.clone();
+    if let Err(e) = db.insert_voice_relay(item.clone()).await {
+        // Still hold it in memory: losing it now would be worse than
+        // losing it only on a restart.
+        tracing::warn!(voice_session = %voice_id, "voice gate: persisting relay failed: {e}");
+    }
+    let held = held_from(&item, source);
+    tracing::info!(
+        voice_session = %voice_id,
+        source = %held.source_name,
+        kind = held.kind.as_str(),
+        "voice gate: relay queued"
+    );
+    with_gate(&voice_id, Instant::now(), |g| g.queue.push(held));
 }
 
 /// Hold a relay for `voice_id` (persisted first, so a restart keeps it).
@@ -307,26 +343,31 @@ pub async fn enqueue(
     let item = VoiceRelayItem {
         id: uuid::Uuid::new_v4().to_string(),
         voice_session_id: voice_id.to_string(),
-        source_session_id: source.id.clone(),
+        source_session_id: Some(source.id.clone()),
         kind: kind.as_str().to_string(),
         question_event_id: question_event_id.map(str::to_string),
         text: text.to_string(),
         summary: summarize(summary_source),
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    if let Err(e) = db.insert_voice_relay(item.clone()).await {
-        // Still hold it in memory: losing it now would be worse than
-        // losing it only on a restart.
-        tracing::warn!(voice_session = %voice_id, "voice gate: persisting relay failed: {e}");
-    }
-    let held = held_from(&item, source);
-    tracing::info!(
-        voice_session = %voice_id,
-        source = %source.name,
-        kind = kind.as_str(),
-        "voice gate: relay queued"
-    );
-    with_gate(voice_id, Instant::now(), |g| g.queue.push(held));
+    hold(db, item, Some(source)).await;
+}
+
+/// Hold a due Assistant-target repeating task for `voice_id`. It has no
+/// source session: it is delivered at the next quiet gap whatever the
+/// focus (the user asked for it at this time), never over the user.
+pub async fn enqueue_scheduled(db: &Db, voice_id: &str, text: &str, summary_source: &str) {
+    let item = VoiceRelayItem {
+        id: uuid::Uuid::new_v4().to_string(),
+        voice_session_id: voice_id.to_string(),
+        source_session_id: None,
+        kind: RelayKind::Scheduled.as_str().to_string(),
+        question_event_id: None,
+        text: text.to_string(),
+        summary: summarize(summary_source),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    hold(db, item, None).await;
 }
 
 /// Pending relays for `voice_id`, in queue order.
@@ -339,8 +380,8 @@ pub fn list(voice_id: &str) -> Vec<Held> {
 
 /// `(source session, whether it holds a question)` groups in release order:
 /// sources with a question first, then by first arrival.
-fn topic_order(queue: &[Held]) -> Vec<String> {
-    let mut sources: Vec<(String, bool, usize)> = Vec::new();
+fn topic_order(queue: &[Held]) -> Vec<Option<String>> {
+    let mut sources: Vec<(Option<String>, bool, usize)> = Vec::new();
     for (i, h) in queue.iter().enumerate() {
         match sources.iter_mut().find(|s| s.0 == h.source_session_id) {
             Some(s) => s.1 |= h.kind == RelayKind::Question,
@@ -422,13 +463,16 @@ async fn still_relevant(db: &Db, items: Vec<Held>) -> Vec<Held> {
     let mut out = Vec::with_capacity(items.len());
     let mut stale = Vec::new();
     for h in items {
-        if let (RelayKind::Question, Some(qid)) = (h.kind, h.question_event_id.as_deref()) {
-            let pending =
-                crate::service::questions::pending_question_events(db, &h.source_session_id)
-                    .await
-                    .map(|p| p.iter().any(|e| e.id == qid))
-                    // A failed scan must not lose the question.
-                    .unwrap_or(true);
+        if let (RelayKind::Question, Some(qid), Some(source)) = (
+            h.kind,
+            h.question_event_id.as_deref(),
+            h.source_session_id.as_deref(),
+        ) {
+            let pending = crate::service::questions::pending_question_events(db, source)
+                .await
+                .map(|p| p.iter().any(|e| e.id == qid))
+                // A failed scan must not lose the question.
+                .unwrap_or(true);
             if !pending {
                 tracing::info!(source = %h.source_name, question_id = qid, "voice gate: dropping held question answered elsewhere");
                 stale.push(h.id.clone());
@@ -513,6 +557,8 @@ pub async fn tick_at(
             });
             continue;
         }
+        // Nobody watching the Assistant? Tell their browser (web push).
+        crate::service::push::notify_assistant_relays(&items);
         if let Err(e) = db.delete_voice_relays(ids).await {
             tracing::warn!(voice_session = %voice_id, "voice gate: deleting delivered relays failed: {e}");
         }
@@ -569,11 +615,18 @@ pub async fn load(db: &Db) {
     let mut orphans = Vec::new();
     let now = Instant::now();
     for row in rows {
-        let Ok(Some(source)) = db.get_session(&row.source_session_id).await else {
-            orphans.push(row.id);
-            continue;
+        let source = match row.source_session_id.as_deref() {
+            // A scheduled relay has no source session.
+            None => None,
+            Some(id) => match db.get_session(id).await {
+                Ok(Some(s)) => Some(s),
+                _ => {
+                    orphans.push(row.id);
+                    continue;
+                }
+            },
         };
-        let held = held_from(&row, &source);
+        let held = held_from(&row, source.as_ref());
         with_gate(&row.voice_session_id, now, |g| {
             if !g.queue.iter().any(|h| h.id == held.id) {
                 g.queue.push(held);

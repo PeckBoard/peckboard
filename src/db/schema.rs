@@ -66,6 +66,7 @@ diesel::table! {
         created_at -> Text,
         updated_at -> Text,
         timezone -> Nullable<Text>,
+        target -> Nullable<Text>,
     }
 }
 
@@ -578,7 +579,7 @@ diesel::table! {
     voice_relay_queue (id) {
         id -> Text,
         voice_session_id -> Text,
-        source_session_id -> Text,
+        source_session_id -> Nullable<Text>,
         kind -> Text,
         question_event_id -> Nullable<Text>,
         text -> Text,

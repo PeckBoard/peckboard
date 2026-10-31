@@ -5,6 +5,7 @@ import type { OrbState } from '../../voice/assistantContract'
 import { audioLevels, useOrbState } from '../../voice/levels'
 import '../../styles/assistant.css'
 import AssistantOrb from './AssistantOrb'
+import AssistantEmbedCard from './AssistantEmbedCard'
 import AssistantTranscriptDrawer from './AssistantTranscriptDrawer'
 import TopicRing from './TopicRing'
 import { useAbsorbAnimation } from './useAbsorbAnimation'
@@ -115,7 +116,7 @@ export default function AssistantPage() {
           {error}
         </div>
       )}
-
+      <AssistantEmbedCard />
       <button
         type="button"
         className="assistant-corner-button assistant-listen"

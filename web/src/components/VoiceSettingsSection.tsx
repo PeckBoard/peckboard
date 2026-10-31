@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useVoiceStore } from '../store/voice'
 import { useResourcesStore } from '../store/resources'
+import { useRepeatingTasksStore } from '../store/repeatingTasks'
+import { describeSchedule } from '../utils/repeatingSchedule'
 import { getSpeechEngine, type VoiceOption } from '../voice/engine'
 import {
   KOKORO_SPEED_MAX,
@@ -336,9 +338,67 @@ export default function VoiceSettingsSection() {
           </p>
         )}
       </section>
-
+      <AssistantScheduleSection />
       <VoicePromptEditor />
       <VoicePronunciations />
     </>
+  )
+}
+
+/** Settings → Assistant → Scheduled Tasks: one-click presets for repeating
+ *  tasks the Assistant performs itself (listed under Repeating Tasks). */
+function AssistantScheduleSection() {
+  const addMorningBriefing = useRepeatingTasksStore((s) => s.addMorningBriefing)
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const add = async () => {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const task = await addMorningBriefing()
+      setStatus({
+        ok: true,
+        text: `“${task.name}” is scheduled: ${describeSchedule(task.schedule_kind, task.schedule_value, task.timezone)}. Edit it under Repeating Tasks.`,
+      })
+    } catch (err) {
+      setStatus({ ok: false, text: err instanceof Error ? err.message : 'Failed to add it' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section
+      className="settings-section"
+      data-testid="voice-schedule-section"
+      data-settings-anchor="voice-schedule"
+    >
+      <h3>Scheduled Tasks</h3>
+      <p className="form-hint">
+        The Assistant can run tasks on a schedule and speak the result at the next quiet moment. Ask
+        it (&ldquo;remind me at five&rdquo;), or add a ready-made one.
+      </p>
+      <div className="voice-settings-actions">
+        <button
+          type="button"
+          className="btn-secondary"
+          data-testid="voice-add-morning-briefing"
+          onClick={() => void add()}
+          disabled={busy}
+        >
+          {busy ? 'Adding…' : 'Add morning briefing'}
+        </button>
+      </div>
+      {status && (
+        <p
+          className={status.ok ? 'form-hint' : 'form-error'}
+          role={status.ok ? 'status' : 'alert'}
+          data-testid="voice-morning-briefing-status"
+        >
+          {status.text}
+        </p>
+      )}
+    </section>
   )
 }

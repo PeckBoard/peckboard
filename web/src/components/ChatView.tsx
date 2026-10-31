@@ -33,6 +33,7 @@ import InputBar from './InputBar'
 import ToolUseBlock, { CopyButton } from './ToolUseBlock'
 import DiffBlock from './DiffBlock'
 import SharedFileCard from './SharedFileCard'
+import LinkPreviews from './LinkPreview'
 import ConfirmDialog from './ConfirmDialog'
 import ModelSwitchDialog, { type ModelSwitchMode } from './ModelSwitchDialog'
 import Modal from './Modal'
@@ -408,6 +409,7 @@ export const ChatRow = memo(function ChatRow({
               </details>
             )}
             <MessageAttachments sessionId={sessionId} attachments={item.attachments} />
+            <LinkPreviews text={item.text} />
             <div className="chat-time chat-time-user">{formatTime(item.ts)}</div>
           </div>
         </div>
@@ -441,6 +443,7 @@ export const ChatRow = memo(function ChatRow({
             >
               {item.text}
             </SafeMarkdown>
+            <LinkPreviews text={item.text} />
             <div className="chat-time">{formatTime(item.ts)}</div>
           </div>
         </div>

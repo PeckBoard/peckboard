@@ -1,5 +1,11 @@
 import { create } from 'zustand'
-import type { RepeatingScheduleKind, RepeatingTask, RepeatingTaskRun, Session } from '../types/api'
+import type {
+  RepeatingScheduleKind,
+  RepeatingTask,
+  RepeatingTaskRun,
+  RepeatingTaskTarget,
+  Session,
+} from '../types/api'
 import { authedFetch } from './auth'
 import { useTabsStore } from './tabs'
 
@@ -22,6 +28,8 @@ export interface CreateRepeatingTaskInput {
   enabled?: boolean
   /** IANA zone name, or null/omitted for UTC. */
   timezone?: string | null
+  /** Where each run happens; omitted = a fresh session. */
+  target?: RepeatingTaskTarget
 }
 
 export interface UpdateRepeatingTaskInput {
@@ -34,7 +42,11 @@ export interface UpdateRepeatingTaskInput {
   effort?: string | null
   enabled?: boolean
   timezone?: string | null
+  target?: RepeatingTaskTarget
 }
+
+/** `queued` = handed to the Assistant (an Assistant-target task). */
+export type RunNowStatus = 'spawned' | 'already_running' | 'disabled' | 'queued'
 
 interface RepeatingTasksState {
   tasks: RepeatingTask[]
@@ -50,7 +62,9 @@ interface RepeatingTasksState {
   /** Local-only cleanup for a task already deleted server-side (broadcast handler). */
   removeTaskLocally: (id: string) => void
   /** Force-run. Returns the backend status string. */
-  runNow: (id: string) => Promise<'spawned' | 'already_running' | 'disabled'>
+  runNow: (id: string) => Promise<RunNowStatus>
+  /** Create (or fetch, if it exists) the daily Assistant "Morning briefing" task. */
+  addMorningBriefing: () => Promise<RepeatingTask>
   /** Apply a WS-driven mutation event (`repeating-task-changed`). */
   applyChange: (action: string, payload: { id?: string; task?: RepeatingTask }) => void
 }
@@ -170,12 +184,28 @@ export const useRepeatingTasksStore = create<RepeatingTasksState>((set, get) => 
       const err = await res.json().catch(() => ({ error: 'Failed to run task' }))
       throw new Error(err.error || 'Failed to run task')
     }
-    const body = (await res.json()) as { status: 'spawned' | 'already_running' | 'disabled' }
+    const body = (await res.json()) as { status: RunNowStatus }
     // Optimistically refresh the sessions + run history so the new run
     // shows up without waiting for a navigation away and back.
     void get().fetchSessionsForTask(id)
     void get().fetchRunsForTask(id)
     return body.status
+  },
+
+  addMorningBriefing: async () => {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null
+    const res = await authedFetch('/api/repeating-tasks/presets/morning-briefing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timezone }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to add the briefing' }))
+      throw new Error(err.error || 'Failed to add the briefing')
+    }
+    const task: RepeatingTask = await res.json()
+    get().applyChange('created', { task })
+    return task
   },
 
   applyChange: (action: string, payload: { id?: string; task?: RepeatingTask }) => {

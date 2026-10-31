@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.112"
+version = "0.1.113"
 edition = "2024"
 
 [dependencies]
@@ -40,7 +40,11 @@ rand = "0.8"
 rand_core = "0.10.1"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 base64 = "0.22"
-p256 = { version = "0.13", features = ["ecdsa"] }
+# `ecdh`: Web Push payload encryption (service::push, RFC 8291).
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+# Web Push key derivation (RFC 8291). 0.13 = digest 0.11, matching sha2
+# 0.11 above; already in the tree via elliptic-curve 0.14 (russh).
+hkdf = "0.13"
 
 # Logging / tracing
 tracing = "0.1"

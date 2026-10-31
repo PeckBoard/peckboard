@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "peckboard"
-version = "0.1.112"
+version = "0.1.113"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4409,6 +4409,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.2",
  "hex",
+ "hkdf 0.13.0",
  "hyper-util",
  "if-addrs",
  "image",

@@ -2553,7 +2553,7 @@ struct HttpFetchRequest {
 /// otherwise non-globally-routable. IPv6 forms that embed an IPv4 address
 /// (mapped, compatible, NAT64, 6to4) are judged by the v4 address they carry,
 /// so `::ffff:10.x` / `64:ff9b::a9fe:a9fe` can't sneak past the v4 list.
-fn is_blocked_fetch_ip(ip: &IpAddr) -> bool {
+pub(crate) fn is_blocked_fetch_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();

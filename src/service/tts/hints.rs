@@ -226,7 +226,8 @@ mod tests {
 
     #[test]
     fn every_hint_in_the_voice_prompt_is_valid() {
-        let prompt = crate::service::voice_relay::VOICE_SYSTEM_PROMPT;
+        // The hint examples live in the fixed core rules.
+        let prompt = crate::service::voice_relay::VOICE_CORE_RULES;
         let written = prompt.matches("](/").count();
         let parsed = parse(prompt)
             .iter()

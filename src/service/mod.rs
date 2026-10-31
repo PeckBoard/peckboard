@@ -9,6 +9,7 @@ pub mod doc_reviews;
 pub mod env_vars;
 pub mod fs_jail;
 pub mod github_pr;
+pub mod link_preview;
 pub mod mcp_client;
 pub mod mcp_server;
 pub mod mdns;

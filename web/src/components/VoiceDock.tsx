@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVoiceStore, type VoiceStatus } from '../store/voice'
 import { foldVoiceTranscript, type VoiceTranscriptItem } from '../voice/text'
 import VoiceActionCard from './VoiceActionCard'
+import LinkPreviews from './LinkPreview'
 import KokoroStatusNotice from './KokoroStatusNotice'
 
 const STATUS_LABEL: Record<VoiceStatus, string> = {
@@ -202,6 +203,7 @@ export default function VoiceDock({
                 data-testid="voice-line-relay"
               >
                 {it.text}
+                <LinkPreviews text={it.text} />
               </div>
             )
           }
@@ -213,6 +215,7 @@ export default function VoiceDock({
                 data-testid="voice-line-assistant"
               >
                 {it.text}
+                <LinkPreviews text={it.text} />
               </div>
             )
           }
@@ -223,6 +226,7 @@ export default function VoiceDock({
               data-testid="voice-line-user"
             >
               {it.text}
+              <LinkPreviews text={it.text} />
             </div>
           )
         })}

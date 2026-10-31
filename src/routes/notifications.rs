@@ -51,6 +51,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
     let protected = Router::new()
         .route("/api/push/subscribe", post(subscribe).delete(unsubscribe))
+        .route("/api/push/test", post(test_push))
         .route(
             "/api/announcements",
             get(list_announcements).post(create_announcement),
@@ -99,14 +100,39 @@ async fn get_vapid_key(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         "publicKey": state.push_service.vapid_public_key
     }))
 }
-
 // ── Push subscribe / unsubscribe ───────────────────────────────────
 
-/// POST /api/push/subscribe
+type ApiError = (StatusCode, Json<serde_json::Value>);
+
+fn api_err(status: StatusCode, msg: impl Into<String>) -> ApiError {
+    (status, Json(serde_json::json!({ "error": msg.into() })))
+}
+
+/// Pushes carry Assistant (admin-only) activity and subscriptions have no
+/// owner, so only admins may register a browser.
+fn push_admin_only(user: &AuthUser) -> Result<(), ApiError> {
+    if user.is_admin() {
+        Ok(())
+    } else {
+        Err(api_err(
+            StatusCode::FORBIDDEN,
+            "notifications are admin-only",
+        ))
+    }
+}
+
+/// POST /api/push/subscribe — register (or refresh) this browser. The
+/// endpoint must be an https push service; the server POSTs to it.
 async fn subscribe(
     State(state): State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<AuthUser>,
     Json(body): Json<SubscribeRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
+    push_admin_only(&user)?;
+    crate::service::push::validate_endpoint(&body.endpoint)
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+    crate::service::push::validate_keys(&body.p256dh, &body.auth_key)
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
     let now = chrono::Utc::now().to_rfc3339();
 
     let sub = state
@@ -118,17 +144,9 @@ async fn subscribe(
             created_at: now,
         })
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok::<_, (StatusCode, Json<serde_json::Value>)>((
-        StatusCode::CREATED,
-        Json(serde_json::json!(sub)),
-    ))
+    Ok((StatusCode::CREATED, Json(serde_json::json!(sub))))
 }
 
 /// DELETE /api/push/subscribe
@@ -140,21 +158,41 @@ async fn unsubscribe(
         .db
         .delete_push_subscription(&body.endpoint)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !deleted {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "subscription not found" })),
-        ));
+        return Err(api_err(StatusCode::NOT_FOUND, "subscription not found"));
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/push/test — push a test notification to every registered
+/// browser now. `{"delivered": n, "failed": n}`.
+async fn test_push(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    push_admin_only(&user)?;
+    if crate::service::push::delivery_suppressed() {
+        return Err(api_err(
+            StatusCode::CONFLICT,
+            "Push is off: this server runs with PECKBOARD_NO_RESUME set",
+        ));
+    }
+    let msg = crate::service::push::PushMessage {
+        title: "Peckboard".into(),
+        body: "Notifications are working.".into(),
+        url: "/assistant".into(),
+        tag: "peckboard-test".into(),
+    };
+    let (delivered, failed) = state
+        .push_service
+        .send_to_all(&state.db, &crate::service::push::http_client(), &msg, 300)
+        .await;
+    Ok(Json(
+        serde_json::json!({ "delivered": delivered, "failed": failed }),
+    ))
 }
 
 // ── Announcements ──────────────────────────────────────────────────

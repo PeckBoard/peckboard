@@ -208,7 +208,7 @@ pub async fn lookup(data_dir: &Path, session_id: &str, file_id: &str) -> Option<
 
 /// HMAC-SHA256 (RFC 2104) — the crate already depends on `sha2`, so this
 /// avoids pulling in `hmac` for one call site.
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64;
     let mut k = [0u8; BLOCK];
     if key.len() > BLOCK {

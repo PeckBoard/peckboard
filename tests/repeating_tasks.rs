@@ -96,6 +96,7 @@ async fn seed_task(db: &Db, id: &str, folder_id: &str, prompt: &str, model: Opti
         created_at: ts.clone(),
         updated_at: ts.clone(),
         timezone: None,
+        target: None,
     };
     let next = initial_next_run_at(&draft);
     db.create_repeating_task(NewRepeatingTask {
@@ -114,6 +115,7 @@ async fn seed_task(db: &Db, id: &str, folder_id: &str, prompt: &str, model: Opti
         created_at: ts.clone(),
         updated_at: ts,
         timezone: None,
+        target: None,
     })
     .await
     .unwrap();
@@ -746,6 +748,7 @@ async fn scheduler_disables_task_with_corrupt_schedule_instead_of_refiring() {
             created_at: ts.clone(),
             updated_at: ts,
             timezone: None,
+            target: None,
         })
         .await
         .unwrap();
@@ -816,6 +819,7 @@ async fn seed_once_task(db: &Db, id: &str, folder_id: &str, days_ahead: i64) {
         created_at: ts.clone(),
         updated_at: ts.clone(),
         timezone: None,
+        target: None,
     };
     let next = initial_next_run_at(&draft);
     db.create_repeating_task(NewRepeatingTask {
@@ -834,6 +838,7 @@ async fn seed_once_task(db: &Db, id: &str, folder_id: &str, days_ahead: i64) {
         created_at: ts.clone(),
         updated_at: ts,
         timezone: None,
+        target: None,
     })
     .await
     .unwrap();
@@ -1002,4 +1007,101 @@ async fn failed_dispatch_reschedules_next_run_at_instead_of_refiring_every_tick(
         1,
         "a dead-model task must not refire on the very next scheduler tick",
     );
+}
+
+/// An Assistant-target task never spawns a session: with no Assistant yet
+/// the run is recorded as failed; once one exists each run is queued into
+/// the voice relay gate as a persisted `scheduled` relay (and recorded),
+/// then delivered to the Assistant at the first quiet gap.
+#[tokio::test]
+async fn assistant_target_task_queues_into_the_voice_gate_without_a_session() {
+    use peckboard::db::models::UpdateRepeatingTask;
+    use peckboard::service::voice_gate::{self, RelayKind};
+
+    let env = fresh_state().await;
+    seed_folder(&env.db, "f1", "/tmp").await;
+    seed_task(&env.db, "t-a", "f1", "Tell the user the time.", None).await;
+    env.db
+        .update_repeating_task(
+            "t-a",
+            UpdateRepeatingTask {
+                target: Some(Some("assistant".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let out = env
+        .rtm
+        .try_run_now("t-a", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(out, StartOutcome::NoAssistant);
+    let runs = env.db.list_repeating_task_runs("t-a", 10).await.unwrap();
+    assert_eq!(runs[0].status, "failed");
+
+    let ts = chrono::Utc::now().to_rfc3339();
+    env.db
+        .create_session(NewSession {
+            id: "voice".into(),
+            name: "Assistant".into(),
+            folder_id: "f1".into(),
+            created_at: ts.clone(),
+            last_activity: ts,
+            is_expert: true,
+            expert_kind: Some("voice".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let out = env
+        .rtm
+        .try_run_now("t-a", env.run_ctx(), false)
+        .await
+        .unwrap();
+    assert_eq!(out, StartOutcome::QueuedForAssistant);
+    assert!(
+        env.db
+            .list_sessions_by_repeating_task("t-a")
+            .await
+            .unwrap()
+            .is_empty(),
+        "an Assistant run must not create a session"
+    );
+    let runs = env.db.list_repeating_task_runs("t-a", 10).await.unwrap();
+    assert_eq!(runs[0].status, "spawned");
+    assert_eq!(runs[0].session_id.as_deref(), Some("voice"));
+
+    let held = voice_gate::list("voice");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].kind, RelayKind::Scheduled);
+    assert_eq!(held[0].source_session_id, None);
+    let expected = "[relay] scheduled task \"t-a\": Tell the user the time.";
+    assert_eq!(held[0].text, expected);
+    assert_eq!(env.db.list_voice_relays().await.unwrap().len(), 1);
+
+    // Off any focus, it still goes out at the first quiet gap.
+    voice_gate::tick_at(
+        &env.db,
+        &env.broadcaster,
+        None,
+        std::time::Instant::now() + std::time::Duration::from_secs(3),
+    )
+    .await;
+    let delivered: Vec<String> = env
+        .db
+        .list_events_by_session("voice", None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "user")
+        .filter_map(|e| {
+            serde_json::from_str::<serde_json::Value>(&e.data).ok()?["text"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(delivered, vec![expected.to_string()]);
+    assert!(env.db.list_voice_relays().await.unwrap().is_empty());
 }

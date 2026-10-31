@@ -1,12 +1,21 @@
-import { useCallback, useEffect, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+  type SyntheticEvent,
+} from 'react'
 import Modal from './Modal'
+import AudioPlayer from './AudioPlayer'
 import { CodePreview } from './ToolUseBlock'
 import type { SharedFile } from './chat/events'
 import { authedFetch } from '../store/auth'
+import { useMediaElementPlayback } from '../media/playback'
 
 /** Previewable kinds of a shared file. Text is decided by extension first —
  *  `mime_guess` maps e.g. `.ts` to a video type. */
-type SharedFileKind = 'image' | 'video' | 'text' | 'other'
+type SharedFileKind = 'image' | 'video' | 'audio' | 'text' | 'other'
 
 const TEXT_EXTS = new Set([
   'txt',
@@ -52,11 +61,15 @@ const TEXT_EXTS = new Set([
   'cfg',
 ])
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp'])
-const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov'])
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv'])
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'weba'])
 const ARCHIVE_EXTS = new Set(['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar'])
 
 /** Text files above this are download-only (no inline viewer). */
 const MAX_TEXT_PREVIEW_BYTES = 1024 * 1024
+/** Audio above this skips the waveform (it downloads + decodes the whole
+ *  file) and shows a plain progress bar. */
+const MAX_WAVEFORM_BYTES = 25 * 1024 * 1024
 
 function extOf(name: string): string {
   return name.match(/\.([A-Za-z0-9]+)$/)?.[1]?.toLowerCase() ?? ''
@@ -67,10 +80,13 @@ function sharedFileKind(file: SharedFile): SharedFileKind {
   if (TEXT_EXTS.has(ext)) return 'text'
   if (IMAGE_EXTS.has(ext)) return 'image'
   if (VIDEO_EXTS.has(ext)) return 'video'
-  // SVG is scriptable: never rendered inline, download only.
-  if (ext === 'svg' || ext === 'html' || ext === 'htm') return 'other'
+  if (AUDIO_EXTS.has(ext)) return 'audio'
+  // SVG is scriptable: never rendered inline, download only. MIDI has no
+  // browser decoder.
+  if (['svg', 'html', 'htm', 'mid', 'midi'].includes(ext)) return 'other'
   if (/^image\/(png|jpeg|gif|webp)$/.test(file.mimeType)) return 'image'
-  if (/^video\/(mp4|webm|quicktime)$/.test(file.mimeType)) return 'video'
+  if (/^video\/(mp4|webm|quicktime|ogg|x-m4v)$/.test(file.mimeType)) return 'video'
+  if (file.mimeType.startsWith('audio/') && !file.mimeType.includes('midi')) return 'audio'
   if (file.mimeType.startsWith('text/') || file.mimeType === 'application/json') return 'text'
   return 'other'
 }
@@ -79,6 +95,7 @@ function fileIcon(file: SharedFile, kind: SharedFileKind): string {
   const ext = extOf(file.filename)
   if (kind === 'image') return '\u{1F5BC}\u{FE0F}'
   if (kind === 'video') return '\u{1F3AC}'
+  if (kind === 'audio') return '\u{1F3B5}'
   if (ARCHIVE_EXTS.has(ext)) return '\u{1F5DC}\u{FE0F}'
   if (ext === 'pdf') return '\u{1F4D1}'
   if (kind === 'text') return '\u{1F4C4}'
@@ -135,9 +152,55 @@ function useSignedUrl(sessionId: string, fileId: string, enabled: boolean) {
       cancelled = true
     }
   }, [sessionId, fileId, enabled, nonce])
-  // A link expires after 10 minutes; media that errors re-mints once.
+  // A link expires after 10 minutes; an image that errors re-mints once.
   const refresh = useCallback(() => setNonce((n) => (n < 1 ? n + 1 : n)), [])
-  return { url, error, refresh }
+  // Media outlives one link (a long clip); `useMediaSource` guards loops.
+  const remint = useCallback(() => setNonce((n) => n + 1), [])
+  return { url, error, refresh, remint }
+}
+
+/** Where a player picks up: position (s) and whether it was playing. */
+interface ResumePoint {
+  time: number
+  play: boolean
+}
+
+/**
+ * Signed `src` for an `<audio>` / `<video>` that survives link expiry: an
+ * error on a link that already loaded re-mints it and resumes at the same
+ * position and play state. An error on a link that never loaded means the
+ * browser can't decode the file → `unsupported`.
+ */
+function useMediaSource(sessionId: string, fileId: string, start?: ResumePoint) {
+  const { url, error, remint } = useSignedUrl(sessionId, fileId, true)
+  const [unsupported, setUnsupported] = useState(false)
+  const resume = useRef<ResumePoint | null>(start ?? null)
+  const loadedUrl = useRef<string | null>(null)
+  const onLoadedMetadata = useCallback(
+    (e: SyntheticEvent<HTMLMediaElement>) => {
+      loadedUrl.current = url
+      const el = e.currentTarget
+      const r = resume.current
+      resume.current = null
+      if (!r) return
+      if (r.time > 0 && Number.isFinite(r.time)) el.currentTime = r.time
+      if (r.play) void el.play().catch(() => {})
+    },
+    [url],
+  )
+  const onError = useCallback(
+    (e: SyntheticEvent<HTMLMediaElement>) => {
+      if (!url || loadedUrl.current !== url) {
+        setUnsupported(true)
+        return
+      }
+      const el = e.currentTarget
+      resume.current ??= { time: el.currentTime, play: !el.paused }
+      remint()
+    },
+    [url, remint],
+  )
+  return { url, error, unsupported, onLoadedMetadata, onError }
 }
 
 function DownloadButton({
@@ -170,23 +233,123 @@ function DownloadButton({
   )
 }
 
-/** Full preview of one shared file: image, video, text/code, or a
- *  "no preview" notice. Download always available in the header. */
+function MediaUnsupported() {
+  return (
+    <div className="shared-file-media-note" role="status" data-testid="shared-file-unsupported">
+      Your browser can't play this format. Download it to open it in another app.
+    </div>
+  )
+}
+
+function VideoPlayer({
+  src,
+  videoRef,
+  className,
+  testId,
+  autoFrame,
+  onLoadedMetadata,
+  onError,
+}: {
+  src: string
+  videoRef: RefObject<HTMLMediaElement | null>
+  className: string
+  testId: string
+  /** Show the first frame as the poster (iOS paints nothing on `metadata`). */
+  autoFrame: boolean
+  onLoadedMetadata: (e: SyntheticEvent<HTMLMediaElement>) => void
+  onError: (e: SyntheticEvent<HTMLMediaElement>) => void
+}) {
+  useMediaElementPlayback(videoRef, src)
+  return (
+    <video
+      ref={videoRef as RefObject<HTMLVideoElement | null>}
+      className={className}
+      src={autoFrame ? `${src}#t=0.001` : src}
+      controls
+      preload="metadata"
+      playsInline
+      data-testid={testId}
+      onLoadedMetadata={onLoadedMetadata}
+      onError={onError}
+    />
+  )
+}
+
+/** Inline video / audio for a shared file, with signed-URL renewal and the
+ *  "can't play" fallback. `mediaRef` exposes the element to the caller. */
+function SharedMedia({
+  sessionId,
+  file,
+  kind,
+  start,
+  mediaRef,
+  className = 'shared-file-preview-video',
+  testId = 'shared-file-preview-video',
+}: {
+  sessionId: string
+  file: SharedFile
+  kind: 'video' | 'audio'
+  start?: ResumePoint
+  mediaRef: RefObject<HTMLMediaElement | null>
+  className?: string
+  testId?: string
+}) {
+  const { url, error, unsupported, onLoadedMetadata, onError } = useMediaSource(
+    sessionId,
+    file.id,
+    start,
+  )
+  if (unsupported) return <MediaUnsupported />
+  if (error) return <div className="shared-file-media-note">{error}</div>
+  if (!url) return <div className="shared-file-media-note">Loading…</div>
+  if (kind === 'audio') {
+    return (
+      <AudioPlayer
+        src={url}
+        label={file.filename}
+        waveformKey={file.size <= MAX_WAVEFORM_BYTES ? file.id : null}
+        audioRef={mediaRef as RefObject<HTMLAudioElement | null>}
+        onLoadedMetadata={onLoadedMetadata}
+        onError={onError}
+      />
+    )
+  }
+  return (
+    <VideoPlayer
+      src={url}
+      videoRef={mediaRef}
+      className={className}
+      testId={testId}
+      autoFrame={!start}
+      onLoadedMetadata={onLoadedMetadata}
+      onError={onError}
+    />
+  )
+}
+
+/** Full preview of one shared file: image, video, audio, text/code, or a
+ *  "no preview" notice. Download always available in the header. Media
+ *  starts at `start` and reports where it stopped through `onClose`. */
 export function FilePreviewModal({
   sessionId,
   file,
+  start,
   onClose,
 }: {
   sessionId: string
   file: SharedFile
-  onClose: () => void
+  start?: ResumePoint
+  onClose: (time?: number) => void
 }) {
   const kind = sharedFileKind(file)
+  const media = kind === 'video' || kind === 'audio'
   const textTooBig = kind === 'text' && file.size > MAX_TEXT_PREVIEW_BYTES
   const previewable = kind !== 'other' && !textTooBig
-  const { url, error, refresh } = useSignedUrl(sessionId, file.id, previewable)
+  const { url, error, refresh } = useSignedUrl(sessionId, file.id, previewable && !media)
   const [text, setText] = useState<string | null>(null)
   const [textError, setTextError] = useState<string | null>(null)
+  const mediaRef = useRef<HTMLMediaElement | null>(null)
+  const close = useCallback(() => onClose(mediaRef.current?.currentTime), [onClose])
 
   useEffect(() => {
     if (kind !== 'text' || !url || textTooBig) return
@@ -207,6 +370,16 @@ export function FilePreviewModal({
         {textTooBig ? 'File too large to preview.' : 'No preview available for this file type.'}
       </div>
     )
+  } else if (media) {
+    body = (
+      <SharedMedia
+        sessionId={sessionId}
+        file={file}
+        kind={kind}
+        start={start ?? { time: 0, play: true }}
+        mediaRef={mediaRef}
+      />
+    )
   } else if (error || textError) {
     body = <div className="shared-file-nopreview">{error ?? textError}</div>
   } else if (!url || (kind === 'text' && text === null)) {
@@ -221,18 +394,6 @@ export function FilePreviewModal({
         onError={refresh}
       />
     )
-  } else if (kind === 'video') {
-    body = (
-      <video
-        className="shared-file-preview-video"
-        src={url}
-        controls
-        autoPlay
-        playsInline
-        data-testid="shared-file-preview-video"
-        onError={refresh}
-      />
-    )
   } else {
     body = (
       <div className="shared-file-preview-text" data-testid="shared-file-preview-text">
@@ -243,7 +404,7 @@ export function FilePreviewModal({
 
   return (
     <Modal
-      onClose={onClose}
+      onClose={close}
       className="shared-file-modal"
       maxWidth="min(960px, 96vw)"
       data-testid="shared-file-modal"
@@ -254,12 +415,7 @@ export function FilePreviewModal({
         </h3>
         <span className="shared-file-size">{formatBytes(file.size)}</span>
         <DownloadButton sessionId={sessionId} file={file} className="btn-primary" />
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={onClose}
-          aria-label="Close preview"
-        >
+        <button type="button" className="btn-secondary" onClick={close} aria-label="Close preview">
           Close
         </button>
       </div>
@@ -271,8 +427,9 @@ export function FilePreviewModal({
 
 /**
  * Chat card for a file an agent shared (`file-shared` event): icon, name,
- * size, caption, an inline thumbnail for images / videos, and an always-
- * visible Download button. Clicking the card opens `FilePreviewModal`.
+ * size, caption, an inline thumbnail for images, an inline player for
+ * video / audio, and an always-visible Download button. Clicking the name
+ * opens `FilePreviewModal`; media there continues from the inline position.
  */
 export default function SharedFileCard({
   sessionId,
@@ -282,36 +439,51 @@ export default function SharedFileCard({
   file: SharedFile
 }) {
   const kind = sharedFileKind(file)
-  const [open, setOpen] = useState(false)
-  const media = kind === 'image' || kind === 'video'
-  const { url, refresh } = useSignedUrl(sessionId, file.id, media)
+  const [preview, setPreview] = useState<{ start?: ResumePoint } | null>(null)
+  const { url, refresh } = useSignedUrl(sessionId, file.id, kind === 'image')
+  const mediaRef = useRef<HTMLMediaElement | null>(null)
+
+  const openPreview = () => {
+    const el = mediaRef.current
+    // The modal picks up where the inline player is; the inline one pauses.
+    const start = el ? { time: el.currentTime, play: true } : undefined
+    el?.pause()
+    setPreview({ start })
+  }
+  const closePreview = (time?: number) => {
+    setPreview(null)
+    const el = mediaRef.current
+    if (el && time !== undefined && Number.isFinite(time)) el.currentTime = time
+  }
 
   return (
     <div className="shared-file-card" data-testid="shared-file-card" data-kind={kind}>
+      {kind === 'video' && (
+        <SharedMedia
+          sessionId={sessionId}
+          file={file}
+          kind="video"
+          mediaRef={mediaRef}
+          className="shared-file-video"
+          testId="shared-file-video"
+        />
+      )}
+      {kind === 'audio' && (
+        <SharedMedia sessionId={sessionId} file={file} kind="audio" mediaRef={mediaRef} />
+      )}
       <button
         type="button"
         className="shared-file-open"
-        onClick={() => setOpen(true)}
+        onClick={openPreview}
         aria-label={`Preview ${file.filename}`}
         data-testid="shared-file-open"
       >
-        {media && url && kind === 'image' && (
+        {kind === 'image' && url && (
           <img
             className="shared-file-thumb"
             src={url}
             alt=""
             loading="lazy"
-            onError={refresh}
-            data-testid="shared-file-thumb"
-          />
-        )}
-        {media && url && kind === 'video' && (
-          <video
-            className="shared-file-thumb"
-            src={url}
-            preload="metadata"
-            muted
-            playsInline
             onError={refresh}
             data-testid="shared-file-thumb"
           />
@@ -333,8 +505,13 @@ export default function SharedFileCard({
         </span>
       </button>
       <DownloadButton sessionId={sessionId} file={file} />
-      {open && (
-        <FilePreviewModal sessionId={sessionId} file={file} onClose={() => setOpen(false)} />
+      {preview && (
+        <FilePreviewModal
+          sessionId={sessionId}
+          file={file}
+          start={preview.start}
+          onClose={closePreview}
+        />
       )}
     </div>
   )

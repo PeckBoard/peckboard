@@ -80,9 +80,15 @@ fn inline_content_type(mime: &str) -> Option<&'static str> {
         "video/mp4" => "video/mp4",
         "video/webm" => "video/webm",
         "video/quicktime" => "video/quicktime",
+        "video/x-m4v" => "video/x-m4v",
+        "video/ogg" => "video/ogg",
         "audio/mpeg" => "audio/mpeg",
-        "audio/wav" => "audio/wav",
-        "audio/ogg" => "audio/ogg",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "audio/wav",
+        "audio/ogg" | "audio/opus" => "audio/ogg",
+        "audio/flac" | "audio/x-flac" => "audio/flac",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "audio/mp4",
+        "audio/aac" | "audio/x-aac" => "audio/aac",
+        "audio/webm" => "audio/webm",
         "application/pdf" => "application/pdf",
         "application/json" => "text/plain; charset=utf-8",
         m if m.starts_with("text/") && m != "text/html" => "text/plain; charset=utf-8",
@@ -211,5 +217,19 @@ mod tests {
         assert_eq!(inline_content_type("image/svg+xml"), None);
         assert_eq!(inline_content_type("text/html"), None);
         assert_eq!(inline_content_type("application/zip"), None);
+    }
+
+    #[test]
+    fn playable_media_extensions_serve_inline() {
+        for name in [
+            "a.mp4", "a.webm", "a.mov", "a.m4v", "a.ogv", "a.mp3", "a.wav", "a.ogg", "a.oga",
+            "a.opus", "a.flac", "a.m4a", "a.aac", "a.weba",
+        ] {
+            let mime = shared_files::guess_mime(name);
+            assert!(
+                inline_content_type(&mime).is_some(),
+                "{name} ({mime}) must play inline"
+            );
+        }
     }
 }

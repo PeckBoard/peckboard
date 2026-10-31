@@ -19,7 +19,9 @@ use similar::{ChangeTag, TextDiff};
 use crate::db::Db;
 use crate::db::models::VoicePromptVersion;
 use crate::provider::registry::ProviderRegistry;
-use crate::service::voice_relay::{VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT, VOICE_TOPIC_RING_RULES};
+use crate::service::voice_relay::{
+    VOICE_CORE_RULES, VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT, VOICE_TOPIC_RING_RULES,
+};
 
 pub const SOURCE_DEFAULT: &str = "default";
 pub const SOURCE_USER: &str = "user";
@@ -265,15 +267,52 @@ pub async fn version(db: &Db, id: &str) -> anyhow::Result<Option<VersionDetail>>
     }))
 }
 
-/// The active prompt plus the built-in tool rules the user can't edit
-/// ([`VOICE_TOPIC_RING_RULES`]) — what the voice session actually runs with.
-/// A custom prompt saved from a default that already carried the rules
-/// (0.1.108–0.1.111) is left as is rather than given them twice.
-pub fn with_builtin_rules(content: &str) -> String {
-    if content.contains("assistant_topics") {
-        return content.to_string();
+/// Bullets older defaults (up to 0.1.112) carried under "How to Speak"
+/// that now live in [`VOICE_CORE_RULES`]. Matched as line prefixes.
+const LEGACY_BUILTIN_BULLETS: &[&str] = &[
+    "- When the user says \"pronounce X like Y\"",
+    "- When the user asks you to change how you behave, use voice_prompt",
+];
+
+/// `content` minus every built-in section (any `## ` heading the core or
+/// topic-ring rules use, up to the next `#`/`##` heading) and the legacy
+/// built-in bullets. A custom prompt saved from an older default still
+/// carries copies of those; stripping them keeps the session from running
+/// two (possibly stale) versions of the same rule.
+pub fn strip_builtin_sections(content: &str) -> String {
+    let headings: Vec<&str> = VOICE_CORE_RULES
+        .lines()
+        .chain(VOICE_TOPIC_RING_RULES.lines())
+        .filter(|l| l.starts_with("## "))
+        .map(str::trim)
+        .collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("## ") {
+            skipping = headings.contains(&t);
+        } else if t.starts_with("# ") {
+            skipping = false;
+        }
+        if skipping || LEGACY_BUILTIN_BULLETS.iter().any(|b| t.starts_with(b)) {
+            continue;
+        }
+        kept.push(line);
     }
-    format!("{}\n\n{VOICE_TOPIC_RING_RULES}", content.trim_end())
+    kept.join("\n").trim_end().to_string()
+}
+
+/// The active prompt plus the built-in rules the user can't edit
+/// ([`VOICE_CORE_RULES`], [`VOICE_TOPIC_RING_RULES`]) — what the voice
+/// session actually runs with. Any older copy of those rules inside a
+/// custom prompt is dropped first ([`strip_builtin_sections`]), so the
+/// current version is the only one the session sees.
+pub fn with_builtin_rules(content: &str) -> String {
+    format!(
+        "{}\n\n{VOICE_CORE_RULES}\n{VOICE_TOPIC_RING_RULES}",
+        strip_builtin_sections(content)
+    )
 }
 
 /// The system prompt to store on the voice session.
@@ -421,10 +460,10 @@ mod tests {
         assert_eq!(active_content(&db).await.unwrap(), VOICE_SYSTEM_PROMPT);
     }
 
-    /// A prompt customised before the topic ring existed still gets its
-    /// rules; one saved from a default that had them doesn't get them twice.
+    /// A prompt customised before the core rules were split out still gets
+    /// them, exactly once.
     #[tokio::test]
-    async fn custom_prompt_keeps_the_topic_ring_rules() {
+    async fn custom_prompt_keeps_the_core_rules() {
         let db = voice_db().await;
         save(&db, "Be a pirate.", SOURCE_USER, None, None)
             .await
@@ -433,9 +472,61 @@ mod tests {
         let s = db.get_session("voice").await.unwrap().unwrap();
         let prompt = s.system_prompt.unwrap();
         assert!(prompt.starts_with("Be a pirate."));
+        assert!(prompt.contains(VOICE_CORE_RULES));
         assert!(prompt.contains(VOICE_TOPIC_RING_RULES));
+    }
 
-        let carried = format!("Be brief.\n\n{VOICE_TOPIC_RING_RULES}");
-        assert_eq!(with_builtin_rules(&carried), carried);
+    /// A custom prompt saved from an older default carries stale copies of
+    /// the built-in sections (and the two built-in "How to Speak" bullets):
+    /// they are dropped, the user's own text is kept, and every built-in
+    /// section appears exactly once, in its current form.
+    #[test]
+    fn legacy_builtin_sections_are_not_duplicated() {
+        let legacy = format!(
+            "{VOICE_SYSTEM_PROMPT}\
+             - When the user says \"pronounce X like Y\", call voice_pronunciation (old wording).\n\
+             - When the user asks you to change how you behave, use voice_prompt (old wording).\n\
+             - Keep it cheerful.\n\n\
+             ## Routing Work to Sessions\n- old routing rule\n\
+             ## Relay Messages\nold relay rule\n\n\
+             ## My Household\n- The cat is called Miso.\n\n\
+             ## The Topic Ring\nold ring rule\n"
+        );
+        let built = with_builtin_rules(&legacy);
+        for gone in [
+            "old routing rule",
+            "old relay rule",
+            "old ring rule",
+            "(old wording)",
+        ] {
+            assert!(!built.contains(gone), "{gone} survived");
+        }
+        for kept in [
+            "- Keep it cheerful.",
+            "## My Household",
+            "The cat is called Miso.",
+        ] {
+            assert!(built.contains(kept), "{kept} was dropped");
+        }
+        for heading in VOICE_CORE_RULES
+            .lines()
+            .chain(VOICE_TOPIC_RING_RULES.lines())
+            .filter(|l| l.starts_with("## "))
+        {
+            assert_eq!(built.matches(heading).count(), 1, "{heading}");
+        }
+        assert_eq!(
+            built
+                .matches("call voice_pronunciation with action add")
+                .count(),
+            1
+        );
+        // Building from an already-built prompt changes nothing.
+        assert_eq!(with_builtin_rules(&built), built);
+        // The shipped default is untouched by the strip.
+        assert_eq!(
+            strip_builtin_sections(VOICE_SYSTEM_PROMPT),
+            VOICE_SYSTEM_PROMPT.trim_end()
+        );
     }
 }

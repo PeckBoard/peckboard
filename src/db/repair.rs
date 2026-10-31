@@ -66,6 +66,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_pending_doc_review_column(conn)?;
     ensure_sessions_is_temp_column(conn)?;
     ensure_repeating_tasks_timezone_column(conn)?;
+    ensure_repeating_tasks_target_column(conn)?;
     ensure_repeating_task_runs_table(conn)?;
     ensure_env_vars_table(conn)?;
     ensure_agent_vars_table(conn)?;
@@ -384,19 +385,21 @@ fn ensure_device_activity_table(conn: &mut SqliteConnection) -> anyhow::Result<(
 
 /// Heal DBs that predate `1790733768_voice_relay_queue`. `CREATE TABLE IF
 /// NOT EXISTS` is idempotent so this is safe on a fully-migrated DB and
-/// only does work on one that lacks the table. DDL mirrors the migration.
+/// only does work on one that lacks the table. DDL mirrors the latest shape
+/// (`1793427362_assistant_scheduled_tasks`: source-less `scheduled` rows).
 fn ensure_voice_relay_queue_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     log_if_healing_table(conn, "voice_relay_queue")?;
     sql_query(
         "CREATE TABLE IF NOT EXISTS voice_relay_queue (
             id                 TEXT PRIMARY KEY NOT NULL,
             voice_session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            source_session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            kind               TEXT NOT NULL CHECK (kind IN ('question', 'update')),
+            source_session_id  TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+            kind               TEXT NOT NULL CHECK (kind IN ('question', 'update', 'scheduled')),
             question_event_id  TEXT,
             text               TEXT NOT NULL,
             summary            TEXT NOT NULL,
-            created_at         TEXT NOT NULL
+            created_at         TEXT NOT NULL,
+            CHECK (kind = 'scheduled' OR source_session_id IS NOT NULL)
         )",
     )
     .execute(conn)?;
@@ -1995,6 +1998,26 @@ fn ensure_repeating_tasks_timezone_column(conn: &mut SqliteConnection) -> anyhow
     if !existing.iter().any(|c| c == "timezone") {
         tracing::info!("Repairing schema: adding repeating_tasks.timezone");
         sql_query("ALTER TABLE repeating_tasks ADD COLUMN timezone TEXT").execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1793427362_assistant_scheduled_tasks`, whose
+/// `ALTER TABLE … ADD COLUMN` can't be made idempotent. Same nullable,
+/// CHECKed column as the migration.
+fn ensure_repeating_tasks_target_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(repeating_tasks)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "target") {
+        tracing::info!("Repairing schema: adding repeating_tasks.target");
+        sql_query(
+            "ALTER TABLE repeating_tasks ADD COLUMN target TEXT \
+             CHECK (target IS NULL OR target = 'assistant')",
+        )
+        .execute(conn)?;
     }
     Ok(())
 }

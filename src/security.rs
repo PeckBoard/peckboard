@@ -5,6 +5,35 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+// No `style-src-attr 'unsafe-inline'`: inline `style=""` attributes
+// are a CSS-based exfiltration vector when combined with any other
+// XSS toehold, and the React app uses class/CSS-module styling
+// rather than dynamic inline `style` for almost everything.
+// `media-src blob:`: iOS plays Kokoro speech through an <audio> element
+// fed a blob: URL of the fetched WAV (see web/src/voice/kokoro.ts).
+// `base-uri 'none'` stops an injected `<base>` from re-pointing relative
+// script/asset URLs; `form-action 'self'` stops an injected `<form>` from
+// posting to another origin (neither falls back to `default-src`).
+// `frame-src` is exactly 'self' plus the link-preview embed origins, derived
+// from the provider table (`service::link_preview::providers`).
+static CSP: std::sync::LazyLock<HeaderValue> = std::sync::LazyLock::new(|| {
+    let frames = crate::service::link_preview::providers::frame_src_origins().join(" ");
+    let csp = format!(
+        "default-src 'self'; \
+         script-src 'self'; \
+         style-src 'self'; \
+         img-src 'self' data: blob:; \
+         media-src 'self' blob:; \
+         connect-src 'self'; \
+         frame-src 'self' {frames}; \
+         frame-ancestors 'none'; \
+         object-src 'none'; \
+         base-uri 'none'; \
+         form-action 'self'"
+    );
+    HeaderValue::from_str(&csp).expect("CSP is a valid header value")
+});
+
 /// Security headers middleware — adds CSP, X-Content-Type-Options, X-Frame-Options.
 ///
 /// On `/plugin-api/*` core defers to **plugin-defined security headers**: a
@@ -25,30 +54,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     }
     let headers = response.headers_mut();
 
-    // No `style-src-attr 'unsafe-inline'`: inline `style=""` attributes
-    // are a CSS-based exfiltration vector when combined with any other
-    // XSS toehold, and the React app uses class/CSS-module styling
-    // rather than dynamic inline `style` for almost everything.
-    // `media-src blob:`: iOS plays Kokoro speech through an <audio> element
-    // fed a blob: URL of the fetched WAV (see web/src/voice/kokoro.ts).
-    // `base-uri 'none'` stops an injected `<base>` from re-pointing relative
-    // script/asset URLs; `form-action 'self'` stops an injected `<form>` from
-    // posting to another origin (neither falls back to `default-src`).
-    headers.insert(
-        "Content-Security-Policy",
-        HeaderValue::from_static(
-            "default-src 'self'; \
-             script-src 'self'; \
-             style-src 'self'; \
-             img-src 'self' data: blob:; \
-             media-src 'self' blob:; \
-             connect-src 'self'; \
-             frame-ancestors 'none'; \
-             object-src 'none'; \
-             base-uri 'none'; \
-             form-action 'self'",
-        ),
-    );
+    headers.insert("Content-Security-Policy", CSP.clone());
 
     headers.insert(
         "X-Content-Type-Options",
@@ -268,6 +274,10 @@ mod tests {
         assert!(csp.contains("media-src 'self' blob:"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("base-uri 'none'"));
+        // Frames: same-origin plus exactly the link-preview embed hosts.
+        assert!(csp.contains(
+            "frame-src 'self' https://www.youtube-nocookie.com https://platform.twitter.com https://embed.bsky.app;"
+        ));
         assert!(csp.contains("form-action 'self'"));
         assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff");
         assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");

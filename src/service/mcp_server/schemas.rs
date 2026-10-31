@@ -1276,18 +1276,20 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "create_repeating_task".into(),
-                description: "Create a repeating task in this session's folder (non-project sessions only). Schedule: interval ({\"minutes\": N}), daily ({\"hour\": H, \"minute\": M}), weekly ({\"weekday\": 0-6 Mon=0, \"hour\": H, \"minute\": M}).".into(),
+                description: "Create a repeating task in this session's folder (non-project sessions only). Schedule: interval ({\"minutes\": N}), daily ({\"hour\": H, \"minute\": M}), weekly ({\"weekday\": 0-6 Mon=0, \"hour\": H, \"minute\": M}), monthly ({\"day\": 1-31, \"hour\": H, \"minute\": M}), once ({\"at\": \"YYYY-MM-DDTHH:MM\"} local wall-clock; fires once, then disables itself). Times are in `timezone` (default: the server's local zone).".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "Display name" },
                         "description": { "type": "string", "description": "Informational description (optional)" },
-                        "prompt": { "type": "string", "description": "Prompt sent to the new session on each run" },
-                        "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
+                        "prompt": { "type": "string", "description": "Prompt sent on each run (to the new session, or to the Assistant for target assistant)" },
+                        "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly", "monthly", "once"] },
                         "schedule_value": { "type": "object", "description": "Schedule parameters per kind" },
                         "model": { "type": "string", "description": "Override model id (optional)" },
                         "effort": { "type": "string", "description": "Override effort level (optional)" },
-                        "enabled": { "type": "boolean", "description": "Whether the schedule fires (default true)" }
+                        "enabled": { "type": "boolean", "description": "Whether the schedule fires (default true)" },
+                        "timezone": { "type": "string", "description": "IANA zone name, e.g. Europe/Berlin (default: the server's local zone)" },
+                        "target": { "type": "string", "enum": ["session", "assistant"], "description": "Where each run happens: a fresh session (default), or the Assistant, which performs the prompt itself and speaks the result (default when the caller is the Assistant; only the Assistant may set it)" }
                     },
                     "required": ["name", "prompt", "schedule_kind", "schedule_value"],
                     "additionalProperties": false
@@ -1303,11 +1305,13 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "name": { "type": "string" },
                         "description": { "type": "string" },
                         "prompt": { "type": "string" },
-                        "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly"] },
+                        "schedule_kind": { "type": "string", "enum": ["interval", "daily", "weekly", "monthly", "once"] },
                         "schedule_value": { "type": "object" },
                         "model": { "type": ["string", "null"] },
                         "effort": { "type": ["string", "null"] },
-                        "enabled": { "type": "boolean" }
+                        "enabled": { "type": "boolean" },
+                        "timezone": { "type": ["string", "null"], "description": "IANA zone name for the schedule's wall-clock times; null = UTC" },
+                        "target": { "type": "string", "enum": ["session", "assistant"], "description": "Where each run happens: a fresh session, or the Assistant (only the Assistant itself may set or edit assistant tasks)" }
                     },
                     "required": ["task_id"],
                     "additionalProperties": false

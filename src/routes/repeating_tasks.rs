@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use crate::auth::middleware::require_auth;
 use crate::db::models::{NewRepeatingTask, UpdateRepeatingTask};
-use crate::repeating::{RunContext, Schedule, StartOutcome, initial_next_run_at};
+use crate::repeating::{
+    RunContext, Schedule, StartOutcome, TARGET_ASSISTANT, initial_next_run_at, server_timezone,
+};
 use crate::routes::misc::explicit_null;
 use crate::state::AppState;
 
@@ -40,6 +42,9 @@ pub struct CreateRepeatingTaskRequest {
     /// existed.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// `"session"` (default) or `"assistant"`: where each run happens.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -62,6 +67,10 @@ pub struct UpdateRepeatingTaskRequest {
     pub effort: Option<Option<String>>,
     pub enabled: Option<bool>,
     pub timezone: Option<Option<String>>,
+    /// `"session"` (or `null`) = a fresh session per run; `"assistant"` =
+    /// the Assistant performs it. Absent leaves it alone.
+    #[serde(default, deserialize_with = "explicit_null")]
+    pub target: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +98,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/repeating-tasks/{id}/runs",
             get(list_repeating_task_runs),
+        )
+        .route(
+            "/api/repeating-tasks/presets/morning-briefing",
+            post(create_morning_briefing),
         )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
@@ -161,6 +174,20 @@ fn validate_timezone(
     }
 }
 
+/// `None`/`"session"` = a fresh session per run (stored as NULL);
+/// `"assistant"` = the Assistant performs it.
+fn validate_target(
+    target: Option<&str>,
+) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
+    match target {
+        None | Some("session") => Ok(None),
+        Some(TARGET_ASSISTANT) => Ok(Some(TARGET_ASSISTANT.to_string())),
+        Some(other) => Err(bad_request(format!(
+            "unknown target: {other} (use session or assistant)"
+        ))),
+    }
+}
+
 async fn create_repeating_task(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateRepeatingTaskRequest>,
@@ -169,6 +196,7 @@ async fn create_repeating_task(
     let prompt = validate_prompt(&body.prompt)?;
     let schedule_value = validate_schedule(&body.schedule_kind, &body.schedule_value)?;
     let timezone = validate_timezone(body.timezone.as_deref())?;
+    let target = validate_target(body.target.as_deref())?;
     crate::routes::settings::check_model_or_400(body.model.as_deref())?;
 
     // Verify folder exists; without this the task row would reference a
@@ -204,6 +232,7 @@ async fn create_repeating_task(
         created_at: now.clone(),
         updated_at: now.clone(),
         timezone: timezone.clone(),
+        target: target.clone(),
     };
     // Disabled tasks must not surface in the due-task scan, so leave
     // next_run_at empty until the task is enabled.
@@ -231,6 +260,7 @@ async fn create_repeating_task(
             created_at: now.clone(),
             updated_at: now,
             timezone,
+            target,
         })
         .await
         .map_err(internal_error)?;
@@ -301,6 +331,10 @@ async fn update_repeating_task(
         Some(tz) => Some(validate_timezone(tz.as_deref())?),
         None => None,
     };
+    let target = match &body.target {
+        Some(t) => Some(validate_target(t.as_deref())?),
+        None => None,
+    };
     crate::routes::settings::check_model_or_400(body.model.as_ref().and_then(|m| m.as_deref()))?;
 
     // Schedule kind/value must be edited together so we can re-validate.
@@ -366,6 +400,7 @@ async fn update_repeating_task(
             created_at: existing.created_at.clone(),
             updated_at: now.clone(),
             timezone: timezone.clone().unwrap_or(existing.timezone.clone()),
+            target: existing.target.clone(),
         };
         if draft.enabled {
             next_run_at_update = Some(initial_next_run_at(&draft));
@@ -389,6 +424,7 @@ async fn update_repeating_task(
         last_run_at: None,
         updated_at: Some(now),
         timezone,
+        target,
     };
 
     let updated = state
@@ -477,6 +513,15 @@ async fn run_repeating_task(
         // practice. We still spell it out so any future code that
         // wires force-run to Scheduler can't silently drop the reason.
         StartOutcome::Throttled(r) => ("throttled", Some(r)),
+        StartOutcome::QueuedForAssistant => ("queued", None),
+        StartOutcome::NoAssistant => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "There is no Assistant yet. Open the Assistant page once, then run this task again.",
+                })),
+            ));
+        }
     };
     let body = match reason {
         Some(r) => serde_json::json!({ "status": status, "reason": r }),
@@ -526,4 +571,122 @@ async fn list_repeating_task_runs(
         .await
         .map_err(internal_error)?;
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(runs)))
+}
+
+/// Name of the morning-briefing preset (also how an existing one is found).
+pub const MORNING_BRIEFING_NAME: &str = "Morning briefing";
+
+/// What the Assistant is asked to do each morning.
+pub const MORNING_BRIEFING_PROMPT: &str = "Give the user their morning briefing. \
+Cover, briefly and by name, only what has news since yesterday evening: sessions that \
+finished, failed, or are waiting on the user overnight (list_sessions, then read the ones \
+that changed); cards that moved on the project boards (list_cards); new reports \
+(list_project_reports); printer status and any print that finished or failed; and the \
+home status (lights or devices left on, anything unusual), where those tools are \
+available. Skip anything with no news, then ask whether they want to dig into any of it.";
+
+#[derive(Deserialize, Default)]
+pub struct MorningBriefingRequest {
+    /// Local wall-clock time; defaults to 07:30.
+    pub hour: Option<u32>,
+    pub minute: Option<u32>,
+    /// The browser's IANA zone; defaults to the server's own zone.
+    pub timezone: Option<String>,
+}
+
+/// POST /api/repeating-tasks/presets/morning-briefing -- create the daily
+/// Assistant-target "Morning briefing" task in the Assistant's folder.
+/// Idempotent: an existing Assistant-target task of that name is returned
+/// as is (200) instead of being duplicated (201 when created).
+async fn create_morning_briefing(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<MorningBriefingRequest>,
+) -> impl IntoResponse {
+    let hour = body.hour.unwrap_or(7);
+    let minute = body.minute.unwrap_or(30);
+    let schedule_value = validate_schedule(
+        "daily",
+        &serde_json::json!({ "hour": hour, "minute": minute }),
+    )?;
+    let timezone = match validate_timezone(body.timezone.as_deref())? {
+        Some(z) => Some(z),
+        None => server_timezone(),
+    };
+    let voice = state
+        .db
+        .find_expert_session(crate::service::voice_relay::VOICE_EXPERT_KIND)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "There is no Assistant yet. Open the Assistant page once, then add the briefing.",
+                })),
+            )
+        })?;
+    let existing = state
+        .db
+        .list_repeating_tasks()
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|t| t.name == MORNING_BRIEFING_NAME && t.target.as_deref() == Some(TARGET_ASSISTANT));
+    if let Some(task) = existing {
+        return Ok((StatusCode::OK, Json(serde_json::json!(task))));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = uuid::Uuid::new_v4().to_string();
+    let draft = crate::db::models::RepeatingTask {
+        id: id.clone(),
+        name: MORNING_BRIEFING_NAME.to_string(),
+        description: String::new(),
+        folder_id: voice.folder_id.clone(),
+        prompt: MORNING_BRIEFING_PROMPT.to_string(),
+        schedule_kind: "daily".to_string(),
+        schedule_value: schedule_value.clone(),
+        model: None,
+        effort: None,
+        enabled: true,
+        next_run_at: None,
+        last_run_at: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        timezone: timezone.clone(),
+        target: Some(TARGET_ASSISTANT.to_string()),
+    };
+    let task = state
+        .db
+        .create_repeating_task(NewRepeatingTask {
+            id,
+            name: draft.name.clone(),
+            description: String::new(),
+            folder_id: voice.folder_id,
+            prompt: draft.prompt.clone(),
+            schedule_kind: draft.schedule_kind.clone(),
+            schedule_value,
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at: initial_next_run_at(&draft),
+            last_run_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            timezone,
+            target: draft.target.clone(),
+        })
+        .await
+        .map_err(internal_error)?;
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "repeating-task-changed".into(),
+            session_id: task.id.clone(),
+            data: serde_json::json!({ "action": "created", "task": &task }),
+        });
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>((
+        StatusCode::CREATED,
+        Json(serde_json::json!(task)),
+    ))
 }

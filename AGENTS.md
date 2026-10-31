@@ -404,6 +404,15 @@ expected to use:
   download-only). Bytes come from short-lived signed URLs
   (`POST /api/sessions/{id}/shared-files/{fid}/url`). Reuse it anywhere a
   downloadable agent artifact is shown.
+- **`LinkPreviews` + `LinkPreview`** (`web/src/components/LinkPreview.tsx`)
+  — previews for the http(s) links in a message (max 3, none from code):
+  site cards, click-to-load sandboxed embeds (YouTube, X, Bluesky; at most
+  four live frames app-wide, registered with `media/playback.ts`), inline
+  media, and live cards for links to this instance (session / project /
+  card / view / report, loaded with the viewer's own permissions). Data via
+  `store/linkPreviews.ts` (deduped, negative-cached
+  `GET /api/link-preview`). Drop `<LinkPreviews text={…} />` under any
+  message body that can carry links.
 
 **Naming and ordering of menu items must match across surfaces.** If a
 session's chat-toolbar 3-dot menu says "Clear session", the tab

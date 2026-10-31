@@ -41,6 +41,7 @@ import {
   type FillerPlayback,
   type ThinkingOutput,
 } from '../voice/thinking'
+import { mediaAudible, pauseAllMedia } from '../media/playback'
 
 /** How long a stream stalled inside a pronunciation hint is waited on
  *  before the tail is spoken anyway (with the hint's bare word). */
@@ -441,6 +442,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     refreshStatus()
     const { prefs } = get()
     voiceLog('dequeue for speech:', JSON.stringify(next), `(${speakQueue.length} more queued)`)
+    pauseAllMedia()
     engine().speak(next, {
       voiceURI: prefs.voiceURI,
       rate: prefs.rate,
@@ -583,6 +585,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     // The filler is audible feedback already: the cue is done for this turn.
     stopThinkingCue('filler started')
     const { filler } = pick
+    pauseAllMedia()
     fillerNow = playFiller(out, filler, pick.clip, () => {
       fillerNow = null
       rememberSpoken(filler.text)
@@ -733,6 +736,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     heldLone = null
   }
   const onHeard = (text: string, isFinal: boolean, meta?: HeardMeta) => {
+    // Inline media (a shared clip) is playing: the mic hears the speakers,
+    // not the user.
+    if (mediaAudible()) {
+      if (isFinal) voiceLog('ignored speech heard while inline media plays:', JSON.stringify(text))
+      if (get().interim) set({ interim: '' })
+      return
+    }
     const words = speechWords(text)
     const audible = assistantAudible()
     // The echo check runs first, so the assistant's own voice never counts

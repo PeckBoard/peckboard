@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import type { RepeatingScheduleKind, RepeatingTask } from '../types/api'
+import type { RepeatingScheduleKind, RepeatingTask, RepeatingTaskTarget } from '../types/api'
 import { useFoldersStore } from '../store/folders'
 import { useAuthStore } from '../store/auth'
 import { useRepeatingTasksStore, type UpdateRepeatingTaskInput } from '../store/repeatingTasks'
@@ -61,6 +61,9 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
   const [scheduleValue, setScheduleValue] =
     useState<Record<string, number | string>>(initialScheduleValue)
   const [timezone, setTimezone] = useState<string>(initial?.timezone ?? '')
+  const [target, setTarget] = useState<RepeatingTaskTarget>(
+    initial?.target === 'assistant' ? 'assistant' : 'session',
+  )
   const [chosenModel, setChosenModel] = useState<string | null>(null)
   // The app-wide default model (Settings → Default Model) preselects — for
   // a new task and for a legacy task saved without one — unless it's gone
@@ -135,6 +138,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           effort: effort || null,
           enabled,
           timezone: timezone || null,
+          target,
         }
         // Only write `model` when the user actually opened the picker —
         // same rule as CardFormModal. Sending it unconditionally would
@@ -155,6 +159,7 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           effort: effort || null,
           enabled,
           timezone: timezone || null,
+          target,
         })
         onSaved?.(task)
       }
@@ -239,6 +244,27 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
         </div>
 
         <div className="form-field">
+          <label className="form-label" htmlFor="repeating-task-target">
+            Runs in
+          </label>
+          <select
+            id="repeating-task-target"
+            className="form-input"
+            value={target}
+            onChange={(e) => setTarget(e.target.value as RepeatingTaskTarget)}
+            data-testid="repeating-task-target"
+          >
+            <option value="session">New session</option>
+            <option value="assistant">Assistant</option>
+          </select>
+          <p className="form-help">
+            {target === 'assistant'
+              ? 'The Assistant performs the prompt at a quiet moment and speaks the result.'
+              : 'Each run starts a fresh session in the folder.'}
+          </p>
+        </div>
+
+        <div className="form-field">
           <label className="form-label" htmlFor="repeating-task-prompt">
             Prompt
           </label>
@@ -247,7 +273,11 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
             className="form-input"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="The message sent to the new session on each run."
+            placeholder={
+              target === 'assistant'
+                ? 'What the Assistant should do, e.g. "Tell me whether last night\'s build passed."'
+                : 'The message sent to the new session on each run.'
+            }
             rows={6}
             style={{ resize: 'vertical' }}
             required
@@ -265,43 +295,48 @@ export default function NewRepeatingTaskModal({ initial, onClose, onSaved }: Pro
           onTimezoneChange={setTimezone}
         />
 
-        <div className="form-field">
-          <label className="form-label" htmlFor="repeating-task-model">
-            Model
-          </label>
-          <ModelPicker
-            id="repeating-task-model"
-            value={model}
-            onChange={handleModelChange}
-            models={models as ModelInfo[]}
-            testId="repeating-task-model"
-          />
-          {modelsLoadError && models.length === 0 && (
-            <PickerLoadError label="models" onRetry={fetchModels} />
-          )}
-          <p className="form-help">Each spawned run starts on this model.</p>
-          {chosenModel === null && !initial?.model && defaultModelGone && (
-            <ModelGoneNotice modelId={defaultModel} />
-          )}
-        </div>
+        {/* The Assistant runs on its own model; these only shape new sessions. */}
+        {target === 'session' && (
+          <>
+            <div className="form-field">
+              <label className="form-label" htmlFor="repeating-task-model">
+                Model
+              </label>
+              <ModelPicker
+                id="repeating-task-model"
+                value={model}
+                onChange={handleModelChange}
+                models={models as ModelInfo[]}
+                testId="repeating-task-model"
+              />
+              {modelsLoadError && models.length === 0 && (
+                <PickerLoadError label="models" onRetry={fetchModels} />
+              )}
+              <p className="form-help">Each spawned run starts on this model.</p>
+              {chosenModel === null && !initial?.model && defaultModelGone && (
+                <ModelGoneNotice modelId={defaultModel} />
+              )}
+            </div>
 
-        <div className="form-field">
-          <label className="form-label" htmlFor="repeating-task-effort">
-            Effort
-          </label>
-          <select
-            id="repeating-task-effort"
-            className="form-input"
-            value={effort}
-            onChange={(e) => setEffort(e.target.value)}
-          >
-            {effortOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
+            <div className="form-field">
+              <label className="form-label" htmlFor="repeating-task-effort">
+                Effort
+              </label>
+              <select
+                id="repeating-task-effort"
+                className="form-input"
+                value={effort}
+                onChange={(e) => setEffort(e.target.value)}
+              >
+                {effortOptions.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
 
         <div className="form-field">
           <label className="form-label" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

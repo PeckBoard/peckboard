@@ -1689,6 +1689,7 @@ mod tests {
             created_at: ts.clone(),
             updated_at: ts.clone(),
             timezone: None,
+            target: None,
         })
         .await
         .unwrap();
@@ -2002,6 +2003,7 @@ mod tests {
             created_at: ts.clone(),
             updated_at: ts.clone(),
             timezone: None,
+            target: None,
         })
         .await
         .unwrap();
@@ -2071,6 +2073,7 @@ mod tests {
             created_at: ts.clone(),
             updated_at: ts.clone(),
             timezone: None,
+            target: None,
         })
         .await
         .unwrap();

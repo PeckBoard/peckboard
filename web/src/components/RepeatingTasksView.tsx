@@ -133,9 +133,11 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
       const text =
         status === 'spawned'
           ? 'Spawned a new session.'
-          : status === 'already_running'
-            ? 'Already running — no new session was created.'
-            : 'Task is disabled.'
+          : status === 'queued'
+            ? 'Queued for the Assistant. It speaks the result at the next quiet moment.'
+            : status === 'already_running'
+              ? 'Already running — no new session was created.'
+              : 'Task is disabled.'
       setRunStatus(text)
       // Refresh so last_run_at lands in the UI.
       fetchTasks().catch(() => {})
@@ -204,6 +206,8 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
               <dd>{folderMap.get(task.folder_id) ?? task.folder_id}</dd>
               <dt>Schedule</dt>
               <dd>{describeSchedule(task.schedule_kind, task.schedule_value, task.timezone)}</dd>
+              <dt>Runs in</dt>
+              <dd>{task.target === 'assistant' ? 'Assistant' : 'New session'}</dd>
               <dt>Timezone</dt>
               <dd>{task.timezone ?? 'UTC'}</dd>
               <dt>Model</dt>
@@ -333,6 +337,14 @@ export default function RepeatingTasksView({ activeTaskId, onNavigate, onOpenSes
           renderItem={(t) => (
             <>
               {!t.enabled && <span className="status-badge status-paused">paused</span>}
+              {t.target === 'assistant' && (
+                <span
+                  className="status-badge status-assistant"
+                  data-testid="repeating-task-assistant-badge"
+                >
+                  Assistant
+                </span>
+              )}
               <span className="list-view-name">{t.name}</span>
               <span className="list-view-meta">
                 {folderMap.get(t.folder_id) && (

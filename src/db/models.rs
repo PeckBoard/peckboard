@@ -211,6 +211,10 @@ pub struct RepeatingTask {
     pub created_at: String,
     pub updated_at: String,
     pub timezone: Option<String>,
+    /// `None` = each run spawns a fresh session; `Some("assistant")` = the
+    /// run is performed by the Assistant (the voice session). See
+    /// [`crate::repeating::TARGET_ASSISTANT`].
+    pub target: Option<String>,
 }
 
 #[derive(Insertable, Debug)]
@@ -231,6 +235,7 @@ pub struct NewRepeatingTask {
     pub created_at: String,
     pub updated_at: String,
     pub timezone: Option<String>,
+    pub target: Option<String>,
 }
 
 #[derive(AsChangeset, Debug, Default)]
@@ -249,6 +254,7 @@ pub struct UpdateRepeatingTask {
     pub last_run_at: Option<Option<String>>,
     pub updated_at: Option<String>,
     pub timezone: Option<Option<String>>,
+    pub target: Option<Option<String>>,
 }
 
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]
@@ -1416,15 +1422,17 @@ pub struct NewDeviceActivity {
 }
 
 /// A relay held for the voice assistant session (`service::voice_gate`):
-/// another session's question or turn-end update, waiting until the user
-/// is quiet and the topic fits. `kind` is `question` or `update`;
-/// `question_event_id` is set for questions. Deleted on delivery.
+/// another session's question or turn-end update, or a due Assistant-target
+/// repeating task, waiting until the user is quiet and the topic fits.
+/// `kind` is `question`, `update` or `scheduled`; `question_event_id` is set
+/// for questions; `source_session_id` is `None` only for `scheduled`.
+/// Deleted on delivery.
 #[derive(Queryable, Selectable, Insertable, Debug, Clone)]
 #[diesel(table_name = voice_relay_queue)]
 pub struct VoiceRelayItem {
     pub id: String,
     pub voice_session_id: String,
-    pub source_session_id: String,
+    pub source_session_id: Option<String>,
     pub kind: String,
     pub question_event_id: Option<String>,
     pub text: String,
