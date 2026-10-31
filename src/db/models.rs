@@ -1525,6 +1525,30 @@ pub struct VoiceTopic {
     pub created_at: String,
     pub updated_at: String,
 }
+
+// ── Assistant Memories ───────────────────────────
+
+/// One entry of the voice Assistant's temporary memory
+/// (`service::assistant_memory`): a short fact recorded at a topic boundary.
+/// `kind` is `did`, `learned` or `pending`; `source` is `assistant` (the
+/// model wrote it) or `fallback` (topic title + ring summary, written when a
+/// topic ended without one). Rows are written only through
+/// `Db::insert_assistant_memory`, whose input carries redacted text.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq, Eq)]
+#[diesel(table_name = assistant_memories)]
+pub struct AssistantMemory {
+    pub id: String,
+    pub voice_session_id: String,
+    pub topic_id: Option<String>,
+    pub topic_title: String,
+    pub kind: String,
+    pub summary: String,
+    pub ref_kind: Option<String>,
+    pub ref_id: Option<String>,
+    pub source: String,
+    pub created_at: String,
+    pub expires_at: String,
+}
 // ── Agent Vars ───────────────────────────────────
 
 /// A user-defined agent variable: plain name/value state agents read AND

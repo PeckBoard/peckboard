@@ -93,6 +93,18 @@ impl Db {
             .await
     }
 
+    /// One topic of `session_id` (open or closed); `None` for an id from
+    /// another session.
+    pub async fn get_voice_topic(
+        &self,
+        session_id: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<VoiceTopic>> {
+        let (session_id, id) = (session_id.to_string(), id.to_string());
+        self.with_conn(move |conn| load_one(conn, &session_id, &id).map_err(Into::into))
+            .await
+    }
+
     /// Add an open topic. Validates kind / title / summary, requires
     /// `ref_id` for `session` / `project` (existence is the caller's check),
     /// refuses a duplicate open topic for the same target, and enforces

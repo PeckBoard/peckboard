@@ -53,6 +53,12 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/voice/settings",
             get(get_assistant_settings).put(put_assistant_settings),
         )
+        .route("/api/voice/memory", get(list_memory).delete(clear_memory))
+        .route("/api/voice/memory/status", get(memory_status))
+        .route(
+            "/api/voice/memory/{id}",
+            axum::routing::delete(delete_memory_entry),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -72,24 +78,141 @@ async fn get_assistant_settings(
     ))
 }
 
-/// PUT /api/voice/settings — replace the settings, then rebuild the voice
-/// session's prompt (some settings change its rules; the live agent picks
-/// them up after its current turn). → the saved settings.
+/// PUT /api/voice/settings — change the settings: the keys in the body are
+/// laid over the saved ones (a client that only knows some fields can't
+/// reset the rest), ranges are checked (400 naming the field), then the
+/// voice session's prompt is rebuilt (some settings change its rules; the
+/// live agent picks them up after its current turn). → the saved settings.
 async fn put_assistant_settings(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
-    Json(body): Json<crate::service::assistant_settings::AssistantSettings>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<crate::service::assistant_settings::AssistantSettings>, ApiError> {
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
     }
-    crate::service::assistant_settings::save(&state.db, &body)
+    let next = crate::service::assistant_settings::load(&state.db)
+        .await
+        .merged(&body)
+        .map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    crate::service::assistant_settings::save(&state.db, &next)
         .await
         .map_err(internal)?;
     crate::service::voice_prompt::apply_to_voice_session(&state.db, Some(&state.provider_registry))
         .await
         .map_err(internal)?;
-    Ok(Json(body))
+    Ok(Json(next))
+}
+
+/// GET /api/voice/memory → `{enabled, entries: [{id, topic_id, topic_title,
+/// kind, summary, ref_kind, ref_id, source, created_at, expires_at, age}]}`:
+/// the Assistant's unexpired memories, oldest first (expired rows are
+/// swept first).
+async fn list_memory(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use crate::service::assistant_memory;
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    let enabled = crate::service::assistant_settings::load(&state.db)
+        .await
+        .memory_enabled;
+    let Some(voice_id) = voice_session_id(&state).await? else {
+        return Ok(Json(
+            serde_json::json!({ "enabled": enabled, "entries": [] }),
+        ));
+    };
+    let now = chrono::Utc::now();
+    let entries: Vec<serde_json::Value> = assistant_memory::list_live(&state.db, &voice_id, now)
+        .await
+        .map_err(internal)?
+        .iter()
+        .map(|m| assistant_memory::entry_json(m, now))
+        .collect();
+    Ok(Json(
+        serde_json::json!({ "enabled": enabled, "entries": entries }),
+    ))
+}
+
+/// DELETE /api/voice/memory/{id} → 204, or 404 when it isn't one of the
+/// Assistant's memories.
+async fn delete_memory_entry(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    let voice_id = voice_session_id(&state)
+        .await?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "memory not found"))?;
+    if !state
+        .db
+        .delete_assistant_memory(&voice_id, &id)
+        .await
+        .map_err(internal)?
+    {
+        return Err(err(StatusCode::NOT_FOUND, "memory not found"));
+    }
+    tracing::info!(voice_session = %voice_id, memory = %id, user_id = %user.user_id, "assistant memory: deleted by user");
+    forget_in_prompt(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The user deleted memory: drop it from the prompt's Recent Memory
+/// snapshot too (the live agent picks that up after its current turn).
+async fn forget_in_prompt(state: &Arc<AppState>) -> Result<(), ApiError> {
+    crate::service::voice_prompt::refresh_memory_snapshot(
+        &state.db,
+        Some(&state.provider_registry),
+        chrono::Utc::now(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(internal)
+}
+
+/// DELETE /api/voice/memory → `{deleted}`: forget every memory.
+async fn clear_memory(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    let deleted = match voice_session_id(&state).await? {
+        Some(voice_id) => {
+            let n = state
+                .db
+                .delete_all_assistant_memories(&voice_id)
+                .await
+                .map_err(internal)?;
+            tracing::info!(voice_session = %voice_id, deleted = n, user_id = %user.user_id, "assistant memory: all deleted by user");
+            forget_in_prompt(&state).await?;
+            n
+        }
+        None => 0,
+    };
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+/// GET /api/voice/memory/status → `{pending: {scheduled_at, due_at, reason,
+/// topics} | null, last_clear: {at, reason, topic_title, kept} | null}`:
+/// the automatic context clear (`assistant_memory::lifecycle`).
+async fn memory_status(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    Ok(Json(match voice_session_id(&state).await? {
+        Some(voice_id) => crate::service::assistant_memory::lifecycle::status(&voice_id),
+        None => serde_json::json!({ "pending": null, "last_clear": null }),
+    }))
 }
 
 /// GET /api/voice/linked → `{working, sessions: [{id, name, folder_id,
@@ -906,6 +1029,122 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    #[tokio::test]
+    async fn memory_routes_are_admin_only_and_settings_are_range_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let user = seed_authenticated_user_with_suffix(&state, "user", "m").await;
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f1".into(),
+                name: "f".into(),
+                path: dir.path().to_string_lossy().into(),
+                created_at: "now".into(),
+            })
+            .await
+            .unwrap();
+        let app = router(state.clone()).with_state(state.clone());
+        let (_, created) = post(&app, &token, "{}").await;
+        let sid = created["session_id"].as_str().unwrap().to_string();
+
+        for (method, uri) in [
+            ("GET", "/api/voice/memory"),
+            ("DELETE", "/api/voice/memory"),
+            ("DELETE", "/api/voice/memory/x"),
+            ("GET", "/api/voice/memory/status"),
+            ("GET", "/api/voice/settings"),
+            ("PUT", "/api/voice/settings"),
+        ] {
+            let (status, _) = call(&app, &user, method, uri, "{}").await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+
+        // Range checks name the field; a partial PUT keeps the rest.
+        let (status, body) = call(
+            &app,
+            &token,
+            "PUT",
+            "/api/voice/settings",
+            r#"{"retention_hours": 500}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("retention_hours"));
+        let (status, saved) = call(
+            &app,
+            &token,
+            "PUT",
+            "/api/voice/settings",
+            r#"{"auto_show_on_topic": true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (_, saved) = call(
+            &app,
+            &token,
+            "PUT",
+            "/api/voice/settings",
+            r#"{"auto_clear": "off", "max_entries": 10}"#,
+        )
+        .await;
+        assert_eq!(saved["auto_show_on_topic"], true);
+        assert_eq!(saved["auto_clear"], "off");
+        assert_eq!(saved["max_entries"], 10);
+        assert_eq!(saved["retention_hours"], 36);
+
+        // List / delete one / delete all.
+        let settings = crate::service::assistant_settings::load(&state.db).await;
+        let topic = crate::service::assistant_memory::TopicRef {
+            id: None,
+            title: "Dinner".into(),
+        };
+        let items = crate::service::assistant_memory::parse_items(Some(&serde_json::json!([
+            {"kind": "did", "summary": "Booked it."},
+            {"kind": "pending", "summary": "Tell Sam."},
+        ])))
+        .unwrap();
+        crate::service::assistant_memory::write_items(
+            &state.db,
+            &sid,
+            &settings,
+            &topic,
+            items,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        let (status, listed) = call(&app, &token, "GET", "/api/voice/memory", "").await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = listed["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0]["expires_at"].is_string());
+        let id = entries[0]["id"].as_str().unwrap().to_string();
+        let (status, _) = call(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/voice/memory/{id}"),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/voice/memory/{id}"),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, cleared) = call(&app, &token, "DELETE", "/api/voice/memory", "").await;
+        assert_eq!(cleared["deleted"], 1);
+        let (status, st) = call(&app, &token, "GET", "/api/voice/memory/status", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(st.get("pending").is_some());
     }
 
     #[tokio::test]

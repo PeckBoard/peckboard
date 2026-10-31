@@ -653,6 +653,21 @@ diesel::table! {
     }
 }
 diesel::table! {
+    assistant_memories (id) {
+        id -> Text,
+        voice_session_id -> Text,
+        topic_id -> Nullable<Text>,
+        topic_title -> Text,
+        kind -> Text,
+        summary -> Text,
+        ref_kind -> Nullable<Text>,
+        ref_id -> Nullable<Text>,
+        source -> Text,
+        created_at -> Text,
+        expires_at -> Text,
+    }
+}
+diesel::table! {
     agent_vars (id) {
         id -> Text,
         name -> Text,
@@ -838,6 +853,7 @@ diesel::joinable!(doc_reviews -> folders (folder_id));
 diesel::joinable!(doc_review_versions -> doc_reviews (review_id));
 diesel::joinable!(doc_review_comments -> doc_reviews (review_id));
 diesel::joinable!(session_memories -> sessions (session_id));
+diesel::joinable!(assistant_memories -> sessions (voice_session_id));
 diesel::joinable!(agent_vars -> folders (folder_id));
 
 diesel::joinable!(user_tabs -> users (user_id));
@@ -931,6 +947,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     tts_lexicon_seeded,
     tts_unknown_words,
     pending_actions,
+    assistant_memories,
     voice_topics,
     voice_prompt_versions,
     session_view_nodes,

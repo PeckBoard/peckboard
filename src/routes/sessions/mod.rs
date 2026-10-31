@@ -1174,6 +1174,9 @@ pub(crate) async fn clear_session_core(state: &AppState, id: &str) -> anyhow::Re
     // A sealed session is kept for its card's history and never reused:
     // clearing it would both wipe that record and make it look runnable.
     crate::provider::manager::ensure_not_sealed(&state.db, id).await?;
+    // The Assistant's pending automatic clear (if this is its session) is
+    // moot once the session is cleared.
+    crate::service::assistant_memory::lifecycle::cancel_pending(id);
     if state.session_manager.is_running(id).await {
         if let Ok(event) = state
             .db

@@ -370,11 +370,17 @@ export type VoiceTranscriptItem =
       questions: RelayQuestionRef[]
     }
   | { kind: 'assistant'; key: string; text: string; ts: number; streaming: boolean }
+  /** A small system status line, e.g. "Context cleared after …". */
+  | { kind: 'status'; key: string; text: string; ts: number }
+
+/** `data.kind` of the `system` event posted when the Assistant's context is
+ *  cleared after a topic ends (`assistant_memory::lifecycle`). */
+export const CONTEXT_CLEARED_KIND = 'assistant-context-cleared'
 
 /**
  * Fold the voice session's raw events into transcript lines: user
- * utterances, backend-relayed updates, and assistant replies (one line per
- * turn, concatenating streamed `agent-text` chunks).
+ * utterances, backend-relayed updates, assistant replies (one line per
+ * turn, concatenating streamed `agent-text` chunks), and status lines.
  */
 export function foldVoiceTranscript(events: Event[]): VoiceTranscriptItem[] {
   const items: VoiceTranscriptItem[] = []
@@ -415,6 +421,15 @@ export function foldVoiceTranscript(events: Event[]): VoiceTranscriptItem[] {
       case 'agent-end':
         close()
         break
+      case 'system': {
+        // Server notices meant for this transcript (the automatic context
+        // clear after a topic ends); other system events stay hidden.
+        if (ev.data.kind === CONTEXT_CLEARED_KIND && typeof ev.data.text === 'string') {
+          close()
+          items.push({ kind: 'status', key: ev.id, text: ev.data.text, ts: ev.ts })
+        }
+        break
+      }
       default:
         break
     }

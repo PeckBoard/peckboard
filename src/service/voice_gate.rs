@@ -254,6 +254,39 @@ pub fn note_turn_end_at(session_id: &str, now: Instant) {
     }
 }
 
+/// What the gate knows about the conversation right now — read by the
+/// Assistant's auto-clear (`service::assistant_memory::lifecycle`), which
+/// must never clear over the user, a reply being read aloud, or a relay it
+/// still owes the user.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConversationState {
+    pub user_speaking: bool,
+    pub tts_playing: bool,
+    /// A user utterance or relay turn is still being answered.
+    pub answering: bool,
+    /// `(source session, source project)` of every held relay.
+    pub held: Vec<(Option<String>, Option<String>)>,
+}
+
+pub fn conversation_state(voice_id: &str) -> ConversationState {
+    conversation_state_at(voice_id, Instant::now())
+}
+
+pub fn conversation_state_at(voice_id: &str, now: Instant) -> ConversationState {
+    gates()
+        .get(voice_id)
+        .map(|g| ConversationState {
+            user_speaking: g.user_active_until.is_some_and(|t| now < t),
+            tts_playing: g.tts_until.is_some_and(|t| now < t),
+            answering: g.busy_since.is_some_and(|t| now < t + BUSY_TTL),
+            held: g
+                .queue
+                .iter()
+                .map(|h| (h.source_session_id.clone(), h.source_project_id.clone()))
+                .collect(),
+        })
+        .unwrap_or_default()
+}
 /// The voice assistant turned to `session_id` (messaged, read, created,
 /// interrupted, or opened it).
 pub async fn focus_session(db: &Db, voice_id: &str, session_id: &str) {

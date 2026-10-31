@@ -194,6 +194,11 @@ pub(super) async fn send_message(
     if session.sealed_at.is_some() {
         return Err(sealed_conflict());
     }
+    // A user turn to the Assistant: cancels a pending automatic context
+    // clear and re-arms its idle topic boundary. Relays never come this way.
+    if session.expert_kind.as_deref() == Some(crate::service::voice_relay::VOICE_EXPERT_KIND) {
+        crate::service::assistant_memory::lifecycle::note_user_utterance(&id);
+    }
 
     // A model-switch handover or context compaction is mid-flight: the
     // outgoing model is still writing its doc. Refuse new user turns until

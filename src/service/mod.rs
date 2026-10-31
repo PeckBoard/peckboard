@@ -1,4 +1,5 @@
 pub mod askpass;
+pub mod assistant_memory;
 pub mod assistant_mirror;
 pub mod assistant_settings;
 pub mod backup;

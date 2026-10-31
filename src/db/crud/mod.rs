@@ -4,6 +4,7 @@
 mod account_refs;
 mod agent_vars;
 mod announcements;
+mod assistant_memories;
 mod auth_sessions;
 mod card_sessions;
 mod cards;
@@ -52,6 +53,7 @@ mod voice_topics;
 mod workflow_instructions;
 
 pub use account_refs::AccountModelRefs;
+pub use assistant_memories::{NewAssistantMemory, memory_ts};
 pub use card_sessions::{CardRunStart, CardSessionEntry, SealOutcome};
 pub use cards::CardOverview;
 pub use claude_accounts::AccountModelUsage;

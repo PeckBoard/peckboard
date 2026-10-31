@@ -1103,6 +1103,21 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     const { panelOpen, prefs } = get()
     if (panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
   })
+  // The voice session was cleared (by hand, or automatically after a topic
+  // ended): its events are gone and seqs start over at 1. Drop the old
+  // transcript and speak everything that arrives from here on — otherwise
+  // every post-clear reply would sit below the old speak cursor, unheard.
+  if (typeof window !== 'undefined') {
+    window.addEventListener('peckboard:session-cleared', (ev) => {
+      const id = (ev as CustomEvent<{ sessionId?: string }>).detail?.sessionId
+      if (!id || id !== get().sessionId) return
+      voiceLog('voice session cleared: transcript reset')
+      if (historyReady) speakAfterSeq = 0
+      heldEvents = []
+      spokenSeqs = new Set()
+      set({ events: [] })
+    })
+  }
   // ── Pending actions (gated tool calls waiting on the user) ──
   const onActionEvent = () => {
     void get().refreshActions()

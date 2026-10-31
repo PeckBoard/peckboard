@@ -237,6 +237,18 @@ export default function VoiceDock({
           </p>
         )}
         {transcript.map((it) => {
+          if (it.kind === 'status') {
+            return (
+              <div
+                key={it.key}
+                className="voice-line voice-line-status"
+                data-testid="voice-line-status"
+                role="status"
+              >
+                {it.text}
+              </div>
+            )
+          }
           if (it.kind === 'relay') {
             return (
               <div

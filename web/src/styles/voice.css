@@ -206,6 +206,23 @@
 .voice-line-relay::before {
   content: '↳ ';
 }
+/* Server status notes ("Context cleared after …"): a thin divider line
+   between the old conversation and the fresh one. */
+.voice-line-status {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 2px 8px;
+  background: transparent;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text3);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+/* Settings → Assistant → Memory number fields. */
+.voice-memory-number {
+  width: 6em;
+}
 /* "Ask me later" under a relayed question. */
 .voice-ask-later {
   display: flex;

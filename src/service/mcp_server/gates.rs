@@ -122,6 +122,7 @@ impl ToolGate {
                 | "voice_pronunciation"
                 | "voice_prompt"
                 | "assistant_topics"
+                | "assistant_memory"
         ) {
             return self.voice;
         }
@@ -180,6 +181,9 @@ impl ToolGate {
         }
         if name == "assistant_topics" && !self.voice {
             return Some("tool 'assistant_topics' is blocked: only the voice assistant session has a topic ring.".to_string());
+        }
+        if name == "assistant_memory" && !self.voice {
+            return Some("tool 'assistant_memory' is blocked: only the voice assistant session has a temporary memory.".to_string());
         }
         if matches!(name, "get_model_guidance" | "switch_session_model") && !self.autoswitch_on {
             return Some(format!(
@@ -396,6 +400,7 @@ mod tests {
             "voice_pronunciation",
             "voice_prompt",
             "assistant_topics",
+            "assistant_memory",
         ] {
             assert!(voice.blocked(tool).is_none());
             assert!(voice.advertised(tool));
@@ -453,6 +458,7 @@ mod tests {
 
         for tool in [
             "assistant_topics",
+            "assistant_memory",
             "show_view",
             "voice_queue",
             "answer_question",

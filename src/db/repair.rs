@@ -78,6 +78,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_voice_prompt_versions_table(conn)?;
     ensure_pending_actions_table(conn)?;
     ensure_voice_topics_table(conn)?;
+    ensure_assistant_memories_table(conn)?;
     ensure_remote_devices_table(conn)?;
     ensure_remote_device_enrollments_table(conn)?;
     ensure_auth_sessions_remote_device_column(conn)?;
@@ -529,6 +530,35 @@ fn ensure_voice_topics_table(conn: &mut SqliteConnection) -> anyhow::Result<()> 
     sql_query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_topics_one_current \
          ON voice_topics (session_id) WHERE is_current = 1",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1793463980_assistant_memories`. `CREATE TABLE IF
+/// NOT EXISTS` is idempotent so this is safe on a fully-migrated DB and only
+/// does work on one that lacks the table. DDL mirrors the migration.
+fn ensure_assistant_memories_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "assistant_memories")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS assistant_memories (
+            id                TEXT PRIMARY KEY NOT NULL,
+            voice_session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            topic_id          TEXT,
+            topic_title       TEXT NOT NULL,
+            kind              TEXT NOT NULL CHECK (kind IN ('did', 'learned', 'pending')),
+            summary           TEXT NOT NULL,
+            ref_kind          TEXT CHECK (ref_kind IS NULL OR ref_kind IN ('session', 'project')),
+            ref_id            TEXT,
+            source            TEXT NOT NULL CHECK (source IN ('assistant', 'fallback')),
+            created_at        TEXT NOT NULL,
+            expires_at        TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_assistant_memories_session_expiry \
+         ON assistant_memories (voice_session_id, expires_at)",
     )
     .execute(conn)?;
     Ok(())

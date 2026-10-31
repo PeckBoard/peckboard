@@ -19,6 +19,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::db::Db;
 use crate::db::models::VoicePromptVersion;
 use crate::provider::registry::ProviderRegistry;
+use crate::service::assistant_memory::RECENT_MEMORY_HEADING;
 use crate::service::voice_relay::{
     VOICE_AUTO_SHOW_RULES, VOICE_CORE_RULES, VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT,
     VOICE_TOPIC_RING_RULES,
@@ -286,6 +287,9 @@ pub fn strip_builtin_sections(content: &str) -> String {
         .chain(VOICE_TOPIC_RING_RULES.lines())
         .filter(|l| l.starts_with("## "))
         .map(str::trim)
+        // The memory snapshot is server-built; a copy in a custom prompt
+        // (or a forged one) is never kept.
+        .chain(std::iter::once(RECENT_MEMORY_HEADING))
         .collect();
     let mut kept: Vec<&str> = Vec::new();
     let mut skipping = false;
@@ -339,10 +343,29 @@ pub fn with_auto_show(prompt: String, on: bool) -> String {
     }
 }
 
+/// The stored prompt's Recent Memory snapshot: from its heading to the end
+/// (`service::assistant_memory::render_block` always appends it last).
+fn memory_snapshot(stored: &str) -> Option<&str> {
+    let i = stored.find(&format!("\n{RECENT_MEMORY_HEADING}\n"))?;
+    Some(&stored[i + 1..])
+}
+
+/// `prompt` with a Recent Memory snapshot appended, when there is one.
+pub fn with_memory_snapshot(prompt: String, snapshot: Option<&str>) -> String {
+    match snapshot {
+        Some(s) => format!("{prompt}\n{s}"),
+        None => prompt,
+    }
+}
+
 /// Bring the voice session's stored prompt in line with the active one. With
 /// a `registry`, a changed prompt also winds the session's live agent down
 /// after its current turn so the next turn spawns with the new prompt.
 /// Returns true when the session's prompt was rewritten.
+///
+/// The stored Recent Memory snapshot is carried over unchanged: memory
+/// writes must not restart the agent, so the snapshot only moves at a
+/// context clear or boot ([`refresh_memory_snapshot`]).
 pub async fn apply_to_voice_session(
     db: &Db,
     registry: Option<&ProviderRegistry>,
@@ -350,7 +373,33 @@ pub async fn apply_to_voice_session(
     let Some(session) = db.find_expert_session(VOICE_EXPERT_KIND).await? else {
         return Ok(false);
     };
-    let content = session_prompt(db).await?;
+    let snapshot = session.system_prompt.as_deref().and_then(memory_snapshot);
+    let content = with_memory_snapshot(session_prompt(db).await?, snapshot);
+    store_if_changed(db, registry, &session, content).await
+}
+
+/// Rebuild the voice session's prompt with a fresh Recent Memory snapshot
+/// (unexpired entries at `now`). Only the auto-clear and boot call this:
+/// both happen with no agent mid-conversation. Returns true when rewritten.
+pub async fn refresh_memory_snapshot(
+    db: &Db,
+    registry: Option<&ProviderRegistry>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<bool> {
+    let Some(session) = db.find_expert_session(VOICE_EXPERT_KIND).await? else {
+        return Ok(false);
+    };
+    let block = crate::service::assistant_memory::current_block(db, &session.id, now).await?;
+    let content = with_memory_snapshot(session_prompt(db).await?, block.as_deref());
+    store_if_changed(db, registry, &session, content).await
+}
+
+async fn store_if_changed(
+    db: &Db,
+    registry: Option<&ProviderRegistry>,
+    session: &crate::db::models::Session,
+    content: String,
+) -> anyhow::Result<bool> {
     if session.system_prompt.as_deref() == Some(content.as_str()) {
         return Ok(false);
     }

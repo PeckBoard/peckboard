@@ -1,7 +1,12 @@
+use chrono::Utc;
 use serde_json::{Value, json};
 
 use super::super::McpToolRegistry;
 use crate::db::crud::MAX_OPEN_VOICE_TOPICS;
+use crate::db::models::VoiceTopic;
+use crate::service::assistant_memory::lifecycle::{self, Boundary, EndedTopic};
+use crate::service::assistant_memory::{self, TopicRef};
+use crate::service::assistant_settings::{self, AssistantSettings};
 use crate::service::mcp_server::context::ToolCallContext;
 use crate::service::voice_relay::VOICE_EXPERT_KIND;
 use crate::service::voice_topics;
@@ -38,6 +43,7 @@ impl McpToolRegistry {
                 .ok_or_else(|| anyhow::anyhow!("'{action}' needs the topic id (from list)"))
         };
         let not_found = || anyhow::anyhow!("no open topic with that id; call list to see the ring");
+        let mut memory_note: Option<String> = None;
         let changed = match action {
             "list" => false,
             "add" => {
@@ -67,19 +73,59 @@ impl McpToolRegistry {
                 true
             }
             "close" => {
-                ctx.db
+                let items = assistant_memory::parse_items(args.get("memory"))?;
+                check_refs(&ctx.db, voice_id, &items).await?;
+                let topic = ctx
+                    .db
                     .close_voice_topic(voice_id, id()?)
                     .await?
                     .ok_or_else(not_found)?;
+                let (settings, now) = (assistant_settings::load(&ctx.db).await, Utc::now());
+                memory_note = remember(&ctx.db, voice_id, &settings, &topic, items, now).await?;
+                // Fallback memory when nothing was recorded, then the clear.
+                lifecycle::end_topic(
+                    &ctx.db,
+                    voice_id,
+                    EndedTopic::of(&topic),
+                    Boundary::Close,
+                    &settings,
+                    now,
+                )
+                .await;
                 true
             }
             "focus" => {
+                let items = assistant_memory::parse_items(args.get("memory"))?;
+                check_refs(&ctx.db, voice_id, &items).await?;
+                let previous = ctx
+                    .db
+                    .list_open_voice_topics(voice_id)
+                    .await?
+                    .into_iter()
+                    .find(|t| t.is_current);
                 let topic = ctx
                     .db
                     .focus_voice_topic(voice_id, id()?)
                     .await?
                     .ok_or_else(not_found)?;
                 voice_topics::focus_gate(&ctx.db, voice_id, &topic).await;
+                let (settings, now) = (assistant_settings::load(&ctx.db).await, Utc::now());
+                // A switch parks the previous topic: its memory is kept,
+                // nothing is cleared.
+                let parked = previous.filter(|p| p.id != topic.id);
+                if let Some(p) = &parked {
+                    tracing::info!(voice_session = %voice_id, parked = %p.title, focus = %topic.title, "assistant memory: topic parked");
+                    lifecycle::note_focus_switch_at(voice_id, now);
+                }
+                memory_note = remember(
+                    &ctx.db,
+                    voice_id,
+                    &settings,
+                    parked.as_ref().unwrap_or(&topic),
+                    items,
+                    now,
+                )
+                .await?;
                 true
             }
             other => {
@@ -107,14 +153,51 @@ impl McpToolRegistry {
             }
             topics.push(v);
         }
-        Ok(json!({
+        let mut out = json!({
             "open": topics.len(),
             "limit": MAX_OPEN_VOICE_TOPICS,
             "topics": topics,
-        }))
+        });
+        if let Some(note) = memory_note {
+            out["memory"] = json!(note);
+        }
+        Ok(out)
     }
 }
 
+/// Refuse a memory `ref_id` that is not a session / project before the ring
+/// changes, so a bad item never leaves a half-done close.
+async fn check_refs(
+    db: &crate::db::Db,
+    voice_id: &str,
+    items: &[assistant_memory::MemoryItem],
+) -> anyhow::Result<()> {
+    for r in items.iter().filter_map(|i| i.ref_id.as_deref()) {
+        assistant_memory::resolve_ref(db, voice_id, r).await?;
+    }
+    Ok(())
+}
+
+/// Write `items` for `topic`. → a note for the tool result, if any.
+async fn remember(
+    db: &crate::db::Db,
+    voice_id: &str,
+    settings: &AssistantSettings,
+    topic: &VoiceTopic,
+    items: Vec<assistant_memory::MemoryItem>,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<Option<String>> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+    if !settings.memory_enabled {
+        return Ok(Some("memory is turned off; nothing was saved".into()));
+    }
+    let n = assistant_memory::write_items(db, voice_id, settings, &TopicRef::of(topic), items, now)
+        .await?
+        .len();
+    Ok(Some(format!("saved {n} for \"{}\"", topic.title)))
+}
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

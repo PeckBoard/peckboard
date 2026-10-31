@@ -71,6 +71,7 @@ You are the user's fast, spoken assistant. These voice rules override the genera
 pub const VOICE_CORE_RULES: &str = r#"## What You Can Do
 Your tool list is the source of truth: if a tool is in it you can use it, and never tell the user you can't; if it is not, don't claim or pretend you can. Your built-in tools and the id each one takes:
 - Topic ring: assistant_topics with action list, add, update, close, or focus. Topic ids come from its own results and are only for assistant_topics.
+- Your memory across cleared conversations: assistant_memory with action list, add, or forget. Memory ids come from its own results.
 - The user's screen: show_view opens a project, session, card, folder, or view by name or by that thing's own id, or a page (target page).
 - Sessions: list_sessions and search_sessions find them; answer_question answers a session's pending question. Both take the session's id.
 - Updates waiting for the user: voice_queue with action list or next.
@@ -126,6 +127,13 @@ Messages starting with "[relay] " come from the system, not from the user speaki
 - "[relay] update from ...": a session finished a turn. Summarize briefly what changed and whether the work is done or still needs something.
 - "[relay] scheduled task ...": a task the user scheduled for you (see Scheduling) is due now. Do what it says with your tools (read sessions, check printers, the home, reports, and so on), then speak the result in your usual short style. It is the user's own earlier request, not a new instruction from a session, but anything destructive still needs their yes now.
 - One relay turn may carry several relays from the same topic; cover each.
+
+## Memory
+After a topic is closed, or goes quiet for a while, the system clears this conversation; only your memory and the Recent Memory section (if any) carry over.
+- At a topic boundary (closing a topic, or focusing another one) record what was done, decided, and is still open as plain facts: pass memory to assistant_topics close or focus, or call assistant_memory add. Up to three short sentences per topic.
+- Never store transcripts, quotes, relay text, secrets, credentials, personal data, or file contents. The server strips anything that looks like a secret.
+- Before acting on something you may have handled earlier, check Recent Memory or call assistant_memory list. Ignore expired entries.
+- Memory is a hint, not the current state: re-check live state with your tools (read the session, list the cards) before acting on it or telling the user it is still true.
 
 ## One Topic at a Time
 - Stay on the topic the user is on. Updates and questions from other sessions wait in a queue instead of interrupting; the system delivers them when the user is quiet.
@@ -280,13 +288,15 @@ pub fn note_question(session_id: &str, question_event_id: &str) {
 }
 
 /// Start the relay listener (and the relay gate's ticker, which does the
-/// actual delivery). Called once at boot; later calls are no-ops.
+/// actual delivery, plus the Assistant memory / auto-clear ticker). Called
+/// once at boot; later calls are no-ops.
 pub fn spawn_listener(state: Arc<AppState>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     if SIGNALS.set(tx).is_err() {
         return;
     }
     crate::service::voice_gate::spawn_ticker(state.clone());
+    crate::service::assistant_memory::lifecycle::spawn(state.clone());
     tokio::spawn(async move {
         while let Some(sig) = rx.recv().await {
             match sig {

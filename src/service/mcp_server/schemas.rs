@@ -57,6 +57,7 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "voice_queue",
         "voice_pronunciation",
         "assistant_topics",
+        "assistant_memory",
         // The user's own screen and dashboards are not a card's business.
         "ui_open",
         "ui_tabs",
@@ -99,6 +100,7 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "voice_queue",
         "voice_pronunciation",
         "assistant_topics",
+        "assistant_memory",
         "voice_prompt",
     ]
 }
@@ -2217,7 +2219,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "assistant_topics".into(),
-                description: "Voice assistant only: the topic ring the user sees on the Assistant page. You curate it entirely. action list = the open topics (id, kind, title, current, live status of a linked session/project). action add = put a topic on the ring: kind conversation (a thread of this conversation), or session / project with ref_id (live work you are discussing or coordinating; the server shows its live status). action update = retitle or re-summarise. action close = take a finished topic off. action focus = mark the topic the conversation is on now. Titles: a few words, at most 60 chars; at most 12 open topics. Returns the updated ring.".into(),
+                description: "Voice assistant only: the topic ring the user sees on the Assistant page. You curate it entirely. action list = the open topics (id, kind, title, current, live status of a linked session/project). action add = put a topic on the ring: kind conversation (a thread of this conversation), or session / project with ref_id (live work you are discussing or coordinating; the server shows its live status). action update = retitle or re-summarise. action close = take a finished topic off. action focus = mark the topic the conversation is on now. close and focus take an optional memory list (up to 3 plain facts about the topic you are closing or leaving), kept after the conversation is cleared. Titles: a few words, at most 60 chars; at most 12 open topics. Returns the updated ring.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -2226,7 +2228,38 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "kind": { "type": "string", "enum": ["conversation", "session", "project"], "description": "add: what the topic is (default conversation)." },
                         "title": { "type": "string", "description": "add/update: a few words, e.g. \"Dinner plans\" or \"Stashify build\"." },
                         "summary": { "type": "string", "description": "add/update: optional one line shown on hover; empty clears it." },
-                        "ref_id": { "type": "string", "description": "add, kind session/project: the session or project id." }
+                        "ref_id": { "type": "string", "description": "add, kind session/project: the session or project id." },
+                        "memory": {
+                            "type": "array",
+                            "maxItems": 3,
+                            "description": "close/focus: what was done, learned, or is still pending on the topic being closed (close) or left (focus), as plain facts. No quotes, transcripts, relayed text, secrets, or personal data.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "type": "string", "enum": ["did", "learned", "pending"] },
+                                    "summary": { "type": "string", "description": "One plain sentence, at most 400 chars." },
+                                    "ref_id": { "type": "string", "description": "Optional session or project id it concerns." }
+                                },
+                                "required": ["kind", "summary"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "assistant_memory".into(),
+                description: "Voice assistant only: your temporary memory, kept when the conversation is cleared after a topic ends; entries expire on their own. action list = the current entries (topic, kind, summary, age, expiry). action add = record one plain fact (kind did, learned, or pending) for topic_id or the current topic. action forget = delete an entry by id. Never store quotes, transcripts, relayed text, secrets, credentials, personal data, or file contents.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["list", "add", "forget"], "description": "list (default), add, or forget." },
+                        "kind": { "type": "string", "enum": ["did", "learned", "pending"], "description": "add: what the fact records." },
+                        "summary": { "type": "string", "description": "add: one plain sentence, at most 400 chars." },
+                        "topic_id": { "type": "string", "description": "add: the topic it belongs to (from assistant_topics; default the current topic)." },
+                        "ref_id": { "type": "string", "description": "add: optional session or project id it concerns." },
+                        "id": { "type": "string", "description": "forget: the entry id (from list)." }
                     },
                     "additionalProperties": false
                 }),

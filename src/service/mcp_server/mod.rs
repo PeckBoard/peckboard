@@ -89,6 +89,7 @@ impl McpToolRegistry {
             "show_view" => self.handle_show_view(args, ctx).await,
             "voice_queue" => self.handle_voice_queue(args, ctx).await,
             "voice_pronunciation" => self.handle_voice_pronunciation(args, ctx).await,
+            "assistant_memory" => self.handle_assistant_memory(args, ctx).await,
             "assistant_topics" => self.handle_assistant_topics(args, ctx).await,
             "voice_prompt" => self.handle_voice_prompt(args, ctx).await,
             "wont_do_card" => self.handle_wont_do_card(args, ctx).await,
@@ -690,7 +691,8 @@ mod tests {
         ] {
             assert!(names.contains(&t), "{t}");
         }
-        assert_eq!(names.len(), 110);
+        assert!(names.contains(&"assistant_memory"));
+        assert_eq!(names.len(), 111);
     }
 
     #[test]
