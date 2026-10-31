@@ -409,6 +409,88 @@ mod tests {
             }
         }
     }
+    /// The Assistant's capability map ("What You Can Do" in
+    /// `VOICE_CORE_RULES`) may only name tools that exist and that the voice
+    /// session is actually allowed to call — a stale or invented name there
+    /// is exactly the capability hallucination the map exists to prevent.
+    /// Built-in names must be core tools; the session-control tools come
+    /// from a plugin, so they may only appear on the map's "From plugins,
+    /// when they are in your tool list" line, never as built-ins.
+    #[test]
+    fn voice_capability_map_names_only_real_voice_tools() {
+        const PLUGIN_SESSION_TOOLS: &[&str] = &[
+            "find_session",
+            "read_session",
+            "send_message",
+            "create_session",
+            "interrupt_session",
+            "clear_session",
+            "terminate_agent",
+        ];
+        fn tool_names(text: &str) -> Vec<&str> {
+            text.split(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+                .filter(|w| w.contains('_') && !w.starts_with('_') && !w.ends_with('_'))
+                .collect()
+        }
+        let rules = crate::service::voice_relay::VOICE_CORE_RULES;
+        let start = rules.find("## What You Can Do").expect("capability map");
+        let body = &rules[start..];
+        let map = &body[..body[3..].find("\n## ").map_or(body.len(), |i| i + 3)];
+        let known: std::collections::HashSet<String> =
+            crate::service::mcp_server::McpToolRegistry::new()
+                .tool_definitions()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect();
+        let voice = ToolGate::from_session(&session(false, Some("voice"), None));
+
+        let (plugin_lines, core_lines): (Vec<&str>, Vec<&str>) = map
+            .lines()
+            .partition(|l| l.starts_with("From plugins, when they are in your tool list"));
+        assert_eq!(plugin_lines.len(), 1, "one conditional plugin line");
+        let core: Vec<&str> = core_lines.iter().flat_map(|l| tool_names(l)).collect();
+        let plugin = tool_names(plugin_lines[0]);
+
+        for tool in [
+            "assistant_topics",
+            "show_view",
+            "voice_queue",
+            "answer_question",
+        ] {
+            assert!(core.contains(&tool), "capability map must name {tool}");
+        }
+        for action in ["list", "add", "update", "close", "focus"] {
+            assert!(map.contains(action), "assistant_topics action {action}");
+        }
+        for tool in core {
+            assert!(
+                known.contains(tool),
+                "capability map names unknown tool {tool}"
+            );
+            assert!(
+                voice.advertised(tool),
+                "{tool} is not advertised to the voice session"
+            );
+            assert!(
+                voice.blocked(tool).is_none(),
+                "{tool} is blocked for the voice session"
+            );
+        }
+        assert_eq!(
+            plugin, PLUGIN_SESSION_TOOLS,
+            "plugin line names exactly these"
+        );
+        for tool in plugin {
+            assert!(
+                !known.contains(tool),
+                "{tool} is core now: move it to a built-in line"
+            );
+            assert!(
+                voice.blocked(tool).is_none(),
+                "{tool} is blocked for the voice session"
+            );
+        }
+    }
 
     #[test]
     fn external_client_has_no_agent_process_tools() {

@@ -49,10 +49,48 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/voice/snooze", post(snooze_question))
         .route("/api/voice/topics", get(list_topics))
         .route("/api/voice/topics/focus", post(focus_topic))
+        .route(
+            "/api/voice/settings",
+            get(get_assistant_settings).put(put_assistant_settings),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
 const ADMIN_ONLY: &str = "the Assistant is admin-only";
+
+/// GET /api/voice/settings → the Assistant's admin settings
+/// (`service::assistant_settings`).
+async fn get_assistant_settings(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<crate::service::assistant_settings::AssistantSettings>, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    Ok(Json(
+        crate::service::assistant_settings::load(&state.db).await,
+    ))
+}
+
+/// PUT /api/voice/settings — replace the settings, then rebuild the voice
+/// session's prompt (some settings change its rules; the live agent picks
+/// them up after its current turn). → the saved settings.
+async fn put_assistant_settings(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<crate::service::assistant_settings::AssistantSettings>,
+) -> Result<Json<crate::service::assistant_settings::AssistantSettings>, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    crate::service::assistant_settings::save(&state.db, &body)
+        .await
+        .map_err(internal)?;
+    crate::service::voice_prompt::apply_to_voice_session(&state.db, Some(&state.provider_registry))
+        .await
+        .map_err(internal)?;
+    Ok(Json(body))
+}
 
 /// GET /api/voice/linked → `{working, sessions: [{id, name, folder_id,
 /// project_id, state}]}`: the sessions the Assistant handed work to

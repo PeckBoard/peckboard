@@ -78,6 +78,25 @@ async function topicsTool(
   return JSON.parse(body.result!.content[0].text!)
 }
 
+async function mcpTool(
+  request: APIRequestContext,
+  mcpToken: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ isError: boolean; text: string }> {
+  const res = await request.post('/mcp', {
+    headers: { Authorization: `Bearer ${mcpToken}` },
+    data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
+  })
+  expect(res.ok()).toBeTruthy()
+  const body = (await res.json()) as {
+    result?: { content: { text?: string }[]; isError?: boolean }
+    error?: { message: string }
+  }
+  if (body.error) return { isError: true, text: body.error.message }
+  return { isError: !!body.result?.isError, text: body.result?.content[0]?.text ?? '' }
+}
+
 test('topics the assistant curates render on the Assistant page and focus both ways', async ({
   request,
   page,
@@ -198,6 +217,42 @@ test('topics the assistant curates render on the Assistant page and focus both w
     await topicsTool(request, mcpToken, { action: 'focus', id: stashify.id })
     await expect(page.getByTestId('assistant-current-topic')).toContainText('Stashify build')
     await expect(page.locator(`[data-topic-id="${dinner.id}"]`)).toHaveCount(1)
+    // Focus alone never moves the screen (auto_show_on_topic is off by default).
+    await expect(page).toHaveURL(/\/assistant$/)
+
+    // The user clicks the session topic on the ring: still no navigation, and
+    // a show_view in that focus turn is refused — the ring and the screen are
+    // separate concerns.
+    await topicsTool(request, mcpToken, { action: 'focus', id: dinner.id })
+    await expect(page.getByTestId('assistant-current-topic')).toContainText('Dinner plans')
+    await page.locator(`[data-topic-id="${stashify.id}"]`).click()
+    await expect(page.getByTestId('assistant-current-topic')).toContainText('Stashify build')
+    await expect(page).toHaveURL(/\/assistant$/)
+    await expect
+      .poll(async () => {
+        const res = await request.get(`/api/sessions/${voice.session_id}/events?limit=500`, {
+          headers: authHeader,
+        })
+        const events = (await res.json()) as { kind: string; data: { text?: string } }[]
+        return events.filter((e) => e.kind === 'user').at(-1)?.data.text
+      })
+      .toBe("Let's talk about Stashify build.")
+    const refused = await mcpTool(request, mcpToken, 'show_view', {
+      target: 'session',
+      id: workId,
+    })
+    expect(refused.isError, refused.text).toBe(true)
+    expect(refused.text).toContain('topic changes')
+    await expect(page).toHaveURL(/\/assistant$/)
+
+    // An explicit show_view outside a focus turn still navigates.
+    await topicsTool(request, mcpToken, { action: 'focus', id: dinner.id })
+    const shown = await mcpTool(request, mcpToken, 'show_view', {
+      target: 'session',
+      id: workId,
+    })
+    expect(shown.isError, shown.text).toBeFalsy()
+    await expect(page).not.toHaveURL(/\/assistant$/)
   } finally {
     for (const t of (await topicsTool(request, mcpToken, { action: 'list' })).topics) {
       await topicsTool(request, mcpToken, { action: 'close', id: t.id })

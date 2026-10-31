@@ -20,7 +20,8 @@ use crate::db::Db;
 use crate::db::models::VoicePromptVersion;
 use crate::provider::registry::ProviderRegistry;
 use crate::service::voice_relay::{
-    VOICE_CORE_RULES, VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT, VOICE_TOPIC_RING_RULES,
+    VOICE_AUTO_SHOW_RULES, VOICE_CORE_RULES, VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT,
+    VOICE_TOPIC_RING_RULES,
 };
 
 pub const SOURCE_DEFAULT: &str = "default";
@@ -316,8 +317,26 @@ pub fn with_builtin_rules(content: &str) -> String {
 }
 
 /// The system prompt to store on the voice session.
+/// The system prompt to store on the voice session: [`with_builtin_rules`],
+/// plus [`VOICE_AUTO_SHOW_RULES`] when the admin turned on
+/// `auto_show_on_topic` (`service::assistant_settings`).
 pub async fn session_prompt(db: &Db) -> anyhow::Result<String> {
-    Ok(with_builtin_rules(&active_content(db).await?))
+    let auto_show = crate::service::assistant_settings::load(db)
+        .await
+        .auto_show_on_topic;
+    Ok(with_auto_show(
+        with_builtin_rules(&active_content(db).await?),
+        auto_show,
+    ))
+}
+
+/// `prompt` with the opt-in topic auto-show rules appended when `on`.
+pub fn with_auto_show(prompt: String, on: bool) -> String {
+    if on {
+        format!("{prompt}\n{VOICE_AUTO_SHOW_RULES}")
+    } else {
+        prompt
+    }
 }
 
 /// Bring the voice session's stored prompt in line with the active one. With
@@ -528,5 +547,31 @@ mod tests {
             strip_builtin_sections(VOICE_SYSTEM_PROMPT),
             VOICE_SYSTEM_PROMPT.trim_end()
         );
+    }
+
+    /// Topic focus and the screen are decoupled by default: the session
+    /// prompt carries the explicit-only show_view rule and no auto-show
+    /// section until the admin turns `auto_show_on_topic` on.
+    #[tokio::test]
+    async fn auto_show_on_topic_is_off_by_default_and_opt_in() {
+        use crate::service::assistant_settings::{self, AssistantSettings};
+        let db = voice_db().await;
+        let off = session_prompt(&db).await.unwrap();
+        assert!(!off.contains(VOICE_AUTO_SHOW_RULES));
+        assert!(off.contains("never calls show_view by itself"));
+        assistant_settings::save(
+            &db,
+            &AssistantSettings {
+                auto_show_on_topic: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let on = session_prompt(&db).await.unwrap();
+        assert!(on.ends_with(VOICE_AUTO_SHOW_RULES));
+        assert!(apply_to_voice_session(&db, None).await.unwrap());
+        let s = db.get_session("voice").await.unwrap().unwrap();
+        assert_eq!(s.system_prompt.as_deref(), Some(on.as_str()));
     }
 }

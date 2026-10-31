@@ -17,6 +17,7 @@ import ModelPicker from './ModelPicker'
 import SpeechServerSection from './SpeechServerSection'
 import VoicePronunciations from './VoicePronunciations'
 import VoicePromptEditor from './VoicePromptEditor'
+import { authedFetch } from '../store/auth'
 
 /** Recognition languages offered in the picker. The browser default (`''`)
  *  follows the page/OS language. */
@@ -350,6 +351,7 @@ export default function VoiceSettingsSection() {
         )}
       </section>
       <AssistantScheduleSection />
+      <AssistantTopicScreenSection />
       <VoicePromptEditor />
       <VoicePronunciations />
     </>
@@ -408,6 +410,81 @@ function AssistantScheduleSection() {
           data-testid="voice-morning-briefing-status"
         >
           {status.text}
+        </p>
+      )}
+    </section>
+  )
+}
+
+interface AssistantSettings {
+  auto_show_on_topic: boolean
+}
+
+/** Settings → Assistant → Topics and Screen: whether adding or focusing a
+ *  topic also switches the screen to it (`auto_show_on_topic`, server-side,
+ *  default off). Asking the Assistant to show something always works. */
+function AssistantTopicScreenSection() {
+  const [settings, setSettings] = useState<AssistantSettings | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    authedFetch('/api/voice/settings')
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Couldn't load (${res.status})`)
+        return (await res.json()) as AssistantSettings
+      })
+      .then((s) => live && setSettings(s))
+      .catch((e: unknown) => live && setError(e instanceof Error ? e.message : String(e)))
+    return () => {
+      live = false
+    }
+  }, [])
+
+  const save = async (next: AssistantSettings) => {
+    const prev = settings
+    setSettings(next)
+    setError(null)
+    try {
+      const res = await authedFetch('/api/voice/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(next),
+      })
+      if (!res.ok) throw new Error(`Couldn't save (${res.status})`)
+      setSettings((await res.json()) as AssistantSettings)
+    } catch (e) {
+      setSettings(prev)
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <section
+      className="settings-section"
+      data-testid="voice-topic-screen-section"
+      data-settings-anchor="voice-topic-screen"
+    >
+      <h3>Topics and Screen</h3>
+      <p className="form-hint">
+        The topic ring tracks what you and the Assistant are talking about. By default, picking a
+        topic leaves your screen where it is; the Assistant opens things when you ask it to.
+      </p>
+      <label className="settings-row settings-row-toggle">
+        <input
+          type="checkbox"
+          data-testid="voice-auto-show-on-topic"
+          checked={settings?.auto_show_on_topic ?? false}
+          disabled={settings === null}
+          onChange={(e) => void save({ ...settings!, auto_show_on_topic: e.target.checked })}
+        />
+        <span className="settings-label">
+          Show a topic&rsquo;s session or project on screen when it is added or focused
+        </span>
+      </label>
+      {error && (
+        <p className="form-error" role="alert" data-testid="voice-topic-screen-error">
+          {error}
         </p>
       )}
     </section>
