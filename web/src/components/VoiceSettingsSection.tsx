@@ -295,6 +295,17 @@ export default function VoiceSettingsSection() {
               Say &ldquo;One sec&rdquo; when a reply is slow to start (natural voices)
             </span>
           </label>
+          <label className="settings-row settings-row-toggle">
+            <input
+              type="checkbox"
+              data-testid="voice-captions"
+              checked={prefs.captions}
+              onChange={(e) => setPrefs({ captions: e.target.checked })}
+            />
+            <span className="settings-label">
+              Show live captions under the orb on the Assistant page
+            </span>
+          </label>
         </div>
         <div className="voice-settings-actions">
           <button

@@ -16,6 +16,17 @@
 //! in memory (6 h, errors 10 min) and outbound fetches are rate-limited per
 //! domain.
 //!
+//! Remote audio / video / 3D-model files get a signed `media.src` on the
+//! same route (`k=media`): the server streams them through the guard with
+//! `Range` passthrough, a content-type allowlist and per-type size caps
+//! (video 500 MB, audio / model 100 MB), so inline players work under
+//! `media-src 'self'`.
+//!
+//! Fediverse posts (any instance: nodeinfo probe, then that software's JSON
+//! API — [`fediverse`]), `.ics` events ([`ics`]), API-backed cards
+//! ([`apis`], [`github`]) and self-hosted app fingerprints ([`lan`]) all
+//! become `card`s with typed `details`.
+//!
 //! Screenshot fallback (setting, default **off**): when a page has no
 //! og:image the preview may carry a screenshot taken by the headless browser
 //! sidecar (`service::browser`). Only the top-level URL is vetted — Chrome
@@ -23,18 +34,24 @@
 //! none of which the guard can see — so enabling it lets a previewed page
 //! make the server's browser touch internal addresses. Hence opt-in.
 
+mod apis;
 mod cache;
+mod fediverse;
 mod github;
+mod ics;
 pub mod internal;
+mod lan;
 pub mod parse;
 pub mod providers;
 pub mod ssrf;
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
+use futures_util::StreamExt;
+use regex::Regex;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +59,7 @@ use crate::db::Db;
 use cache::TtlLru;
 use internal::{InstanceHosts, InternalLink};
 use parse::{OEmbed, Product};
-use providers::Enrich;
+use providers::{CardHint, Enrich};
 use ssrf::{BodyRule, FetchError, FetchOptions, FetchPolicy, Fetched, TrustedHost, VettedTarget};
 
 /// Key under the core settings KV (`core.settings` / `app`).
@@ -143,6 +160,14 @@ pub struct Media {
     #[serde(rename = "type")]
     pub kind: &'static str,
     pub mime: String,
+    /// Signed same-origin `/api/link-preview/image?k=media` URL streaming
+    /// the file (video / audio / model) — set by [`Preview::for_client`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
+    /// The file to stream when it isn't the link itself (a PeerTube video,
+    /// a provider's direct media URL).
+    #[serde(skip)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -173,22 +198,31 @@ pub struct Preview {
     pub json_ld_product: Option<Product>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub internal: Option<InternalLink>,
-    /// Provider-specific extras (GitHub: state, author, counts, …).
+    /// Provider-specific extras: `type` plus the fields documented in
+    /// [`apis`] (GitHub: state, author, counts, …; `post`: author, handle,
+    /// avatar, text, thumbs; `event`: start, end, location; `asset`:
+    /// download_url). `avatar` / `thumbs` are proxied like `image`, and a
+    /// `download_url` gains a streamed `download_src`, in [`Preview::for_client`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
     /// No og:image and the screenshot fallback is on: `image` becomes a
     /// signed screenshot URL when the preview is handed to a client.
     #[serde(skip)]
     pub screenshot: bool,
+    /// The scraped page's `og:video` (embed-player discovery).
+    #[serde(skip)]
+    pub og_video: Option<String>,
 }
 
 impl Preview {
     /// The client copy: raw upstream image URLs swapped for signed proxy
-    /// URLs (re-signed per response, so cached previews never go stale).
+    /// URLs, and streamed media given a signed `src` (re-signed per
+    /// response, so cached previews never go stale).
     pub fn for_client(&self, secret: &[u8], now: u64) -> Preview {
         let mut p = self.clone();
+        let img = |u: &str| image_proxy_url(secret, ImageKind::Fetch, u, now);
         p.image = match &self.image {
-            Some(u) => Some(image_proxy_url(secret, ImageKind::Fetch, u, now)),
+            Some(u) => Some(img(u)),
             None if self.screenshot => Some(image_proxy_url(
                 secret,
                 ImageKind::Screenshot,
@@ -197,10 +231,32 @@ impl Preview {
             )),
             None => None,
         };
-        p.favicon = self
-            .favicon
-            .as_ref()
-            .map(|u| image_proxy_url(secret, ImageKind::Fetch, u, now));
+        p.favicon = self.favicon.as_deref().map(img);
+        if let Some(m) = &mut p.media
+            && m.kind != "image"
+        {
+            let target = m.target.as_deref().unwrap_or(&self.final_url);
+            m.src = Some(image_proxy_url(secret, ImageKind::Media, target, now));
+        }
+        if let Some(d) = p.details.as_mut().and_then(|d| d.as_object_mut()) {
+            if let Some(a) = d.get("avatar").and_then(|v| v.as_str()).map(img) {
+                d.insert("avatar".into(), a.into());
+            }
+            if let Some(serde_json::Value::Array(list)) = d.get_mut("thumbs") {
+                for t in list.iter_mut() {
+                    if let Some(u) = t.as_str().map(img) {
+                        *t = u.into();
+                    }
+                }
+            }
+            if let Some(src) = d
+                .get("download_url")
+                .and_then(|v| v.as_str())
+                .map(|u| image_proxy_url(secret, ImageKind::Media, u, now))
+            {
+                d.insert("download_src".into(), src.into());
+            }
+        }
         p
     }
 }
@@ -228,11 +284,12 @@ fn err(status: u16, message: impl Into<String>) -> PreviewError {
 }
 
 // ── Signed image-proxy URLs ───────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind {
     Fetch,
     Screenshot,
+    /// A streamed audio / video / model file ([`LinkPreviewService::media_stream`]).
+    Media,
 }
 
 impl ImageKind {
@@ -240,6 +297,7 @@ impl ImageKind {
         match self {
             Self::Fetch => "img",
             Self::Screenshot => "shot",
+            Self::Media => "media",
         }
     }
 
@@ -247,6 +305,7 @@ impl ImageKind {
         match s {
             "img" => Some(Self::Fetch),
             "shot" => Some(Self::Screenshot),
+            "media" => Some(Self::Media),
             _ => None,
         }
     }
@@ -316,6 +375,15 @@ pub struct ProxiedImage {
     pub mime: &'static str,
     pub bytes: Bytes,
 }
+/// A streamed media response: upstream status (200 / 206) and headers, plus
+/// the size-capped body.
+pub struct MediaStream {
+    pub status: u16,
+    pub mime: String,
+    pub content_length: Option<u64>,
+    pub content_range: Option<String>,
+    pub body: Body,
+}
 
 pub struct LinkPreviewService {
     previews: Mutex<TtlLru<Result<Preview, PreviewError>>>,
@@ -329,10 +397,13 @@ pub fn service() -> &'static LinkPreviewService {
     SVC.get_or_init(LinkPreviewService::new)
 }
 
-/// Cache key: fragment and tracking parameters dropped.
+/// Cache key: fragment and tracking parameters dropped — except a map
+/// position fragment (`#map=15/52.5/13.4`), which names what is shown.
 fn cache_key(url: &Url) -> String {
     let mut u = url.clone();
-    u.set_fragment(None);
+    if !u.fragment().is_some_and(|f| f.starts_with("map=")) {
+        u.set_fragment(None);
+    }
     let kept: Vec<(String, String)> = u
         .query_pairs()
         .filter(|(k, _)| {
@@ -358,16 +429,38 @@ fn media_kind(ct: &str) -> Option<&'static str> {
     }
 }
 
+const ICS_MAX_BYTES: usize = 1024 * 1024;
+
 fn page_rule(ct: &str) -> BodyRule {
     if ct == "text/html" || ct == "application/xhtml+xml" {
         BodyRule::Read {
             max: ssrf::HTML_MAX_BYTES,
             truncate: true,
         }
-    } else if media_kind(ct).is_some() {
+    } else if ct == "text/calendar" {
+        BodyRule::Read {
+            max: ICS_MAX_BYTES,
+            truncate: true,
+        }
+    } else if media_kind(ct).is_some() || MODEL_CTS.contains(&ct) {
         BodyRule::HeadersOnly
     } else {
         BodyRule::Refuse
+    }
+}
+
+/// A `.ics` link: calendars are often served as text/plain or octet-stream.
+fn ics_rule(ct: &str) -> BodyRule {
+    if matches!(
+        ct,
+        "text/calendar" | "text/plain" | "application/octet-stream" | "application/ics" | ""
+    ) {
+        BodyRule::Read {
+            max: ICS_MAX_BYTES,
+            truncate: true,
+        }
+    } else {
+        page_rule(ct)
     }
 }
 
@@ -489,57 +582,103 @@ impl LinkPreviewService {
             kind: "card",
             ..Default::default()
         };
-        if let Some(pm) = providers::match_url(url) {
-            let provider = pm.provider;
-            p.provider = Some(provider.id.to_string());
-            p.site_name = Some(provider.name.to_string());
-            let mut caps = pm.caps;
-            match provider.enrich {
-                Enrich::None => {}
-                Enrich::BlueskyDid => {
-                    if let Some(did) = self.bluesky_did(&caps["handle"], &policy).await {
-                        caps.insert("did".into(), did);
-                    }
-                }
-                gh => {
-                    if let Some(card) =
-                        github::enrich(self, db, &policy, gh, &caps, privileged).await
-                    {
-                        p.title = card.title;
-                        p.description = card.description;
-                        p.image = card.image;
-                        p.favicon = Some("https://github.com/favicon.ico".into());
-                        p.details = Some(card.details);
-                        return Ok(p);
-                    }
-                }
-            }
-            if let Some(spec) = &provider.embed
-                && let Some(src) = providers::embed_src(spec, &caps)
+        let Some(pm) = providers::match_url(url) else {
+            // Any fediverse instance: a post-shaped path + a nodeinfo probe.
+            if let Some(post) = fediverse::post_ref(url)
+                && let Some(found) = fediverse::lookup(self, &policy, url, &post).await
             {
-                p.kind = "embed";
-                p.embed = Some(Embed {
-                    iframe_src: src,
-                    sandbox_mode: spec.sandbox.as_str(),
-                    width: spec.width,
-                    height: spec.height,
-                    aspect: spec.aspect,
-                });
-                // Metadata is best-effort: the embed works without it.
-                if let Some(tmpl) = provider.oembed {
-                    let mut c = caps.clone();
-                    c.insert("url".into(), url.to_string());
-                    if let Some(endpoint) = providers::render(tmpl, &c)
-                        && let Some(o) = self.fetch_oembed(&endpoint, &policy).await
-                    {
-                        apply_oembed(&mut p, &o);
+                return Ok(fediverse_preview(p, found));
+            }
+            return self
+                .scrape(url, &policy, settings, p, CardHint::Plain)
+                .await;
+        };
+        let provider = pm.provider;
+        p.provider = Some(provider.id.to_string());
+        p.site_name = Some(provider.name.to_string());
+        let mut caps = pm.caps;
+        match provider.enrich {
+            Enrich::None => {}
+            Enrich::BlueskyDid => {
+                if let Some(did) = self.bluesky_did(&caps["handle"], &policy).await {
+                    caps.insert("did".into(), did);
+                }
+            }
+            Enrich::Osm => osm_caps(url, &mut caps),
+            Enrich::OgEmbed => {
+                // The player id is only in the page's `og:video`.
+                let mut scraped = self
+                    .scrape(url, &policy, settings, p, provider.card)
+                    .await?;
+                if let Some(spec) = &provider.embed
+                    && let Some(player) = scraped
+                        .og_video
+                        .as_deref()
+                        .and_then(|v| v.strip_prefix("https://bandcamp.com/EmbeddedPlayer/"))
+                {
+                    caps.insert("player".into(), player.trim_end_matches('/').to_string());
+                    if let Some(src) = providers::embed_src(spec, &caps) {
+                        scraped.kind = "embed";
+                        scraped.embed = Some(embed_of(spec, src));
                     }
                 }
-                return Ok(p);
+                return Ok(scraped);
             }
-            // No embed/enrichment (API down, handle unresolvable): scrape.
+            gh if gh.is_github() => {
+                if let Some(card) = github::enrich(self, db, &policy, gh, &caps, privileged).await {
+                    apply_card(&mut p, card);
+                    p.favicon = Some("https://github.com/favicon.ico".into());
+                    return Ok(p);
+                }
+            }
+            kind => {
+                if let Some(card) = apis::enrich(self, db, &policy, kind, &caps, privileged).await {
+                    apply_card(&mut p, card);
+                    return Ok(p);
+                }
+            }
         }
-        self.scrape(url, &policy, settings, p).await
+        if let Some(media) = &provider.media
+            && let Some(src) = providers::render(media.src, &caps)
+        {
+            p.kind = "media";
+            p.media = Some(Media {
+                kind: media.kind,
+                mime: mime_for(&src),
+                src: None,
+                target: Some(src.clone()),
+            });
+            if media.kind == "image" {
+                p.image = Some(src);
+            }
+            p.title = Some(provider.name.to_string());
+            return Ok(p);
+        }
+        if let Some(spec) = &provider.embed
+            && let Some(src) = providers::embed_src(spec, &caps)
+        {
+            p.kind = "embed";
+            p.embed = Some(embed_of(spec, src));
+            // Metadata is best-effort: the embed works without it.
+            if let Some(tmpl) = provider.oembed
+                && let Some(endpoint) = providers::render(tmpl, &caps)
+                && let Some(o) = self.fetch_oembed(&endpoint, &policy).await
+            {
+                apply_oembed(&mut p, &o);
+            }
+            return Ok(p);
+        }
+        // No embed/enrichment (API down, token absent, handle
+        // unresolvable): scrape the page itself.
+        match self
+            .scrape(url, &policy, settings, p.clone(), provider.card)
+            .await
+        {
+            Err(e) if provider.card == CardHint::Shop && e.status != 429 => {
+                Ok(shop_fallback(p, url, settings))
+            }
+            res => res,
+        }
     }
 
     async fn scrape(
@@ -548,28 +687,42 @@ impl LinkPreviewService {
         policy: &FetchPolicy,
         settings: &LinkPreviewSettings,
         mut p: Preview,
+        hint: CardHint,
     ) -> Result<Preview, PreviewError> {
+        let is_ics = url.path().to_ascii_lowercase().ends_with(".ics");
         let fetched = self
             .guarded_fetch(
                 url.as_str(),
                 policy,
                 &FetchOptions {
                     accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
-                    bearer: None,
-                    body: page_rule,
+                    auth: None,
+                    post_json: None,
+                    body: if is_ics { ics_rule } else { page_rule },
                 },
             )
             .await?;
         p.final_url = fetched.final_url.to_string();
-        if let Some(kind) = media_kind(&fetched.content_type) {
+        let is_html =
+            fetched.content_type == "text/html" || fetched.content_type == "application/xhtml+xml";
+        if fetched.content_type == "text/calendar" || (is_ics && !is_html) {
+            let card = ics::event_card(&String::from_utf8_lossy(&fetched.body))
+                .ok_or_else(|| err(422, "no event in the calendar"))?;
+            apply_card(&mut p, card);
+            p.provider.get_or_insert_with(|| "ics".into());
+            return Ok(p);
+        }
+        if let Some((kind, mime)) = media_kind_for(&fetched.content_type, &fetched.final_url) {
             p.kind = "media";
-            p.media = Some(Media {
-                kind,
-                mime: fetched.content_type.clone(),
-            });
             if kind == "image" && fetched.content_type != "image/svg+xml" {
                 p.image = Some(p.final_url.clone());
             }
+            p.media = Some(Media {
+                kind,
+                mime,
+                src: None,
+                target: None,
+            });
             p.title = fetched
                 .final_url
                 .path_segments()
@@ -577,6 +730,9 @@ impl LinkPreviewService {
                 .filter(|s| !s.is_empty())
                 .map(|s| urlencoding::decode(&s).map(|c| c.into_owned()).unwrap_or(s));
             return Ok(p);
+        }
+        if !is_html {
+            return Err(FetchError::ContentType(fetched.content_type).into());
         }
         let html = String::from_utf8_lossy(&fetched.body);
         let meta = parse::parse_html(&html, &fetched.final_url);
@@ -587,6 +743,20 @@ impl LinkPreviewService {
         p.favicon = p.favicon.or(meta.favicon);
         p.theme_color = meta.theme_color;
         p.json_ld_product = meta.product;
+        p.og_video = meta.video;
+        if hint == CardHint::Asset {
+            p.details = Some(serde_json::json!({
+                "type": "asset",
+                "download_url": model_link(&html, &fetched.final_url),
+            }));
+        } else if p.provider.is_none()
+            && let Some((id, name)) = lan::fingerprint(&html)
+        {
+            p.provider = Some(id.into());
+            p.site_name = p.site_name.or_else(|| Some(name.into()));
+            p.title = p.title.or_else(|| Some(name.into()));
+            p.details = Some(serde_json::json!({ "type": "app", "app": id, "facts": [name] }));
+        }
         if (p.title.is_none() || p.image.is_none())
             && let Some(endpoint) = meta.oembed_url
             && let Some(o) = self.fetch_oembed(&endpoint, policy).await
@@ -604,11 +774,7 @@ impl LinkPreviewService {
             .guarded_fetch(
                 endpoint,
                 policy,
-                &FetchOptions {
-                    accept: "application/json",
-                    bearer: None,
-                    body: github::json_rule,
-                },
+                &FetchOptions::get("application/json", github::json_rule),
             )
             .await
             .ok()?;
@@ -633,11 +799,7 @@ impl LinkPreviewService {
             .guarded_fetch(
                 &endpoint,
                 policy,
-                &FetchOptions {
-                    accept: "application/json",
-                    bearer: None,
-                    body: github::json_rule,
-                },
+                &FetchOptions::get("application/json", github::json_rule),
             )
             .await
             .ok()?;
@@ -666,6 +828,7 @@ impl LinkPreviewService {
                 self.screenshot(target, &policy).await
             }
             ImageKind::Screenshot => Err(err(404, "screenshot fallback is disabled")),
+            ImageKind::Media => Err(err(400, "media is streamed, not proxied as an image")),
         };
         if !matches!(&res, Err(e) if e.status == 429) {
             let (ttl, weight) = match &res {
@@ -689,11 +852,10 @@ impl LinkPreviewService {
             .guarded_fetch(
                 target,
                 policy,
-                &FetchOptions {
-                    accept: "image/avif,image/webp,image/png,image/jpeg,image/gif,image/*;q=0.5",
-                    bearer: None,
-                    body: image_rule,
-                },
+                &FetchOptions::get(
+                    "image/avif,image/webp,image/png,image/jpeg,image/gif,image/*;q=0.5",
+                    image_rule,
+                ),
             )
             .await?;
         let mime = sniff_raster(&f.body).ok_or_else(|| err(415, "not a raster image"))?;
@@ -753,6 +915,67 @@ impl LinkPreviewService {
             bytes: Bytes::from(shot),
         })
     }
+
+    /// Stream a remote audio / video / model file (signature already
+    /// verified by the route): vetted like every fetch, `Range` passed
+    /// through, type allowlisted, size capped per type. Not rate-limited —
+    /// a player issues many range requests for one file.
+    pub async fn media_stream(
+        &self,
+        db: &Db,
+        target: &str,
+        range: Option<&str>,
+    ) -> Result<MediaStream, PreviewError> {
+        let policy = load_settings(db).await.policy();
+        self.media_stream_with(target, range, &policy, None).await
+    }
+
+    async fn media_stream_with(
+        &self,
+        target: &str,
+        range: Option<&str>,
+        policy: &FetchPolicy,
+        cap_override: Option<u64>,
+    ) -> Result<MediaStream, PreviewError> {
+        static RANGE_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^bytes=[0-9]{0,15}-[0-9]{0,15}$").unwrap());
+        let range = range.filter(|r| RANGE_RE.is_match(r));
+        let vetted = VettedTarget::vet(target, policy).await?;
+        let up = ssrf::fetch_stream(
+            vetted,
+            policy,
+            "video/*,audio/*,model/*,application/octet-stream;q=0.5",
+            range,
+        )
+        .await?;
+        let (mime, cap) = media_allowance(&up.content_type, &up.final_url)
+            .ok_or_else(|| PreviewError::from(FetchError::ContentType(up.content_type.clone())))?;
+        let cap = cap_override.unwrap_or(cap);
+        let total = up
+            .content_range
+            .as_deref()
+            .and_then(|r| r.rsplit('/').next())
+            .and_then(|t| t.parse::<u64>().ok());
+        if up.content_length.is_some_and(|n| n > cap) || total.is_some_and(|n| n > cap) {
+            return Err(err(413, format!("media exceeds {cap} bytes")));
+        }
+        let mut seen = 0u64;
+        let stream = up.response.bytes_stream().map(move |chunk| {
+            let chunk = chunk.map_err(std::io::Error::other)?;
+            seen += chunk.len() as u64;
+            if seen > cap {
+                return Err(std::io::Error::other("media exceeds its size cap"));
+            }
+            Ok(chunk)
+        });
+        Ok(MediaStream {
+            status: up.status,
+            mime,
+            content_length: up.content_length,
+            content_range: up.content_range,
+            body: Body::from_stream(stream),
+        })
+    }
 }
 
 impl Default for LinkPreviewService {
@@ -776,6 +999,231 @@ fn apply_oembed(p: &mut Preview, o: &OEmbed) {
     }
     if p.image.is_none() {
         p.image = o.thumbnail_url.clone();
+    }
+}
+fn embed_of(spec: &providers::EmbedSpec, src: String) -> Embed {
+    Embed {
+        iframe_src: src,
+        sandbox_mode: spec.sandbox.as_str(),
+        width: spec.width,
+        height: spec.height,
+        aspect: spec.aspect,
+    }
+}
+
+fn apply_card(p: &mut Preview, card: github::GhCard) {
+    p.title = card.title.or(p.title.take());
+    p.description = card.description.or(p.description.take());
+    p.image = card.image.or(p.image.take());
+    p.details = Some(card.details);
+}
+
+fn title_case(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+fn fediverse_preview(mut p: Preview, f: fediverse::FediPost) -> Preview {
+    p.provider = Some(f.software.clone());
+    p.site_name = Some(title_case(&f.software));
+    apply_card(&mut p, f.card);
+    if let Some((file, mime)) = f.video {
+        p.kind = "media";
+        p.media = Some(Media {
+            kind: "video",
+            mime,
+            src: None,
+            target: Some(file),
+        });
+    }
+    p
+}
+
+/// A shop refused the scrape (bot wall): a plain card named after the URL
+/// slug, with the screenshot fallback when it is on.
+fn shop_fallback(mut p: Preview, url: &Url, settings: &LinkPreviewSettings) -> Preview {
+    p.title = url
+        .path_segments()
+        .and_then(|segs| {
+            segs.filter(|s| s.len() > 6 && s.contains('-') && s.chars().any(char::is_alphabetic))
+                .max_by_key(|s| s.len())
+                .map(|s| {
+                    urlencoding::decode(s)
+                        .map(|c| c.into_owned())
+                        .unwrap_or_else(|_| s.to_string())
+                        .replace('-', " ")
+                })
+        })
+        .and_then(|t| parse::clean(&t, 200))
+        .or_else(|| p.site_name.clone());
+    p.screenshot = settings.screenshot_fallback;
+    p
+}
+
+/// OpenStreetMap: `bbox` + `marker` from `?mlat=&mlon=[&zoom=]` or the
+/// `#map=zoom/lat/lon` fragment.
+fn osm_caps(url: &Url, caps: &mut BTreeMap<String, String>) {
+    let q = |k: &str| {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    let (zoom, lat, lon) = match (q("mlat"), q("mlon")) {
+        (Some(lat), Some(lon)) => (q("zoom").unwrap_or_else(|| "15".into()), lat, lon),
+        _ => {
+            let Some(map) = url
+                .fragment()
+                .and_then(|f| f.split('&').find_map(|kv| kv.strip_prefix("map=")))
+            else {
+                return;
+            };
+            let parts: Vec<&str> = map.split('/').collect();
+            let [z, lat, lon] = parts[..] else { return };
+            (z.to_string(), lat.to_string(), lon.to_string())
+        }
+    };
+    let (Ok(z), Ok(lat), Ok(lon)) = (zoom.parse::<f64>(), lat.parse::<f64>(), lon.parse::<f64>())
+    else {
+        return;
+    };
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return;
+    }
+    let d = 180.0 / 2f64.powf(z.clamp(1.0, 19.0));
+    caps.insert(
+        "bbox".into(),
+        format!(
+            "{:.5},{:.5},{:.5},{:.5}",
+            lon - d,
+            lat - d / 2.0,
+            lon + d,
+            lat + d / 2.0
+        ),
+    );
+    caps.insert("marker".into(), format!("{lat:.5},{lon:.5}"));
+}
+
+const MODEL_CTS: &[&str] = &[
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/sla",
+    "application/vnd.ms-pki.stl",
+    "application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+];
+
+fn ext_of(path: &str) -> Option<String> {
+    let last = path.rsplit('/').next()?;
+    last.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())
+}
+
+fn model_mime_for_ext(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "stl" => "model/stl",
+        "3mf" => "model/3mf",
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "obj" => "model/obj",
+        "ply" => "model/ply",
+        _ => return None,
+    })
+}
+
+/// `(kind, mime)` of a media response. Model files usually arrive as
+/// `application/octet-stream`, so their extension decides.
+fn media_kind_for(ct: &str, url: &Url) -> Option<(&'static str, String)> {
+    if let Some(k) = media_kind(ct) {
+        return Some((k, ct.to_string()));
+    }
+    if (MODEL_CTS.contains(&ct) || ct.is_empty())
+        && let Some(m) = ext_of(url.path()).and_then(|e| model_mime_for_ext(&e))
+    {
+        return Some(("model", m.to_string()));
+    }
+    None
+}
+
+/// Rough mime of a provider's direct media URL, by extension.
+fn mime_for(src: &str) -> String {
+    let path = src.split(['?', '#']).next().unwrap_or(src);
+    match ext_of(path).as_deref() {
+        Some("gif") => "image/gif",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("mp4") => "video/mp4",
+        Some(e) => model_mime_for_ext(e).unwrap_or("application/octet-stream"),
+        None => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// The first direct 3D-model file an asset page links to.
+fn model_link(html: &str, base: &Url) -> Option<String> {
+    static MODEL_LINK: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?i)(?:href|src|data-src|data-url)\s*=\s*["']([^"'<>\s]+?\.(?:stl|3mf|glb|gltf|obj)(?:\?[^"'<>\s]*)?)["']"#,
+        )
+        .unwrap()
+    });
+    MODEL_LINK
+        .captures(html)
+        .and_then(|c| parse::absolutize(base, &parse::decode_entities(&c[1])))
+}
+
+const VIDEO_MAX_BYTES: u64 = 500 * 1024 * 1024;
+const AUDIO_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const MODEL_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// `(served mime, size cap)` for an upstream media response, or `None`
+/// when its type isn't on the allowlist.
+fn media_allowance(ct: &str, url: &Url) -> Option<(String, u64)> {
+    const VIDEO: &[&str] = &[
+        "video/mp4",
+        "video/webm",
+        "video/ogg",
+        "video/quicktime",
+        "video/x-m4v",
+    ];
+    const AUDIO: &[&str] = &[
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/mp4",
+        "audio/aac",
+        "audio/ogg",
+        "audio/opus",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/webm",
+        "audio/flac",
+        "audio/x-flac",
+        "audio/x-m4a",
+    ];
+    const MODEL: &[&str] = &[
+        "model/gltf-binary",
+        "model/gltf+json",
+        "model/stl",
+        "model/x.stl-binary",
+        "model/x.stl-ascii",
+        "model/obj",
+        "model/3mf",
+        "model/ply",
+    ];
+    if VIDEO.contains(&ct) {
+        return Some((ct.to_string(), VIDEO_MAX_BYTES));
+    }
+    if AUDIO.contains(&ct) {
+        return Some((ct.to_string(), AUDIO_MAX_BYTES));
+    }
+    if MODEL.contains(&ct) {
+        return Some((ct.to_string(), MODEL_MAX_BYTES));
+    }
+    match media_kind_for(ct, url) {
+        Some(("model", mime)) => Some((mime, MODEL_MAX_BYTES)),
+        _ => None,
     }
 }
 
@@ -889,7 +1337,9 @@ mod tests {
             p.media,
             Some(Media {
                 kind: "image",
-                mime: "image/png".into()
+                mime: "image/png".into(),
+                src: None,
+                target: None,
             })
         );
 
@@ -1044,5 +1494,179 @@ mod tests {
             cache_key(&Url::parse("https://E.com/a?utm_source=x#f").unwrap()),
             "https://e.com/a"
         );
+    }
+
+    fn fedi_app() -> Router {
+        use axum::http::HeaderMap;
+        Router::new()
+            .route(
+                "/.well-known/nodeinfo",
+                get(|headers: HeaderMap| async move {
+                    let host = headers[header::HOST].to_str().unwrap().to_string();
+                    Json(serde_json::json!({"links": [{
+                        "rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+                        "href": format!("http://{host}/nodeinfo/2.0"),
+                    }]}))
+                }),
+            )
+            .route(
+                "/nodeinfo/2.0",
+                get(|| async { Json(serde_json::json!({"software": {"name": "mastodon"}})) }),
+            )
+            .route(
+                "/api/v1/statuses/123",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "content": "<p>Hello fediverse</p>", "created_at": "2026-01-01T00:00:00Z",
+                        "account": {"acct": "alice", "display_name": "Alice", "avatar": "https://cdn.example/a.png"},
+                        "media_attachments": [], "replies_count": 1, "reblogs_count": 0, "favourites_count": 2
+                    }))
+                }),
+            )
+            .route(
+                "/event.ics",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "text/calendar")],
+                        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Standup\r\nDTSTART:20261102T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+                    )
+                }),
+            )
+            .route(
+                "/a.mp3",
+                get(|headers: HeaderMap| async move {
+                    use axum::response::IntoResponse;
+                    let body = vec![7u8; 100];
+                    match headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+                        Some("bytes=10-19") => (
+                            axum::http::StatusCode::PARTIAL_CONTENT,
+                            [
+                                (header::CONTENT_TYPE, "audio/mpeg"),
+                                (header::CONTENT_RANGE, "bytes 10-19/100"),
+                            ],
+                            body[10..20].to_vec(),
+                        )
+                            .into_response(),
+                        _ => ([(header::CONTENT_TYPE, "audio/mpeg")], body).into_response(),
+                    }
+                }),
+            )
+            .route(
+                "/page.html",
+                get(|| async { ([(header::CONTENT_TYPE, "text/html")], "<p>x</p>") }),
+            )
+    }
+
+    #[tokio::test]
+    async fn fediverse_posts_and_calendar_events_become_cards() {
+        let port = serve(fedi_app()).await;
+        let db = db_trusting(&["localhost"]).await;
+        let svc = LinkPreviewService::new();
+        let hosts = InstanceHosts::default();
+        let base = format!("http://localhost:{port}");
+
+        let p = svc
+            .preview(&db, &format!("{base}/@alice/123"), &hosts, false)
+            .await
+            .unwrap();
+        assert_eq!(p.kind, "card");
+        assert_eq!(p.provider.as_deref(), Some("mastodon"));
+        let d = p.details.as_ref().unwrap();
+        assert_eq!(d["type"], "post");
+        assert_eq!(d["handle"], "@alice@localhost");
+        assert_eq!(d["text"], "Hello fediverse");
+        // The avatar is proxied like any image.
+        let c = p.for_client(b"k", 1_000);
+        assert!(
+            c.details.unwrap()["avatar"]
+                .as_str()
+                .unwrap()
+                .starts_with("/api/link-preview/image?k=img&")
+        );
+
+        let p = svc
+            .preview(&db, &format!("{base}/event.ics"), &hosts, false)
+            .await
+            .unwrap();
+        assert_eq!(p.title.as_deref(), Some("Standup"));
+        let d = p.details.unwrap();
+        assert_eq!(d["type"], "event");
+        assert_eq!(d["start"], "2026-11-02T09:00:00Z");
+
+        // A remote audio file: media with a signed stream URL.
+        let p = svc
+            .preview(&db, &format!("{base}/a.mp3"), &hosts, false)
+            .await
+            .unwrap();
+        assert_eq!(p.kind, "media");
+        let m = p.for_client(b"k", 1_000).media.unwrap();
+        assert_eq!(m.kind, "audio");
+        assert!(
+            m.src
+                .unwrap()
+                .starts_with("/api/link-preview/image?k=media&")
+        );
+    }
+
+    #[tokio::test]
+    async fn media_proxy_streams_ranges_within_caps_through_the_guard() {
+        let port = serve(fedi_app()).await;
+        let svc = LinkPreviewService::new();
+        let trusted = FetchPolicy::for_previews(vec![TrustedHost::parse("localhost").unwrap()]);
+        let url = |p: &str| format!("http://localhost:{port}{p}");
+
+        let full = svc
+            .media_stream_with(&url("/a.mp3"), None, &trusted, None)
+            .await
+            .unwrap();
+        assert_eq!((full.status, full.mime.as_str()), (200, "audio/mpeg"));
+        assert_eq!(full.content_length, Some(100));
+        let bytes = axum::body::to_bytes(full.body, 1 << 20).await.unwrap();
+        assert_eq!(bytes.len(), 100);
+
+        let part = svc
+            .media_stream_with(&url("/a.mp3"), Some("bytes=10-19"), &trusted, None)
+            .await
+            .unwrap();
+        assert_eq!(part.status, 206);
+        assert_eq!(part.content_range.as_deref(), Some("bytes 10-19/100"));
+        assert_eq!(
+            axum::body::to_bytes(part.body, 1 << 20)
+                .await
+                .unwrap()
+                .len(),
+            10
+        );
+
+        // A malformed / multi-range header is dropped, not forwarded.
+        let multi = svc
+            .media_stream_with(&url("/a.mp3"), Some("bytes=0-1,5-6"), &trusted, None)
+            .await
+            .unwrap();
+        assert_eq!(multi.status, 200);
+
+        // Over the cap (judged on the full size, even for a range).
+        for range in [None, Some("bytes=10-19")] {
+            let e = svc
+                .media_stream_with(&url("/a.mp3"), range, &trusted, Some(50))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(e.status, 413);
+        }
+        // Not on the allowlist.
+        let e = svc
+            .media_stream_with(&url("/page.html"), None, &trusted, None)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, 415);
+        // The SSRF guard: loopback is refused without trust.
+        let e = svc
+            .media_stream_with(&url("/a.mp3"), None, &FetchPolicy::strict(), None)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, 403);
     }
 }

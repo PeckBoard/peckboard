@@ -344,9 +344,31 @@ export function endOfTurnDelay(text: string, maxPauseMs: number): number {
   return endsSentence(text) ? END_OF_TURN_MS : END_OF_TURN_MS + UNPUNCTUATED_EXTRA_MS
 }
 
+/** A relayed question's ids, as `answer_question` (and snoozing) need them. */
+export interface RelayQuestionRef {
+  sessionId: string
+  questionId: string
+}
+
+/** Every `[relay] question from "…" (session <id>, question <qid>)` header
+ *  in a (possibly batched) relay turn. */
+export function relayQuestions(text: string): RelayQuestionRef[] {
+  const out: RelayQuestionRef[] = []
+  const re = /question from "[^"\n]*" \(session ([^,()\s]+), question ([^()\s]+)\)/g
+  for (const m of text.matchAll(re)) out.push({ sessionId: m[1], questionId: m[2] })
+  return out
+}
+
 export type VoiceTranscriptItem =
   | { kind: 'user'; key: string; text: string; ts: number; pending?: boolean }
-  | { kind: 'relay'; key: string; text: string; ts: number }
+  | {
+      kind: 'relay'
+      key: string
+      text: string
+      ts: number
+      /** The relayed questions in this turn (several relays may share one). */
+      questions: RelayQuestionRef[]
+    }
   | { kind: 'assistant'; key: string; text: string; ts: number; streaming: boolean }
 
 /**
@@ -374,6 +396,7 @@ export function foldVoiceTranscript(events: Event[]): VoiceTranscriptItem[] {
             key: ev.id,
             text: stripPronunciationHints(stripRelayPrefix(text)),
             ts: ev.ts,
+            questions: relayQuestions(text),
           })
         } else {
           items.push({ kind: 'user', key: ev.id, text: stripInterruptMarker(text), ts: ev.ts })

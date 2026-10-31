@@ -4,8 +4,9 @@
 //!   image/favicon fields are signed `/api/link-preview/image` URLs.
 //! - `GET /api/link-preview/image?k&u&exp&sig` — NO JWT: the HMAC over
 //!   `(k, u, exp)` minted by the preview route is the credential, so a plain
-//!   `<img>` works. Re-applies the SSRF guard and serves sniffed raster
-//!   bytes only.
+//!   `<img>` / `<audio>` / `<video>` works. Re-applies the SSRF guard;
+//!   `k=img|shot` serve sniffed raster bytes only, `k=media` streams an
+//!   allowlisted audio / video / model file with `Range` passthrough.
 //! - `GET|PUT /api/settings/link-preview` — admin: trusted internal hosts +
 //!   the screenshot fallback switch.
 
@@ -78,9 +79,12 @@ struct ImageQuery {
     exp: u64,
     sig: String,
 }
-
-/// GET /api/link-preview/image?k=img|shot&u=<url>&exp=<unix>&sig=<hex>
-async fn get_image(State(state): State<Arc<AppState>>, Query(q): Query<ImageQuery>) -> Response {
+/// GET /api/link-preview/image?k=img|shot|media&u=<url>&exp=<unix>&sig=<hex>
+async fn get_image(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<ImageQuery>,
+) -> Response {
     let Some(kind) = ImageKind::parse(&q.k) else {
         return error_response(PreviewError {
             status: 400,
@@ -92,6 +96,16 @@ async fn get_image(State(state): State<Arc<AppState>>, Query(q): Query<ImageQuer
             status: 403,
             message: "invalid or expired signature".into(),
         });
+    }
+    if kind == ImageKind::Media {
+        let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+        return match link_preview::service()
+            .media_stream(&state.db, &q.u, range)
+            .await
+        {
+            Ok(m) => media_response(m),
+            Err(e) => error_response(e),
+        };
     }
     match link_preview::service().image(&state.db, kind, &q.u).await {
         Ok(img) => (
@@ -114,6 +128,27 @@ async fn get_image(State(state): State<Arc<AppState>>, Query(q): Query<ImageQuer
     }
 }
 
+fn media_response(m: link_preview::MediaStream) -> Response {
+    let status = StatusCode::from_u16(m.status).unwrap_or(StatusCode::OK);
+    let mut b = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, m.mime)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "private, max-age=3600")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        );
+    if let Some(n) = m.content_length {
+        b = b.header(header::CONTENT_LENGTH, n);
+    }
+    if let Some(r) = m.content_range {
+        b = b.header(header::CONTENT_RANGE, r);
+    }
+    b.body(m.body)
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
 /// GET /api/settings/link-preview →
 /// `{"trusted_internal_hosts": [..], "screenshot_fallback": bool}`.
 async fn get_settings(State(state): State<Arc<AppState>>) -> Response {

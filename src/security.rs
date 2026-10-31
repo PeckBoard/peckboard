@@ -273,11 +273,11 @@ mod tests {
         // Kokoro speech on iOS plays its WAV from a blob: URL.
         assert!(csp.contains("media-src 'self' blob:"));
         assert!(csp.contains("frame-ancestors 'none'"));
-        assert!(csp.contains("base-uri 'none'"));
         // Frames: same-origin plus exactly the link-preview embed hosts.
-        assert!(csp.contains(
-            "frame-src 'self' https://www.youtube-nocookie.com https://platform.twitter.com https://embed.bsky.app;"
-        ));
+        let frames = crate::service::link_preview::providers::frame_src_origins();
+        assert!(frames.contains(&"https://www.youtube-nocookie.com".to_string()));
+        assert!(csp.contains(&format!("frame-src 'self' {};", frames.join(" "))));
+        assert!(csp.contains("base-uri 'none'"));
         assert!(csp.contains("form-action 'self'"));
         assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff");
         assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");

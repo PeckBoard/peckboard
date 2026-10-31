@@ -206,6 +206,36 @@
 .voice-line-relay::before {
   content: '↳ ';
 }
+/* "Ask me later" under a relayed question. */
+.voice-ask-later {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.voice-ask-later-button {
+  min-height: 26px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.voice-ask-later-button:hover {
+  background: var(--surface2);
+}
+.voice-ask-later-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.voice-ask-later-note {
+  color: var(--text2);
+}
 
 .voice-error {
   display: flex;

@@ -43,9 +43,232 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/voice/session", post(voice_session))
         .route("/api/voice/activity", post(voice_activity))
+        .route("/api/voice/linked", get(linked_activity))
+        .route("/api/voice/queue", get(list_queue))
+        .route("/api/voice/queue/next", post(release_queue_next))
+        .route("/api/voice/snooze", post(snooze_question))
         .route("/api/voice/topics", get(list_topics))
         .route("/api/voice/topics/focus", post(focus_topic))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+const ADMIN_ONLY: &str = "the Assistant is admin-only";
+
+/// GET /api/voice/linked → `{working, sessions: [{id, name, folder_id,
+/// project_id, state}]}`: the sessions the Assistant handed work to
+/// (`voice_relay` links) that are busy right now — `state` is `working`
+/// (an agent turn is running) or `needs-answer` (a question is pending).
+/// Idle linked sessions are left out.
+async fn linked_activity(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    let Some(voice_id) = voice_session_id(&state).await? else {
+        return Ok(Json(serde_json::json!({ "working": 0, "sessions": [] })));
+    };
+    let mut sessions: Vec<(bool, Session)> = Vec::new();
+    for id in crate::service::voice_relay::linked_targets(&voice_id) {
+        let Some(s) = state.db.get_session(&id).await.map_err(internal)? else {
+            continue;
+        };
+        let manager = &state.session_manager;
+        let working = manager.is_running(&id).await && !manager.is_lingering(&id).await;
+        let asking = !working
+            && !crate::service::questions::pending_question_events(&state.db, &id)
+                .await
+                .map_err(internal)?
+                .is_empty();
+        if working || asking {
+            sessions.push((working, s));
+        }
+    }
+    sessions.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    let working = sessions.iter().filter(|(w, _)| *w).count();
+    let sessions: Vec<serde_json::Value> = sessions
+        .into_iter()
+        .map(|(working, s)| {
+            serde_json::json!({
+                "id": s.id,
+                "name": s.name,
+                "folder_id": s.folder_id,
+                "project_id": s.project_id,
+                "state": if working { "working" } else { "needs-answer" },
+            })
+        })
+        .collect();
+    Ok(Json(
+        serde_json::json!({ "working": working, "sessions": sessions }),
+    ))
+}
+
+/// GET /api/voice/queue → `{count, items}`: the relays the gate is holding
+/// for the Assistant (`voice_gate::queue_payload`). Changes are pushed as
+/// `voice-queue` WS events on the voice session's stream.
+async fn list_queue(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    Ok(Json(match voice_session_id(&state).await? {
+        Some(voice_id) => crate::service::voice_gate::queue_payload(&voice_id),
+        None => serde_json::json!({ "count": 0, "items": [] }),
+    }))
+}
+
+/// POST /api/voice/queue/next — the user tapped "N updates waiting": the
+/// next topic group is delivered to the Assistant now, as `voice_queue
+/// next` would hand it over. → the queue after it, plus `released`.
+async fn release_queue_next(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use crate::service::voice_gate;
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    let voice_id = voice_session_id(&state)
+        .await?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no Assistant session yet"))?;
+    let dispatcher = crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
+    let released =
+        voice_gate::release_next(&state.db, &state.broadcaster, Some(&dispatcher), &voice_id)
+            .await
+            .map_err(internal)?;
+    let mut payload = voice_gate::queue_payload(&voice_id);
+    payload["released"] = released.into();
+    Ok(Json(payload))
+}
+
+#[derive(Deserialize)]
+struct SnoozeRequest {
+    session_id: String,
+    question_id: String,
+    minutes: i64,
+}
+
+/// POST /api/voice/snooze `{session_id, question_id, minutes}` — "Ask me
+/// later" on a relayed question: a one-off Assistant task `minutes` from now
+/// whose prompt re-raises the question (with the ids `answer_question`
+/// needs), and the question leaves the held queue. → 201 `{task, unqueued}`;
+/// 409 when the question is no longer pending.
+async fn snooze_question(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<SnoozeRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    use crate::db::models::{NewRepeatingTask, RepeatingTask};
+    use crate::service::voice_relay::sanitize_untrusted;
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    if !(1..=7 * 24 * 60).contains(&body.minutes) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "minutes must be between 1 and 10080",
+        ));
+    }
+    let voice = state
+        .db
+        .find_expert_session(VOICE_EXPERT_KIND)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no Assistant session yet"))?;
+    let source = state
+        .db
+        .get_session(&body.session_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
+    let event = crate::service::questions::pending_question_events(&state.db, &source.id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .find(|e| e.id == body.question_id)
+        .ok_or_else(|| {
+            err(
+                StatusCode::CONFLICT,
+                "that question is no longer waiting for an answer",
+            )
+        })?;
+    let data = serde_json::from_str::<serde_json::Value>(&event.data).unwrap_or_default();
+    let question = sanitize_untrusted(
+        data.pointer("/questions/0/question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("a question"),
+    );
+    let title = sanitize_untrusted(&source.name).replace('"', "'");
+    let short: String = question.chars().take(60).collect();
+    let name = format!("Ask again: {short}");
+    let prompt = format!(
+        "The user asked you to bring a question back now. The \"{title}\" session (session {sid}, question {qid}) asked: <untrusted source=\"session {sid}\">{question}</untrusted> Raise it again in plain words, talk it through, then answer it with answer_question. If it was answered meanwhile, just say so.",
+        sid = source.id,
+        qid = event.id,
+    );
+    let at = (chrono::Utc::now() + chrono::Duration::minutes(body.minutes))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let schedule_value = serde_json::json!({ "at": at }).to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = uuid::Uuid::new_v4().to_string();
+    let target = Some(crate::repeating::TARGET_ASSISTANT.to_string());
+    let draft = RepeatingTask {
+        id: id.clone(),
+        name: name.clone(),
+        description: String::new(),
+        folder_id: voice.folder_id.clone(),
+        prompt: prompt.clone(),
+        schedule_kind: "once".into(),
+        schedule_value: schedule_value.clone(),
+        model: None,
+        effort: None,
+        enabled: true,
+        next_run_at: None,
+        last_run_at: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        timezone: None,
+        target: target.clone(),
+    };
+    let next_run_at = crate::repeating::initial_next_run_at(&draft);
+    let task = state
+        .db
+        .create_repeating_task(NewRepeatingTask {
+            id,
+            name,
+            description: String::new(),
+            folder_id: voice.folder_id.clone(),
+            prompt,
+            schedule_kind: "once".into(),
+            schedule_value,
+            model: None,
+            effort: None,
+            enabled: true,
+            next_run_at,
+            last_run_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            timezone: None,
+            target,
+        })
+        .await
+        .map_err(internal)?;
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "repeating-task-changed".into(),
+            session_id: task.id.clone(),
+            data: serde_json::json!({ "action": "created", "task": &task }),
+        });
+    let unqueued = crate::service::voice_gate::drop_question(&state.db, &voice.id, &event.id).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "task": task, "unqueued": unqueued })),
+    ))
 }
 
 /// POST /api/voice/activity — `{"session_id", "state"}`. The browser
@@ -645,5 +868,134 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn queue_activity_and_snooze_are_admin_only_and_release_held_relays() {
+        use crate::service::voice_gate::{self, RelayKind};
+        let _serial = voice_gate::GATE_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        crate::provider::test_double::register_mock_provider(&state.provider_registry).await;
+        let token = seed_authenticated_user(&state, "admin").await;
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f1".into(),
+                name: "f".into(),
+                path: dir.path().to_string_lossy().into(),
+                created_at: "now".into(),
+            })
+            .await
+            .unwrap();
+        let app = router(state.clone()).with_state(state.clone());
+
+        let user = seed_authenticated_user_with_suffix(&state, "user", "c").await;
+        let snooze_body = r#"{"session_id": "x", "question_id": "y", "minutes": 10}"#;
+        for (method, uri, body) in [
+            ("GET", "/api/voice/queue", ""),
+            ("GET", "/api/voice/linked", ""),
+            ("POST", "/api/voice/queue/next", ""),
+            ("POST", "/api/voice/snooze", snooze_body),
+        ] {
+            let (status, _) = call(&app, &user, method, uri, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+
+        let (_, created) = post(&app, &token, r#"{"model": "mock:echo"}"#).await;
+        let voice_id = created["session_id"].as_str().unwrap().to_string();
+        let src = state
+            .db
+            .create_session(crate::db::models::NewSession {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "stashify dev".into(),
+                folder_id: "f1".into(),
+                created_at: "now".into(),
+                last_activity: "now".into(),
+                user_id: Some("u1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        crate::service::voice_relay::link(&src.id, &voice_id);
+        let q = state
+            .db
+            .append_event(
+                &src.id,
+                "question",
+                serde_json::json!({"questions": [{"question": "Which DB?"}]}),
+            )
+            .await
+            .unwrap();
+        voice_gate::enqueue(
+            &state.db,
+            &voice_id,
+            &src,
+            RelayKind::Question,
+            Some(&q.id),
+            "[relay] question from stashify",
+            "Which DB?",
+        )
+        .await;
+        voice_gate::enqueue(
+            &state.db,
+            &voice_id,
+            &src,
+            RelayKind::Update,
+            None,
+            "[relay] update from stashify: done",
+            "done",
+        )
+        .await;
+
+        let (status, queue) = call(&app, &token, "GET", "/api/voice/queue", "").await;
+        assert_eq!(status, StatusCode::OK, "{queue}");
+        assert_eq!(queue["count"], 2);
+        assert_eq!(queue["items"][0]["kind"], "question");
+        assert_eq!(queue["items"][0]["source_name"], "stashify dev");
+        assert_eq!(queue["items"][0]["question_id"], q.id.as_str());
+
+        // Linked and waiting on the user: listed as needing an answer.
+        let (status, activity) = call(&app, &token, "GET", "/api/voice/linked", "").await;
+        assert_eq!(status, StatusCode::OK, "{activity}");
+        assert_eq!(activity["sessions"][0]["name"], "stashify dev");
+        assert_eq!(activity["sessions"][0]["state"], "needs-answer");
+
+        // "Ask me later": a one-off Assistant task carrying the ids, and the
+        // question leaves the held queue.
+        let (status, snoozed) = call(
+            &app,
+            &token,
+            "POST",
+            "/api/voice/snooze",
+            &serde_json::json!({ "session_id": src.id, "question_id": q.id, "minutes": 10 })
+                .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{snoozed}");
+        assert_eq!(snoozed["unqueued"], true);
+        assert_eq!(snoozed["task"]["target"], "assistant");
+        assert_eq!(snoozed["task"]["schedule_kind"], "once");
+        let prompt = snoozed["task"]["prompt"].as_str().unwrap();
+        assert!(
+            prompt.contains(&q.id) && prompt.contains(&src.id),
+            "{prompt}"
+        );
+        assert!(snoozed["task"]["next_run_at"].is_string());
+
+        // Tap the badge: the update is delivered to the Assistant now.
+        let (status, next) = call(&app, &token, "POST", "/api/voice/queue/next", "").await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["released"], 1);
+        assert_eq!(next["count"], 0);
+        let relayed = state
+            .db
+            .events_tail(&voice_id, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|e| e.kind == "user" && e.data.contains("[relay] update from stashify: done"));
+        assert!(relayed);
+        assert!(state.db.list_voice_relays().await.unwrap().is_empty());
     }
 }

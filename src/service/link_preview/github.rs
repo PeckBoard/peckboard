@@ -76,20 +76,50 @@ pub(super) async fn enrich_with(
         Enrich::GithubRun => format!("{base}/actions/runs/{}", caps.get("run")?),
         _ => return None,
     };
-    let fetched = svc
-        .guarded_fetch(
-            &endpoint,
-            policy,
-            &FetchOptions {
-                accept: "application/vnd.github+json",
-                bearer: token,
-                body: json_rule,
-            },
-        )
-        .await
-        .ok()?;
+    let auth = token.map(|t| format!("Bearer {t}"));
+    let opts = FetchOptions {
+        accept: "application/vnd.github+json",
+        auth: auth.as_deref(),
+        post_json: None,
+        body: json_rule,
+    };
+    let fetched = svc.guarded_fetch(&endpoint, policy, &opts).await.ok()?;
     let v: Value = serde_json::from_slice(&fetched.body).ok()?;
-    Some(card_from(kind, &format!("{owner}/{repo}"), &v))
+    let mut card = card_from(kind, &format!("{owner}/{repo}"), &v);
+    if kind == Enrich::GithubRun
+        && let Some(jobs_url) = v.get("jobs_url").and_then(Value::as_str)
+        && jobs_url.starts_with(api_base.trim_end_matches('/'))
+        && let Ok(f) = svc.guarded_fetch(jobs_url, policy, &opts).await
+        && let Ok(jobs) = serde_json::from_slice::<Value>(&f.body)
+    {
+        apply_jobs(&mut card.details, &jobs);
+    }
+    Some(card)
+}
+
+/// Per-job status of an Actions run: `jobs` (name/status/conclusion) and a
+/// `checks` summary like `3/4 passed`.
+fn apply_jobs(details: &mut Value, jobs: &Value) {
+    let Some(list) = jobs.get("jobs").and_then(Value::as_array) else {
+        return;
+    };
+    let summary: Vec<Value> = list
+        .iter()
+        .take(20)
+        .map(|j| {
+            json!({
+                "name": j.get("name"),
+                "status": j.get("status"),
+                "conclusion": j.get("conclusion"),
+            })
+        })
+        .collect();
+    let passed = list
+        .iter()
+        .filter(|j| j.get("conclusion").and_then(Value::as_str) == Some("success"))
+        .count();
+    details["checks"] = json!(format!("{passed}/{} passed", list.len()));
+    details["jobs"] = Value::Array(summary);
 }
 
 fn s(v: &Value, path: &[&str]) -> Option<String> {

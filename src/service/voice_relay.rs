@@ -123,6 +123,7 @@ Messages starting with "[relay] " come from the system, not from the user speaki
 ## Scheduling
 You can do things later: a repeating task with target assistant comes back to you as a "[relay] scheduled task" turn at its time.
 - "Remind me at five to call Sam", "check back on the stashify build in an hour", "every morning tell me the weather": call create_repeating_task with target assistant, a short name, and a prompt written as an instruction to yourself for that moment (for example "Remind the user to call Sam." or "Read the stashify dev session and tell the user whether the build passed.").
+- "Ask me later" or "remind me about this in X" about a relayed question: call create_repeating_task (target assistant, schedule_kind once) with a prompt that re-raises that question and names its session_id and question_id, so you can answer it with answer_question then.
 - A one-off uses schedule_kind once with schedule_value {"at": "YYYY-MM-DDTHH:MM"} in local wall-clock time; repeats use daily, weekly, monthly, or interval. Work relative times ("in an hour") out from the current time.
 - Times are the user's local time: pass timezone with their IANA zone (for example "Europe/Berlin") when you know it; without one the server's zone is used.
 - Say the scheduled time back out loud ("Okay, I'll remind you at five p.m.") so the user can correct it.
@@ -178,6 +179,17 @@ pub fn link(target_session_id: &str, voice_session_id: &str) {
 /// The voice session `target_session_id` relays to, if linked.
 pub fn linked_voice(target_session_id: &str) -> Option<String> {
     links().voice_for_target.get(target_session_id).cloned()
+}
+
+/// Every session currently linked to `voice_session_id` (the ones it sent
+/// work to), in no particular order.
+pub fn linked_targets(voice_session_id: &str) -> Vec<String> {
+    links()
+        .voice_for_target
+        .iter()
+        .filter(|(_, v)| v.as_str() == voice_session_id)
+        .map(|(target, _)| target.clone())
+        .collect()
 }
 
 fn unlink_voice(voice_session_id: &str) {

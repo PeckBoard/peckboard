@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVoiceStore, type VoiceStatus } from '../store/voice'
-import { foldVoiceTranscript, type VoiceTranscriptItem } from '../voice/text'
+import { foldVoiceTranscript, type RelayQuestionRef, type VoiceTranscriptItem } from '../voice/text'
+import { MenuButton, type MenuItem } from './Dropdown'
 import VoiceActionCard from './VoiceActionCard'
 import LinkPreviews from './LinkPreview'
 import KokoroStatusNotice from './KokoroStatusNotice'
+import { SNOOZE_CHOICES, snoozeQuestion } from './assistant/snooze'
 
 const STATUS_LABEL: Record<VoiceStatus, string> = {
   idle: 'Idle',
@@ -82,6 +84,46 @@ export function VoiceListenButton({
       <MicIcon />
       {status !== 'idle' && <span className="rail-btn-dot voice-rail-dot" aria-hidden />}
     </button>
+  )
+}
+/** "Ask me later" on a relayed question: the Assistant raises it again
+ *  after the chosen delay (a one-off Assistant task), and it leaves the
+ *  held queue if it is still waiting there. */
+function AskLaterButton({ questions }: { questions: RelayQuestionRef[] }) {
+  const [note, setNote] = useState<string | null>(null)
+  const choices = (q: RelayQuestionRef): MenuItem[] =>
+    SNOOZE_CHOICES.map((c) => ({
+      label: c.label,
+      testId: `voice-ask-later-${c.minutes}`,
+      onSelect: () =>
+        void snoozeQuestion(q.sessionId, q.questionId, c.minutes).then((err) =>
+          setNote(
+            err ??
+              `Okay — I'll ask again ${c.minutes < 60 ? `in ${c.minutes} minutes` : 'in an hour'}.`,
+          ),
+        ),
+    }))
+  const items: MenuItem[] =
+    questions.length === 1
+      ? choices(questions[0])
+      : questions.map((q, i) => ({ label: `Question ${i + 1}`, submenu: choices(q) }))
+  return (
+    <span className="voice-ask-later">
+      <MenuButton
+        items={items}
+        ariaLabel="Ask me later"
+        triggerClassName="voice-ask-later-button"
+        testId="voice-ask-later"
+        align="left"
+      >
+        Ask me later
+      </MenuButton>
+      {note && (
+        <span className="voice-ask-later-note" role="status">
+          {note}
+        </span>
+      )}
+    </span>
   )
 }
 
@@ -203,6 +245,7 @@ export default function VoiceDock({
                 data-testid="voice-line-relay"
               >
                 {it.text}
+                {it.questions.length > 0 && <AskLaterButton questions={it.questions} />}
                 <LinkPreviews text={it.text} />
               </div>
             )

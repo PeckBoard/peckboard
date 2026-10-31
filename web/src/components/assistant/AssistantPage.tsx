@@ -1,13 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useAssistantActivity } from '../../store/assistantActivity'
 import { useAssistantTopics } from '../../store/assistantTopics'
+import { useRepeatingTasksStore } from '../../store/repeatingTasks'
+import { useResourcesStore } from '../../store/resources'
 import { useVoiceStore } from '../../store/voice'
 import type { OrbState } from '../../voice/assistantContract'
 import { audioLevels, useOrbState } from '../../voice/levels'
 import '../../styles/assistant.css'
+import ModelPicker from '../ModelPicker'
+import AssistantActivity from './AssistantActivity'
+import AssistantCaptions from './AssistantCaptions'
 import AssistantOrb from './AssistantOrb'
 import AssistantEmbedCard from './AssistantEmbedCard'
 import AssistantTranscriptDrawer from './AssistantTranscriptDrawer'
+import AssistantUpcoming from './AssistantUpcoming'
 import TopicRing from './TopicRing'
+import { upcomingAssistantTasks } from './upcoming'
 import { useAbsorbAnimation } from './useAbsorbAnimation'
 
 const STATUS_LABEL: Record<OrbState, string> = {
@@ -49,6 +57,13 @@ export default function AssistantPage() {
   const toggleMic = useVoiceStore((state) => state.toggleMic)
   const unlockSpeech = useVoiceStore((state) => state.unlockSpeech)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [upcomingOpen, setUpcomingOpen] = useState(false)
+  const model = useVoiceStore((state) => state.model)
+  const setModel = useVoiceStore((state) => state.setModel)
+  const models = useResourcesStore((state) => state.models)
+  const fetchModels = useResourcesStore((state) => state.fetchModels)
+  const tasks = useRepeatingTasksStore((state) => state.tasks)
+  const upcomingCount = useMemo(() => upcomingAssistantTasks(tasks).length, [tasks])
 
   const { absorbing, displayedId, durationMs } = useAbsorbAnimation(topics, currentId)
   const displayedTopic = useMemo(
@@ -59,7 +74,16 @@ export default function AssistantPage() {
   useEffect(() => {
     void useAssistantTopics.getState().load()
     void useVoiceStore.getState().openPanel()
+    void useRepeatingTasksStore
+      .getState()
+      .fetchTasks()
+      .catch(() => undefined)
+    return useAssistantActivity.getState().start()
   }, [])
+
+  useEffect(() => {
+    if (models.length === 0) void fetchModels()
+  }, [models.length, fetchModels])
 
   const handleListen = () => {
     if (!panelOpen) {
@@ -75,6 +99,7 @@ export default function AssistantPage() {
       data-testid="assistant-page"
       data-state={orbState}
       data-transcript-open={transcriptOpen ? 'true' : 'false'}
+      data-upcoming-open={upcomingOpen ? 'true' : 'false'}
       onPointerDown={unlockSpeech}
     >
       <div className="assistant-ambient assistant-ambient-one" aria-hidden />
@@ -88,6 +113,35 @@ export default function AssistantPage() {
           aria-hidden
         />
         <span>{STATUS_LABEL[orbState]}</span>
+      </div>
+
+      <AssistantActivity />
+
+      <div className="assistant-toolbar">
+        <ModelPicker
+          value={model ?? ''}
+          onChange={(id) => {
+            if (id && id !== model) void setModel(id)
+          }}
+          models={models}
+          ariaLabel="Assistant model"
+          testId="assistant-model"
+          triggerClassName="assistant-chip assistant-chip-button assistant-model-trigger"
+          align="right"
+          emptyHint="Loading models…"
+          onOpen={fetchModels}
+          valueLabel={model === null ? 'Loading…' : undefined}
+        />
+        <button
+          type="button"
+          className="assistant-chip assistant-chip-button"
+          data-testid="assistant-upcoming-toggle"
+          aria-expanded={upcomingOpen}
+          onClick={() => setUpcomingOpen((o) => !o)}
+        >
+          Upcoming
+          {upcomingCount > 0 && <span className="assistant-chip-count">{upcomingCount}</span>}
+        </button>
       </div>
 
       <TopicRing
@@ -116,6 +170,7 @@ export default function AssistantPage() {
           {error}
         </div>
       )}
+      <AssistantCaptions />
       <AssistantEmbedCard />
       <button
         type="button"
@@ -151,6 +206,7 @@ export default function AssistantPage() {
       </button>
 
       <AssistantTranscriptDrawer open={transcriptOpen} />
+      <AssistantUpcoming open={upcomingOpen} onClose={() => setUpcomingOpen(false)} />
     </main>
   )
 }

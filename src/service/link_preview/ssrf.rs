@@ -13,10 +13,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::Url;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use reqwest::header::{
+    ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE,
+};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// A streamed body that delivers nothing for this long is abandoned.
+pub const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_REDIRECTS: usize = 5;
 pub const HTML_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
@@ -274,9 +278,24 @@ pub enum BodyRule {
 
 pub struct FetchOptions<'a> {
     pub accept: &'a str,
+    /// The whole `Authorization` header value (`Bearer …`, `Basic …`).
     /// Sent on the first hop only — a redirect never carries it elsewhere.
-    pub bearer: Option<&'a str>,
+    pub auth: Option<&'a str>,
+    /// POST this JSON body on the first hop instead of a GET.
+    pub post_json: Option<&'a str>,
     pub body: fn(&str) -> BodyRule,
+}
+
+impl<'a> FetchOptions<'a> {
+    /// A plain unauthenticated GET.
+    pub fn get(accept: &'a str, body: fn(&str) -> BodyRule) -> Self {
+        Self {
+            accept,
+            auth: None,
+            post_json: None,
+            body,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -383,36 +402,147 @@ async fn fetch_inner(
     }
     Err(FetchError::TooManyRedirects)
 }
+fn client_for(
+    target: &VettedTarget,
+    total: Option<Duration>,
+) -> Result<reqwest::Client, FetchError> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // A proxy would resolve the host itself and defeat the pin.
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(UA);
+    builder = match total {
+        Some(t) => builder.timeout(t),
+        // A stream has no overall deadline, only a stall timeout.
+        None => builder.read_timeout(STREAM_STALL_TIMEOUT),
+    };
+    if let Some(domain) = &target.domain {
+        builder = builder.resolve(domain, target.addr);
+    }
+    builder
+        .build()
+        .map_err(|e| FetchError::Request(e.to_string()))
+}
+
+fn send_err(e: reqwest::Error) -> FetchError {
+    if e.is_timeout() {
+        FetchError::Timeout
+    } else {
+        FetchError::Request(e.to_string())
+    }
+}
 
 async fn send_once(
     target: &VettedTarget,
     opts: &FetchOptions<'_>,
     first_hop: bool,
 ) -> Result<reqwest::Response, FetchError> {
-    let mut builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        // A proxy would resolve the host itself and defeat the pin.
-        .no_proxy()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(TOTAL_TIMEOUT)
-        .user_agent(UA);
-    if let Some(domain) = &target.domain {
-        builder = builder.resolve(domain, target.addr);
+    let client = client_for(target, Some(TOTAL_TIMEOUT))?;
+    // A redirect after a POST continues as a GET (303 semantics).
+    let mut req = match opts.post_json {
+        Some(body) if first_hop => client
+            .post(target.url.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string()),
+        _ => client.get(target.url.clone()),
     }
-    let client = builder
-        .build()
-        .map_err(|e| FetchError::Request(e.to_string()))?;
-    let mut req = client.get(target.url.clone()).header(ACCEPT, opts.accept);
-    if first_hop && let Some(token) = opts.bearer {
-        req = req.header(AUTHORIZATION, format!("Bearer {token}"));
+    .header(ACCEPT, opts.accept);
+    if first_hop && let Some(auth) = opts.auth {
+        req = req.header(AUTHORIZATION, auth);
     }
-    req.send().await.map_err(|e| {
-        if e.is_timeout() {
-            FetchError::Timeout
-        } else {
-            FetchError::Request(e.to_string())
+    req.send().await.map_err(send_err)
+}
+
+/// The headers of a streamed upstream response, plus the live response to
+/// pull the body from ([`fetch_stream`]).
+pub struct Streamed {
+    pub final_url: Url,
+    /// 200, or 206 for a satisfied `Range`.
+    pub status: u16,
+    pub content_type: String,
+    pub content_length: Option<u64>,
+    pub content_range: Option<String>,
+    pub response: reqwest::Response,
+}
+
+/// GET a vetted target for streaming (the media proxy): redirects re-vetted
+/// like [`fetch`], the client's `range` forwarded on every hop, the headers
+/// awaited within [`TOTAL_TIMEOUT`] — the body then streams with only a
+/// stall timeout, so a long video isn't cut off mid-play. The caller
+/// enforces content type and size.
+pub async fn fetch_stream(
+    target: VettedTarget,
+    policy: &FetchPolicy,
+    accept: &str,
+    range: Option<&str>,
+) -> Result<Streamed, FetchError> {
+    tokio::time::timeout(
+        TOTAL_TIMEOUT,
+        fetch_stream_inner(target, policy, accept, range),
+    )
+    .await
+    .map_err(|_| FetchError::Timeout)?
+}
+
+async fn fetch_stream_inner(
+    mut target: VettedTarget,
+    policy: &FetchPolicy,
+    accept: &str,
+    range: Option<&str>,
+) -> Result<Streamed, FetchError> {
+    for hop in 0..=MAX_REDIRECTS {
+        let client = client_for(&target, None)?;
+        let mut req = client.get(target.url.clone()).header(ACCEPT, accept);
+        if let Some(r) = range {
+            req = req.header(RANGE, r);
         }
-    })
+        let resp = req.send().await.map_err(send_err)?;
+        let status = resp.status();
+        if status.is_redirection() {
+            if hop == MAX_REDIRECTS {
+                return Err(FetchError::TooManyRedirects);
+            }
+            let loc = resp
+                .headers()
+                .get(LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| FetchError::Request("redirect without location".into()))?;
+            let next = target
+                .url
+                .join(loc)
+                .map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
+            target = VettedTarget::vet_url(next, policy).await?;
+            continue;
+        }
+        if status.as_u16() != 200 && status.as_u16() != 206 {
+            return Err(FetchError::Status(status.as_u16()));
+        }
+        let header = |name| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let content_type = header(CONTENT_TYPE)
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let content_length = header(CONTENT_LENGTH).and_then(|v| v.parse().ok());
+        let content_range = header(CONTENT_RANGE);
+        return Ok(Streamed {
+            final_url: target.url,
+            status: status.as_u16(),
+            content_type,
+            content_length,
+            content_range,
+            response: resp,
+        });
+    }
+    Err(FetchError::TooManyRedirects)
 }
 
 #[cfg(test)]
@@ -447,11 +577,7 @@ mod tests {
     }
 
     fn opts() -> FetchOptions<'static> {
-        FetchOptions {
-            accept: "text/html",
-            bearer: None,
-            body: html_rule,
-        }
+        FetchOptions::get("text/html", html_rule)
     }
 
     fn trust(entries: &[&str]) -> FetchPolicy {

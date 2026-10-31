@@ -1,6 +1,10 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
 
+/** Placeholder in an embed URL for the embedding page's host name (Twitch
+ *  `parent=`, Calendly `embed_domain=`). */
+export const PARENT_HOST_TOKEN = '__PARENT_HOST__'
+
 /** `GET /api/link-preview?url=` (`service::link_preview::Preview`). */
 export interface LinkPreviewData {
   url: string
@@ -16,13 +20,19 @@ export interface LinkPreviewData {
   /** Server-vetted CSS colour. */
   theme_color?: string
   embed?: {
+    /** May contain {@link PARENT_HOST_TOKEN}, swapped for this page's host. */
     iframe_src: string
     sandbox_mode: 'origin' | 'srcdoc'
     width?: number
     height?: number
     aspect?: string
   }
-  media?: { type: 'image' | 'video' | 'audio' | 'model'; mime: string }
+  media?: {
+    type: 'image' | 'video' | 'audio' | 'model'
+    mime: string
+    /** Signed same-origin stream of the remote file (video / audio / model). */
+    src?: string
+  }
   json_ld_product?: {
     name?: string
     price?: string
@@ -36,6 +46,11 @@ export interface LinkPreviewData {
     id?: string
     project_id?: string
   }
+  /** Provider extras keyed by `type` (`repo`/`pull`/`issue`/`run`/`commit`,
+   *  `package`, `post`, `event`, `asset`, `hn`, `paper`, `game`, `ticket`,
+   *  …) plus the shared `badge` (`{label, tone}`) and `facts` (string[]).
+   *  `avatar` / `thumbs` are signed image-proxy URLs; `download_src` a signed
+   *  stream of `download_url`. */
   details?: Record<string, unknown>
 }
 
@@ -49,7 +64,7 @@ export type AutoEmbeds = 'off' | 'trusted' | 'all'
 
 /** Embed providers whose frames are origin-isolated and don't need the
  *  provider's own script — what "Trusted providers" auto-loads. */
-export const TRUSTED_EMBED_PROVIDERS = new Set(['youtube', 'bluesky'])
+export const TRUSTED_EMBED_PROVIDERS = new Set(['youtube', 'bluesky', 'x', 'vimeo'])
 
 /** Most embed iframes alive at once; mounting another reverts the oldest
  *  to its click-to-load facade. */

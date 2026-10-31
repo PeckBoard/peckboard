@@ -256,6 +256,11 @@ export const useWsStore = create<WsState>((set, get) => ({
         window.dispatchEvent(new CustomEvent('peckboard:voice-topics', { detail: msg.data }))
         return
       }
+      if (msg.type === 'voice-queue') {
+        // The relays held back for the Assistant changed: `{count, items}`.
+        window.dispatchEvent(new CustomEvent('peckboard:voice-queue', { detail: msg.data }))
+        return
+      }
       if (msg.type === 'plugin-data') {
         // A plugin's data store changed (identifiers only — no values).
         // PluginFullPage / PluginPanelModal forward it into their sandboxed

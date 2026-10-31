@@ -28,6 +28,7 @@ import {
   spokenDecision,
   stripForSpeech,
   stripInterruptMarker,
+  stripPronunciationHints,
   takeSpeakable,
 } from '../voice/text'
 import {
@@ -69,6 +70,8 @@ export interface VoicePrefs {
   thinkingCue: boolean
   /** A short spoken filler ("One sec.") when the reply is slow to start. */
   thinkingFiller: boolean
+  /** Live captions under the Assistant page's orb. */
+  captions: boolean
 }
 
 export const VOICE_PREFS_KEY = 'peckboard_voice_prefs'
@@ -82,6 +85,7 @@ const DEFAULT_PREFS: VoicePrefs = {
   maxPauseMs: 5000,
   thinkingCue: true,
   thinkingFiller: true,
+  captions: true,
 }
 
 function loadPrefs(): VoicePrefs {
@@ -103,6 +107,7 @@ function loadPrefs(): VoicePrefs {
         typeof parsed.thinkingFiller === 'boolean'
           ? parsed.thinkingFiller
           : DEFAULT_PREFS.thinkingFiller,
+      captions: typeof parsed.captions === 'boolean' ? parsed.captions : DEFAULT_PREFS.captions,
     }
   } catch {
     return DEFAULT_PREFS
@@ -161,6 +166,10 @@ interface VoiceState {
   micOn: boolean
   /** Partial hypothesis while the user is still talking. */
   interim: string
+  /** The chunk being read aloud right now (hints stripped), set when its
+   *  audio starts and cleared when it ends — the Assistant page's live
+   *  captions. */
+  speakingText: string
   /** Final phrases heard but not yet sent (the utterance in progress). */
   heard: string
   /** `heard` looks cut off mid-sentence: waiting longer for the rest. */
@@ -448,7 +457,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       rate: prefs.rate,
       pitch: prefs.pitch,
       onStart: () => {
-        if (gen === speakGen) stopThinking('reply audio started', false)
+        if (gen !== speakGen) return
+        stopThinking('reply audio started', false)
+        // Live captions follow the audio, not the queue.
+        set({ speakingText: stripPronunciationHints(next) })
       },
       onError: reportSpeakError,
       onEnd: () => {
@@ -456,6 +468,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         stopThinking('reply utterance ended', false)
         speakingNow = false
         currentUtterance = null
+        set({ speakingText: '' })
         rememberSpoken(next)
         pump()
       },
@@ -603,6 +616,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     mergeBuffer = ''
     speakingNow = false
     currentUtterance = null
+    if (get().speakingText) set({ speakingText: '' })
     clearFlushTimer()
     clearHoldTimer()
     engine().cancelSpeech(reason)
@@ -1143,6 +1157,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     status: 'idle',
     micOn: false,
     interim: '',
+    speakingText: '',
     heard: '',
     turnUnfinished: false,
     events: [],
@@ -1176,7 +1191,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         return null
       }
     },
-
     setModel: async (model) => {
       await get().ensureSession(model)
     },

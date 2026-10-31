@@ -39,6 +39,8 @@ pub struct PageMeta {
     pub theme_color: Option<String>,
     pub oembed_url: Option<String>,
     pub product: Option<Product>,
+    /// `og:video` (absolute): an embed player URL on some sites (Bandcamp).
+    pub video: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -227,6 +229,9 @@ pub fn parse_html(html: &str, base: &Url) -> PageMeta {
         .and_then(|(_, href)| absolutize(base, href))
         .or_else(|| absolutize(base, "/favicon.ico"));
 
+    let video = first(&meta, &["og:video:secure_url", "og:video:url", "og:video"])
+        .and_then(|v| absolutize(base, v));
+
     PageMeta {
         title,
         description,
@@ -236,6 +241,7 @@ pub fn parse_html(html: &str, base: &Url) -> PageMeta {
         theme_color,
         oembed_url,
         product,
+        video,
     }
 }
 

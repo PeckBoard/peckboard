@@ -56,6 +56,9 @@ const TICK: Duration = Duration::from_millis(400);
 /// Cap on a relay's one-line summary.
 const SUMMARY_CHARS: usize = 120;
 
+/// WS event carrying [`queue_payload`] whenever the held queue changes.
+pub const VOICE_QUEUE_EVENT: &str = "voice-queue";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelayKind {
     Question,
@@ -175,6 +178,8 @@ struct Gate {
     last_activity: Instant,
     /// Last logged hold reason, so a steady hold logs once, not every tick.
     last_reason: Option<&'static str>,
+    /// Queue ids last pushed to the Assistant page ([`VOICE_QUEUE_EVENT`]).
+    announced: Vec<String>,
 }
 
 impl Gate {
@@ -189,6 +194,7 @@ impl Gate {
             // activity: off-topic relays still wait out the idle window.
             last_activity: now,
             last_reason: None,
+            announced: Vec::new(),
         }
     }
 }
@@ -378,6 +384,121 @@ pub fn list(voice_id: &str) -> Vec<Held> {
         .unwrap_or_default()
 }
 
+/// `{count, items: [{id, kind, summary, source_name, source_session_id,
+/// question_id}]}` — the held queue as the Assistant page shows it
+/// (`GET /api/voice/queue` and the [`VOICE_QUEUE_EVENT`] payload).
+pub fn queue_payload(voice_id: &str) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = list(voice_id)
+        .iter()
+        .map(|h| {
+            serde_json::json!({
+                "id": h.id,
+                "kind": h.kind.as_str(),
+                "summary": h.summary,
+                "source_name": h.source_name,
+                "source_session_id": h.source_session_id,
+                "question_id": h.question_event_id,
+            })
+        })
+        .collect();
+    serde_json::json!({ "count": items.len(), "items": items })
+}
+
+/// Push [`queue_payload`] for every gate whose queue changed since the last
+/// push. Called at the end of every tick, so enqueue, delivery, and
+/// `voice_queue next` all reach the page within one [`TICK`].
+fn announce_changes(broadcaster: &Broadcaster) {
+    let changed: Vec<String> = {
+        let mut all = gates();
+        all.iter_mut()
+            .filter_map(|(voice_id, g)| {
+                let ids: Vec<String> = g.queue.iter().map(|h| h.id.clone()).collect();
+                (ids != g.announced).then(|| {
+                    g.announced = ids;
+                    voice_id.clone()
+                })
+            })
+            .collect()
+    };
+    for voice_id in changed {
+        broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: VOICE_QUEUE_EVENT.into(),
+            data: queue_payload(&voice_id),
+            session_id: voice_id,
+        });
+    }
+}
+
+/// Drop the held relay carrying question `question_event_id` (the user
+/// snoozed it). `true` when one was held.
+pub async fn drop_question(db: &Db, voice_id: &str, question_event_id: &str) -> bool {
+    let removed: Vec<String> = with_gate(voice_id, Instant::now(), |g| {
+        let (gone, keep): (Vec<Held>, Vec<Held>) = g
+            .queue
+            .drain(..)
+            .partition(|h| h.question_event_id.as_deref() == Some(question_event_id));
+        g.queue = keep;
+        gone.into_iter().map(|h| h.id).collect()
+    });
+    if removed.is_empty() {
+        return false;
+    }
+    if let Err(e) = db.delete_voice_relays(removed).await {
+        tracing::warn!(voice_session = %voice_id, "voice gate: deleting snoozed relay failed: {e}");
+    }
+    true
+}
+
+/// The row a held relay was loaded from (to persist it again).
+fn item_of(voice_id: &str, h: &Held) -> VoiceRelayItem {
+    VoiceRelayItem {
+        id: h.id.clone(),
+        voice_session_id: voice_id.to_string(),
+        source_session_id: h.source_session_id.clone(),
+        kind: h.kind.as_str().to_string(),
+        question_event_id: h.question_event_id.clone(),
+        text: h.text.clone(),
+        summary: h.summary.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+/// The user tapped "N updates waiting": [`take_next`], delivered as one
+/// relay turn right away (the same text `voice_queue next` hands the
+/// assistant). → how many relays were delivered; `Err` when the append
+/// failed, in which case they are held again.
+pub async fn release_next(
+    db: &Db,
+    broadcaster: &Broadcaster,
+    dispatcher: Option<&dyn ExpertDispatcher>,
+    voice_id: &str,
+) -> anyhow::Result<usize> {
+    let items = take_next(db, voice_id).await;
+    if items.is_empty() {
+        return Ok(0);
+    }
+    // The relay turn is an assistant turn: hold the rest until it ends.
+    note_activity(voice_id, Activity::Sent);
+    let text = items
+        .iter()
+        .map(|h| h.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if crate::service::voice_relay::deliver(db, broadcaster, dispatcher, voice_id, &text).await {
+        return Ok(items.len());
+    }
+    for h in &items {
+        let _ = db.insert_voice_relay(item_of(voice_id, h)).await;
+    }
+    with_gate(voice_id, Instant::now(), |g| {
+        g.busy_since = None;
+        let mut back = items;
+        back.append(&mut g.queue);
+        g.queue = back;
+    });
+    anyhow::bail!("couldn't deliver the relay to the Assistant")
+}
+
 /// `(source session, whether it holds a question)` groups in release order:
 /// sources with a question first, then by first arrival.
 fn topic_order(queue: &[Held]) -> Vec<Option<String>> {
@@ -563,6 +684,7 @@ pub async fn tick_at(
             tracing::warn!(voice_session = %voice_id, "voice gate: deleting delivered relays failed: {e}");
         }
     }
+    announce_changes(broadcaster);
 }
 
 /// `voice_queue next`: take the next topic group now, bypassing the gate

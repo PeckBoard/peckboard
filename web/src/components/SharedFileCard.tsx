@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type RefObject,
@@ -12,10 +13,21 @@ import { CodePreview } from './ToolUseBlock'
 import type { SharedFile } from './chat/events'
 import { authedFetch } from '../store/auth'
 import { useMediaElementPlayback } from '../media/playback'
+import ModelViewer, { type ModelSource } from './ModelViewer'
+import {
+  isCadFile,
+  MAX_MODEL_BYTES,
+  modelFormatFromName,
+  printFarmAccepts,
+  sniffModelFormat,
+  SNIFF_BYTES,
+  type ModelFormat,
+} from './model/formats'
 
 /** Previewable kinds of a shared file. Text is decided by extension first —
- *  `mime_guess` maps e.g. `.ts` to a video type. */
-type SharedFileKind = 'image' | 'video' | 'audio' | 'text' | 'other'
+ *  `mime_guess` maps e.g. `.ts` to a video type. `model` is an inline 3D
+ *  viewer; `cad` (STEP / IGES / .blend) is download-only. */
+type SharedFileKind = 'image' | 'video' | 'audio' | 'text' | 'model' | 'cad' | 'other'
 
 const TEXT_EXTS = new Set([
   'txt',
@@ -77,6 +89,8 @@ function extOf(name: string): string {
 
 function sharedFileKind(file: SharedFile): SharedFileKind {
   const ext = extOf(file.filename)
+  if (modelFormatFromName(file.filename)) return 'model'
+  if (isCadFile(file.filename)) return 'cad'
   if (TEXT_EXTS.has(ext)) return 'text'
   if (IMAGE_EXTS.has(ext)) return 'image'
   if (VIDEO_EXTS.has(ext)) return 'video'
@@ -93,6 +107,8 @@ function sharedFileKind(file: SharedFile): SharedFileKind {
 
 function fileIcon(file: SharedFile, kind: SharedFileKind): string {
   const ext = extOf(file.filename)
+  if (kind === 'model') return '\u{1F9CA}'
+  if (kind === 'cad') return '\u{1F4D0}'
   if (kind === 'image') return '\u{1F5BC}\u{FE0F}'
   if (kind === 'video') return '\u{1F3AC}'
   if (kind === 'audio') return '\u{1F3B5}'
@@ -137,6 +153,149 @@ async function downloadSharedFile(sessionId: string, file: SharedFile): Promise<
   a.remove()
 }
 
+// ── Print-farm hand-off ───────────────────────────────────────────────
+
+const PRINT_FARM_API = '/api/plugin-ui/print-farm'
+/** Raw bytes per upload request → exactly 1 MiB of base64, print-farm's cap. */
+const PRINT_FARM_CHUNK = 768 * 1024
+
+let printFarmProbe: Promise<boolean> | null = null
+
+/** Is the print-farm plugin active? Read from the `/api/plugins` catalog
+ *  (its sidebar entry), once; re-read after a plugin approval changes. */
+function probePrintFarm(): Promise<boolean> {
+  if (!printFarmProbe) {
+    window.addEventListener('peckboard:plugin-approval', () => (printFarmProbe = null), {
+      once: true,
+    })
+    printFarmProbe = authedFetch('/api/plugins')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b: { sidebar_items?: { plugin: string }[] } | null) =>
+        (b?.sidebar_items ?? []).some((i) => i.plugin === 'print-farm'),
+      )
+      .catch(() => false)
+  }
+  return printFarmProbe
+}
+
+function usePrintFarm(enabled: boolean): boolean {
+  const [active, setActive] = useState(false)
+  useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    probePrintFarm().then((on) => !cancelled && setActive(on))
+    return () => {
+      cancelled = true
+    }
+  }, [enabled])
+  return enabled && active
+}
+
+function bytesToB64(bytes: Uint8Array): string {
+  let s = ''
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(s)
+}
+
+interface PrintFarmFile {
+  id: string
+  size: number
+  complete: boolean
+}
+
+async function printFarmPost(path: string, body: unknown): Promise<PrintFarmFile> {
+  const res = await authedFetch(`${PRINT_FARM_API}/${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const parsed = (await res.json().catch(() => ({}))) as { file?: PrintFarmFile; error?: string }
+  if (!res.ok || typeof parsed.error === 'string' || !parsed.file)
+    throw new Error(parsed.error ?? `Print Farm upload failed (HTTP ${res.status})`)
+  return parsed.file
+}
+
+/** Upload a shared file to print-farm (its chunked `uploads` API, the same
+ *  one its Slice tab uses), then open the Print Farm page on that tab. */
+async function sendToPrinter(sessionId: string, file: SharedFile): Promise<void> {
+  const res = await fetch(await mintUrl(sessionId, file.id))
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const bytes = new Uint8Array(await res.arrayBuffer())
+  const chunk = (off: number) => bytesToB64(bytes.subarray(off, off + PRINT_FARM_CHUNK))
+  let rec = await printFarmPost('uploads', {
+    name: file.filename,
+    data_base64: chunk(0),
+    done: bytes.length <= PRINT_FARM_CHUNK,
+  })
+  while (!rec.complete) {
+    const off = rec.size
+    const next = await printFarmPost(`uploads/${encodeURIComponent(rec.id)}/chunk`, {
+      offset: off,
+      data_base64: chunk(off),
+      done: off + PRINT_FARM_CHUNK >= bytes.length,
+    })
+    if (!next.complete && next.size <= off) throw new Error('Print Farm upload stalled')
+    rec = next
+  }
+  window.dispatchEvent(
+    new CustomEvent('peckboard:open-plugin-page', {
+      detail: { plugin: 'print-farm', item: 'print-farm', query: 'tab=slice' },
+    }),
+  )
+}
+
+// ── 3D files ──────────────────────────────────────────────────────────
+
+/** Viewer byte source for a shared file (signed URL minted per load). */
+function useModelSource(sessionId: string, file: SharedFile): ModelSource {
+  return useMemo(
+    () => ({
+      key: `shared:${file.id}`,
+      name: file.filename,
+      size: file.size,
+      url: () => mintUrl(sessionId, file.id),
+    }),
+    [sessionId, file.id, file.filename, file.size],
+  )
+}
+
+const NEVER_SNIFF = new Set(['pdf', 'svg', 'html', 'htm', 'mid', 'midi'])
+
+/** An unrecognised binary (no / unknown extension) may still be a binary
+ *  STL or a GLB: worth reading its first bytes. */
+function sniffable(file: SharedFile): boolean {
+  const ext = extOf(file.filename)
+  return (
+    !NEVER_SNIFF.has(ext) &&
+    !ARCHIVE_EXTS.has(ext) &&
+    (!file.mimeType || file.mimeType === 'application/octet-stream') &&
+    file.size >= 12 &&
+    file.size <= MAX_MODEL_BYTES
+  )
+}
+
+/** The 3D format of a file by its magic bytes (one Range request). */
+function useSniffedModel(sessionId: string, file: SharedFile, enabled: boolean) {
+  const [format, setFormat] = useState<ModelFormat | null>(null)
+  useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    mintUrl(sessionId, file.id)
+      .then((u) => fetch(u, { headers: { Range: `bytes=0-${SNIFF_BYTES - 1}` } }))
+      .then((r) => (r.ok ? r.arrayBuffer() : null))
+      .then((b) => {
+        if (cancelled || !b) return
+        const head = new Uint8Array(b, 0, Math.min(SNIFF_BYTES, b.byteLength))
+        setFormat(sniffModelFormat(head, file.size))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId, file.id, file.size, enabled])
+  return enabled ? format : null
+}
 /** Signed URL for inline media; `null` until minted (or when disabled). */
 function useSignedUrl(sessionId: string, fileId: string, enabled: boolean) {
   const [url, setUrl] = useState<string | null>(null)
@@ -233,6 +392,31 @@ function DownloadButton({
   )
 }
 
+function SendToPrinterButton({ sessionId, file }: { sessionId: string; file: SharedFile }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'failed'>('idle')
+  const [error, setError] = useState<string | null>(null)
+  return (
+    <button
+      type="button"
+      className="btn-secondary shared-file-download"
+      data-testid="shared-file-send-to-printer"
+      title={error ?? 'Upload to Print Farm and open its Slice tab'}
+      disabled={state === 'busy'}
+      onClick={(e) => {
+        e.stopPropagation()
+        setState('busy')
+        sendToPrinter(sessionId, file)
+          .then(() => setState('idle'))
+          .catch((err: Error) => {
+            setError(err.message)
+            setState('failed')
+          })
+      }}
+    >
+      {state === 'busy' ? 'Sending…' : state === 'failed' ? 'Retry send' : 'Send to printer'}
+    </button>
+  )
+}
 function MediaUnsupported() {
   return (
     <div className="shared-file-media-note" role="status" data-testid="shared-file-unsupported">
@@ -327,25 +511,36 @@ function SharedMedia({
   )
 }
 
-/** Full preview of one shared file: image, video, audio, text/code, or a
- *  "no preview" notice. Download always available in the header. Media
- *  starts at `start` and reports where it stopped through `onClose`. */
+/** Full preview of one shared file: image, video, audio, text/code, a 3D
+ *  viewer, or a "no preview" notice. Download always available in the
+ *  header. Media starts at `start` and reports where it stopped through
+ *  `onClose`. `modelFormat` carries a format the card sniffed from the
+ *  file's bytes (no / wrong extension). */
 export function FilePreviewModal({
   sessionId,
   file,
   start,
+  modelFormat,
   onClose,
 }: {
   sessionId: string
   file: SharedFile
   start?: ResumePoint
+  modelFormat?: ModelFormat | null
   onClose: (time?: number) => void
 }) {
-  const kind = sharedFileKind(file)
+  const format = modelFormat ?? modelFormatFromName(file.filename)
+  const baseKind = sharedFileKind(file)
+  const kind: SharedFileKind = baseKind === 'other' && format ? 'model' : baseKind
   const media = kind === 'video' || kind === 'audio'
   const textTooBig = kind === 'text' && file.size > MAX_TEXT_PREVIEW_BYTES
-  const previewable = kind !== 'other' && !textTooBig
-  const { url, error, refresh } = useSignedUrl(sessionId, file.id, previewable && !media)
+  const previewable = kind !== 'other' && kind !== 'cad' && !textTooBig
+  const { url, error, refresh } = useSignedUrl(
+    sessionId,
+    file.id,
+    previewable && !media && kind !== 'model',
+  )
+  const modelSource = useModelSource(sessionId, file)
   const [text, setText] = useState<string | null>(null)
   const [textError, setTextError] = useState<string | null>(null)
   const mediaRef = useRef<HTMLMediaElement | null>(null)
@@ -367,9 +562,15 @@ export function FilePreviewModal({
   if (!previewable) {
     body = (
       <div className="shared-file-nopreview" data-testid="shared-file-nopreview">
-        {textTooBig ? 'File too large to preview.' : 'No preview available for this file type.'}
+        {textTooBig
+          ? 'File too large to preview.'
+          : kind === 'cad'
+            ? 'CAD files need a CAD app — download it to open it there.'
+            : 'No preview available for this file type.'}
       </div>
     )
+  } else if (kind === 'model' && format) {
+    body = <ModelViewer source={modelSource} format={format} variant="modal" />
   } else if (media) {
     body = (
       <SharedMedia
@@ -406,7 +607,7 @@ export function FilePreviewModal({
     <Modal
       onClose={close}
       className="shared-file-modal"
-      maxWidth="min(960px, 96vw)"
+      maxWidth={kind === 'model' ? 'min(1200px, 96vw)' : 'min(960px, 96vw)'}
       data-testid="shared-file-modal"
     >
       <div className="shared-file-modal-header">
@@ -428,8 +629,10 @@ export function FilePreviewModal({
 /**
  * Chat card for a file an agent shared (`file-shared` event): icon, name,
  * size, caption, an inline thumbnail for images, an inline player for
- * video / audio, and an always-visible Download button. Clicking the name
- * opens `FilePreviewModal`; media there continues from the inline position.
+ * video / audio, an interactive viewer for 3D files, and an always-visible
+ * Download button (plus "Send to printer" for printables when the
+ * print-farm plugin is active). Clicking the name opens `FilePreviewModal`;
+ * media there continues from the inline position.
  */
 export default function SharedFileCard({
   sessionId,
@@ -438,10 +641,17 @@ export default function SharedFileCard({
   sessionId: string
   file: SharedFile
 }) {
-  const kind = sharedFileKind(file)
+  const baseKind = sharedFileKind(file)
+  const sniffed = useSniffedModel(sessionId, file, baseKind === 'other' && sniffable(file))
+  const modelFormat = modelFormatFromName(file.filename) ?? sniffed
+  const kind: SharedFileKind = baseKind === 'other' && sniffed ? 'model' : baseKind
   const [preview, setPreview] = useState<{ start?: ResumePoint } | null>(null)
   const { url, refresh } = useSignedUrl(sessionId, file.id, kind === 'image')
   const mediaRef = useRef<HTMLMediaElement | null>(null)
+  const modelSource = useModelSource(sessionId, file)
+  const printFarm = usePrintFarm(
+    (kind === 'model' || kind === 'cad') && printFarmAccepts(file.filename),
+  )
 
   const openPreview = () => {
     const el = mediaRef.current
@@ -471,6 +681,9 @@ export default function SharedFileCard({
       {kind === 'audio' && (
         <SharedMedia sessionId={sessionId} file={file} kind="audio" mediaRef={mediaRef} />
       )}
+      {kind === 'model' && modelFormat && (
+        <ModelViewer source={modelSource} format={modelFormat} onExpand={openPreview} />
+      )}
       <button
         type="button"
         className="shared-file-open"
@@ -499,17 +712,20 @@ export default function SharedFileCard({
             <span className="shared-file-sub">
               {formatBytes(file.size)}
               {file.origin === 'generated' ? ' · generated' : ''}
+              {kind === 'cad' ? ' · needs a CAD app' : ''}
             </span>
             {file.caption && <span className="shared-file-caption">{file.caption}</span>}
           </span>
         </span>
       </button>
       <DownloadButton sessionId={sessionId} file={file} />
+      {printFarm && <SendToPrinterButton sessionId={sessionId} file={file} />}
       {preview && (
         <FilePreviewModal
           sessionId={sessionId}
           file={file}
           start={preview.start}
+          modelFormat={modelFormat}
           onClose={closePreview}
         />
       )}

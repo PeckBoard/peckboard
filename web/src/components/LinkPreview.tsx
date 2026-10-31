@@ -5,10 +5,15 @@ import InternalLinkPreview from './LinkPreviewInternal'
 import { extractLinks } from '../lib/links'
 import { useMediaElementPlayback, useMediaPlayback } from '../media/playback'
 import {
+  PARENT_HOST_TOKEN,
   TRUSTED_EMBED_PROVIDERS,
   useLinkPreviewStore,
   type LinkPreviewData,
 } from '../store/linkPreviews'
+import ModelViewer from './ModelViewer'
+import { modelFormatFromMime, modelFormatFromName, type ModelFormat } from './model/formats'
+import { AssetActions, DetailsLine, EventCard, PostCard } from './LinkPreviewDetails'
+import { isCompactDetails } from '../lib/linkPreviewDetails'
 import '../styles/link-preview.css'
 
 /** A streamed message is only scanned once it has stopped growing, so a
@@ -113,88 +118,27 @@ function ProductLine({ product }: { product: NonNullable<LinkPreviewData['json_l
   )
 }
 
-const str = (v: unknown): string | null =>
-  typeof v === 'string' && v !== '' ? v : typeof v === 'number' ? String(v) : null
-
-/** GitHub state badge + the facts worth a glance (author, number, size). */
-function GithubLine({ d }: { d: Record<string, unknown> }) {
-  const type = d.type
-  let badge: { label: string; tone: string } | null = null
-  if (type === 'pull') {
-    badge = d.merged
-      ? { label: 'Merged', tone: 'merged' }
-      : d.draft
-        ? { label: 'Draft', tone: 'muted' }
-        : d.state === 'open'
-          ? { label: 'Open', tone: 'ok' }
-          : { label: 'Closed', tone: 'danger' }
-  } else if (type === 'issue') {
-    badge =
-      d.state === 'open'
-        ? { label: 'Open', tone: 'ok' }
-        : d.state_reason === 'not_planned'
-          ? { label: 'Not planned', tone: 'muted' }
-          : { label: 'Closed', tone: 'merged' }
-  } else if (type === 'run') {
-    const c = str(d.conclusion) ?? str(d.status)
-    if (c)
-      badge = {
-        label: c.replace(/_/g, ' '),
-        tone: c === 'success' ? 'ok' : c === 'failure' ? 'danger' : 'muted',
-      }
-  }
-  const bits: string[] = []
-  const num = str(d.number) ?? str(d.run_number)
-  if (num) bits.push(`#${num}`)
-  const author = str(d.author) ?? str(d.login)
-  if (author) bits.push(author)
-  if (type === 'commit' && str(d.sha)) bits.push(String(d.sha))
-  if (type === 'repo') {
-    if (str(d.language)) bits.push(String(d.language))
-    if (str(d.stars)) bits.push(`★ ${d.stars}`)
-    if (str(d.forks)) bits.push(`${d.forks} forks`)
-  }
-  if (typeof d.additions === 'number' && typeof d.deletions === 'number') {
-    bits.push(`+${d.additions} −${d.deletions}`)
-  }
-  if (type === 'run' && str(d.head_branch)) bits.push(String(d.head_branch))
-  const checks = str(d.checks)
-  if (checks) bits.push(`checks: ${checks}`)
-  if (!badge && bits.length === 0) return null
-  return (
-    <span className="link-card-meta" data-testid="link-card-github">
-      {badge && (
-        <span className={`link-badge link-badge-${badge.tone}`} data-testid="link-card-state">
-          {badge.label}
-        </span>
-      )}
-      {bits.map((b) => (
-        <span key={b}>{b}</span>
-      ))}
-    </span>
-  )
-}
-
 function CardPreview({ p, note }: { p: LinkPreviewData; note?: string }) {
   const href = p.final_url || p.url
-  const github = p.provider === 'github'
+  const compact = p.provider === 'github' || isCompactDetails(p.details)
   const accent: CSSProperties | undefined = p.theme_color
     ? { borderInlineStartColor: p.theme_color }
     : undefined
-  return (
+  const card = (
     <a
-      className={`link-card${github ? ' link-card-compact' : ''}${p.theme_color ? ' link-card-accented' : ''}`}
+      className={`link-card${compact ? ' link-card-compact' : ''}${p.theme_color ? ' link-card-accented' : ''}`}
       href={href}
       target="_blank"
       rel="noreferrer noopener"
       data-testid="link-card"
       data-kind={p.kind}
+      data-type={typeof p.details?.type === 'string' ? p.details.type : undefined}
       style={accent}
     >
       {p.image && (
         <SafeImg
           src={p.image}
-          className={github ? 'link-card-thumb' : 'link-card-image'}
+          className={compact ? 'link-card-thumb' : 'link-card-image'}
           testId="link-card-image"
         />
       )}
@@ -207,11 +151,50 @@ function CardPreview({ p, note }: { p: LinkPreviewData; note?: string }) {
         )}
         {p.description && <span className="link-card-desc">{p.description}</span>}
         {p.json_ld_product && <ProductLine product={p.json_ld_product} />}
-        {p.details && <GithubLine d={p.details} />}
+        {p.details && <DetailsLine d={p.details} />}
         {note && <span className="link-card-note">{note}</span>}
       </span>
     </a>
   )
+  if (p.details?.type !== 'asset' || !p.details.download_src) return card
+  return (
+    <div className="link-card-stack">
+      {card}
+      <AssetActions d={p.details} />
+      <AssetModelToggle d={p.details} />
+    </div>
+  )
+}
+
+/** "View in 3D" under an asset card whose page links a model file the
+ *  viewer can read; mounts the same viewer as a direct model link. */
+function AssetModelToggle({ d }: { d: NonNullable<LinkPreviewData['details']> }) {
+  const [shown, setShown] = useState(false)
+  const src = typeof d.download_src === 'string' ? d.download_src : null
+  const raw = typeof d.download_url === 'string' ? d.download_url : null
+  if (!src || !raw) return null
+  let format: ModelFormat | null
+  try {
+    format = modelFormatFromName(new URL(raw, location.href).pathname)
+  } catch {
+    format = null
+  }
+  if (!format) return null
+  const name = raw.split(/[?#]/)[0].split('/').pop() || 'model'
+  if (!shown)
+    return (
+      <div className="link-card-actions">
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => setShown(true)}
+          data-testid="link-asset-view-3d"
+        >
+          View in 3D
+        </button>
+      </div>
+    )
+  return <ModelLinkPreview src={src} href={raw} name={name} format={format} />
 }
 
 // ── Embed ─────────────────────────────────────────────────────────────
@@ -246,6 +229,20 @@ function aspectStyle(embed: NonNullable<LinkPreviewData['embed']>): CSSPropertie
   return null
 }
 
+/** The height an embed frame reports for itself, by provider protocol:
+ *  Bluesky / Telegram `{height}`, X `{"twttr.embed": {method:
+ *  "twttr.private.resize", params: [{height}]}}`, Instagram `{type: "MEASURE",
+ *  details: {height}}`, Reddit `{type: "resize.embed", data}`. */
+function reportedHeight(m: Record<string, unknown>): number | null {
+  const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : null)
+  const tw = m['twttr.embed'] as { method?: unknown; params?: unknown } | undefined
+  if (tw && tw.method === 'twttr.private.resize' && Array.isArray(tw.params)) {
+    return num((tw.params[0] as Record<string, unknown> | undefined)?.height)
+  }
+  if (m.type === 'MEASURE') return num((m.details as Record<string, unknown> | undefined)?.height)
+  if (m.type === 'resize.embed') return num(m.data)
+  return num(m.height)
+}
 function EmbedFrame({
   p,
   autoplay,
@@ -260,8 +257,11 @@ function EmbedFrame({
   const youtube = p.provider === 'youtube'
   const [height, setHeight] = useState<number | null>(null)
   const src = useMemo(() => {
+    const raw = embed.iframe_src
+      .split(PARENT_HOST_TOKEN)
+      .join(encodeURIComponent(window.location.hostname))
     try {
-      const u = new URL(embed.iframe_src)
+      const u = new URL(raw)
       if (youtube) {
         u.searchParams.set('enablejsapi', '1')
         u.searchParams.set('origin', window.location.origin)
@@ -269,7 +269,7 @@ function EmbedFrame({
       }
       return u.href
     } catch {
-      return embed.iframe_src
+      return raw
     }
   }, [embed.iframe_src, youtube, autoplay])
   const frameOrigin = useMemo(() => {
@@ -317,10 +317,8 @@ function EmbedFrame({
         else if (state === 0 || state === 2) media.stopped()
         return
       }
-      // Bluesky posts `{height}`; the srcdoc relay `{type, height}`.
-      if (typeof m.height === 'number' && m.height > 0) {
-        setHeight(Math.min(MAX_EMBED_HEIGHT, Math.ceil(m.height)))
-      }
+      const h = reportedHeight(m)
+      if (h) setHeight(Math.min(MAX_EMBED_HEIGHT, Math.ceil(h)))
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
@@ -472,6 +470,55 @@ function InlineVideo({ src }: { src: string }) {
   )
 }
 
+/** A linked 3D file, viewed inline from the server's signed proxy URL
+ *  (`media.src`); Fullscreen opens a larger viewer. */
+function ModelLinkPreview({
+  src,
+  href,
+  name,
+  format,
+}: {
+  src: string
+  href: string
+  name: string
+  format: ModelFormat
+}) {
+  const [open, setOpen] = useState(false)
+  const source = useMemo(
+    () => ({ key: `link:${href}`, name, url: () => Promise.resolve(src) }),
+    [href, name, src],
+  )
+  return (
+    <div className="shared-file-card link-media" data-kind="model" data-testid="link-media">
+      <ModelViewer source={source} format={format} onExpand={() => setOpen(true)} />
+      <a className="link-embed-open" href={href} target="_blank" rel="noreferrer noopener">
+        {name} {'↗'}
+      </a>
+      {open && (
+        <Modal
+          onClose={() => setOpen(false)}
+          className="shared-file-modal"
+          maxWidth="min(1200px, 96vw)"
+        >
+          <div className="shared-file-modal-header">
+            <h3 className="shared-file-modal-title" title={href}>
+              {name}
+            </h3>
+            <a className="btn-secondary" href={href} target="_blank" rel="noreferrer noopener">
+              Open
+            </a>
+            <button type="button" className="btn-secondary" onClick={() => setOpen(false)}>
+              Close
+            </button>
+          </div>
+          <div className="shared-file-modal-body">
+            <ModelViewer source={source} format={format} variant="modal" />
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
 function MediaPreview({ p }: { p: LinkPreviewData }) {
   const [open, setOpen] = useState(false)
   const type = p.media?.type
@@ -514,22 +561,31 @@ function MediaPreview({ p }: { p: LinkPreviewData }) {
       </>
     )
   }
-  // The page CSP only lets <video>/<audio> load this origin's media, so a
-  // remote clip stays a card with an Open link.
-  if ((type === 'video' || type === 'audio') && sameOrigin(href)) {
+  // The page CSP only lets <video>/<audio> load this origin's media: a
+  // remote file plays through the server's signed stream (`media.src`).
+  const playable =
+    type === 'video' || type === 'audio' ? (p.media?.src ?? (sameOrigin(href) ? href : null)) : null
+  if (playable) {
     return (
       <div className="shared-file-card link-media" data-kind={type} data-testid="link-media">
         {type === 'video' ? (
-          <InlineVideo src={href} />
+          <InlineVideo src={playable} />
         ) : (
-          <AudioPlayer src={href} label={name} waveformKey={null} />
+          <AudioPlayer src={playable} label={name} waveformKey={null} />
         )}
       </div>
     )
   }
+  if (type === 'model') {
+    const src = (p.media as { src?: string } | undefined)?.src
+    const format =
+      modelFormatFromName(new URL(href, location.href).pathname) ??
+      modelFormatFromMime(p.media?.mime ?? '')
+    if (src && format) return <ModelLinkPreview src={src} href={href} name={name} format={format} />
+  }
   const note =
     type === 'model'
-      ? '3D preview coming — open the link to view the model.'
+      ? '3D model — open the link to view it.'
       : type === 'video'
         ? 'Video — open the link to play it.'
         : type === 'audio'
@@ -556,6 +612,8 @@ export function LinkPreview({ url }: { url: string }) {
     case 'internal':
       return <InternalLinkPreview preview={p} />
     default:
+      if (p.details?.type === 'event') return <EventCard p={p} />
+      if (p.details?.type === 'post') return <PostCard p={p} />
       return p.title || p.description || p.image ? <CardPreview p={p} /> : null
   }
 }
