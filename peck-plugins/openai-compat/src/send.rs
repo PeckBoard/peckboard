@@ -301,15 +301,16 @@ pub fn run(payload: &Value) -> Result<(), String> {
             emit_usage(session_id, &model_label, &usage)?;
             return no_output(session_id);
         };
-        if let Some(think) = ["reasoning_content", "reasoning"]
+        let field_think = ["reasoning_content", "reasoning"]
             .iter()
             .find_map(|k| msg.get(*k).and_then(|v| v.as_str()))
             .filter(|s| !s.trim().is_empty())
-        {
+            .map(str::to_string);
+        if let Some(think) = &field_think {
             emit(
                 session_id,
                 &ProviderEvent::Thinking {
-                    text: think.to_string(),
+                    text: think.clone(),
                 },
             )?;
         }
@@ -317,9 +318,15 @@ pub fn run(payload: &Value) -> Result<(), String> {
         // inline in `content`. Only the answer is shown and persisted.
         let (inline_think, text) =
             split_inline_think(msg.get("content").and_then(|v| v.as_str()).unwrap_or(""));
-        if let Some(think) = inline_think {
-            emit(session_id, &ProviderEvent::Thinking { text: think })?;
+        if let Some(think) = &inline_think {
+            emit(
+                session_id,
+                &ProviderEvent::Thinking {
+                    text: think.clone(),
+                },
+            )?;
         }
+        let round_thinking = field_think.or(inline_think);
         if !text.is_empty() {
             emit(session_id, &ProviderEvent::Text { text: text.clone() })?;
         }
@@ -341,7 +348,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 },
             )?;
         }
-        let calls = parse_tool_calls(session_id, &msg);
+        let calls = parse_tool_calls(session_id, &msg, tools.as_ref());
         let mut assistant = json!({ "role": "assistant", "content": text });
         if !calls.is_empty() {
             assistant["tool_calls"] = Value::Array(
@@ -357,7 +364,21 @@ pub fn run(payload: &Value) -> Result<(), String> {
                     .collect(),
             );
         }
-        messages.push(assistant.clone());
+        // Within this turn, the model's own reasoning goes back to it on its
+        // assistant messages: Qwen3-style templates render `reasoning_content`
+        // into the think block of every assistant turn after the last user
+        // query, and without it each tool round starts its reasoning from
+        // scratch (and re-runs checks it already did). vLLM reads the
+        // message's `reasoning` field into that template variable; llama.cpp's
+        // server reads `reasoning_content`; each ignores the other. History
+        // keeps only the answer, so older turns stay small and the prefix
+        // stable.
+        let mut sent = assistant.clone();
+        if let Some(think) = round_thinking {
+            sent["reasoning"] = json!(think);
+            sent["reasoning_content"] = json!(think);
+        }
+        messages.push(sent);
         new_messages.push(assistant);
         // The stop may have landed while the (blocking) request was in
         // flight: persist what we have instead of dropping the exchange.
@@ -471,7 +492,7 @@ fn announces_unfinished_step(answer: &str) -> bool {
     }
     // Last sentence of the last line: a one-line reply often leads with a
     // recap ("Three questions, all read-only.") before the announcement.
-    let body = line.trim_end_matches(|c: char| matches!(c, '.' | '!' | '…' | ' '));
+    let body = line.trim_end_matches(['.', '!', '…', ' ']);
     let sentence = body.rfind(['.', '!', '?']).map_or(body, |i| &body[i + 1..]);
     let lower = sentence.to_lowercase().replace('\u{2019}', "'");
     let mut lower = lower.trim_start_matches(|c: char| !c.is_alphanumeric());
@@ -520,9 +541,10 @@ fn error_message(body: &str) -> String {
 
 /// Normalise `message.tool_calls`. Arguments arrive as a JSON string
 /// (sometimes an object on lax servers); unparseable or empty arguments
-/// become `{}` rather than failing the turn. A call without an id gets a
+/// become `{}` rather than failing the turn, and argument types are coerced
+/// to the offered tool schema ([`coerce_args`]). A call without an id gets a
 /// generated one so the `tool` result can still reference it.
-fn parse_tool_calls(session_id: &str, msg: &Value) -> Vec<ToolCall> {
+fn parse_tool_calls(session_id: &str, msg: &Value, tools: Option<&Value>) -> Vec<ToolCall> {
     let Some(arr) = msg.get("tool_calls").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
@@ -544,7 +566,10 @@ fn parse_tool_calls(session_id: &str, msg: &Value) -> Vec<ToolCall> {
             Some(v @ Value::Object(_)) => v.clone(),
             _ => json!({}),
         };
-        let args = if args.is_object() { args } else { json!({}) };
+        let mut args = if args.is_object() { args } else { json!({}) };
+        if let Some(schema) = tool_schema(tools, &name) {
+            coerce_args(&mut args, schema);
+        }
         let wire_id = call
             .get("id")
             .and_then(|v| v.as_str())
@@ -572,6 +597,117 @@ fn tool_call_signature(calls: &[ToolCall]) -> String {
         .map(|c| format!("{}\u{0}{}", c.name, c.arguments))
         .collect::<Vec<_>>()
         .join("\u{1}")
+}
+
+/// The `parameters` schema the server was offered for tool `name`.
+fn tool_schema<'a>(tools: Option<&'a Value>, name: &str) -> Option<&'a Value> {
+    tools?.as_array()?.iter().find_map(|t| {
+        let f = t.get("function")?;
+        if f.get("name")?.as_str()? == name {
+            f.get("parameters")
+        } else {
+            None
+        }
+    })
+}
+
+/// Local models (via vLLM's XML tool-call parsers) often get argument types
+/// wrong: an array sent as a string — sometimes cut short, e.g.
+/// `["-c", "print(1)` without the closing `"]` — a number as a string, `""`
+/// for an optional number, or a bare scalar where a list of strings is
+/// expected (`args: -1`). The host then rejects the call, and the model tends
+/// to resend it unchanged until the identical-call guard ends the turn.
+/// Coerce top-level arguments to the types the tool's schema declares; a
+/// value that can't be coerced is left for the host to reject as before.
+fn coerce_args(args: &mut Value, schema: &Value) {
+    let (Some(obj), Some(props)) = (
+        args.as_object_mut(),
+        schema.get("properties").and_then(Value::as_object),
+    ) else {
+        return;
+    };
+    let keys: Vec<String> = obj.keys().cloned().collect();
+    for key in keys {
+        let Some(prop) = props.get(&key) else {
+            continue;
+        };
+        let Some(ty) = prop.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(value) = obj.get(&key) else {
+            continue;
+        };
+        let fixed = match (ty, value) {
+            ("array" | "object", Value::String(s)) => parse_json_lenient(s.trim(), ty),
+            // A lone scalar where a list of strings belongs: one-item list.
+            ("array", Value::Number(_) | Value::Bool(_))
+                if prop.pointer("/items/type").and_then(Value::as_str) == Some("string") =>
+            {
+                Some(json!([value.to_string()]))
+            }
+            ("integer", Value::String(s)) => s.trim().parse::<i64>().ok().map(Value::from),
+            ("number", Value::String(s)) => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+            ("boolean", Value::String(s)) => match s.trim() {
+                "true" => Some(Value::Bool(true)),
+                "false" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            ("string", Value::String(s)) => match strip_tool_markup(s) {
+                Some(clean) => Some(Value::String(clean)),
+                None => continue,
+            },
+            _ => continue,
+        };
+        match fixed {
+            Some(v) => {
+                obj.insert(key, v);
+            }
+            // `""` for an optional non-string argument means "not given".
+            None if value.as_str().is_some_and(|s| s.trim().is_empty()) => {
+                obj.remove(&key);
+            }
+            None => {}
+        }
+    }
+}
+
+/// A string argument with the XML tool-call markup leaking into it
+/// (`"page.tsx\n</parameter>\n>"` from a malformed qwen3_coder call), cut
+/// at the first closing tag. `None` when the value is clean.
+fn strip_tool_markup(s: &str) -> Option<String> {
+    ["</parameter>", "</function>", "</tool_call>"]
+        .iter()
+        .filter_map(|tag| s.find(tag))
+        .min()
+        .map(|i| s[..i].trim_end().to_string())
+}
+
+/// Parse `s` as a JSON array (`ty == "array"`) or object, also accepting it
+/// with a missing closing bracket, or a missing closing quote + bracket.
+fn parse_json_lenient(s: &str, ty: &str) -> Option<Value> {
+    let (open, close) = if ty == "array" {
+        ('[', ']')
+    } else {
+        ('{', '}')
+    };
+    if !s.starts_with(open) {
+        return None;
+    }
+    [String::new(), close.to_string(), format!("\"{close}")]
+        .iter()
+        .filter_map(|suffix| serde_json::from_str::<Value>(&format!("{s}{suffix}")).ok())
+        .find(|v| {
+            if ty == "array" {
+                v.is_array()
+            } else {
+                v.is_object()
+            }
+        })
 }
 /// Emit the turn's single `Usage` event, or nothing when the server
 /// reported no counts.
@@ -1539,6 +1675,48 @@ mod tests {
         assert_eq!(split_inline_think("<think></think>hi"), (None, "hi".into()));
     }
 
+    /// A tool round's reasoning is sent back on its assistant message for the
+    /// rest of the turn (Qwen3 templates render `reasoning_content`), but the
+    /// saved history keeps only the answer.
+    #[test]
+    fn in_turn_reasoning_is_replayed_but_not_persisted() {
+        let mut host = FakeHost::new(vec![
+            completion(
+                json!({
+                    "role": "assistant",
+                    "content": "file is broken at line 40\n</think>\n\nChecking it.",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "list_files", "arguments": "{}" },
+                    }],
+                }),
+                30,
+                5,
+            ),
+            completion(json!({ "role": "assistant", "content": "done" }), 60, 3),
+        ]);
+        host.tool_defs = Some(json!([{
+            "name": "list_files",
+            "input_schema": { "type": "object", "properties": {} },
+        }]));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let bodies = host.chat_bodies.lock().unwrap();
+        let msgs = bodies[1]["messages"].as_array().unwrap();
+        let replayed = &msgs[msgs.len() - 2];
+        assert_eq!(replayed["content"], "Checking it.");
+        assert_eq!(replayed["reasoning"], "file is broken at line 40");
+        assert_eq!(replayed["reasoning_content"], "file is broken at line 40");
+        drop(bodies);
+        let history = host.saved_history();
+        assert!(
+            history
+                .iter()
+                .all(|m| m.get("reasoning").is_none() && m.get("reasoning_content").is_none())
+        );
+    }
+
     /// Sampling settings ride the request only when set; an out-of-range
     /// float is dropped with a warning instead of 400ing every turn.
     #[test]
@@ -1672,6 +1850,52 @@ mod tests {
         ] {
             assert!(!announces_unfinished_step(done), "{done}");
         }
+    }
+
+    /// Argument shapes a local model actually sent (run_command / git), each
+    /// coerced to the schema's types instead of failing validation.
+    #[test]
+    fn tool_args_are_coerced_to_the_schema() {
+        let schema = json!({"type": "object", "properties": {
+            "command": {"type": "string"},
+            "args": {"type": "array", "items": {"type": "string"}},
+            "timeout_secs": {"type": "integer"},
+            "verbose": {"type": "boolean"},
+        }});
+        let coerce = |mut args: Value| {
+            coerce_args(&mut args, &schema);
+            args
+        };
+        // A stringified array that is complete, and one cut short.
+        assert_eq!(
+            coerce(json!({"command": "python3", "args": "[\"-c\", \"print(1)\"]"})),
+            json!({"command": "python3", "args": ["-c", "print(1)"]})
+        );
+        assert_eq!(
+            coerce(json!({"args": "[\"-c\", \"print('x', fib(30)"}))["args"],
+            json!(["-c", "print('x', fib(30)"])
+        );
+        // `args: -1` for `git log -1`, a numeric string, `""` for a number.
+        assert_eq!(coerce(json!({"args": -1}))["args"], json!(["-1"]));
+        assert_eq!(
+            coerce(json!({"timeout_secs": "30"}))["timeout_secs"],
+            json!(30)
+        );
+        assert_eq!(
+            coerce(json!({"timeout_secs": "", "verbose": "true"})),
+            json!({"verbose": true})
+        );
+        // Strings stay strings, and junk is left for the host to reject.
+        assert_eq!(
+            coerce(json!({"command": "[not json"}))["command"],
+            json!("[not json")
+        );
+        assert_eq!(coerce(json!({"args": "-la"}))["args"], json!("-la"));
+        // Tool-call markup leaking into a string argument.
+        assert_eq!(
+            coerce(json!({"command": "frontend/page.tsx\n</parameter>\n>"}))["command"],
+            json!("frontend/page.tsx")
+        );
     }
 
     #[test]
