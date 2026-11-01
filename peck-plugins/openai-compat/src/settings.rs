@@ -168,6 +168,12 @@ pub fn timeout_secs() -> u64 {
     i64("request_timeout_secs", 600).clamp(1, 3600) as u64
 }
 
+/// Longest tool result (in chars) the model is sent; `None` = no cap (`0`).
+pub fn max_tool_result_chars() -> Option<usize> {
+    let n = i64("max_tool_result_chars", 24_000);
+    (n > 0).then_some(n as usize)
+}
+
 /// Additional Models, plus the `models` list of the retired registry WASM
 /// plugin that used this same plugin id — its saved settings carry over, so
 /// an upgraded install keeps its models without re-entering them.
@@ -179,6 +185,65 @@ pub fn extra_models() -> Vec<String> {
         }
     }
     ids
+}
+
+/// `chat_template_kwargs.enable_thinking` for this request, from the
+/// Thinking setting: `on`/`off` force it; `auto` (the default) turns it on
+/// for Qwen3 models only — their templates render an empty think block
+/// unless it is explicitly true — and sends nothing otherwise.
+pub fn enable_thinking(model: &str) -> Option<bool> {
+    match str("thinking").as_deref() {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        _ => model.to_ascii_lowercase().contains("qwen3").then_some(true),
+    }
+}
+
+/// Float sampling settings: `(key, min, max, min_exclusive)`. Core's schema
+/// has no float type, so these are string fields parsed here.
+const FLOAT_SAMPLING: [(&str, f64, f64, bool); 4] = [
+    ("temperature", 0.0, 2.0, false),
+    ("top_p", 0.0, 1.0, true),
+    ("min_p", 0.0, 1.0, false),
+    ("presence_penalty", -2.0, 2.0, false),
+];
+
+/// Integer sampling settings; `0` (the default) means "not sent". Core
+/// enforces the manifest's min/max.
+const INT_SAMPLING: [&str; 2] = ["top_k", "max_tokens"];
+
+/// Request fields for every configured sampling setting (unset ones are
+/// omitted so the server default applies), plus one message per value that
+/// was set but unusable.
+pub fn sampling() -> (serde_json::Map<String, Value>, Vec<String>) {
+    let mut out = serde_json::Map::new();
+    let mut bad = Vec::new();
+    for (key, min, max, min_exclusive) in FLOAT_SAMPLING {
+        let parsed = match value(key) {
+            Some(Value::String(s)) if s.trim().is_empty() => continue,
+            Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+            Some(v) => v.as_f64(),
+            None => continue,
+        };
+        let in_range =
+            |f: f64| f.is_finite() && f <= max && if min_exclusive { f > min } else { f >= min };
+        match parsed.filter(|f| in_range(*f)) {
+            Some(f) => {
+                out.insert(key.into(), json!(f));
+            }
+            None => {
+                let lo = if min_exclusive { "(" } else { "[" };
+                bad.push(format!("{key} must be a number in {lo}{min}, {max}]"));
+            }
+        }
+    }
+    for key in INT_SAMPLING {
+        let n = i64(key, 0);
+        if n > 0 {
+            out.insert(key.into(), json!(n));
+        }
+    }
+    (out, bad)
 }
 
 #[cfg(test)]

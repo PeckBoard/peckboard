@@ -18,7 +18,15 @@ const HISTORY_COLLECTION: &str = "history";
 /// collection (which core wipes on session clear): persisted events outlive
 /// the trimmed transcript, so ids must never repeat within a session.
 const COUNTER_COLLECTION: &str = "counters";
-const MAX_HISTORY_MESSAGES: usize = 100;
+/// Stored transcript cap. Crossing it trims down to `HISTORY_TRIM_TARGET`
+/// at once, so the prompt prefix then stays byte-identical (and the
+/// server's prefix cache warm) for many turns.
+const MAX_HISTORY_MESSAGES: usize = 160;
+const HISTORY_TRIM_TARGET: usize = MAX_HISTORY_MESSAGES * 3 / 5;
+/// Max continue nudges per turn for a reply that announces a step and stops.
+const MAX_CONTINUE_NUDGES: usize = 2;
+const CONTINUE_NUDGE: &str =
+    "Continue: make that tool call now. If you're done, give your final answer instead.";
 /// No cap on tool rounds per turn: a busy model may call as many tools as
 /// the task needs. A model that repeats the exact same calls this many
 /// rounds in a row is stuck instead, and the turn ends there.
@@ -139,13 +147,11 @@ pub fn run(payload: &Value) -> Result<(), String> {
     }
     history.push(user_message(prompt, &message));
     // Persist the user turn now, so an interrupt or crash mid-turn doesn't
-    // forget the user said anything.
-    save_history(session_id, history.clone());
+    // forget the user said anything. Any trim happens here, before the
+    // request, so this turn's prompt prefix matches what's stored.
+    save_history(session_id, &mut history);
 
-    let mut messages = history.clone();
-    if !system_prompt.trim().is_empty() {
-        messages.insert(0, json!({ "role": "system", "content": system_prompt }));
-    }
+    let mut messages = request_messages(system_prompt, &history, &[]);
     // Assistant + tool turns produced this turn, appended to `history` at
     // whichever exit the turn takes (never the system message).
     let mut new_messages: Vec<Value> = Vec::new();
@@ -157,9 +163,23 @@ pub fn run(payload: &Value) -> Result<(), String> {
     };
     let url = format!("{root}/v1/chat/completions");
     let mut usage = TurnUsage::default();
+    let enable_thinking = settings::enable_thinking(&model);
+    let (sampling, bad_sampling) = settings::sampling();
+    for problem in bad_sampling {
+        emit(
+            session_id,
+            &ProviderEvent::System {
+                text: format!("Ignoring sampling setting: {problem}."),
+                subtype: "warning".into(),
+                detail: Value::Null,
+            },
+        )?;
+    }
 
     let mut last_signature: Option<String> = None;
     let mut identical_rounds = 0;
+    let mut nudges = 0;
+    let mut overflow_retried = false;
     loop {
         if should_stop(session_id) {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
@@ -172,6 +192,17 @@ pub fn run(payload: &Value) -> Result<(), String> {
         if let Some(t) = &tools {
             body["tools"] = t.clone();
         }
+        if let Some(on) = enable_thinking {
+            body["chat_template_kwargs"] = json!({ "enable_thinking": on });
+        }
+        if let Some(obj) = body.as_object_mut() {
+            obj.extend(sampling.clone());
+        }
+        // Blocking: `peckboard_http_request` has no cancel or poll handle
+        // (one request, bounded only by `timeout_secs`), so a stop landing
+        // mid-request is seen only once the server answers, and the server
+        // keeps generating until then. Cancelling it would need a streaming
+        // request the host can drop on stop.
         let resp = host::call_host(
             HostFn::HttpRequest,
             &json!({
@@ -185,10 +216,37 @@ pub fn run(payload: &Value) -> Result<(), String> {
         let status = resp.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
         let body = resp.get("body").and_then(|v| v.as_str()).unwrap_or("");
         if !(200..300).contains(&status) {
+            // The prompt outgrew the model's context window: drop about half
+            // of the older turns and retry once. Checked before the tools
+            // retry — an overflow message can mention tools too.
+            if status == 400
+                && !overflow_retried
+                && is_context_overflow(body)
+                && trim_older_turns(&mut history)
+            {
+                overflow_retried = true;
+                save_history(session_id, &mut history);
+                messages = request_messages(system_prompt, &history, &new_messages);
+                emit(
+                    session_id,
+                    &ProviderEvent::System {
+                        text: "History trimmed to fit the model's context window; older \
+                               messages were dropped."
+                            .into(),
+                        subtype: "warning".into(),
+                        detail: Value::Null,
+                    },
+                )?;
+                continue;
+            }
             // A server/model without tool calling (e.g. vLLM without
             // --enable-auto-tool-choice) 400s a request carrying `tools`:
             // drop them for the rest of the turn and retry this round once.
-            if status == 400 && tools.is_some() && body.to_ascii_lowercase().contains("tool") {
+            if status == 400
+                && tools.is_some()
+                && !is_context_overflow(body)
+                && body.to_ascii_lowercase().contains("tool")
+            {
                 tools = None;
                 emit(
                     session_id,
@@ -255,13 +313,33 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 },
             )?;
         }
-        let text = msg
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        // No server reasoning parser: the template's think block arrives
+        // inline in `content`. Only the answer is shown and persisted.
+        let (inline_think, text) =
+            split_inline_think(msg.get("content").and_then(|v| v.as_str()).unwrap_or(""));
+        if let Some(think) = inline_think {
+            emit(session_id, &ProviderEvent::Thinking { text: think })?;
+        }
         if !text.is_empty() {
             emit(session_id, &ProviderEvent::Text { text: text.clone() })?;
+        }
+        let finish_reason = parsed
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if finish_reason.as_deref() == Some("length") {
+            emit(
+                session_id,
+                &ProviderEvent::System {
+                    text: "The reply hit the max-token limit and was cut off. Raise Max Tokens \
+                           (or the server's context length), or send a message to continue."
+                        .into(),
+                    subtype: "warning".into(),
+                    detail: Value::Null,
+                },
+            )?;
         }
         let calls = parse_tool_calls(session_id, &msg);
         let mut assistant = json!({ "role": "assistant", "content": text });
@@ -287,6 +365,20 @@ pub fn run(payload: &Value) -> Result<(), String> {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
         if calls.is_empty() {
+            // "Let me check X." and then nothing: the agent announced a
+            // step but stopped. Nudge it to act, a bounded number of times;
+            // the nudge is persisted so the history stays consistent.
+            if tools.is_some()
+                && finish_reason.as_deref() == Some("stop")
+                && nudges < MAX_CONTINUE_NUDGES
+                && announces_unfinished_step(&text)
+            {
+                nudges += 1;
+                let nudge = json!({ "role": "user", "content": CONTINUE_NUDGE });
+                messages.push(nudge.clone());
+                new_messages.push(nudge);
+                continue;
+            }
             break;
         }
         let signature = tool_call_signature(&calls);
@@ -348,6 +440,65 @@ fn user_message(prompt: &str, message: &Value) -> Value {
         }));
     }
     json!({ "role": "user", "content": parts })
+}
+
+/// `(thinking, answer)` from a `content` the chat template's think block
+/// leaked into (no server reasoning parser): `reasoning</think>answer` —
+/// the opening `<think>` usually sits in the prompt — or
+/// `<think>reasoning</think>answer`. Splits on the LAST `</think>`; with
+/// none, the content is all answer.
+fn split_inline_think(content: &str) -> (Option<String>, String) {
+    const CLOSE: &str = "</think>";
+    let Some(idx) = content.rfind(CLOSE) else {
+        return (None, content.to_string());
+    };
+    let before = content[..idx].trim_start();
+    let think = before.strip_prefix("<think>").unwrap_or(before).trim();
+    let answer = content[idx + CLOSE.len()..].trim_start().to_string();
+    ((!think.is_empty()).then(|| think.to_string()), answer)
+}
+
+/// Whether a reply's last sentence announces a step it never took
+/// ("Let me check the logs.", "Three questions. Let me work through
+/// them.", "Now I'll run the tests:") — the agent stopping mid-task instead
+/// of making the tool call.
+fn announces_unfinished_step(answer: &str) -> bool {
+    let Some(line) = answer.lines().map(str::trim).rfind(|l| !l.is_empty()) else {
+        return false;
+    };
+    if line.ends_with(':') {
+        return true;
+    }
+    // Last sentence of the last line: a one-line reply often leads with a
+    // recap ("Three questions, all read-only.") before the announcement.
+    let body = line.trim_end_matches(|c: char| matches!(c, '.' | '!' | '…' | ' '));
+    let sentence = body.rfind(['.', '!', '?']).map_or(body, |i| &body[i + 1..]);
+    let lower = sentence.to_lowercase().replace('\u{2019}', "'");
+    let mut lower = lower.trim_start_matches(|c: char| !c.is_alphanumeric());
+    // Discourse openers in front of the announcement ("Now, let me …").
+    for opener in [
+        "now", "next", "first", "then", "ok", "okay", "alright", "good", "great",
+    ] {
+        if let Some(rest) = lower.strip_prefix(opener)
+            && rest.starts_with([',', ' '])
+        {
+            lower = rest.trim_start_matches([',', ' ']);
+            break;
+        }
+    }
+    if lower.starts_with("let me know") {
+        return false;
+    }
+    [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "let's ",
+        "i am going to ",
+        "i'm going to ",
+    ]
+    .iter()
+    .any(|p| lower.starts_with(p))
 }
 
 /// Best human-readable message from an error body: OpenAI's
@@ -454,6 +605,15 @@ fn interrupted_exit(
     usage: &TurnUsage,
 ) -> Result<(), String> {
     emit_usage(session_id, model_label, usage)?;
+    // A continue nudge the model never answered would leave two user turns
+    // in a row once the next message arrives.
+    if new_messages
+        .last()
+        .and_then(|m| m.get("role").and_then(|r| r.as_str()))
+        == Some("user")
+    {
+        new_messages.pop();
+    }
     if let Some(last) = new_messages.last_mut()
         && last.get("role").and_then(|r| r.as_str()) == Some("assistant")
         && let Some(text) = last
@@ -468,7 +628,7 @@ fn interrupted_exit(
     // calls from the tail.
     drop_unanswered_tool_calls(&mut new_messages);
     history.extend(new_messages);
-    save_history(session_id, history);
+    save_history(session_id, &mut history);
     crash(session_id, "interrupted", CrashKind::Interrupted)
 }
 
@@ -512,38 +672,81 @@ fn drop_unanswered_tool_calls(messages: &mut [Value]) {
 /// Append this turn's generated messages to the durable transcript.
 fn persist_turn(session_id: &str, history: &mut Vec<Value>, new_messages: Vec<Value>) {
     history.extend(new_messages);
-    save_history(session_id, history.clone());
+    save_history(session_id, history);
 }
 
-/// Peckboard MCP tools as OpenAI `{"type":"function","function":{…}}` defs.
+/// Tool Set "Core coding tools": names offered on top of Extra Tools. Only
+/// those the session actually exposes are sent (e.g. `graphify_*` exist only
+/// while that plugin is active).
+const CORE_TOOLS: &[&str] = &[
+    "ask_user",
+    "background_status",
+    "browser_act",
+    "browser_find",
+    "browser_open",
+    "browser_outline",
+    "browser_screenshot",
+    "edit_file",
+    "fetch_url",
+    "file_outline",
+    "finish_card",
+    "git",
+    "graphify_explain",
+    "graphify_path",
+    "list_files",
+    "move_card_to_done",
+    "read_file",
+    "read_symbol",
+    "run_background",
+    "run_command",
+    "run_tests",
+    "search_files",
+    "search_web",
+    "update_card",
+    "write_file",
+];
+
+/// Peckboard MCP tools as OpenAI `{"type":"function","function":{…}}` defs,
+/// narrowed by the Tool Set setting and sorted by name. ~200 definitions
+/// cost ~45k prompt tokens and make a small model pick tools badly; the
+/// sort keeps the array byte-identical across requests for the prefix cache.
 fn function_tools(session_id: &str) -> Option<Value> {
     let mcp = host::call_host(
         HostFn::ProviderGetMcpConfig,
         &json!({ "session_id": session_id }),
     )
     .ok()?;
+    let allowed = settings::str("tool_set")
+        .filter(|s| s == "core")
+        .map(|_| settings::str_list("extra_tools"));
+    let offered = |name: &str| match &allowed {
+        None => true,
+        Some(extra) => CORE_TOOLS.contains(&name) || extra.iter().any(|e| e == name),
+    };
     let defs = mcp.get("tool_defs")?.as_array()?;
-    let tools: Vec<Value> = defs
+    let mut tools: Vec<(String, Value)> = defs
         .iter()
         .filter_map(|d| {
             let name = d.get("name")?.as_str()?.to_string();
-            if name.is_empty() {
+            if name.is_empty() || !offered(&name) {
                 return None;
             }
-            Some(json!({
+            let def = json!({
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": d.get("description").and_then(|v| v.as_str()).unwrap_or(""),
                     "parameters": d.get("input_schema").cloned().unwrap_or(json!({"type": "object"})),
                 }
-            }))
+            });
+            Some((name, def))
         })
         .collect();
+    tools.sort_by(|a, b| a.0.cmp(&b.0));
     if tools.is_empty() {
         None
     } else {
-        Some(Value::Array(tools))
+        Some(Value::Array(tools.into_iter().map(|(_, d)| d).collect()))
     }
 }
 
@@ -603,7 +806,7 @@ fn run_tool_calls(
         let (content, ok) = match invoked {
             Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
                 let result = v.get("result").cloned().unwrap_or(Value::Null);
-                (result.to_string(), true)
+                (tool_result_text(&result), true)
             }
             Ok(v) => (
                 v.get("error")
@@ -623,15 +826,75 @@ fn run_tool_calls(
                 images: Vec::new(),
             },
         )?;
+        // The UI keeps the full output; the model gets a capped copy so one
+        // huge result can't blow the context window for every later round.
         let tool_msg = json!({
             "role": "tool",
             "tool_call_id": call.wire_id,
-            "content": content,
+            "content": cap_tool_result(&content, settings::max_tool_result_chars()),
         });
         messages.push(tool_msg.clone());
         new_messages.push(tool_msg);
     }
     Ok(false)
+}
+
+/// A tool result as the plain text the model reads: a string as-is, an
+/// MCP-shaped `{"content":[{"type":"text","text":…}]}` as its text parts
+/// joined, anything else (core tools return JSON objects) as pretty JSON.
+/// `Value::to_string` would hand the model a JSON-quoted string with
+/// escaped newlines.
+fn tool_result_text(result: &Value) -> String {
+    if let Value::String(s) = result {
+        return s.clone();
+    }
+    if let Some(parts) = result.get("content").and_then(|c| c.as_array()) {
+        let texts: Vec<&str> = parts
+            .iter()
+            .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect();
+        if !texts.is_empty() {
+            return texts.join("\n");
+        }
+    }
+    serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+}
+
+/// `text` cut to about `max` chars — the head and the tail, with a marker
+/// in the middle saying how much was dropped and how to see it. Unchanged
+/// when it fits or there's no cap.
+fn cap_tool_result(text: &str, max: Option<usize>) -> String {
+    let Some(max) = max else {
+        return text.to_string();
+    };
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_string();
+    }
+    let head = max / 2;
+    let tail = max - head;
+    let omitted = total - head - tail;
+    let byte_at = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(i, _)| i);
+    format!(
+        "{}\n\n[… {} chars omitted: narrow the request (line ranges, filters, tail) to see more …]\n\n{}",
+        &text[..byte_at(head)],
+        thousands(omitted),
+        &text[byte_at(total - tail)..],
+    )
+}
+
+/// `183402` → `183,402`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn load_history(session_id: &str) -> Vec<Value> {
@@ -645,9 +908,61 @@ fn load_history(session_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn save_history(session_id: &str, mut messages: Vec<Value>) {
+/// The request transcript: the CURRENT system prompt (never persisted),
+/// the stored history, then this turn's generated messages.
+fn request_messages(system_prompt: &str, history: &[Value], new_messages: &[Value]) -> Vec<Value> {
+    let mut messages = Vec::with_capacity(history.len() + new_messages.len() + 1);
+    if !system_prompt.trim().is_empty() {
+        messages.push(json!({ "role": "system", "content": system_prompt }));
+    }
+    messages.extend_from_slice(history);
+    messages.extend_from_slice(new_messages);
+    messages
+}
+
+/// Whether an error body is the server saying the prompt exceeds the
+/// model's context window (vLLM, OpenAI, llama.cpp, Anthropic-style
+/// proxies all word it differently).
+fn is_context_overflow(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    [
+        "maximum context length",
+        "context_length_exceeded",
+        "prompt is too long",
+        "reduce the length",
+    ]
+    .iter()
+    .any(|p| b.contains(p))
+}
+
+/// Drop about half of the turns before the current user message (always
+/// the last entry), realigned to a user-message boundary. `false` when
+/// there was nothing older to drop.
+fn trim_older_turns(history: &mut Vec<Value>) -> bool {
+    let older = history.len().saturating_sub(1);
+    if older == 0 {
+        return false;
+    }
+    history.drain(0..older.div_ceil(2));
+    while history.len() > 1
+        && history
+            .first()
+            .and_then(|m| m.get("role").and_then(|r| r.as_str()))
+            != Some("user")
+    {
+        history.remove(0);
+    }
+    true
+}
+
+/// Store the transcript, trimming it in place first so the caller keeps
+/// exactly what was stored. Over `MAX_HISTORY_MESSAGES` it drops down to
+/// `HISTORY_TRIM_TARGET` in one go (hysteresis), not just the overflow:
+/// trimming one message per turn would change the prompt prefix every turn
+/// and defeat the server's prefix cache, re-prefilling the whole context.
+fn save_history(session_id: &str, messages: &mut Vec<Value>) {
     if messages.len() > MAX_HISTORY_MESSAGES {
-        let drop = messages.len() - MAX_HISTORY_MESSAGES;
+        let drop = messages.len() - HISTORY_TRIM_TARGET;
         messages.drain(0..drop);
         // Align to a user-message boundary: a leading `tool` result (or an
         // assistant turn whose `tool_calls` were trimmed off the front) is
@@ -747,6 +1062,10 @@ mod tests {
         stop_from: usize,
         stop_calls: Arc<Mutex<usize>>,
         tool_defs: Option<Value>,
+        /// Plugin settings by key; unset keys answer `null`.
+        settings: HashMap<String, Value>,
+        /// What every `invoke_mcp` call returns as `result`.
+        tool_result: Value,
     }
 
     impl FakeHost {
@@ -761,6 +1080,8 @@ mod tests {
                 stop_from: 0,
                 stop_calls: Arc::default(),
                 tool_defs: None,
+                settings: HashMap::new(),
+                tool_result: json!({ "files": ["a.rs"] }),
             }
         }
 
@@ -774,6 +1095,8 @@ mod tests {
             let stop_from = self.stop_from;
             let stop_calls = self.stop_calls.clone();
             let tool_defs = self.tool_defs.clone();
+            let settings = self.settings.clone();
+            let tool_result = self.tool_result.clone();
             Arc::new(move |name: &str, input: &str| {
                 let input: Value = serde_json::from_str(input).unwrap_or(json!({}));
                 let key = |v: &Value| {
@@ -789,7 +1112,10 @@ mod tests {
                     )
                 };
                 match name {
-                    "peckboard_get_plugin_setting" => json!({ "value": null }).to_string(),
+                    "peckboard_get_plugin_setting" => {
+                        let k = input.get("key").and_then(|k| k.as_str()).unwrap_or("");
+                        json!({ "value": settings.get(k) }).to_string()
+                    }
                     "peckboard_store_get" => {
                         let v = store.lock().unwrap().get(&key(&input)).cloned();
                         json!({ "value": v }).to_string()
@@ -817,7 +1143,7 @@ mod tests {
                     },
                     "peckboard_provider_invoke_mcp" => {
                         invoked.lock().unwrap().push(input.clone());
-                        json!({ "ok": true, "result": { "files": ["a.rs"] } }).to_string()
+                        json!({ "ok": true, "result": tool_result }).to_string()
                     }
                     "peckboard_http_request" => {
                         let url = input.get("url").and_then(|u| u.as_str()).unwrap_or("");
@@ -846,10 +1172,14 @@ mod tests {
     }
 
     fn completion(message: Value, prompt: i64, completion: i64) -> Value {
+        finished(message, prompt, completion, "stop")
+    }
+
+    fn finished(message: Value, prompt: i64, completion: i64, finish_reason: &str) -> Value {
         json!({
             "status": 200,
             "body": json!({
-                "choices": [{ "index": 0, "message": message, "finish_reason": "stop" }],
+                "choices": [{ "index": 0, "message": message, "finish_reason": finish_reason }],
                 "usage": { "prompt_tokens": prompt, "completion_tokens": completion },
             })
             .to_string(),
@@ -1061,7 +1391,7 @@ mod tests {
         let tool = &msgs[msgs.len() - 1];
         assert_eq!(tool["role"], "tool");
         assert_eq!(tool["tool_call_id"], "call_abc");
-        assert_eq!(tool["content"], json!({ "files": ["a.rs"] }).to_string());
+        assert_eq!(tool["content"], "{\n  \"files\": [\n    \"a.rs\"\n  ]\n}");
 
         let events = host.events.lock().unwrap();
         let start = events.iter().find(|e| e["kind"] == "tool_start").unwrap();
@@ -1148,5 +1478,380 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0], json!({ "type": "text", "text": "look" }));
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    fn answer(content: &str) -> Value {
+        completion(json!({ "role": "assistant", "content": content }), 10, 2)
+    }
+
+    /// Thinking: Auto sends `enable_thinking: true` for Qwen3 ids only, On
+    /// and Off force it either way.
+    #[test]
+    fn thinking_kwarg_follows_mode_and_model() {
+        for (mode, model, want) in [
+            (None, "openai-compat:Qwen/Qwen3-32B", Some(true)),
+            (Some("auto"), "openai-compat:llama-3.1-8b", None),
+            (Some("on"), "openai-compat:llama-3.1-8b", Some(true)),
+            (Some("off"), "openai-compat:Qwen/Qwen3-32B", Some(false)),
+        ] {
+            let mut host = FakeHost::new(vec![answer("ok")]);
+            if let Some(m) = mode {
+                host.settings.insert("thinking".into(), json!(m));
+            }
+            let mut p = payload();
+            p["spawn_config"]["model"] = json!(model);
+            peck_plugin_native_host::with_host(host.host_fn(), || run(&p)).unwrap();
+            let body = &host.chat_bodies.lock().unwrap()[0];
+            let got = body
+                .get("chat_template_kwargs")
+                .map(|k| k["enable_thinking"].as_bool().unwrap());
+            assert_eq!(got, want, "mode {mode:?}, model {model}");
+            assert!(body.get("temperature").is_none() && body.get("max_tokens").is_none());
+        }
+    }
+
+    /// Inline `reasoning</think>answer` content: the reasoning becomes a
+    /// thinking event and only the answer is shown and persisted.
+    #[test]
+    fn inline_think_is_split_and_only_the_answer_persisted() {
+        let host = FakeHost::new(vec![answer("weigh options\n</think>\n\nThe answer.")]);
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let events = host.events.lock().unwrap();
+        let thinking = events.iter().find(|e| e["kind"] == "thinking").unwrap();
+        assert_eq!(thinking["text"], "weigh options");
+        let text = events.iter().find(|e| e["kind"] == "text").unwrap();
+        assert_eq!(text["text"], "The answer.");
+        drop(events);
+        assert_eq!(
+            host.saved_history().last().unwrap()["content"],
+            "The answer."
+        );
+
+        assert_eq!(
+            split_inline_think("<think>a</think>b"),
+            (Some("a".into()), "b".into())
+        );
+        assert_eq!(
+            split_inline_think("x</think>y</think>z"),
+            (Some("x</think>y".into()), "z".into())
+        );
+        assert_eq!(split_inline_think("plain"), (None, "plain".into()));
+        assert_eq!(split_inline_think("<think></think>hi"), (None, "hi".into()));
+    }
+
+    /// Sampling settings ride the request only when set; an out-of-range
+    /// float is dropped with a warning instead of 400ing every turn.
+    #[test]
+    fn sampling_settings_pass_through_when_set() {
+        let mut host = FakeHost::new(vec![answer("ok")]);
+        for (k, v) in [
+            ("temperature", json!("5")),
+            ("top_p", json!("0.95")),
+            ("top_k", json!(20)),
+            ("min_p", json!("0")),
+            ("presence_penalty", json!(" 1.5 ")),
+            ("max_tokens", json!(4096)),
+        ] {
+            host.settings.insert(k.into(), v);
+        }
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let body = &host.chat_bodies.lock().unwrap()[0];
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["top_p"], 0.95);
+        assert_eq!(body["top_k"], 20);
+        assert_eq!(body["min_p"], 0.0);
+        assert_eq!(body["presence_penalty"], 1.5);
+        assert_eq!(body["max_tokens"], 4096);
+        let events = host.events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"] == "system"
+                    && e["text"].as_str().unwrap().contains("temperature"))
+        );
+    }
+
+    /// Crossing the cap trims well below it once, so the next turn's prompt
+    /// starts with exactly the previous turn's messages (prefix-cache hit).
+    #[test]
+    fn history_trim_has_hysteresis_and_keeps_the_prefix_stable() {
+        let host = FakeHost::new(vec![answer("ok")]);
+        let seeded: Vec<Value> = (0..MAX_HISTORY_MESSAGES)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                json!({ "role": role, "content": format!("m{i}") })
+            })
+            .collect();
+        host.store.lock().unwrap().insert(
+            (HISTORY_COLLECTION.to_string(), "s1".to_string()),
+            Value::Array(seeded),
+        );
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let saved = host.saved_history();
+        assert!(saved.len() <= HISTORY_TRIM_TARGET, "len {}", saved.len());
+        assert_eq!(saved[0]["role"], "user");
+
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let bodies = host.chat_bodies.lock().unwrap();
+        let first = bodies[0]["messages"].as_array().unwrap();
+        let second = bodies[1]["messages"].as_array().unwrap();
+        assert_eq!(&second[..first.len()], &first[..]);
+    }
+
+    #[test]
+    fn tool_results_are_plain_text() {
+        assert_eq!(tool_result_text(&json!("line 1\nline 2")), "line 1\nline 2");
+        assert_eq!(
+            tool_result_text(&json!({ "content": [
+                { "type": "text", "text": "a\nb" },
+                { "type": "image", "data": "AAAA" },
+                { "type": "text", "text": "c" },
+            ] })),
+            "a\nb\nc"
+        );
+        assert_eq!(tool_result_text(&json!({ "n": 1 })), "{\n  \"n\": 1\n}");
+    }
+
+    /// A reply announcing a step it never took gets a persisted continue
+    /// nudge, at most `MAX_CONTINUE_NUDGES` times per turn.
+    #[test]
+    fn announce_and_stop_is_nudged_at_most_twice() {
+        let mut host = FakeHost::new(vec![answer("Found it.\nLet me check the video detail.")]);
+        host.tool_defs = Some(json!([{ "name": "t", "input_schema": { "type": "object" } }]));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        assert_eq!(
+            host.chat_bodies.lock().unwrap().len(),
+            1 + MAX_CONTINUE_NUDGES
+        );
+        let saved = host.saved_history();
+        let nudges = saved
+            .iter()
+            .filter(|m| m["content"] == CONTINUE_NUDGE)
+            .count();
+        assert_eq!(nudges, MAX_CONTINUE_NUDGES);
+        assert_eq!(saved.last().unwrap()["role"], "assistant");
+        assert!(
+            host.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "completed")
+        );
+
+        assert!(announces_unfinished_step("Now I’ll run the tests."));
+        assert!(announces_unfinished_step("Here is the plan:\n\n"));
+        assert!(!announces_unfinished_step("Let me know if you need more."));
+        assert!(!announces_unfinished_step("All done."));
+    }
+
+    /// No nudge without tools: a chat-only model can't act on it.
+    #[test]
+    fn announce_without_tools_is_not_nudged() {
+        let host = FakeHost::new(vec![answer("Let me think about that.")]);
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        assert_eq!(host.chat_bodies.lock().unwrap().len(), 1);
+    }
+
+    /// Real replies from a local agent that ended its turn without acting,
+    /// next to finished answers that must not be nudged.
+    #[test]
+    fn announcement_detection_reads_the_last_sentence() {
+        for stalled in [
+            "Three questions, all read-only. Let me work through them.",
+            "Let me answer all three.",
+            "The video is still processing. Now let me check the worker logs.",
+            "Next, I'll run the build:",
+            "Okay, I'm going to restart the service.",
+        ] {
+            assert!(announces_unfinished_step(stalled), "{stalled}");
+        }
+        for done in [
+            "The build passes: `Finished dev profile in 4.83s`.",
+            "Fixed. Let me know if you want autoplay muted.",
+            "Both thumbnails return 403, so the bucket still denies anonymous reads.",
+        ] {
+            assert!(!announces_unfinished_step(done), "{done}");
+        }
+    }
+
+    #[test]
+    fn length_finish_warns_about_the_token_limit() {
+        let host = FakeHost::new(vec![finished(
+            json!({ "role": "assistant", "content": "partial" }),
+            10,
+            2,
+            "length",
+        )]);
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let events = host.events.lock().unwrap();
+        assert!(events.iter().any(|e| e["kind"] == "system"
+            && e["subtype"] == "warning"
+            && e["text"].as_str().unwrap().contains("max-token limit")));
+        assert!(events.iter().any(|e| e["kind"] == "completed"));
+    }
+
+    /// An oversized tool result reaches the model (and history) as head +
+    /// tail around an omission marker; the UI's ToolEnd keeps all of it.
+    #[test]
+    fn long_tool_results_are_capped_for_the_model_only() {
+        let full = format!("HEAD{}TAIL", "x".repeat(50_000));
+        let mut host = FakeHost::new(vec![
+            completion(
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": { "name": "t", "arguments": "{}" },
+                    }],
+                }),
+                10,
+                1,
+            ),
+            answer("done"),
+        ]);
+        host.tool_defs = Some(json!([{ "name": "t", "input_schema": { "type": "object" } }]));
+        host.tool_result = json!(full);
+        host.settings
+            .insert("max_tool_result_chars".into(), json!(1000));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let bodies = host.chat_bodies.lock().unwrap();
+        let msgs = bodies[1]["messages"].as_array().unwrap();
+        let sent = msgs.last().unwrap()["content"].as_str().unwrap();
+        assert!(sent.starts_with("HEAD") && sent.ends_with("TAIL"));
+        assert!(sent.contains("[… 49,008 chars omitted: narrow the request"));
+        assert!(sent.chars().count() < 1200);
+        let events = host.events.lock().unwrap();
+        let end = events.iter().find(|e| e["kind"] == "tool_end").unwrap();
+        assert_eq!(end["output"].as_str().unwrap().len(), full.len());
+        drop(events);
+        let saved = host.saved_history();
+        let tool = saved.iter().find(|m| m["role"] == "tool").unwrap();
+        assert_eq!(tool["content"], sent);
+
+        assert_eq!(cap_tool_result("ééééé", None), "ééééé");
+        assert!(cap_tool_result(&"é".repeat(100), Some(10)).starts_with("ééééé\n"));
+        assert_eq!(thousands(183_402), "183,402");
+        assert_eq!(thousands(999), "999");
+    }
+
+    fn overflow() -> Value {
+        json!({
+            "status": 400,
+            "body": json!({ "error": { "message": "This model's maximum context length is \
+                262144 tokens. However, your prompt contains at least 262145 input tokens." } })
+            .to_string(),
+        })
+    }
+
+    fn seed_turns(host: &FakeHost, n: usize) {
+        let seeded: Vec<Value> = (0..n)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                json!({ "role": role, "content": format!("m{i}") })
+            })
+            .collect();
+        host.store.lock().unwrap().insert(
+            (HISTORY_COLLECTION.to_string(), "s1".to_string()),
+            Value::Array(seeded),
+        );
+    }
+
+    /// A context-length 400 trims about half the older turns, warns,
+    /// persists the trimmed history and retries the round.
+    #[test]
+    fn context_overflow_trims_history_and_retries_once() {
+        let host = FakeHost::new(vec![overflow(), answer("fits now")]);
+        seed_turns(&host, 10);
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let bodies = host.chat_bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        let before = bodies[0]["messages"].as_array().unwrap().len();
+        let after = bodies[1]["messages"].as_array().unwrap();
+        assert!(
+            after.len() <= before / 2 + 1,
+            "{} -> {}",
+            before,
+            after.len()
+        );
+        assert_eq!(after[1]["role"], "user");
+        assert_eq!(after.last().unwrap()["content"], "hello");
+        let events = host.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| e["kind"] == "system"
+                && e["text"].as_str().unwrap().starts_with("History trimmed"))
+        );
+        assert!(events.iter().any(|e| e["kind"] == "completed"));
+        drop(events);
+        let saved = host.saved_history();
+        assert_eq!(saved[0]["role"], "user");
+        assert_eq!(saved.last().unwrap()["content"], "fits now");
+        assert!(saved.len() < 10);
+    }
+
+    /// Still overflowing after the one trim: crash as before.
+    #[test]
+    fn second_context_overflow_crashes() {
+        let host = FakeHost::new(vec![overflow()]);
+        seed_turns(&host, 10);
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        assert_eq!(host.chat_bodies.lock().unwrap().len(), 2);
+        let events = host.events.lock().unwrap();
+        let crashed = events.iter().find(|e| e["kind"] == "crashed").unwrap();
+        assert!(
+            crashed["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("openai-compat HTTP 400")
+        );
+    }
+
+    fn offered_tool_names(host: &FakeHost) -> Vec<String> {
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let bodies = host.chat_bodies.lock().unwrap();
+        bodies[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Tools go out sorted by name in both modes; Core keeps only the
+    /// allowlisted names the session has, plus Extra Tools.
+    #[test]
+    fn tool_set_filters_to_core_plus_extra_and_sorts() {
+        let defs = json!([
+            { "name": "write_file", "input_schema": { "type": "object" } },
+            { "name": "create_card", "input_schema": { "type": "object" } },
+            { "name": "list_views", "input_schema": { "type": "object" } },
+            { "name": "git", "input_schema": { "type": "object" } },
+            { "name": "read_file", "input_schema": { "type": "object" } },
+        ]);
+        let mut all = FakeHost::new(vec![answer("ok")]);
+        all.tool_defs = Some(defs.clone());
+        assert_eq!(
+            offered_tool_names(&all),
+            [
+                "create_card",
+                "git",
+                "list_views",
+                "read_file",
+                "write_file"
+            ]
+        );
+
+        let mut core = FakeHost::new(vec![answer("ok")]);
+        core.tool_defs = Some(defs);
+        core.settings.insert("tool_set".into(), json!("core"));
+        core.settings
+            .insert("extra_tools".into(), json!(["create_card", "not_a_tool"]));
+        assert_eq!(
+            offered_tool_names(&core),
+            ["create_card", "git", "read_file", "write_file"]
+        );
     }
 }

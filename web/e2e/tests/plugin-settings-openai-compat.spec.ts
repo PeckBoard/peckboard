@@ -14,7 +14,8 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
  *
  * 1. The provider gets its own section rendering the shared per-plugin
  *    settings form with the declared fields (base URL, API key, servers,
- *    default model, discovery, tools, additional models, headers).
+ *    default model, discovery, tools, thinking, sampling, additional models,
+ *    headers).
  * 2. A base URL edit round-trips through the PUT endpoint and survives a
  *    reload; the API key is secret and comes back masked.
  * 3. An Additional Model (an HF-style id with a slash) appears in
@@ -69,11 +70,27 @@ test('OpenAI-Compatible section renders and round-trips base URL + API key', asy
     'request_timeout_secs',
     'discover_models',
     'enable_tools',
+    'tool_set',
+    'extra_tools',
+    'thinking',
+    'temperature',
+    'top_p',
+    'top_k',
+    'min_p',
+    'presence_penalty',
+    'max_tokens',
+    'max_tool_result_chars',
     'additional_models',
     'additional_headers',
   ]) {
     await expect(settings.locator(`[data-field="${field}"]`)).toBeVisible()
   }
+  // Thinking is an enum: a select, never a free-text input.
+  await expect(settings.locator('[data-field="thinking"] select option')).toHaveText([
+    'Auto (on for Qwen3 models)',
+    'On',
+    'Off',
+  ])
   await expect(settings.locator('[data-field="base_url"] input')).toHaveValue(
     'http://localhost:8000',
   )

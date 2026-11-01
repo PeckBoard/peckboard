@@ -389,7 +389,7 @@ const OPENAI_COMPAT: CrateHooks = CrateHooks {
     registration: peckboard_openai_compat_plugin::registration,
     manifest_json: peckboard_openai_compat_plugin::manifest_json,
     interrupt_frame: None,
-    base_prompt: None,
+    base_prompt: Some(peckboard_openai_compat_plugin::base_prompt),
 };
 const MOCK: CrateHooks = CrateHooks {
     send: peckboard_mock_plugin::send_turn,

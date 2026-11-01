@@ -11,6 +11,7 @@ mod event;
 mod host;
 mod manifest;
 mod models;
+mod prompt;
 mod send;
 mod settings;
 
@@ -207,4 +208,11 @@ pub fn refresh_models() -> Option<serde_json::Value> {
 
 pub fn manifest_json() -> String {
     manifest::manifest_json()
+}
+
+/// Provider-specific default base-prompt text (local-model operating
+/// rules). The host prepends it to the shared working-style rules and omits
+/// both when the user overrides the base prompt.
+pub fn base_prompt() -> &'static str {
+    prompt::BASE_PROMPT
 }

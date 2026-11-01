@@ -70,9 +70,94 @@ pub fn manifest_json() -> String {
             {
                 "key": "enable_tools",
                 "title": "Enable Tools",
-                "description": "Offer Peckboard's MCP tools (core tools plus any active plugin tools) to the model as OpenAI function tools on every turn, and run the tool calls it makes. Needs a server and model with tool calling enabled (e.g. vLLM with --enable-auto-tool-choice); turn this off for models that don't support tools, or to keep sessions chat-only.",
+                "description": "Offer Peckboard's MCP tools (core tools plus any active plugin tools) to the model as OpenAI function tools on every turn, and run the tool calls it makes. A reply that announces a next step (\"Let me check…\") but makes no call is nudged to continue, at most twice per turn. Needs a server and model with tool calling enabled (e.g. vLLM with --enable-auto-tool-choice); turn this off for models that don't support tools, or to keep sessions chat-only.",
                 "type": "boolean",
                 "default": true
+            },
+            {
+                "key": "tool_set",
+                "title": "Tool Set",
+                "description": "Which tools to offer when Enable Tools is on. All tools sends every Peckboard tool (around 200 definitions, roughly 45k prompt tokens per request). Core coding tools sends a short list for coding work (files, search, edit, run_command, run_tests, git, browser, ask_user, cards, background tasks, web fetch/search) plus any Extra Tools: much faster prefill, and smaller models pick tools more reliably.",
+                "type": "enum",
+                "options": [
+                    { "value": "all", "label": "All tools" },
+                    { "value": "core", "label": "Core coding tools" }
+                ],
+                "default": "all"
+            },
+            {
+                "key": "extra_tools",
+                "title": "Extra Tools",
+                "description": "Tool names to offer on top of Core coding tools (e.g. create_card, spawn_subagent). Ignored with All tools. Names the session doesn't have are skipped.",
+                "type": "string_list",
+                "item_placeholder": "create_card"
+            },
+            {
+                "key": "thinking",
+                "title": "Thinking",
+                "description": "Whether to ask the chat template for a reasoning block (chat_template_kwargs.enable_thinking). Auto turns it on for Qwen3 models — their templates otherwise render an empty think block, so the model never reasons — and sends nothing for other models. Reasoning that arrives inline in the reply (no --reasoning-parser on the server) is split off and shown as thinking either way.",
+                "type": "enum",
+                "options": [
+                    { "value": "auto", "label": "Auto (on for Qwen3 models)" },
+                    { "value": "on", "label": "On" },
+                    { "value": "off", "label": "Off" }
+                ],
+                "default": "auto"
+            },
+            {
+                "key": "temperature",
+                "title": "Temperature",
+                "description": "Sampling temperature, 0 to 2. Leave empty for the server's default. Qwen3 recommends 0.6 with thinking on, 0.7 with it off.",
+                "type": "string",
+                "placeholder": "0.6"
+            },
+            {
+                "key": "top_p",
+                "title": "Top P",
+                "description": "Nucleus sampling, above 0 up to 1. Leave empty for the server's default.",
+                "type": "string",
+                "placeholder": "0.95"
+            },
+            {
+                "key": "top_k",
+                "title": "Top K",
+                "description": "Sample from the K most likely tokens. 0 leaves it to the server's default.",
+                "type": "integer",
+                "default": 0,
+                "min": 0,
+                "max": 1000
+            },
+            {
+                "key": "min_p",
+                "title": "Min P",
+                "description": "Minimum token probability relative to the most likely one, 0 to 1. Leave empty for the server's default.",
+                "type": "string",
+                "placeholder": "0"
+            },
+            {
+                "key": "presence_penalty",
+                "title": "Presence Penalty",
+                "description": "Penalise tokens already in the reply, -2 to 2; 1 to 1.5 curbs repetition loops in quantised models. Leave empty for the server's default.",
+                "type": "string",
+                "placeholder": "1.5"
+            },
+            {
+                "key": "max_tokens",
+                "title": "Max Tokens",
+                "description": "Cap on tokens generated per reply (reasoning included). 0 leaves it to the server, which allows up to the rest of the context window. A reply that hits the cap is flagged with a warning.",
+                "type": "integer",
+                "default": 0,
+                "min": 0,
+                "max": 1048576
+            },
+            {
+                "key": "max_tool_result_chars",
+                "title": "Max Tool Result Size (Characters)",
+                "description": "Longest tool result sent to the model. A longer one is cut to its start and end, with a note in the middle telling the model to narrow the request (line ranges, filters, tail). The chat still shows the full output. 0 means no limit.",
+                "type": "integer",
+                "default": 24000,
+                "min": 0,
+                "max": 1000000
             },
             {
                 "key": "additional_models",

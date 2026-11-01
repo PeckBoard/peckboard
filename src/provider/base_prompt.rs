@@ -73,3 +73,22 @@ pub async fn set_override(db: &Db, provider_id: &str, text: Option<String>) -> a
     .await??;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// openai-compat's local-model operating rules lead its default base
+    /// prompt, ahead of the shared working-style rules.
+    #[test]
+    fn openai_compat_default_leads_with_local_model_rules() {
+        let p = default_base_prompt("openai-compat");
+        let rules = p
+            .find("# Operating Rules (Local Model Agent)")
+            .expect("rules block present");
+        assert!(p.contains("`update` REPLACES lines start_line..end_line"));
+        assert!(p.contains("Act, don't announce."));
+        assert!(rules < p.find("# Working style").unwrap());
+        assert!(p.ends_with(crate::provider::WORKING_STYLE));
+    }
+}
