@@ -33,9 +33,10 @@ const CONTINUE_NUDGE: &str =
 const MAX_IDENTICAL_TOOL_ROUNDS: usize = 3;
 /// Cap on the response body quoted in an HTTP-error crash reason.
 const MAX_ERROR_CHARS: usize = 2_000;
-/// Tool images shown to the model per round: the most recent ones, within
-/// a total of about 5 MB of base64.
-const MAX_TOOL_IMAGES_PER_ROUND: usize = 2;
+/// Tool images shown to the model: only the newest one, within about 5 MB
+/// of base64. vLLM's default --limit-mm-per-prompt is one image, and earlier
+/// images of the turn are swapped back to their stubs before a new one goes.
+const MAX_TOOL_IMAGES_PER_ROUND: usize = 1;
 const MAX_TOOL_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Per-turn token rollup. The server reports `usage` once per completion,
@@ -292,8 +293,21 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 && !is_context_overflow(body)
                 && is_image_rejection(body)
             {
+                // The rejected images were never seen: say so in both the
+                // request and the stored history, so the model doesn't report
+                // on them (seen: "both widths render well" after a rejection).
+                let unseen = json!({
+                    "role": "user",
+                    "content": "[The screenshot(s) from this round could not be shown to you: the \
+                                server rejected image input. Don't describe how the page looks; \
+                                check it another way, e.g. browser_outline or browser_find, or \
+                                by reading the code.]",
+                });
                 for (i, stub) in tool_image_msgs.drain(..) {
-                    messages[i] = stub;
+                    messages[i] = unseen.clone();
+                    if let Some(slot) = new_messages.iter_mut().rev().find(|m| **m == stub) {
+                        *slot = unseen.clone();
+                    }
                 }
                 send_images = false;
                 emit(
@@ -425,6 +439,21 @@ pub fn run(payload: &Value) -> Result<(), String> {
             parsed = next;
             msg = next_msg;
             forced_think = (!think.is_empty()).then_some(think);
+        }
+        // A tool call the server's parser couldn't read arrives as raw
+        // `<tool_call>` text in `content` (seen: `<parameter=write_file>`
+        // where `<function=write_file>` belonged — a whole page written into
+        // the chat instead of the file, ending the turn). Recover it.
+        if tools.is_some()
+            && msg
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_none_or(|a| a.is_empty())
+            && let Some(content) = msg.get("content").and_then(Value::as_str)
+            && let Some((rest, recovered)) = recover_inline_tool_calls(content, tools.as_ref())
+        {
+            msg["content"] = json!(rest);
+            msg["tool_calls"] = Value::Array(recovered);
         }
         let field_think = ["reasoning_content", "reasoning"]
             .iter()
@@ -565,8 +594,15 @@ pub fn run(payload: &Value) -> Result<(), String> {
         )? {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
-        // The model sees this round's images now; history keeps a stub.
+        // The model sees this round's image now; history keeps a stub.
+        // Earlier images of this turn go back to their stubs first: vLLM
+        // allows one image per prompt unless started with a larger
+        // --limit-mm-per-prompt ("At most 1 image(s) may be provided in one
+        // prompt"), and the newest screenshot is the one that matters.
         if send_images && let Some((sent, stub)) = tool_image_message(&round_images) {
+            for (i, old_stub) in tool_image_msgs.drain(..) {
+                messages[i] = old_stub;
+            }
             tool_image_msgs.push((messages.len(), stub.clone()));
             messages.push(sent);
             new_messages.push(stub);
@@ -623,6 +659,101 @@ fn finish_reason_of(parsed: &Value) -> Option<&str> {
     parsed
         .pointer("/choices/0/finish_reason")
         .and_then(Value::as_str)
+}
+
+/// Tool calls left as raw `<tool_call>` blocks in a reply's text because
+/// the server's parser rejected them. Reads the qwen3_coder XML form —
+/// the function from `<function=NAME>`, or from a first `<parameter=NAME>`
+/// that names an offered tool (a real model slip) — or a JSON
+/// `{"name", "arguments"}` body. Only looks after the last `</think>`.
+/// Returns the text with the blocks removed plus OpenAI-shape tool calls,
+/// or `None` when nothing usable was found.
+fn recover_inline_tool_calls(content: &str, tools: Option<&Value>) -> Option<(String, Vec<Value>)> {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+    let answer_from = content
+        .rfind("</think>")
+        .map_or(0, |i| i + "</think>".len());
+    let (head, answer) = content.split_at(answer_from);
+    if !answer.contains(OPEN) {
+        return None;
+    }
+    let tool_names: Vec<&str> = tools
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut calls = Vec::new();
+    let mut rest = head.to_string();
+    let mut cursor = answer;
+    while let Some(start) = cursor.find(OPEN) {
+        rest.push_str(&cursor[..start]);
+        let after = &cursor[start + OPEN.len()..];
+        let (body, next) = match after.find(CLOSE) {
+            Some(end) => (&after[..end], &after[end + CLOSE.len()..]),
+            None => (after, ""),
+        };
+        if let Some(call) = parse_inline_call(body, &tool_names) {
+            calls.push(call);
+        } else {
+            // Unreadable: keep it visible rather than silently dropping it.
+            rest.push_str(OPEN);
+            rest.push_str(body);
+        }
+        cursor = next;
+    }
+    rest.push_str(cursor);
+    (!calls.is_empty()).then(|| (rest.trim_end().to_string(), calls))
+}
+
+/// One `<tool_call>` body → an OpenAI tool call (`id` left empty; one is
+/// generated downstream), or `None` if no offered tool can be identified.
+fn parse_inline_call(body: &str, tool_names: &[&str]) -> Option<Value> {
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') {
+        let v: Value = serde_json::from_str(trimmed).ok()?;
+        let name = v.get("name")?.as_str()?;
+        if !tool_names.contains(&name) {
+            return None;
+        }
+        let args = v.get("arguments").cloned().unwrap_or(json!({}));
+        let args = match args {
+            Value::String(s) => s,
+            other => other.to_string(),
+        };
+        return Some(json!({
+            "id": "", "type": "function",
+            "function": { "name": name, "arguments": args },
+        }));
+    }
+    let mut name = body
+        .split_once("<function=")
+        .and_then(|(_, r)| r.split_once('>'))
+        .map(|(n, _)| n.trim().to_string());
+    let mut args = serde_json::Map::new();
+    for chunk in body.split("<parameter=").skip(1) {
+        let Some((key, value)) = chunk.split_once('>') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.rfind("</parameter>").map_or(value, |i| &value[..i]);
+        let value = value.strip_prefix('\n').unwrap_or(value);
+        let value = value.strip_suffix('\n').unwrap_or(value);
+        // The slip: `<parameter=write_file>` standing in for the function.
+        if name.is_none() && tool_names.contains(&key) {
+            name = Some(key.to_string());
+            continue;
+        }
+        args.insert(key.to_string(), Value::String(value.to_string()));
+    }
+    let name = name.filter(|n| tool_names.contains(&n.as_str()))?;
+    Some(json!({
+        "id": "", "type": "function",
+        "function": { "name": name, "arguments": Value::Object(args).to_string() },
+    }))
 }
 
 /// The reasoning of a reply, finished or not: the server's reasoning field,
@@ -1329,6 +1460,9 @@ fn image_placeholder(img: &ToolImage, attached: bool) -> String {
     }
     if attached {
         desc.push_str(" screenshot attached below");
+    } else {
+        // Without this the model reports on screenshots it never saw.
+        desc.push_str(" screenshot, not shown to you");
     }
     format!("[image: {desc}]")
 }
@@ -1390,9 +1524,19 @@ fn tool_image_message(images: &[(String, ToolImage)]) -> Option<(Value, Value)> 
         }
     }
     let names = names.join(", ");
+    // A bare "here is the screenshot" gets a lenient "looks good" from
+    // local models even when the layout is visibly broken (seen: badges and
+    // avatars unstyled after a CSS syntax slip, reported as fine). Ask for
+    // an itemised critique before any verdict.
     let mut parts = vec![json!({
         "type": "text",
-        "text": format!("Screenshot(s) returned by {names}:"),
+        "text": format!(
+            "Screenshot(s) returned by {names}. If this shows UI you are building, inspect it \
+             critically before deciding anything: list each concrete defect you can see — \
+             elements misplaced, overlapping, clipped or unstyled, missing items, spacing or \
+             layout that doesn't match what was asked — and fix them. Don't call it done while \
+             any defect is visible."
+        ),
     })];
     parts.extend(picked.iter().map(|(_, img)| {
         json!({
@@ -2491,6 +2635,57 @@ mod tests {
         );
     }
 
+    /// A tool call the server failed to parse (here the model wrote
+    /// `<parameter=write_file>` where `<function=write_file>` belonged)
+    /// arrives as text; it is recovered and run, and the raw markup is not
+    /// shown as the reply.
+    #[test]
+    fn unparsed_inline_tool_call_is_recovered() {
+        let mut host = FakeHost::new(vec![
+            completion(
+                json!({ "role": "assistant", "content": "Writing the page.\n\n<tool_call>\n<parameter=write_file>\n<parameter=path>\ntmp/ui/index.html\n</parameter>\n<parameter=content>\n<!doctype html>\n<p>hi</p>\n</parameter>\n</function>\n</tool_call>" }),
+                30,
+                5,
+            ),
+            completion(json!({ "role": "assistant", "content": "done" }), 60, 3),
+        ]);
+        host.tool_defs = Some(json!([{
+            "name": "write_file",
+            "input_schema": { "type": "object", "properties": {
+                "path": { "type": "string" }, "content": { "type": "string" } } },
+        }]));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let invoked = host.invoked.lock().unwrap();
+        assert_eq!(invoked.len(), 1);
+        assert_eq!(invoked[0]["name"], "write_file");
+        assert_eq!(
+            invoked[0]["arguments"],
+            json!({ "path": "tmp/ui/index.html", "content": "<!doctype html>\n<p>hi</p>" })
+        );
+        drop(invoked);
+        let events = host.events.lock().unwrap();
+        let text = events.iter().find(|e| e["kind"] == "text").unwrap();
+        assert_eq!(text["text"], "Writing the page.");
+
+        // The JSON (hermes-style) body works too; unknown tools are left alone.
+        let tools = json!([{ "type": "function", "function": { "name": "ls" } }]);
+        let (rest, calls) = recover_inline_tool_calls(
+            "<tool_call>{\"name\": \"ls\", \"arguments\": {\"path\": \".\"}}</tool_call>",
+            Some(&tools),
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(calls[0]["function"]["name"], "ls");
+        assert!(
+            recover_inline_tool_calls(
+                "<tool_call><function=rm_rf></function></tool_call>",
+                Some(&tools)
+            )
+            .is_none()
+        );
+    }
+
     /// An oversized tool result reaches the model (and history) as head +
     /// tail around an omission marker; the UI's ToolEnd keeps all of it.
     #[test]
@@ -2721,10 +2916,9 @@ mod tests {
         assert_eq!(tool["content"], placeholder);
         let shot = &msgs[msgs.len() - 1];
         assert_eq!(shot["role"], "user");
-        assert_eq!(
-            shot["content"][0]["text"],
-            "Screenshot(s) returned by browser_screenshot:"
-        );
+        let ask = shot["content"][0]["text"].as_str().unwrap();
+        assert!(ask.starts_with("Screenshot(s) returned by browser_screenshot."));
+        assert!(ask.contains("list each concrete defect"));
         assert_eq!(
             image_urls(shot),
             [format!("data:image/png;base64,{PNG_1280X800}")]
@@ -2742,7 +2936,7 @@ mod tests {
     }
 
     /// MCP image parts are extracted too, the text part stays the tool
-    /// result, and only the two most recent images go to the model.
+    /// result, and only the newest image goes to the model.
     #[test]
     fn mcp_image_parts_are_capped_per_round() {
         let part = |data: &str| json!({ "type": "image", "data": data, "mimeType": "image/jpeg" });
@@ -2761,10 +2955,10 @@ mod tests {
 
         let bodies = host.chat_bodies.lock().unwrap();
         let msgs = bodies[1]["messages"].as_array().unwrap();
-        assert_eq!(msgs[msgs.len() - 2]["content"], "captured 3 frames");
+        // One image per request (vLLM's default limit): the newest.
         assert_eq!(
             image_urls(&msgs[msgs.len() - 1]),
-            ["data:image/jpeg;base64,BBBB", "data:image/jpeg;base64,CCCC"]
+            ["data:image/jpeg;base64,CCCC"]
         );
     }
 
@@ -2785,7 +2979,10 @@ mod tests {
         let msgs = bodies[1]["messages"].as_array().unwrap();
         let last = &msgs[msgs.len() - 1];
         assert_eq!(last["role"], "tool");
-        assert_eq!(last["content"], "[image: image/png, 1280x800]");
+        assert_eq!(
+            last["content"],
+            "[image: image/png, 1280x800 screenshot, not shown to you]"
+        );
     }
 
     /// A server that 400s image input gets the round retried once with the
@@ -2809,6 +3006,15 @@ mod tests {
         assert!(bodies[1].to_string().contains("image_url"));
         assert!(!bodies[2].to_string().contains("image_url"));
         assert!(bodies[2].get("tools").is_some());
+        // The rejected image is marked as never seen, in the request and in
+        // the stored history.
+        assert!(bodies[2].to_string().contains("could not be shown to you"));
+        drop(bodies);
+        assert!(host.saved_history().iter().any(|m| {
+            m["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("could not be shown to you"))
+        }));
         let events = host.events.lock().unwrap();
         assert!(
             events.iter().any(|e| e["kind"] == "system"
