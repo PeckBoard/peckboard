@@ -895,6 +895,33 @@ diesel::table! {
 
 diesel::joinable!(oauth_clients -> folders (folder_id));
 diesel::joinable!(oauth_access_tokens -> oauth_clients (oauth_client_id));
+diesel::table! {
+    dns_credentials (id) {
+        id -> Text,
+        provider -> Text,
+        label -> Text,
+        credentials -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    tls_certificates (id) {
+        id -> Text,
+        source -> Text,
+        domains -> Text,
+        dns_credential_id -> Nullable<Text>,
+        acme_email -> Nullable<Text>,
+        staging -> Bool,
+        status -> Text,
+        last_error -> Nullable<Text>,
+        not_after -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::joinable!(tls_certificates -> dns_credentials (dns_credential_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -958,4 +985,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     remote_device_enrollments,
     oauth_clients,
     oauth_access_tokens,
+    dns_credentials,
+    tls_certificates,
 );

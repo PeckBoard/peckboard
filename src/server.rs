@@ -842,8 +842,20 @@ pub async fn run_server(
         }
     };
 
+    // SNI-selected managed certs (`tls_certificates`, `service::acme`).
+    if let Err(e) =
+        crate::service::acme::reload_managed(&state.db, &state.config.data_dir, &state.tls).await
+    {
+        tracing::warn!("Failed to load managed TLS certificates: {e:#}");
+    }
+    if !no_resume {
+        crate::service::acme::spawn_renewal_task(state.clone());
+    }
+
     state.tls.set_listener_bound(bind_ok);
-    state.tls.set_https_enabled(cert_loaded && bind_ok);
+    state
+        .tls
+        .set_https_enabled((cert_loaded || state.tls.has_any_cert()) && bind_ok);
 
     if tls_errors.is_empty() {
         if let Err(e) = tls::clear_failure_announcement(&state.db).await {

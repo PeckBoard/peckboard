@@ -33,10 +33,15 @@ pub struct TlsStatus {
 /// startup with a `ResolvesServerCert` backed by this state; `load_from`
 /// swaps the key it hands out on the next handshake, so a new upload or
 /// regenerated self-signed cert takes effect with no restart and no
-/// listener rebind.
+/// listener rebind. `managed` holds the SNI-selected certificates from
+/// `tls_certificates` (`service::acme`); `current` is the legacy single
+/// slot (uploaded or self-signed) and the fallback.
 pub struct TlsState {
     current: RwLock<Option<Arc<rustls::sign::CertifiedKey>>>,
+    managed: RwLock<Vec<ManagedCert>>,
     pub status: RwLock<TlsStatus>,
+    /// In-flight issuance guards + test-mode switch (`service::acme`).
+    pub acme: crate::service::acme::AcmeRuntime,
 }
 
 impl Default for TlsState {
@@ -49,7 +54,9 @@ impl TlsState {
     pub fn new() -> Self {
         Self {
             current: RwLock::new(None),
+            managed: RwLock::new(Vec::new()),
             status: RwLock::new(TlsStatus::default()),
+            acme: crate::service::acme::AcmeRuntime::default(),
         }
     }
 
@@ -94,6 +101,60 @@ impl TlsState {
     pub fn snapshot(&self) -> TlsStatus {
         self.status.read().unwrap().clone()
     }
+
+    /// Replace the whole managed-certificate set (`service::acme` reloads
+    /// it from disk after every issue / upload / delete).
+    pub fn set_managed(&self, certs: Vec<ManagedCert>) {
+        *self.managed.write().unwrap() = certs;
+    }
+
+    /// Ids of the managed certs currently served.
+    pub fn managed_ids(&self) -> Vec<String> {
+        self.managed
+            .read()
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// Whether anything at all can be served on a handshake.
+    pub fn has_any_cert(&self) -> bool {
+        self.current.read().unwrap().is_some() || !self.managed.read().unwrap().is_empty()
+    }
+
+    /// SNI selection: exact SAN among managed certs → single-label
+    /// wildcard SAN → the legacy slot (uploaded or self-signed) → the first
+    /// managed cert. No SNI skips straight to the legacy slot.
+    pub fn resolve_name(&self, sni: Option<&str>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        if let Some(name) = sni {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            let managed = self.managed.read().unwrap();
+            if let Some(c) = managed.iter().find(|c| c.sans.iter().any(|s| *s == name)) {
+                return Some(c.key.clone());
+            }
+            if let Some((_, parent)) = name.split_once('.') {
+                let wildcard = format!("*.{parent}");
+                if let Some(c) = managed.iter().find(|c| c.sans.contains(&wildcard)) {
+                    return Some(c.key.clone());
+                }
+            }
+        }
+        if let Some(key) = self.current.read().unwrap().clone() {
+            return Some(key);
+        }
+        self.managed.read().unwrap().first().map(|c| c.key.clone())
+    }
+}
+
+/// One managed certificate (`tls_certificates` row with key material on
+/// disk) loaded for SNI selection. `sans` are lowercase DNS names, with
+/// wildcards kept as `*.example.com`.
+#[derive(Clone)]
+pub struct ManagedCert {
+    pub id: String,
+    pub sans: Vec<String>,
+    pub key: Arc<rustls::sign::CertifiedKey>,
 }
 
 /// `rustls` cert resolver backed by `TlsState`. Returns the current key
@@ -107,13 +168,12 @@ impl std::fmt::Debug for TlsCertResolver {
         f.debug_struct("TlsCertResolver").finish_non_exhaustive()
     }
 }
-
 impl rustls::server::ResolvesServerCert for TlsCertResolver {
     fn resolve(
         &self,
-        _client_hello: rustls::server::ClientHello,
+        client_hello: rustls::server::ClientHello,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        self.0.current.read().unwrap().clone()
+        self.0.resolve_name(client_hello.server_name())
     }
 }
 
@@ -200,6 +260,51 @@ mod tests {
         assert!(state.current.read().unwrap().is_none());
         assert!(state.snapshot().last_error.is_none());
         assert!(state.snapshot().source.is_none());
+    }
+
+    fn fresh_key() -> Arc<rustls::sign::CertifiedKey> {
+        let tmp = TempDir::new().unwrap();
+        tls::certified_key(&tls::ensure_certs(tmp.path()).unwrap()).unwrap()
+    }
+
+    /// SNI order: exact SAN → one-label wildcard → legacy slot; no SNI
+    /// goes to the legacy slot, and with no legacy slot to the first
+    /// managed cert.
+    #[test]
+    fn resolve_name_prefers_exact_then_wildcard_then_legacy() {
+        let state = TlsState::new();
+        let exact = fresh_key();
+        let wild = fresh_key();
+        state.set_managed(vec![
+            ManagedCert {
+                id: "wild".into(),
+                sans: vec!["*.example.com".into()],
+                key: wild.clone(),
+            },
+            ManagedCert {
+                id: "exact".into(),
+                sans: vec!["app.example.com".into()],
+                key: exact.clone(),
+            },
+        ]);
+        let pick = |sni: Option<&str>| state.resolve_name(sni).unwrap();
+
+        // No legacy slot loaded yet: unmatched names get the first managed.
+        assert!(Arc::ptr_eq(&pick(Some("other.test")), &wild));
+        assert!(Arc::ptr_eq(&pick(None), &wild));
+
+        let tmp = TempDir::new().unwrap();
+        state
+            .load_from(tmp.path(), &tls::ensure_certs(tmp.path()).unwrap())
+            .unwrap();
+        let legacy = state.current.read().unwrap().clone().unwrap();
+
+        assert!(Arc::ptr_eq(&pick(Some("APP.example.com.")), &exact));
+        assert!(Arc::ptr_eq(&pick(Some("api.example.com")), &wild));
+        // A wildcard covers exactly one label.
+        assert!(Arc::ptr_eq(&pick(Some("a.b.example.com")), &legacy));
+        assert!(Arc::ptr_eq(&pick(Some("example.com")), &legacy));
+        assert!(Arc::ptr_eq(&pick(None), &legacy));
     }
 
     #[test]

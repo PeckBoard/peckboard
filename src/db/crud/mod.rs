@@ -43,6 +43,7 @@ mod ssh_keys;
 mod system_prompts;
 mod tabs;
 mod terminals;
+mod tls_certificates;
 mod todos;
 mod tts_lexicon;
 mod usage;

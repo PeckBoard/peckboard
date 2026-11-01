@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { readFileAsText } from '../lib/readFileAsText'
 import { authedFetch } from '../store/auth'
 import type { TlsStatus } from '../types/api'
 import ConfirmDialog from './ConfirmDialog'
 import FieldError from './FieldError'
+import TlsManagedCertificates from './TlsManagedCertificates'
 
 function formatExpiry(at: string): string {
   const d = new Date(at)
@@ -51,6 +52,17 @@ export default function TlsSettingsSection() {
       })
     return () => {
       cancelled = true
+    }
+  }, [])
+
+  /** Re-fetch after a managed-cert / DNS-credential mutation (and while
+   *  issuance is pending). A failed refresh keeps the last good status. */
+  const reload = useCallback(async () => {
+    try {
+      const res = await authedFetch('/api/settings/tls')
+      if (res.ok) setStatus((await res.json()) as TlsStatus)
+    } catch {
+      // keep the last good status
     }
   }, [])
 
@@ -165,6 +177,7 @@ export default function TlsSettingsSection() {
           </>
         )}
       </section>
+      {status && <TlsManagedCertificates status={status} reload={reload} />}
 
       {status && (
         <section className="settings-section" data-testid="tls-san-section">

@@ -1,3 +1,4 @@
+pub mod acme;
 pub mod askpass;
 pub mod assistant_memory;
 pub mod assistant_mirror;

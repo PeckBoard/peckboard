@@ -25,6 +25,10 @@ Before starting a task, ask (via `mcp__peckboard__ask_user`) when the request is
 # Directory restrictions
 
 You are restricted to the current working directory and its subdirectories. Never read, write, or access paths outside the project folder — such attempts are denied. All file paths must stay within the project root.
+
+# Other sessions
+
+To find or message another Peckboard session use `mcp__peckboard__find_session` and `mcp__peckboard__send_message`. The CLI's built-in ListAgents / SendMessage cannot see Peckboard sessions.
 "#;
 
 pub const SUBAGENT_CONTEXT: &str = r#"# Peckboard subagent rules
@@ -94,6 +98,33 @@ pub const VOICE_DISALLOWED_TOOLS: &str = "AskUserQuestion,Read,Write,Edit,MultiE
 /// agents run invisibly inside the CLI process, so Peckboard can't track,
 /// show, or stop them. Subagents go through `spawn_subagent` instead.
 pub const NATIVE_SUBAGENT_TOOLS: &str = "Task,Agent,Workflow";
+
+/// The CLI's built-in session-to-session tools. Denied everywhere: they
+/// only see Claude processes on this machine, never Peckboard sessions,
+/// so an agent that reaches for them concludes no session is reachable.
+/// Peckboard sessions are found with `find_session` and messaged with
+/// `send_message`.
+pub const NATIVE_PEER_TOOLS: &str = "ListAgents,SendMessage";
+
+/// Native CLI tools Peckboard replaces with its own MCP tools, each paired
+/// with the peckboard tool(s) that cover it. A native tool is denied only
+/// when every covering tool is allowed for the session, so no session
+/// loses a capability outright.
+pub const COVERED_NATIVE_TOOLS: &[(&str, &[&str])] = &[
+    ("Bash", &["run_command"]),
+    ("BashOutput", &["background_status"]),
+    ("KillShell", &["stop_background"]),
+    ("Monitor", &["run_background", "background_status"]),
+    ("TaskStop", &["stop_background"]),
+    ("Glob", &["list_files"]),
+    ("Grep", &["search_files"]),
+    ("WebFetch", &["fetch_url"]),
+    ("WebSearch", &["search_web"]),
+    ("CronCreate", &["create_repeating_task"]),
+    ("CronList", &["list_repeating_tasks"]),
+    ("CronDelete", &["delete_repeating_task"]),
+    ("ScheduleWakeup", &["create_repeating_task"]),
+];
 pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
     let combined_system_prompt = {
         // A user override of the base prompt already arrived in
@@ -125,6 +156,20 @@ pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
     } else {
         format!("AskUserQuestion,{NATIVE_SUBAGENT_TOOLS}")
     };
+    if !spec.is_pre_hatcher && !spec.voice_lockdown {
+        let allowed = |t: &str| {
+            spec.core_tools.iter().any(|c| c == t)
+                || spec.extra_allowed_tools.iter().any(|c| c == t)
+        };
+        for (native, covers) in COVERED_NATIVE_TOOLS {
+            if covers.iter().all(|c| allowed(c)) {
+                disallowed.push(',');
+                disallowed.push_str(native);
+            }
+        }
+    }
+    disallowed.push(',');
+    disallowed.push_str(NATIVE_PEER_TOOLS);
     for t in &spec.extra_disallowed_tools {
         disallowed.push(',');
         disallowed.push_str(t);
@@ -327,10 +372,39 @@ mod tests {
         let chat = build_cli_args(&spec(false, false));
         assert!(
             chat.contains(
-                &"--disallowedTools=AskUserQuestion,Read,Write,Edit,MultiEdit,Task,Agent,Workflow"
+                &"--disallowedTools=AskUserQuestion,Read,Write,Edit,MultiEdit,Task,Agent,Workflow,ListAgents,SendMessage"
                     .to_string()
             )
         );
         assert!(!chat.iter().any(|a| a.starts_with("--setting-sources")));
+    }
+
+    #[test]
+    fn native_tools_peckboard_covers_are_denied_when_the_cover_is_allowed() {
+        let deny = |s: &CliSpec| {
+            build_cli_args(s)
+                .into_iter()
+                .find_map(|a| a.strip_prefix("--disallowedTools=").map(str::to_string))
+                .unwrap()
+        };
+        let mut full = spec(false, false);
+        full.core_tools = COVERED_NATIVE_TOOLS
+            .iter()
+            .flat_map(|(_, c)| c.iter().map(|t| t.to_string()))
+            .collect();
+        let denied = deny(&full);
+        for t in [
+            "Bash",
+            "Grep",
+            "WebFetch",
+            "CronCreate",
+            "ListAgents",
+            "SendMessage",
+        ] {
+            assert!(denied.split(',').any(|d| d == t), "{t} in {denied}");
+        }
+        // Without run_command the session keeps the CLI's Bash.
+        full.core_tools.retain(|t| t != "run_command");
+        assert!(!deny(&full).split(',').any(|d| d == "Bash"));
     }
 }

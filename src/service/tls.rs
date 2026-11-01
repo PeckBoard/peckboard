@@ -400,7 +400,7 @@ pub fn regenerate_self_signed(data_dir: &Path) -> Result<TlsMaterial> {
 /// created with mode 0o600 in one syscall via `OpenOptions::mode` so
 /// the secret never lands on disk world-readable. On other platforms
 /// this is just a regular write — Windows ACLs aren't covered here.
-fn write_secret_pem(path: &Path, pem: &str) -> std::io::Result<()> {
+pub(crate) fn write_secret_pem(path: &Path, pem: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::fs::OpenOptions;

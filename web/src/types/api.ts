@@ -613,6 +613,52 @@ export interface TlsStatus {
   not_after: string | null
   /** Why TLS failed at startup, if it did. */
   error: string | null
+  /** Managed certificates, picked per hostname by SNI. Absent on older
+   *  servers. */
+  certificates?: TlsCertificate[]
+  /** Saved DNS-provider credentials for ACME DNS-01. */
+  dns_credentials?: DnsCredential[]
+  /** DNS providers this server can drive, with their credential fields. */
+  dns_providers?: DnsProviderSpec[]
+}
+
+/** One managed certificate (`tls_certificates` row). */
+export interface TlsCertificate {
+  id: string
+  source: 'acme' | 'uploaded'
+  domains: string[]
+  dns_credential_id: string | null
+  acme_email: string | null
+  staging: boolean
+  status: 'pending' | 'issued' | 'error'
+  error: string | null
+  not_after: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** A saved DNS-provider credential. Secret field values arrive masked. */
+export interface DnsCredential {
+  id: string
+  provider: string
+  label: string
+  fields: Record<string, string>
+  created_at: string
+}
+
+export interface DnsProviderField {
+  key: string
+  label: string
+  secret: boolean
+  required: boolean
+  help: string
+}
+
+export interface DnsProviderSpec {
+  id: string
+  name: string
+  docs_url: string
+  fields: DnsProviderField[]
 }
 // ── Usage dashboard ──────────────────────────────────────────────────
 // Mirrors the Rust contract in `src/routes/usage/mod.rs` (and the cost

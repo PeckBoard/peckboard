@@ -34,6 +34,7 @@ use std::sync::Arc;
 use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::Db;
 use crate::provider::base_prompt;
+use crate::service::acme;
 use crate::service::mcp_server::user_servers;
 use crate::service::tls::{self, TlsSource};
 use crate::state::AppState;
@@ -144,6 +145,27 @@ fn admin_router() -> Router<Arc<AppState>> {
             post(upload_tls_cert).delete(delete_tls_cert),
         )
         .route("/api/settings/tls/regenerate", post(regenerate_tls_cert))
+        .route(
+            "/api/settings/tls/dns-credentials",
+            post(create_dns_credential),
+        )
+        .route(
+            "/api/settings/tls/dns-credentials/{id}",
+            delete(delete_dns_credential),
+        )
+        .route(
+            "/api/settings/tls/dns-credentials/{id}/test",
+            post(test_dns_credential),
+        )
+        .route("/api/settings/tls/certificates", post(create_certificate))
+        .route(
+            "/api/settings/tls/certificates/{id}",
+            delete(delete_certificate),
+        )
+        .route(
+            "/api/settings/tls/certificates/{id}/renew",
+            post(renew_certificate),
+        )
         .route("/api/settings/provider-prompts", get(get_provider_prompts))
         .route(
             "/api/settings/provider-prompts/{provider}",
@@ -1109,9 +1131,31 @@ fn tls_status_json(state: &AppState) -> serde_json::Value {
     })
 }
 
-/// GET /api/settings/tls → the current TLS status.
+/// GET /api/settings/tls → the current TLS status, plus the managed
+/// certificates, stored DNS credentials (masked) and the provider catalog.
 async fn get_tls(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(tls_status_json(&state))
+    let mut body = tls_status_json(&state);
+    let certificates: Vec<_> = match state.db.list_tls_certificates().await {
+        Ok(rows) => rows.iter().map(acme::certificate_json).collect(),
+        Err(e) => {
+            tracing::warn!("Failed to list TLS certificates: {e:#}");
+            Vec::new()
+        }
+    };
+    let credentials: Vec<_> = match state.db.list_dns_credentials().await {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| acme::credential_json(&state.ssh_vault_key, r))
+            .collect(),
+        Err(e) => {
+            tracing::warn!("Failed to list DNS credentials: {e:#}");
+            Vec::new()
+        }
+    };
+    body["certificates"] = serde_json::json!(certificates);
+    body["dns_credentials"] = serde_json::json!(credentials);
+    body["dns_providers"] = serde_json::json!(acme::dns::catalog());
+    Json(body)
 }
 
 #[derive(serde::Deserialize)]
@@ -1219,6 +1263,230 @@ async fn regenerate_tls_cert(State(state): State<Arc<AppState>>) -> impl IntoRes
     finish_tls_change(&state, res).await
 }
 
+type ApiError = (StatusCode, Json<serde_json::Value>);
+
+fn api_err(status: StatusCode, msg: impl Into<String>) -> ApiError {
+    (status, Json(serde_json::json!({ "error": msg.into() })))
+}
+
+fn internal(e: anyhow::Error) -> ApiError {
+    api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+}
+
+#[derive(serde::Deserialize)]
+struct DnsCredentialBody {
+    provider: String,
+    label: String,
+    #[serde(default)]
+    fields: acme::dns::Credentials,
+}
+
+/// POST /api/settings/tls/dns-credentials → 201 masked credential.
+async fn create_dns_credential(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DnsCredentialBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let label = body.label.trim().to_string();
+    if label.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "label is required"));
+    }
+    let fields = acme::validate_credentials(&body.provider, &body.fields)
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+    let row = crate::db::models::DnsCredentialRow {
+        id: uuid::Uuid::new_v4().to_string(),
+        provider: body.provider,
+        label,
+        credentials: acme::seal_credentials(&state.ssh_vault_key, &fields).map_err(internal)?,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    state
+        .db
+        .insert_dns_credential(row.clone())
+        .await
+        .map_err(internal)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(acme::credential_json(&state.ssh_vault_key, &row)),
+    ))
+}
+
+/// DELETE /api/settings/tls/dns-credentials/{id} → 204; 409 while a
+/// certificate still references it.
+async fn delete_dns_credential(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    match state
+        .db
+        .delete_dns_credential(&id)
+        .await
+        .map_err(internal)?
+    {
+        Some(true) => Ok(StatusCode::NO_CONTENT),
+        Some(false) => Err(api_err(
+            StatusCode::CONFLICT,
+            "a certificate still uses this DNS credential; delete the certificate first",
+        )),
+        None => Err(api_err(StatusCode::NOT_FOUND, "DNS credential not found")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TestCredentialBody {
+    domain: String,
+}
+
+/// POST /api/settings/tls/dns-credentials/{id}/test → create + delete a
+/// `_acme-challenge` TXT record through the provider.
+async fn test_dns_credential(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<TestCredentialBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let cred = state
+        .db
+        .get_dns_credential(&id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "DNS credential not found"))?;
+    let raw = body.domain.trim();
+    let domain = acme::normalize_domains(&[raw.strip_prefix("*.").unwrap_or(raw).to_string()])
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?
+        .remove(0);
+    acme::test_credential(&state.ssh_vault_key, &cred, &domain)
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+enum CertificateBody {
+    Acme {
+        domains: Vec<String>,
+        dns_credential_id: String,
+        #[serde(default)]
+        acme_email: Option<String>,
+        #[serde(default)]
+        staging: bool,
+    },
+    Uploaded {
+        cert_pem: String,
+        key_pem: String,
+    },
+}
+
+/// POST /api/settings/tls/certificates → 202 pending ACME cert (issued in
+/// the background) or 201 uploaded cert.
+async fn create_certificate(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<CertificateBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Json(body) = body.map_err(|e| api_err(StatusCode::BAD_REQUEST, e.body_text()))?;
+    match body {
+        CertificateBody::Uploaded { cert_pem, key_pem } => {
+            let row = acme::install_uploaded(&state, &cert_pem, &key_pem)
+                .await
+                .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+            Ok((StatusCode::CREATED, Json(acme::certificate_json(&row))))
+        }
+        CertificateBody::Acme {
+            domains,
+            dns_credential_id,
+            acme_email,
+            staging,
+        } => {
+            let domains = acme::normalize_domains(&domains)
+                .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+            let email = acme_email
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty());
+            if let Some(e) = &email
+                && (!e.contains('@') || e.contains(char::is_whitespace))
+            {
+                return Err(api_err(StatusCode::BAD_REQUEST, "invalid ACME email"));
+            }
+            if state
+                .db
+                .get_dns_credential(&dns_credential_id)
+                .await
+                .map_err(internal)?
+                .is_none()
+            {
+                return Err(api_err(StatusCode::BAD_REQUEST, "unknown DNS credential"));
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            let row = crate::db::models::TlsCertificateRow {
+                id: uuid::Uuid::new_v4().to_string(),
+                source: "acme".into(),
+                domains: serde_json::to_string(&domains).map_err(|e| internal(e.into()))?,
+                dns_credential_id: Some(dns_credential_id),
+                acme_email: email,
+                staging,
+                status: "pending".into(),
+                last_error: None,
+                not_after: None,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            state
+                .db
+                .insert_tls_certificate(row.clone())
+                .await
+                .map_err(internal)?;
+            acme::spawn_issue(state.clone(), row.id.clone())
+                .await
+                .map_err(internal)?;
+            Ok((StatusCode::ACCEPTED, Json(acme::certificate_json(&row))))
+        }
+    }
+}
+
+/// POST /api/settings/tls/certificates/{id}/renew → 202 (ACME only). A
+/// renewal already running is left alone.
+async fn renew_certificate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row = state
+        .db
+        .get_tls_certificate(&id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "certificate not found"))?;
+    if row.source != "acme" {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "only Let's Encrypt certificates can be renewed",
+        ));
+    }
+    acme::spawn_issue(state.clone(), id.clone())
+        .await
+        .map_err(internal)?;
+    let row = state
+        .db
+        .get_tls_certificate(&id)
+        .await
+        .map_err(internal)?
+        .unwrap_or(row);
+    Ok((StatusCode::ACCEPTED, Json(acme::certificate_json(&row))))
+}
+
+/// DELETE /api/settings/tls/certificates/{id} → 204.
+async fn delete_certificate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if acme::delete_certificate(&state, &id)
+        .await
+        .map_err(internal)?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(api_err(StatusCode::NOT_FOUND, "certificate not found"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1309,6 +1577,119 @@ mod tests {
         assert_eq!(body["https_enabled"], false);
         assert_eq!(body["https_port"], 0);
         assert_eq!(body["error"], serde_json::Value::Null);
+    }
+    /// Test mode end to end: store a mock DNS credential (masked on the way
+    /// out), request an ACME cert, watch it reach `issued` with its TXT
+    /// records cleaned up, see it served by SNI, and see the credential
+    /// refuse deletion while the cert uses it.
+    #[tokio::test]
+    async fn acme_test_mode_issues_a_managed_certificate() {
+        // The mock DNS provider is env-gated; test-mode issuance is forced
+        // on this state directly.
+        unsafe { std::env::set_var(acme::TEST_ENV, "1") };
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        state.tls.acme.set_test_mode(true);
+        let token = seed_authenticated_user(&state, "admin").await;
+
+        let (status, cred) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/dns-credentials",
+            Some(serde_json::json!({
+                "provider": "mock",
+                "label": "Mock zone",
+                "fields": { "token": "supersecret1234" },
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{cred}");
+        assert_eq!(cred["fields"]["token"], "••••1234");
+        let cred_id = cred["id"].as_str().unwrap().to_string();
+
+        let (status, _) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/certificates",
+            Some(serde_json::json!({
+                "source": "acme",
+                "domains": ["a.*.example.com"],
+                "dns_credential_id": cred_id,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, cert) = call(
+            &state,
+            &token,
+            "POST",
+            "/api/settings/tls/certificates",
+            Some(serde_json::json!({
+                "source": "acme",
+                "domains": [" App.Peck-Route.test ", "*.peck-route.test"],
+                "dns_credential_id": cred_id,
+                "acme_email": "ops@example.com",
+                "staging": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{cert}");
+        assert_eq!(cert["status"], "pending");
+        assert_eq!(
+            cert["domains"],
+            serde_json::json!(["app.peck-route.test", "*.peck-route.test"])
+        );
+        let cert_id = cert["id"].as_str().unwrap().to_string();
+
+        let mut issued = serde_json::Value::Null;
+        for _ in 0..200 {
+            let (_, body) = call(&state, &token, "GET", "/api/settings/tls", None).await;
+            let c = body["certificates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == cert_id.as_str())
+                .cloned()
+                .unwrap();
+            if c["status"] != "pending" {
+                issued = c;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(issued["status"], "issued", "{issued}");
+        assert!(issued["not_after"].is_string());
+        assert!(
+            !acme::dns::mock::records()
+                .iter()
+                .any(|(fqdn, _)| fqdn.ends_with("peck-route.test")),
+            "challenge TXT records must be deleted after issuance"
+        );
+        assert!(state.tls.managed_ids().contains(&cert_id));
+
+        let (status, _) = call(
+            &state,
+            &token,
+            "DELETE",
+            &format!("/api/settings/tls/dns-credentials/{cred_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let (status, _) = call(
+            &state,
+            &token,
+            "DELETE",
+            &format!("/api/settings/tls/certificates/{cert_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(state.tls.managed_ids().is_empty());
     }
 
     #[tokio::test]

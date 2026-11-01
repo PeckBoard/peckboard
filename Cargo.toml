@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.116"
+version = "0.1.117"
 edition = "2024"
 
 [dependencies]
@@ -54,6 +54,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rcgen = "0.13"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+# Let's Encrypt over DNS-01 (service::acme). Default features = aws-lc-rs
+# + hyper-rustls, matching the provider the binary installs; no ring.
+instant-acme = "0.8.5"
+# SANs + expiry of issued / uploaded certificates (service::acme).
+x509-parser = "0.18"
 if-addrs = "0.13"
 
 # mDNS

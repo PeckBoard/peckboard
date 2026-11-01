@@ -1948,3 +1948,36 @@ pub struct OAuthAccessToken {
     pub expires_at: String,
     pub created_at: String,
 }
+
+// ── TLS certificates (multi-cert SNI + Let's Encrypt DNS-01) ───────────
+
+/// Stored DNS provider credentials for ACME DNS-01 (`service::acme::dns`).
+/// `credentials` is the JSON field map the provider reads. Never serialized
+/// as-is — the settings API masks the secret fields.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone)]
+#[diesel(table_name = dns_credentials)]
+pub struct DnsCredentialRow {
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+    pub credentials: String,
+    pub created_at: String,
+}
+
+/// A certificate the HTTPS listener serves by SNI. `domains` is a JSON
+/// array of SANs; key material lives under `<data>/certs/managed/<id>/`.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone)]
+#[diesel(table_name = tls_certificates)]
+pub struct TlsCertificateRow {
+    pub id: String,
+    pub source: String,
+    pub domains: String,
+    pub dns_credential_id: Option<String>,
+    pub acme_email: Option<String>,
+    pub staging: bool,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub not_after: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
