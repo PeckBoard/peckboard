@@ -979,9 +979,13 @@ async fn serve_https(
             let io = hyper_util::rt::TokioIo::new(tls_stream);
             let hyper_service = hyper_util::service::TowerToHyperService::new(service);
 
+            // `_with_upgrades`: plain `serve_connection` still sends the
+            // 101 for a WebSocket handshake but never hands the upgraded
+            // stream to the handler, so every wss:// socket closed (1006)
+            // right after opening and the UI looped on reconnect.
             if let Err(e) =
                 hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection(io, hyper_service)
+                    .serve_connection_with_upgrades(io, hyper_service)
                     .await
             {
                 tracing::debug!("HTTPS connection error from {remote_addr}: {e}");
