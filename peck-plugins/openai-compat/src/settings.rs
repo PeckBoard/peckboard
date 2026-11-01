@@ -164,13 +164,29 @@ pub fn http_headers() -> serde_json::Map<String, Value> {
     m
 }
 
+/// Per-request timeout. 1800 s by default: on slow local hardware one tool
+/// round that writes a whole file (plus its reasoning) can run past 10
+/// minutes, and the request is non-streaming.
 pub fn timeout_secs() -> u64 {
-    i64("request_timeout_secs", 600).clamp(1, 3600) as u64
+    i64("request_timeout_secs", 1800).clamp(1, 7200) as u64
 }
 
 /// Longest tool result (in chars) the model is sent; `None` = no cap (`0`).
 pub fn max_tool_result_chars() -> Option<usize> {
     let n = i64("max_tool_result_chars", 24_000);
+    (n > 0).then_some(n as usize)
+}
+
+/// Estimated-token budget for the stored history; `None` = no budget (`0`).
+pub fn max_history_tokens() -> Option<usize> {
+    let n = i64("max_history_tokens", 40_000);
+    (n > 0).then_some(n as usize)
+}
+
+/// Cap on reasoning tokens per round when thinking is on; `None` = no cap
+/// (`0`). At the cap the model is made to answer (see `send::force_answer`).
+pub fn thinking_budget() -> Option<usize> {
+    let n = i64("thinking_budget", 8_192);
     (n > 0).then_some(n as usize)
 }
 

@@ -54,11 +54,11 @@ pub fn manifest_json() -> String {
             {
                 "key": "request_timeout_secs",
                 "title": "Request Timeout (Seconds)",
-                "description": "How long to wait for a single chat completion. Increase for large models on slow hardware.",
+                "description": "How long to wait for a single chat completion (requests are non-streaming, so this covers the whole reply). On slow local hardware a round that writes a whole file can take more than 10 minutes.",
                 "type": "integer",
-                "default": 600,
+                "default": 1800,
                 "min": 1,
-                "max": 3600
+                "max": 7200
             },
             {
                 "key": "discover_models",
@@ -105,6 +105,15 @@ pub fn manifest_json() -> String {
                 "default": "auto"
             },
             {
+                "key": "thinking_budget",
+                "title": "Thinking Budget (Tokens)",
+                "description": "Cap on reasoning tokens per round while thinking is on. A round that hits it mid-reasoning is re-asked with its reasoning closed off (vLLM's continue_final_message), so the model acts on what it worked out instead of reasoning until the request times out. Servers that don't support this fall back to the cut-off reply with a warning. 0 = no cap.",
+                "type": "integer",
+                "default": 8192,
+                "min": 0,
+                "max": 262144
+            },
+            {
                 "key": "temperature",
                 "title": "Temperature",
                 "description": "Sampling temperature, 0 to 2. Leave empty for the server's default. Qwen3 recommends 0.6 with thinking on, 0.7 with it off.",
@@ -149,6 +158,22 @@ pub fn manifest_json() -> String {
                 "default": 0,
                 "min": 0,
                 "max": 1048576
+            },
+            {
+                "key": "send_tool_images",
+                "title": "Send Tool Images",
+                "description": "Send images returned by tools, such as browser screenshots, to the model as image inputs. Turn off for text-only models.",
+                "type": "boolean",
+                "default": true
+            },
+            {
+                "key": "max_history_tokens",
+                "title": "Max History Tokens",
+                "description": "Estimated-token budget for the conversation history sent each turn (tool definitions and the base prompt come on top). Past it, the oldest turns are dropped down to 60% of the budget in one go, so the prompt prefix stays cacheable. Local models get noticeably worse at long contexts; raise this for models that handle them well. 0 = no budget.",
+                "type": "integer",
+                "default": 40000,
+                "min": 0,
+                "max": 2000000
             },
             {
                 "key": "max_tool_result_chars",
