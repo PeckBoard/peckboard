@@ -587,6 +587,19 @@ function fallbackToUpstream(reason) {
   );
   process.exit(1);
 }
+
+const SCREENSHOT_TIMEOUT_MS = 20000;
+
+/** Validate one viewport dimension; `undefined`/`null` keeps `current`. */
+function viewportDim(value, current, min, max, name) {
+  if (value === undefined || value === null) return current;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${name} must be an integer in ${min}..${max}`);
+  }
+  return n;
+}
+
 const pkgDir = findPackageDir();
 if (!pkgDir) {
   fallbackToUpstream("package not found on PATH");
@@ -659,6 +672,61 @@ if (!pkgDir) {
         return await origCreate(...args);
       }
     };
+
+    // Every page is a tab in ONE Chrome window, and headless Chrome only
+    // produces frames for the foreground tab: screenshotting any page that a
+    // later browser_open pushed into the background hangs in
+    // Page.captureScreenshot until the 30s timeout. Bring the page to the
+    // front first, and serialize screenshots so two concurrent calls can't
+    // swap the foreground out from under each other.
+    let shotChain = Promise.resolve();
+    server.screenshot = (pageId, fullPage = true) => {
+      const run = async () => {
+        const info = server.pages.get(pageId);
+        if (!info) throw new Error(`Page ${pageId} not found`);
+        await info.page.bringToFront();
+        try {
+          const buf = await info.page.screenshot({
+            fullPage,
+            timeout: SCREENSHOT_TIMEOUT_MS,
+          });
+          return buf.toString("base64");
+        } catch (err) {
+          if (!String(err).includes("Timeout")) throw err;
+          throw new Error(
+            `screenshot timed out after ${SCREENSHOT_TIMEOUT_MS / 1000}s: the ` +
+              `page produced no frame (busy main thread or endless load); ` +
+              `retry, or browser_close and reopen the page`,
+          );
+        }
+      };
+      const out = shotChain.then(run, run);
+      shotChain = out.catch(() => {});
+      return out;
+    };
+
+    // Resize one page's viewport (CSS px) — phone-width checks. Re-evaluates
+    // media queries immediately; an omitted dimension keeps its current value.
+    server.app.post("/api/pages/:pageId/viewport", async (req, res) => {
+      try {
+        const info = server.pages.get(req.params.pageId);
+        if (!info) throw new Error(`Page ${req.params.pageId} not found`);
+        const cur = info.page.viewportSize() || { width: 1280, height: 720 };
+        const body = req.body || {};
+        const width = viewportDim(body.width, cur.width, 240, 3840, "width");
+        const height = viewportDim(
+          body.height,
+          cur.height,
+          240,
+          2160,
+          "height",
+        );
+        await info.page.setViewportSize({ width, height });
+        res.json({ success: true, width, height });
+      } catch (err) {
+        res.status(400).json({ error: String(err.message || err) });
+      }
+    });
 
     // Compose our route in front of the upstream express app (an express
     // app is itself a (req, res) handler) instead of calling

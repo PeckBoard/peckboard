@@ -19,6 +19,26 @@ fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
 
+/// Optional `width` / `height` viewport args (CSS px) as the sidecar's
+/// `/viewport` body; `None` when neither is given. An omitted dimension is
+/// sent as null and keeps the page's current value.
+fn viewport_arg(args: &Value) -> anyhow::Result<Option<Value>> {
+    let dim = |key: &str, min: u64, max: u64| -> anyhow::Result<Option<u64>> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .filter(|n| (min..=max).contains(n))
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("`{key}` must be an integer in {min}..{max}")),
+        }
+    };
+    let width = dim("width", 240, 3840)?;
+    let height = dim("height", 240, 2160)?;
+    Ok((width.is_some() || height.is_some())
+        .then(|| serde_json::json!({ "width": width, "height": height })))
+}
+
 /// Fetch the compressed outline for a page.
 async fn outline(page_id: &str) -> anyhow::Result<String> {
     let r = browser::post(
@@ -93,16 +113,19 @@ impl McpToolRegistry {
     ) -> anyhow::Result<Value> {
         match tool_name {
             // Create a page, navigate, and return the compressed outline in
-            // one round-trip.
+            // one round-trip. With a viewport the page is created blank and
+            // resized BEFORE the first load, so the page's own JS sees the
+            // requested width too, not just its media queries.
             "browser_open" => {
                 let url = req_str(&args, "url")?;
                 let name = opt_str(&args, "name").unwrap_or("page");
+                let viewport = viewport_arg(&args)?;
                 let created = browser::post(
                     "/api/pages",
                     serde_json::json!({
                         "name": name,
                         "description": format!("peckboard test page: {name}"),
-                        "url": url,
+                        "url": if viewport.is_some() { None } else { Some(url) },
                     }),
                 )
                 .await?;
@@ -111,6 +134,33 @@ impl McpToolRegistry {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("browser server returned no pageId: {created}"))?
                     .to_string();
+                let mut applied_viewport: Option<Value> = None;
+                if let Some(vp) = viewport {
+                    let sized = async {
+                        let r =
+                            browser::post(&format!("/api/pages/{page_id}/viewport"), vp).await?;
+                        browser::post(
+                            &format!("/api/pages/{page_id}/navigate"),
+                            serde_json::json!({ "url": url }),
+                        )
+                        .await?;
+                        anyhow::Ok(r)
+                    }
+                    .await;
+                    match sized {
+                        Ok(r) => {
+                            applied_viewport = Some(serde_json::json!({
+                                "width": r.get("width"),
+                                "height": r.get("height"),
+                            }));
+                        }
+                        Err(e) => {
+                            // Don't leak a blank page the caller never got an id for.
+                            let _ = browser::delete(&format!("/api/pages/{page_id}")).await;
+                            return Err(e);
+                        }
+                    }
+                }
                 let outline = outline(&page_id).await.unwrap_or_default();
                 // Start run recording (playwright-video replay).
                 let mut run_id: Option<String> = None;
@@ -139,11 +189,14 @@ impl McpToolRegistry {
                 }
                 let mut out =
                     serde_json::json!({ "page_id": page_id, "url": url, "outline": outline });
-                if let Some(rid) = run_id
-                    && let Some(obj) = out.as_object_mut()
-                {
-                    // Lets the chat card deep-link the recorded replay.
-                    obj.insert("run_id".into(), Value::String(rid));
+                if let Some(obj) = out.as_object_mut() {
+                    if let Some(rid) = run_id {
+                        // Lets the chat card deep-link the recorded replay.
+                        obj.insert("run_id".into(), Value::String(rid));
+                    }
+                    if let Some(vp) = applied_viewport {
+                        obj.insert("viewport".into(), vp);
+                    }
                 }
                 Ok(out)
             }
@@ -259,10 +312,16 @@ impl McpToolRegistry {
                             serde_json::json!({ "ref": need_ref()?, "files": files }),
                         )
                     }
+                    "viewport" => (
+                        format!("/api/pages/{page_id}/viewport"),
+                        viewport_arg(&args)?.ok_or_else(|| {
+                            anyhow::anyhow!("`width` and/or `height` is required for viewport")
+                        })?,
+                    ),
                     other => anyhow::bail!(
                         "unknown action `{other}` (use click|type|fill|select|hover|press_key|\
                          upload|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|\
-                         wait_ms|dialog)"
+                         wait_ms|dialog|viewport)"
                     ),
                 };
                 let r = browser::post(&path, body).await?;
@@ -272,7 +331,15 @@ impl McpToolRegistry {
                 if ctx.data_dir.is_some() {
                     let frame = capture_frame(page_id).await;
                     let mut detail = serde_json::Map::new();
-                    for k in ["text", "values", "files", "timeout_ms", "accept"] {
+                    for k in [
+                        "text",
+                        "values",
+                        "files",
+                        "timeout_ms",
+                        "accept",
+                        "width",
+                        "height",
+                    ] {
                         if let Some(v) = args.get(k) {
                             detail.insert(k.to_string(), v.clone());
                         }
@@ -302,6 +369,14 @@ impl McpToolRegistry {
                     && let Some(obj) = out.as_object_mut()
                 {
                     obj.insert("run_id".into(), Value::String(rid));
+                }
+                if action == "viewport"
+                    && let Some(obj) = out.as_object_mut()
+                {
+                    obj.insert(
+                        "viewport".into(),
+                        serde_json::json!({ "width": r.get("width"), "height": r.get("height") }),
+                    );
                 }
                 // The outline costs ~2k tokens — attach it only on request.
                 if args
@@ -424,6 +499,9 @@ mod tests {
         M.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Request trail for the viewport test (create / viewport / navigate).
+    static STUB_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
     /// Stub of the sidecar HTTP API (upstream routes + `/events`). One
     /// server for the whole process, on its own runtime thread — tests share
     /// it because the base-url override is a process-global OnceLock, so it
@@ -434,12 +512,37 @@ mod tests {
         axum::Router::new()
             .route(
                 "/api/pages",
-                post(|| async { Json(serde_json::json!({ "pageId": "p1", "success": true })) })
+                post(|Json(b): Json<serde_json::Value>| async move {
+                    STUB_LOG.lock().unwrap().push(format!("create url={}", b["url"]));
+                    Json(serde_json::json!({ "pageId": "p1", "success": true }))
+                })
                     .get(|| async {
                         Json(serde_json::json!([
                             { "id": "p1", "name": "page", "url": "https://example.com", "title": "Hi" }
                         ]))
                     }),
+            )
+            .route(
+                "/api/pages/p1/viewport",
+                post(|Json(b): Json<serde_json::Value>| async move {
+                    STUB_LOG
+                        .lock()
+                        .unwrap()
+                        .push(format!("viewport {}x{}", b["width"], b["height"]));
+                    let w = b["width"].as_u64().unwrap_or(1280);
+                    let h = b["height"].as_u64().unwrap_or(720);
+                    Json(serde_json::json!({ "success": true, "width": w, "height": h }))
+                }),
+            )
+            .route(
+                "/api/pages/p1/navigate",
+                post(|Json(b): Json<serde_json::Value>| async move {
+                    STUB_LOG
+                        .lock()
+                        .unwrap()
+                        .push(format!("navigate {}", b["url"].as_str().unwrap_or("")));
+                    Json(serde_json::json!({ "success": true }))
+                }),
             )
             .route(
                 "/api/pages/p1/outline",
@@ -646,6 +749,70 @@ mod tests {
         assert!(err.contains("`files`"), "got: {err}");
 
         assert_eq!(closed["closed"], "p1");
+    }
+
+    #[tokio::test]
+    async fn viewport_opens_blank_resizes_then_navigates() {
+        let _g = test_guard();
+        let base = start_stub();
+        crate::service::browser::set_test_base_url(&base);
+        let reg = McpToolRegistry::new();
+        let ctx = ctx();
+
+        let opened = reg
+            .handle_tool_call(
+                "browser_open",
+                serde_json::json!({ "url": "https://example.com/m", "width": 375 }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(opened["viewport"]["width"], 375, "got: {opened}");
+        assert_eq!(opened["viewport"]["height"], 720);
+        // Created blank (no url → no initial goto), then resized, then loaded.
+        let log = STUB_LOG.lock().unwrap().clone();
+        let tail: Vec<&str> = log.iter().rev().take(3).rev().map(String::as_str).collect();
+        assert_eq!(
+            tail,
+            [
+                "create url=null",
+                "viewport 375xnull",
+                "navigate https://example.com/m"
+            ],
+        );
+
+        let resized = reg
+            .handle_tool_call(
+                "browser_act",
+                serde_json::json!({ "page_id": "p1", "action": "viewport", "width": 1024, "height": 768 }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resized["viewport"]["width"], 1024, "got: {resized}");
+        assert_eq!(resized["viewport"]["height"], 768);
+
+        for bad in [
+            serde_json::json!({ "url": "https://example.com", "width": 100 }),
+            serde_json::json!({ "url": "https://example.com", "height": "tall" }),
+        ] {
+            let err = reg
+                .handle_tool_call("browser_open", bad, &ctx)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("must be an integer in"), "got: {err}");
+        }
+        let err = reg
+            .handle_tool_call(
+                "browser_act",
+                serde_json::json!({ "page_id": "p1", "action": "viewport" }),
+                &ctx,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`width` and/or `height`"), "got: {err}");
     }
 
     #[tokio::test]

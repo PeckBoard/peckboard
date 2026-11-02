@@ -1888,12 +1888,14 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "browser_open".into(),
-                description: "Open URL in the managed headless browser for web testing. Returns page_id + compressed page outline (~91% smaller than DOM; elements carry ref=eN handles for browser_act). First call may take a minute (server + browser spin-up).".into(),
+                description: "Open URL in the managed headless browser for web testing. Returns page_id + compressed page outline (~91% smaller than DOM; elements carry ref=eN handles for browser_act). Viewport defaults to 1280x720; pass width/height to load at another size — e.g. width=375, height=812 for a phone-width check (CSS @media queries apply). First call may take a minute (server + browser spin-up).".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "url": { "type": "string", "description": "URL to open." },
-                        "name": { "type": "string", "description": "Short page label." }
+                        "name": { "type": "string", "description": "Short page label." },
+                        "width": { "type": "integer", "minimum": 240, "maximum": 3840, "description": "Viewport width in CSS px (default 1280; 375 for a phone)." },
+                        "height": { "type": "integer", "minimum": 240, "maximum": 2160, "description": "Viewport height in CSS px (default 720; 812 for a phone)." }
                     },
                     "required": ["url"]
                 }),
@@ -1925,7 +1927,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "browser_act".into(),
-                description: "Interact with an open page. action: click|type|fill|select|hover|press_key|upload|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog. Element actions take `ref` (eN from outline/find); type/fill/select/press_key/navigate/wait_selector put their argument in `text`; multi-select uses `values`, upload uses `files`. Set outline=true to get the fresh page structure in the same call.".into(),
+                description: "Interact with an open page. action: click|type|fill|select|hover|press_key|upload|navigate|back|forward|scroll_top|scroll_bottom|wait_selector|wait_ms|dialog|viewport. Element actions take `ref` (eN from outline/find); type/fill/select/press_key/navigate/wait_selector put their argument in `text`; multi-select uses `values`, upload uses `files`; viewport resizes the page to `width`/`height` (CSS px). Set outline=true to get the fresh page structure in the same call.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1937,6 +1939,8 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "files": { "type": "array", "items": { "type": "string" }, "description": "upload: file paths." },
                         "timeout_ms": { "type": "integer", "description": "wait_ms duration (max 30000)." },
                         "accept": { "type": "boolean", "description": "dialog: accept or dismiss (default true)." },
+                        "width": { "type": "integer", "minimum": 240, "maximum": 3840, "description": "viewport: width in CSS px." },
+                        "height": { "type": "integer", "minimum": 240, "maximum": 2160, "description": "viewport: height in CSS px." },
                         "outline": { "type": "boolean", "description": "Also return the post-action outline (default false; costs ~2k tokens)." }
                     },
                     "required": ["page_id", "action"]

@@ -79,6 +79,74 @@ struct ToolCall {
     arguments: String,
 }
 
+/// A tool that failed this turn and hasn't succeeded since: its name, how
+/// many times it failed in a row, and the first line of the latest error.
+#[derive(Debug, Clone, PartialEq)]
+struct FailedCall {
+    name: String,
+    times: usize,
+    error: String,
+}
+
+/// Record one tool call's outcome: a success clears that tool's failures
+/// (a redone step), a failure adds to them.
+fn record_outcome(failures: &mut Vec<FailedCall>, name: &str, ok: bool, error: &str) {
+    if ok {
+        failures.retain(|f| f.name != name);
+        return;
+    }
+    let line: String = error
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("tool failed")
+        .trim()
+        .chars()
+        .take(200)
+        .collect();
+    match failures.iter_mut().find(|f| f.name == name) {
+        Some(f) => {
+            f.times += 1;
+            f.error = line;
+        }
+        None => failures.push(FailedCall {
+            name: name.to_string(),
+            times: 1,
+            error: line,
+        }),
+    }
+}
+
+/// The user message asking the model to check its final answer against the
+/// tool calls that failed this turn.
+fn failed_call_check(failures: &[FailedCall]) -> String {
+    let list = failures
+        .iter()
+        .map(|f| {
+            let times = if f.times > 1 {
+                format!(" ({} times)", f.times)
+            } else {
+                String::new()
+            };
+            format!("- {}{times}: {}", f.name, f.error)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Before you finish: these tool calls failed this turn and were not redone \
+         successfully afterwards:\n{list}\n\nIf your answer above says or implies that any of \
+         them worked (for example \"verified\", \"re-checked\", \"stopped\", \"passed\"), \
+         write a corrected final answer that says what failed and what is still unverified. \
+         Otherwise reply with exactly: OK"
+    )
+}
+
+/// Whether a reply is just "OK" (any case, stray punctuation or markup).
+fn is_bare_ok(text: &str) -> bool {
+    text.trim()
+        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .eq_ignore_ascii_case("ok")
+}
+
 pub fn run(payload: &Value) -> Result<(), String> {
     let session_id = payload
         .get("session_id")
@@ -195,6 +263,11 @@ pub fn run(payload: &Value) -> Result<(), String> {
     let mut identical_rounds = 0;
     let mut nudges = 0;
     let mut overflow_retried = false;
+    // Tool calls that failed this turn and weren't redone successfully, and
+    // the once-per-turn check on the final answer they trigger.
+    let mut failures: Vec<FailedCall> = Vec::new();
+    let mut failure_checked = false;
+    let mut awaiting_check_reply = false;
     loop {
         if should_stop(session_id) {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
@@ -481,6 +554,28 @@ pub fn run(payload: &Value) -> Result<(), String> {
             )?;
         }
         let round_thinking = forced_think.or(field_think).or(inline_think);
+        // The reply to the failed-call check: a bare OK keeps the answer
+        // already shown, so the check and the OK are dropped from the turn.
+        let check_reply = std::mem::take(&mut awaiting_check_reply);
+        let no_calls = msg
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_none_or(|a| a.is_empty());
+        if check_reply && no_calls && is_bare_ok(&text) {
+            new_messages.pop();
+            break;
+        }
+        if check_reply && no_calls && !text.is_empty() {
+            emit(
+                session_id,
+                &ProviderEvent::System {
+                    text: "Some tool calls failed this turn; the model revised its final answer."
+                        .into(),
+                    subtype: "info".into(),
+                    detail: Value::Null,
+                },
+            )?;
+        }
         if !text.is_empty() {
             emit(session_id, &ProviderEvent::Text { text: text.clone() })?;
         }
@@ -554,6 +649,23 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 new_messages.push(nudge);
                 continue;
             }
+            // The answer is final, but tool calls failed this turn and were
+            // never redone: local models then report them as done anyway
+            // (seen: "re-verified" after five timed-out screenshots, "server
+            // stopped" after a failed stop). Show the model the failures and
+            // ask once for a corrected answer, or a bare OK to keep this one.
+            if tools.is_some()
+                && finish_reason.as_deref() == Some("stop")
+                && !failure_checked
+                && !failures.is_empty()
+            {
+                failure_checked = true;
+                awaiting_check_reply = true;
+                let check = json!({ "role": "user", "content": failed_call_check(&failures) });
+                messages.push(check.clone());
+                new_messages.push(check);
+                continue;
+            }
             break;
         }
         let signature = tool_call_signature(&calls);
@@ -591,6 +703,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
             &mut new_messages,
             send_images,
             &mut round_images,
+            &mut failures,
         )? {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
@@ -1312,9 +1425,9 @@ fn alloc_tool_ids(key: &str, count: u64) -> u64 {
 
 /// Run one round's tool calls, feeding each result back as a `tool` turn.
 /// Images the tools return go on `ToolEnd` for the UI and into `images`
-/// (with the tool's name) for the caller to show the model. Returns
-/// `Ok(true)` when the user interrupted between calls — the caller persists
-/// the partial exchange.
+/// (with the tool's name) for the caller to show the model; each call's
+/// outcome goes into `failures`. Returns `Ok(true)` when the user
+/// interrupted between calls — the caller persists the partial exchange.
 fn run_tool_calls(
     session_id: &str,
     calls: &[ToolCall],
@@ -1322,6 +1435,7 @@ fn run_tool_calls(
     new_messages: &mut Vec<Value>,
     send_images: bool,
     images: &mut Vec<(String, ToolImage)>,
+    failures: &mut Vec<FailedCall>,
 ) -> Result<bool, String> {
     let base = alloc_tool_ids(session_id, calls.len() as u64);
     for (i, call) in calls.iter().enumerate() {
@@ -1381,6 +1495,7 @@ fn run_tool_calls(
                 images: call_images.clone(),
             },
         )?;
+        record_outcome(failures, &call.name, ok, &content);
         images.extend(call_images.into_iter().map(|img| (call.name.clone(), img)));
         // The UI keeps the full output; the model gets a capped copy so one
         // huge result can't blow the context window for every later round.
@@ -1526,16 +1641,24 @@ fn tool_image_message(images: &[(String, ToolImage)]) -> Option<(Value, Value)> 
     let names = names.join(", ");
     // A bare "here is the screenshot" gets a lenient "looks good" from
     // local models even when the layout is visibly broken (seen: badges and
-    // avatars unstyled after a CSS syntax slip, reported as fine). Ask for
-    // an itemised critique before any verdict.
+    // avatars unstyled after a CSS syntax slip, reported as fine). A generic
+    // "list defects" still let a phone layout that overflowed its right edge
+    // (Upload button and badges cut in half) pass as "all chips fit": walk
+    // the model through concrete checks, edges first, before any verdict.
     let mut parts = vec![json!({
         "type": "text",
         "text": format!(
             "Screenshot(s) returned by {names}. If this shows UI you are building, inspect it \
-             critically before deciding anything: list each concrete defect you can see — \
-             elements misplaced, overlapping, clipped or unstyled, missing items, spacing or \
-             layout that doesn't match what was asked — and fix them. Don't call it done while \
-             any defect is visible."
+             critically before deciding anything. Go through these checks and list every defect \
+             you find:\n\
+             1. Edges: look along the right, left and bottom edges. Is any text, button, badge \
+             or card cut off? That means the page overflows its viewport.\n\
+             2. Overlap and placement: elements on top of each other, misaligned or in the \
+             wrong place.\n\
+             3. Styling: unstyled, broken or invisible parts; text too low-contrast to read.\n\
+             4. Completeness: items or layout the request asked for that are missing or wrong.\n\
+             Fix each defect and take another screenshot. Don't call it done while any defect \
+             is visible, and claim only what this screenshot shows."
         ),
     })];
     parts.extend(picked.iter().map(|(_, img)| {
@@ -1813,7 +1936,8 @@ mod tests {
         tool_defs: Option<Value>,
         /// Plugin settings by key; unset keys answer `null`.
         settings: HashMap<String, Value>,
-        /// What every `invoke_mcp` call returns as `result`.
+        /// What every `invoke_mcp` call returns as `result`; an `_error`
+        /// key makes every call fail with that error instead.
         tool_result: Value,
     }
 
@@ -1892,7 +2016,10 @@ mod tests {
                     },
                     "peckboard_provider_invoke_mcp" => {
                         invoked.lock().unwrap().push(input.clone());
-                        json!({ "ok": true, "result": tool_result }).to_string()
+                        match tool_result.get("_error") {
+                            Some(err) => json!({ "ok": false, "error": err }).to_string(),
+                            None => json!({ "ok": true, "result": tool_result }).to_string(),
+                        }
                     }
                     "peckboard_http_request" => {
                         let url = input.get("url").and_then(|u| u.as_str()).unwrap_or("");
@@ -2468,6 +2595,89 @@ mod tests {
         assert!(!announces_unfinished_step("All done."));
     }
 
+    /// A final answer after a tool call that failed and was never redone gets
+    /// one check: a bare OK keeps the answer (check and OK dropped), anything
+    /// else is the revised answer.
+    #[test]
+    fn failed_tool_calls_trigger_one_check_of_the_final_answer() {
+        let call = completion(
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "c1",
+                    "type": "function",
+                    "function": { "name": "t", "arguments": "{}" },
+                }],
+            }),
+            10,
+            1,
+        );
+        let run_with = |reply: &str| {
+            let mut host = FakeHost::new(vec![
+                call.clone(),
+                answer("Done. Verified at both widths."),
+                answer(reply),
+            ]);
+            host.tool_defs = Some(json!([{ "name": "t", "input_schema": { "type": "object" } }]));
+            host.tool_result =
+                json!({ "_error": "page.screenshot: Timeout 30000ms exceeded.\nCall log:" });
+            peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+            host
+        };
+
+        let host = run_with("**OK**");
+        let bodies = host.chat_bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 3);
+        let check = bodies[2]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(check["role"], "user");
+        let check = check["content"].as_str().unwrap();
+        assert!(check.contains("- t: page.screenshot: Timeout 30000ms exceeded."));
+        assert!(!check.contains("Call log"));
+        let saved = host.saved_history();
+        assert_eq!(
+            saved.last().unwrap()["content"],
+            "Done. Verified at both widths."
+        );
+        assert!(!saved.iter().any(|m| m["content"].as_str() == Some(check)));
+        assert!(
+            !host
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["text"] == "**OK**")
+        );
+
+        let host = run_with("Correction: the screenshot timed out, so nothing was verified.");
+        assert_eq!(host.chat_bodies.lock().unwrap().len(), 3);
+        let saved = host.saved_history();
+        assert_eq!(
+            saved.last().unwrap()["content"],
+            "Correction: the screenshot timed out, so nothing was verified."
+        );
+        assert!(host.events.lock().unwrap().iter().any(|e| {
+            e["kind"] == "system"
+                && e["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("revised its final answer"))
+        }));
+
+        // A failure redone successfully needs no check.
+        let mut failures = Vec::new();
+        record_outcome(&mut failures, "t", false, "boom");
+        record_outcome(&mut failures, "t", false, "boom again");
+        assert_eq!(failures[0].times, 2);
+        record_outcome(&mut failures, "t", true, "");
+        assert!(failures.is_empty());
+        assert!(is_bare_ok(" ok. ") && !is_bare_ok("OK, but the build failed."));
+    }
+
     /// No nudge without tools: a chat-only model can't act on it.
     #[test]
     fn announce_without_tools_is_not_nudged() {
@@ -2918,7 +3128,7 @@ mod tests {
         assert_eq!(shot["role"], "user");
         let ask = shot["content"][0]["text"].as_str().unwrap();
         assert!(ask.starts_with("Screenshot(s) returned by browser_screenshot."));
-        assert!(ask.contains("list each concrete defect"));
+        assert!(ask.contains("list every defect") && ask.contains("1. Edges"));
         assert_eq!(
             image_urls(shot),
             [format!("data:image/png;base64,{PNG_1280X800}")]
