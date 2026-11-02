@@ -183,6 +183,13 @@ pub fn max_history_tokens() -> Option<usize> {
     (n > 0).then_some(n as usize)
 }
 
+/// Estimated-token conversation size that triggers in-turn compaction
+/// (`send::compact_turn`); `None` = never (`0`).
+pub fn compact_turn_tokens() -> Option<usize> {
+    let n = i64("compact_turn_tokens", 48_000);
+    (n > 0).then_some(n as usize)
+}
+
 /// Cap on reasoning tokens per round when thinking is on; `None` = no cap
 /// (`0`). At the cap the model is made to answer (see `send::force_answer`).
 pub fn thinking_budget() -> Option<usize> {
@@ -213,6 +220,23 @@ pub fn enable_thinking(model: &str) -> Option<bool> {
         Some("off") => Some(false),
         _ => model.to_ascii_lowercase().contains("qwen3").then_some(true),
     }
+}
+
+/// Temperature sent when the Temperature setting is empty: Qwen's
+/// recommended 0.6 with thinking on, 0.7 with it off. Without it the server
+/// falls back to the model's `generation_config.json`, which for some Qwen3
+/// finetunes is 1.0 — enough to garble long file writes (half-written tags,
+/// duplicated attributes) once a quantised model is a few hundred lines in.
+/// Other models keep the server default.
+pub fn default_temperature(model: &str, enable_thinking: Option<bool>) -> Option<f64> {
+    if !model.to_ascii_lowercase().contains("qwen3") {
+        return None;
+    }
+    Some(if enable_thinking == Some(false) {
+        0.7
+    } else {
+        0.6
+    })
 }
 
 /// Float sampling settings: `(key, min, max, min_exclusive)`. Core's schema

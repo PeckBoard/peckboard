@@ -8,6 +8,7 @@
 
 use serde_json::{Value, json};
 
+use crate::check;
 use crate::event::{CrashKind, ProviderEvent, ToolImage};
 use crate::host::{self, HostFn};
 use crate::models::{DEFAULT_MODEL_ID, PROVIDER_ID};
@@ -250,7 +251,12 @@ pub fn run(payload: &Value) -> Result<(), String> {
     } else {
         None
     };
-    let (sampling, bad_sampling) = settings::sampling();
+    let (mut sampling, bad_sampling) = settings::sampling();
+    if !sampling.contains_key("temperature")
+        && let Some(t) = settings::default_temperature(&model, enable_thinking)
+    {
+        sampling.insert("temperature".into(), json!(t));
+    }
     for problem in bad_sampling {
         emit(
             session_id,
@@ -271,9 +277,27 @@ pub fn run(payload: &Value) -> Result<(), String> {
     let mut failures: Vec<FailedCall> = Vec::new();
     let mut failure_checked = false;
     let mut awaiting_check_reply = false;
+    let mut compacted = false;
     loop {
         if should_stop(session_id) {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
+        }
+        if let Some(budget) = settings::compact_turn_tokens()
+            && estimate_tokens(&messages) > budget
+            && compact_turn(&mut messages, &mut new_messages) > 0
+            && !compacted
+        {
+            compacted = true;
+            emit(
+                session_id,
+                &ProviderEvent::System {
+                    text: "Long turn compacted: file contents already written, long tool results \
+                           and reasoning from older rounds were shortened to save context."
+                        .into(),
+                    subtype: "info".into(),
+                    detail: Value::Null,
+                },
+            )?;
         }
         let mut body = json!({
             "model": model,
@@ -715,13 +739,33 @@ pub fn run(payload: &Value) -> Result<(), String> {
         // allows one image per prompt unless started with a larger
         // --limit-mm-per-prompt ("At most 1 image(s) may be provided in one
         // prompt"), and the newest screenshot is the one that matters.
-        if send_images && let Some((sent, stub)) = tool_image_message(&round_images) {
-            for (i, old_stub) in tool_image_msgs.drain(..) {
-                messages[i] = old_stub;
+        if send_images {
+            let shown = tool_image_message(&round_images);
+            let picked = shown.as_ref().map(|s| s.2.clone()).unwrap_or_default();
+            // Images left out by the cap: their "attached below" would be a
+            // lie the model acts on.
+            for (i, ri) in round_images.iter().enumerate() {
+                if picked.contains(&i) {
+                    continue;
+                }
+                let (from, to) = (
+                    image_placeholder(&ri.img, true),
+                    over_cap_placeholder(&ri.img),
+                );
+                for m in [&mut messages[ri.msg], &mut new_messages[ri.new_msg]] {
+                    if let Some(c) = m["content"].as_str() {
+                        m["content"] = json!(c.replacen(&from, &to, 1));
+                    }
+                }
             }
-            tool_image_msgs.push((messages.len(), stub.clone()));
-            messages.push(sent);
-            new_messages.push(stub);
+            if let Some((sent, stub, _)) = shown {
+                for (i, old_stub) in tool_image_msgs.drain(..) {
+                    messages[i] = old_stub;
+                }
+                tool_image_msgs.push((messages.len(), stub.clone()));
+                messages.push(sent);
+                new_messages.push(stub);
+            }
         }
     }
 
@@ -1395,9 +1439,61 @@ fn persist_turn(session_id: &str, history: &mut Vec<Value>, new_messages: Vec<Va
     save_history(session_id, history);
 }
 
+/// The structure-check note (`check::report`) for a successful
+/// `write_file` / `edit_file` of a web file. edit_file's arguments are only
+/// its ops (and write_file's only the tail in append mode), so those files
+/// are read back.
+fn written_file_note(session_id: &str, call: &ToolCall) -> Option<String> {
+    let path = call.args.get("path")?.as_str()?;
+    if !check::is_checked(path) {
+        return None;
+    }
+    let appended = call.args.get("append").and_then(Value::as_bool) == Some(true);
+    let text = match call.name.as_str() {
+        "write_file" if !appended => call.args.get("content")?.as_str()?.to_string(),
+        "write_file" | "edit_file" => read_back(session_id, path)?,
+        _ => return None,
+    };
+    check::report(path, &text)
+}
+
+/// The text of `path` through `read_file` windows, up to 6,000 lines.
+fn read_back(session_id: &str, path: &str) -> Option<String> {
+    const WINDOW: u64 = 600;
+    let mut text = String::new();
+    for w in 0..10 {
+        let v = host::call_host(
+            HostFn::ProviderInvokeMcp,
+            &json!({
+                "session_id": session_id,
+                "name": "read_file",
+                "arguments": { "path": path, "start_line": 1 + w * WINDOW, "line_count": WINDOW },
+            }),
+        )
+        .ok()?;
+        if v.get("ok").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        let result = v.get("result")?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(result.get("content")?.as_str()?);
+        if result.get("has_more").and_then(Value::as_bool) != Some(true) {
+            break;
+        }
+    }
+    Some(text)
+}
+
 /// Tool Set "Core coding tools": names offered on top of Extra Tools. Only
 /// those the session actually exposes are sent (e.g. `graphify_*` exist only
-/// while that plugin is active).
+/// while that plugin is active). Research needs the whole web set:
+/// `search_web` alone only returns links, and `fetch_web` / `parse_web`
+/// store pages and return a reference read in parts with `web_get_part`, so
+/// a page never lands in the context whole. `stop_background` /
+/// `list_background` let it stop the servers it starts (seen: "server
+/// stopped" reported when it had no way to stop one).
 const CORE_TOOLS: &[&str] = &[
     "ask_user",
     "background_status",
@@ -1408,13 +1504,16 @@ const CORE_TOOLS: &[&str] = &[
     "browser_screenshot",
     "edit_file",
     "fetch_url",
+    "fetch_web",
     "file_outline",
     "finish_card",
     "git",
     "graphify_explain",
     "graphify_path",
+    "list_background",
     "list_files",
     "move_card_to_done",
+    "parse_web",
     "read_file",
     "read_symbol",
     "run_background",
@@ -1422,7 +1521,9 @@ const CORE_TOOLS: &[&str] = &[
     "run_tests",
     "search_files",
     "search_web",
+    "stop_background",
     "update_card",
+    "web_get_part",
     "write_file",
 ];
 
@@ -1503,7 +1604,7 @@ fn run_tool_calls(
     messages: &mut Vec<Value>,
     new_messages: &mut Vec<Value>,
     send_images: bool,
-    images: &mut Vec<(String, ToolImage)>,
+    images: &mut Vec<RoundImage>,
     failures: &mut Vec<FailedCall>,
 ) -> Result<bool, String> {
     let base = alloc_tool_ids(session_id, calls.len() as u64);
@@ -1533,7 +1634,8 @@ fn run_tool_calls(
                 let result = v.get("result").cloned().unwrap_or(Value::Null);
                 let (rest, found) = take_tool_images(&result);
                 let text = if found.is_empty() {
-                    tool_result_text(&result)
+                    file_result_text(&call.name, &result)
+                        .unwrap_or_else(|| tool_result_text(&result))
                 } else if has_text(&rest) {
                     tool_result_text(&rest)
                 } else {
@@ -1560,6 +1662,12 @@ fn run_tool_calls(
         } else {
             format!("{content}\n{}", call.notes.join("\n"))
         };
+        // A web file just written gets its structure checked while it's
+        // fresh; the model then fixes it before judging a screenshot.
+        let content = match ok.then(|| written_file_note(session_id, call)).flatten() {
+            Some(note) => format!("{content}\n\n{note}"),
+            None => content,
+        };
         emit(
             session_id,
             &ProviderEvent::ToolEnd {
@@ -1570,7 +1678,13 @@ fn run_tool_calls(
             },
         )?;
         record_outcome(failures, &call.name, ok, &content);
-        images.extend(call_images.into_iter().map(|img| (call.name.clone(), img)));
+        let (msg, new_msg) = (messages.len(), new_messages.len());
+        images.extend(call_images.into_iter().map(|img| RoundImage {
+            tool: call.name.clone(),
+            img,
+            msg,
+            new_msg,
+        }));
         // The UI keeps the full output; the model gets a capped copy so one
         // huge result can't blow the context window for every later round.
         let tool_msg = json!({
@@ -1641,6 +1755,7 @@ fn has_text(rest: &Value) -> bool {
 }
 
 /// The `tool` text standing in for an image-only result, e.g.
+/// The `tool` text standing in for an image-only result, e.g.
 /// `[image: image/png, 1280x800 screenshot attached below]`.
 fn image_placeholder(img: &ToolImage, attached: bool) -> String {
     let mut desc = img.mime_type.clone();
@@ -1654,6 +1769,19 @@ fn image_placeholder(img: &ToolImage, attached: bool) -> String {
         desc.push_str(" screenshot, not shown to you");
     }
     format!("[image: {desc}]")
+}
+
+/// The placeholder for an image left out by the per-request image cap.
+/// Seen: a desktop and a phone screenshot taken in one reply, both labelled
+/// "attached below" while only the newest was shown, then both retaken
+/// together — and the desktop one missed again.
+fn over_cap_placeholder(img: &ToolImage) -> String {
+    let unseen = image_placeholder(img, false);
+    format!(
+        "{}: only one image reaches you per reply. To see it, take it again on its own \
+         (one browser_screenshot per reply)]",
+        unseen.trim_end_matches(']')
+    )
 }
 
 /// Width and height from a base64 PNG's IHDR chunk (the first 24 bytes, so
@@ -1684,31 +1812,42 @@ fn png_dimensions(data_base64: &str) -> Option<(u32, u32)> {
     Some((be(16), be(20)))
 }
 
+/// A tool image from this round, with where its call's `tool` message sits
+/// in the request messages and in the turn's new (persisted) messages.
+struct RoundImage {
+    tool: String,
+    img: ToolImage,
+    msg: usize,
+    new_msg: usize,
+}
+
 /// The round's tool images as one `user` message for the model — the
 /// `MAX_TOOL_IMAGES_PER_ROUND` most recent, within `MAX_TOOL_IMAGE_BYTES` of
 /// base64 — plus the text-only stub that replaces it in history (old turns
-/// stay small and the prompt prefix stable). `None` when nothing fits.
-fn tool_image_message(images: &[(String, ToolImage)]) -> Option<(Value, Value)> {
-    let mut picked: Vec<&(String, ToolImage)> = Vec::new();
+/// stay small and the prompt prefix stable) and the indices of the images
+/// picked. `None` when nothing fits.
+fn tool_image_message(images: &[RoundImage]) -> Option<(Value, Value, Vec<usize>)> {
+    let mut picked: Vec<usize> = Vec::new();
     let mut total = 0;
-    for entry in images.iter().rev() {
+    for (i, entry) in images.iter().enumerate().rev() {
         if picked.len() == MAX_TOOL_IMAGES_PER_ROUND {
             break;
         }
-        let size = entry.1.data_base64.len();
+        let size = entry.img.data_base64.len();
         if total + size > MAX_TOOL_IMAGE_BYTES {
             continue;
         }
         total += size;
-        picked.push(entry);
+        picked.push(i);
     }
     if picked.is_empty() {
         return None;
     }
     picked.reverse();
     let mut names: Vec<&str> = Vec::new();
-    for (name, _) in &picked {
-        if !names.contains(&name.as_str()) {
+    for &i in &picked {
+        let name = images[i].tool.as_str();
+        if !names.contains(&name) {
             names.push(name);
         }
     }
@@ -1735,7 +1874,8 @@ fn tool_image_message(images: &[(String, ToolImage)]) -> Option<(Value, Value)> 
              is visible, and claim only what this screenshot shows."
         ),
     })];
-    parts.extend(picked.iter().map(|(_, img)| {
+    parts.extend(picked.iter().map(|&i| {
+        let img = &images[i].img;
         json!({
             "type": "image_url",
             "image_url": { "url": format!("data:{};base64,{}", img.mime_type, img.data_base64) },
@@ -1745,7 +1885,7 @@ fn tool_image_message(images: &[(String, ToolImage)]) -> Option<(Value, Value)> 
         "role": "user",
         "content": format!("[{} screenshot(s) from {names} were shown here]", picked.len()),
     });
-    Some((json!({ "role": "user", "content": parts }), stub))
+    Some((json!({ "role": "user", "content": parts }), stub, picked))
 }
 
 /// Whether a 400 body is the server refusing image input (a text-only
@@ -1777,6 +1917,62 @@ fn tool_result_text(result: &Value) -> String {
         }
     }
     serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+}
+
+/// `read_file` / `read_symbol` results as numbered lines under a one-line
+/// header, instead of pretty JSON. As JSON the whole file is one string of
+/// `\n` and `\"` escapes with no line numbers, and edit_file needs line
+/// numbers: the model counted escaped newlines in its reasoning (seen: 12–15k
+/// chars of reasoning per round and the same 222 lines re-read four times
+/// before a single edit). `None` for any other result shape.
+fn file_result_text(tool: &str, result: &Value) -> Option<String> {
+    let numbered = |content: &str, start: u64| -> String {
+        content
+            .lines()
+            .enumerate()
+            .map(|(i, l)| format!("{:>5}| {l}", start + i as u64))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let header = |obj: &serde_json::Map<String, Value>, skip: &[&str]| -> String {
+        obj.iter()
+            .filter(|(k, v)| !skip.contains(&k.as_str()) && !v.is_array() && !v.is_object())
+            .map(|(k, v)| match v {
+                Value::String(s) => format!("{k}: {s}"),
+                other => format!("{k}: {other}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    const NOTE: &str = "(line numbers and `| ` are not part of the file)";
+    let obj = result.as_object()?;
+    match tool {
+        "read_file" => {
+            let content = obj.get("content")?.as_str()?;
+            let start = obj.get("start_line").and_then(Value::as_u64).unwrap_or(1);
+            Some(format!(
+                "{} {NOTE}\n{}",
+                header(obj, &["content"]),
+                numbered(content, start)
+            ))
+        }
+        "read_symbol" => {
+            let symbols = obj.get("symbols")?.as_array()?;
+            let mut out = vec![format!("{} {NOTE}", header(obj, &[]))];
+            for s in symbols {
+                let s = s.as_object()?;
+                let content = s.get("content")?.as_str()?;
+                let start = s.get("start_line").and_then(Value::as_u64).unwrap_or(1);
+                out.push(format!(
+                    "\n{}\n{}",
+                    header(s, &["content"]),
+                    numbered(content, start)
+                ));
+            }
+            Some(out.join("\n"))
+        }
+        _ => None,
+    }
 }
 
 /// `text` cut to about `max` chars — the head and the tail, with a marker
@@ -1876,7 +2072,133 @@ fn trim_older_turns(history: &mut Vec<Value>) -> bool {
 /// Rough token count of stored messages (~3 chars per token, JSON included),
 /// for the history budget. Errs high, which only trims a little early.
 fn estimate_tokens(messages: &[Value]) -> usize {
-    messages.iter().map(|m| m.to_string().len()).sum::<usize>() / 3
+    messages.iter().map(message_chars).sum::<usize>() / 3
+}
+
+/// A message's size for the estimates, with each attached image counted as
+/// `IMAGE_CHARS` instead of its base64 (a screenshot's data URL alone would
+/// read as ~100k tokens).
+fn message_chars(m: &Value) -> usize {
+    const IMAGE_CHARS: usize = 3_000;
+    match m.get("content").and_then(Value::as_array) {
+        Some(parts) => {
+            let images = parts.iter().filter(|p| p["type"] == "image_url").count();
+            let text: usize = parts
+                .iter()
+                .filter(|p| p["type"] != "image_url")
+                .map(|p| p.to_string().len())
+                .sum();
+            text + images * IMAGE_CHARS + 32
+        }
+        None => m.to_string().len(),
+    }
+}
+
+/// Tool rounds at the end of a turn that compaction leaves verbatim.
+const KEEP_RECENT_ROUNDS: usize = 4;
+/// Longest tool-call argument string kept in a compacted round.
+const COMPACT_ARG_CHARS: usize = 300;
+/// Longest tool result kept in a compacted round (its start is kept).
+const COMPACT_RESULT_CHARS: usize = 600;
+const ELIDED_MARK: &str = "elided to save context";
+
+/// Compact this turn's older rounds in place, in both the request
+/// (`messages`, whose last `new_messages.len()` entries are this turn's) and
+/// the turn's persisted messages. In every round before the last
+/// `KEEP_RECENT_ROUNDS`: long tool-call argument strings (file contents
+/// already written) and long tool results become short notes, and replayed
+/// reasoning is dropped. A long build is one turn of 50+ rounds, and without
+/// this every file the model ever wrote and every result it ever read is
+/// resent on every round until the context fills (and a local model gets
+/// worse long before that). Only called past the Compact Long Turns budget:
+/// rewriting old rounds costs a prefix-cache miss from that point on.
+/// Returns how many messages changed.
+fn compact_turn(messages: &mut [Value], new_messages: &mut [Value]) -> usize {
+    let start = messages.len().saturating_sub(new_messages.len());
+    let assistants: Vec<usize> = (0..new_messages.len())
+        .filter(|&k| new_messages[k]["role"] == "assistant")
+        .collect();
+    if assistants.len() <= KEEP_RECENT_ROUNDS {
+        return 0;
+    }
+    let keep_from = assistants[assistants.len() - KEEP_RECENT_ROUNDS];
+    let mut changed = 0;
+    for k in 0..keep_from {
+        let mut hit = false;
+        for m in [&mut messages[start + k], &mut new_messages[k]] {
+            hit |= compact_message(m);
+        }
+        changed += usize::from(hit);
+    }
+    changed
+}
+
+/// Compact one message (see `compact_turn`); `true` if it changed.
+fn compact_message(m: &mut Value) -> bool {
+    let mut changed = false;
+    match m["role"].as_str() {
+        Some("assistant") => {
+            if let Some(obj) = m.as_object_mut() {
+                changed |= obj.remove("reasoning").is_some();
+                changed |= obj.remove("reasoning_content").is_some();
+            }
+            let Some(calls) = m.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+                return changed;
+            };
+            for call in calls {
+                let f = &mut call["function"];
+                let Some(raw) = f["arguments"].as_str() else {
+                    continue;
+                };
+                let Ok(Value::Object(mut args)) = serde_json::from_str::<Value>(raw) else {
+                    continue;
+                };
+                let mut shrunk = false;
+                for v in args.values_mut() {
+                    let long = match v {
+                        Value::String(s) if s.chars().count() > COMPACT_ARG_CHARS => {
+                            Some((s.lines().count(), s.chars().count()))
+                        }
+                        Value::Array(_) | Value::Object(_)
+                            if v.to_string().len() > COMPACT_ARG_CHARS =>
+                        {
+                            let s = v.to_string();
+                            Some((s.lines().count(), s.len()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((lines, chars)) = long {
+                        *v = json!(format!(
+                            "[{lines} lines, {chars} chars {ELIDED_MARK}; this call already ran — \
+                             read the file if you need its current content]"
+                        ));
+                        shrunk = true;
+                    }
+                }
+                if shrunk {
+                    f["arguments"] = json!(Value::Object(args).to_string());
+                    changed = true;
+                }
+            }
+        }
+        Some("tool") => {
+            if let Some(text) = m["content"].as_str()
+                && text.chars().count() > COMPACT_RESULT_CHARS
+                && !text.contains(ELIDED_MARK)
+            {
+                let total = text.chars().count();
+                let head: String = text.chars().take(COMPACT_RESULT_CHARS / 2).collect();
+                m["content"] = json!(format!(
+                    "{head}\n[… {} more chars of this old result {ELIDED_MARK}; run the tool \
+                     again if you need them …]",
+                    thousands(total - COMPACT_RESULT_CHARS / 2)
+                ));
+                changed = true;
+            }
+        }
+        _ => {}
+    }
+    changed
 }
 
 /// Store the transcript, trimming it in place first so the caller keeps
@@ -2456,7 +2778,15 @@ mod tests {
                 .get("chat_template_kwargs")
                 .map(|k| k["enable_thinking"].as_bool().unwrap());
             assert_eq!(got, want, "mode {mode:?}, model {model}");
-            assert!(body.get("temperature").is_none());
+            // An empty Temperature gets Qwen's recommended value, for Qwen3 only.
+            let temp = model
+                .contains("Qwen3")
+                .then(|| json!(if want == Some(false) { 0.7 } else { 0.6 }));
+            assert_eq!(
+                body.get("temperature").cloned(),
+                temp,
+                "mode {mode:?}, model {model}"
+            );
             // Thinking rounds carry the Thinking Budget as max_tokens.
             let budget = (want == Some(true)).then(|| json!(8192));
             assert_eq!(body.get("max_tokens").cloned(), budget, "mode {mode:?}");
@@ -2551,7 +2881,8 @@ mod tests {
         }
         peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
         let body = &host.chat_bodies.lock().unwrap()[0];
-        assert!(body.get("temperature").is_none());
+        // The unusable temperature falls back to the Qwen3 default.
+        assert_eq!(body["temperature"], 0.6);
         assert_eq!(body["top_p"], 0.95);
         assert_eq!(body["top_k"], 20);
         assert_eq!(body["min_p"], 0.0);
@@ -3139,6 +3470,8 @@ mod tests {
             { "name": "list_views", "input_schema": { "type": "object" } },
             { "name": "git", "input_schema": { "type": "object" } },
             { "name": "read_file", "input_schema": { "type": "object" } },
+            { "name": "web_get_part", "input_schema": { "type": "object" } },
+            { "name": "stop_background", "input_schema": { "type": "object" } },
         ]);
         let mut all = FakeHost::new(vec![answer("ok")]);
         all.tool_defs = Some(defs.clone());
@@ -3149,6 +3482,8 @@ mod tests {
                 "git",
                 "list_views",
                 "read_file",
+                "stop_background",
+                "web_get_part",
                 "write_file"
             ]
         );
@@ -3160,7 +3495,14 @@ mod tests {
             .insert("extra_tools".into(), json!(["create_card", "not_a_tool"]));
         assert_eq!(
             offered_tool_names(&core),
-            ["create_card", "git", "read_file", "write_file"]
+            [
+                "create_card",
+                "git",
+                "read_file",
+                "stop_background",
+                "web_get_part",
+                "write_file"
+            ]
         );
     }
 
@@ -3275,6 +3617,56 @@ mod tests {
         );
     }
 
+    /// Two screenshots in one reply: only the newest is attached, and the
+    /// other's `tool` text says so and how to see it, instead of "attached
+    /// below" (seen: desktop + phone retaken together, desktop missed again).
+    #[test]
+    fn screenshot_over_the_image_cap_says_to_retake_it_alone() {
+        let call = |id: &str| {
+            json!({
+                "id": id,
+                "type": "function",
+                "function": { "name": "browser_screenshot", "arguments": "{}" },
+            })
+        };
+        let mut host = FakeHost::new(vec![
+            completion(
+                json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [call("desk"), call("phone")],
+                }),
+                10,
+                2,
+            ),
+            answer("done"),
+        ]);
+        host.tool_defs = Some(json!([{
+            "name": "browser_screenshot",
+            "input_schema": { "type": "object" },
+        }]));
+        host.tool_result = json!({ "_image_base64": PNG_1280X800 });
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let bodies = host.chat_bodies.lock().unwrap();
+        let msgs = bodies[1]["messages"].as_array().unwrap();
+        let n = msgs.len();
+        assert_eq!(image_urls(&msgs[n - 1]).len(), 1);
+        let (desk, phone) = (&msgs[n - 3], &msgs[n - 2]);
+        assert_eq!(desk["tool_call_id"], "desk");
+        let unseen = desk["content"].as_str().unwrap();
+        assert!(unseen.contains("not shown to you") && unseen.contains("on its own"));
+        assert_eq!(
+            phone["content"],
+            "[image: image/png, 1280x800 screenshot attached below]"
+        );
+        drop(bodies);
+        // History says the same, so a later turn doesn't think it saw it.
+        let saved = host.saved_history();
+        assert!(saved.iter().any(|m| m["tool_call_id"] == "desk"
+            && m["content"].as_str().unwrap().contains("not shown to you")));
+    }
+
     /// Send Tool Images off: the UI still gets the image, the model only the
     /// text placeholder.
     #[test]
@@ -3334,5 +3726,90 @@ mod tests {
                 && e["text"].as_str().unwrap().contains("Send Tool Images"))
         );
         assert!(events.iter().any(|e| e["kind"] == "completed"));
+    }
+
+    /// Compaction shortens written file contents, long results and reasoning
+    /// in all but the last 4 rounds of the turn, in the request and in what
+    /// gets persisted alike; arguments stay valid JSON; history before the
+    /// turn is untouched; a second pass changes nothing.
+    #[test]
+    fn compact_turn_shortens_old_rounds_only() {
+        let page = "<div>card</div>\n".repeat(100);
+        let round = |i: usize| {
+            let args = json!({ "path": format!("p{i}.html"), "content": page }).to_string();
+            vec![
+                json!({
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "think",
+                    "tool_calls": [{
+                        "id": format!("c{i}"),
+                        "type": "function",
+                        "function": { "name": "write_file", "arguments": args },
+                    }],
+                }),
+                json!({ "role": "tool", "tool_call_id": format!("c{i}"), "content": page }),
+            ]
+        };
+        let mut new_messages: Vec<Value> = (0..6).flat_map(round).collect();
+        let older = json!({ "role": "tool", "tool_call_id": "old", "content": page });
+        let mut messages = vec![json!({ "role": "user", "content": "go" }), older.clone()];
+        messages.extend(new_messages.clone());
+        let before = estimate_tokens(&messages);
+
+        // Rounds 0 and 1 compacted (2 messages each), rounds 2-5 kept.
+        assert_eq!(compact_turn(&mut messages, &mut new_messages), 4);
+        // Two 1.6k-char writes and two 1.6k-char results gone (~2k tokens).
+        assert!(estimate_tokens(&messages) + 1_500 < before);
+        assert_eq!(messages[1], older);
+        for (k, m) in new_messages.iter().enumerate() {
+            let compacted = k < 4;
+            assert_eq!(messages[2 + k]["tool_calls"], m["tool_calls"]);
+            if m["role"] == "assistant" {
+                assert_eq!(m.get("reasoning").is_none(), compacted);
+                let raw = m["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .unwrap();
+                let args: Value = serde_json::from_str(raw).unwrap();
+                assert_eq!(args["path"], format!("p{}.html", k / 2));
+                let content = args["content"].as_str().unwrap();
+                assert_eq!(content.contains(ELIDED_MARK), compacted, "message {k}");
+            } else {
+                let text = m["content"].as_str().unwrap();
+                assert_eq!(text.contains(ELIDED_MARK), compacted, "message {k}");
+            }
+        }
+        assert_eq!(compact_turn(&mut messages, &mut new_messages), 0);
+    }
+
+    /// read_file reaches the model as numbered lines under a header that
+    /// keeps the hash and paging fields, not as one escaped JSON string;
+    /// other tools keep the generic rendering.
+    #[test]
+    fn file_reads_are_numbered_lines() {
+        let result = json!({
+            "content": "<div class=\"a\">\n  x\n</div>",
+            "hash": "abc123",
+            "has_more": true,
+            "path": "ui/index.html",
+            "start_line": 41,
+            "total_lines": 90,
+        });
+        let text = file_result_text("read_file", &result).unwrap();
+        let mut lines = text.lines();
+        let head = lines.next().unwrap();
+        assert!(head.contains("hash: abc123") && head.contains("has_more: true"));
+        assert!(head.contains("total_lines: 90") && !head.contains("content"));
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            ["   41| <div class=\"a\">", "   42|   x", "   43| </div>"]
+        );
+
+        let sym = json!({ "count": 1, "hash": "h", "symbols": [
+            { "name": "f", "start_line": 7, "content": "fn f() {}" },
+        ] });
+        let text = file_result_text("read_symbol", &sym).unwrap();
+        assert!(text.contains("name: f") && text.ends_with("    7| fn f() {}"));
+        assert!(file_result_text("write_file", &result).is_none());
     }
 }

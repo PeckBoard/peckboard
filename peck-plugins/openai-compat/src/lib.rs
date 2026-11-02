@@ -7,6 +7,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
 mod catalog_cache;
+mod check;
 mod event;
 mod host;
 mod manifest;

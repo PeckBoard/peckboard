@@ -116,7 +116,7 @@ pub fn manifest_json() -> String {
             {
                 "key": "temperature",
                 "title": "Temperature",
-                "description": "Sampling temperature, 0 to 2. Leave empty for the server's default. Qwen3 recommends 0.6 with thinking on, 0.7 with it off.",
+                "description": "Sampling temperature, 0 to 2. Leave empty for the default: 0.6 with thinking on and 0.7 with it off for Qwen3 models (Qwen's recommendation; some Qwen3 finetunes ship 1.0, which garbles long file writes), the server's default for other models.",
                 "type": "string",
                 "placeholder": "0.6"
             },
@@ -172,6 +172,15 @@ pub fn manifest_json() -> String {
                 "description": "Estimated-token budget for the conversation history sent each turn (tool definitions and the base prompt come on top). Past it, the oldest turns are dropped down to 60% of the budget in one go, so the prompt prefix stays cacheable. Local models get noticeably worse at long contexts; raise this for models that handle them well. 0 = no budget.",
                 "type": "integer",
                 "default": 40000,
+                "min": 0,
+                "max": 2000000
+            },
+            {
+                "key": "compact_turn_tokens",
+                "title": "Compact Long Turns At (Tokens)",
+                "description": "Estimated-token size of the conversation (base prompt, history and the current turn; tool definitions come on top) past which a long turn is compacted: in all but its last 4 tool rounds, file contents the model already wrote, long tool results and old reasoning are replaced with short notes. Keeps multi-hour builds from filling the context window. 0 = never compact.",
+                "type": "integer",
+                "default": 48000,
                 "min": 0,
                 "max": 2000000
             },
