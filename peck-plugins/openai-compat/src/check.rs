@@ -30,6 +30,92 @@ const OPTIONAL_CLOSE: &[&str] = &[
 pub fn is_checked(path: &str) -> bool {
     matches!(ext(path).as_str(), "html" | "htm" | "css" | "js" | "mjs")
 }
+/// Add the closing parentheses a CSS declaration is missing right before
+/// its `;`, in a `.css` file or the `<style>` blocks of an HTML file.
+/// Returns the repaired text and the 1-based lines changed.
+///
+/// The model drops the outer `)` of nested calls before `;` in nearly every
+/// stylesheet it writes (`repeat(2, minmax(0, 1fr);`,
+/// `linear-gradient(transparent, rgba(0,0,0,.75);`), and when it rewrites the
+/// file to fix one it drops others. Only one-line declarations that start
+/// on that line (after `{`, `;`, or a line that ended a rule) and end in `;`
+/// are touched, so a multi-line value is never "fixed".
+pub fn repair_css_parens(path: &str, src: &str) -> (String, Vec<usize>) {
+    let html = matches!(ext(path).as_str(), "html" | "htm");
+    if !html && ext(path) != "css" {
+        return (src.to_string(), Vec::new());
+    }
+    let mut fixed = Vec::new();
+    let mut out = String::with_capacity(src.len() + 8);
+    let mut in_style = !html;
+    let mut prev_ends_rule = true;
+    for (i, line) in src.split_inclusive('\n').enumerate() {
+        let lower = line.to_ascii_lowercase();
+        if html && lower.contains("<style") {
+            in_style = true;
+            prev_ends_rule = true;
+        }
+        if html && lower.contains("</style") {
+            in_style = false;
+        }
+        let body = line.trim_end_matches(['\n', '\r']);
+        let repaired = if in_style && prev_ends_rule && !body.contains("/*") {
+            repair_line(body)
+        } else {
+            None
+        };
+        match repaired {
+            Some(r) => {
+                out.push_str(&r);
+                out.push_str(&line[body.len()..]);
+                fixed.push(i + 1);
+            }
+            None => out.push_str(line),
+        }
+        let t = body.trim_end();
+        prev_ends_rule = t.is_empty()
+            || t.ends_with('{')
+            || t.ends_with(';')
+            || t.ends_with('}')
+            || t.ends_with("*/")
+            || t.to_ascii_lowercase().contains("<style");
+    }
+    (out, fixed)
+}
+
+/// One line's declarations, each closed if it opens more `(` than it closes
+/// and ends with `;`. `None` when nothing changed or the line has quotes.
+fn repair_line(line: &str) -> Option<String> {
+    if line.contains(['"', '\'']) || !line.contains('(') {
+        return None;
+    }
+    let mut out = String::with_capacity(line.len() + 4);
+    let mut seg = String::new();
+    let mut changed = false;
+    for c in line.chars() {
+        match c {
+            ';' => {
+                let opens = seg.matches('(').count();
+                let closes = seg.matches(')').count();
+                out.push_str(&seg);
+                if opens > closes {
+                    out.push_str(&")".repeat(opens - closes));
+                    changed = true;
+                }
+                out.push(';');
+                seg.clear();
+            }
+            '{' | '}' => {
+                out.push_str(&seg);
+                out.push(c);
+                seg.clear();
+            }
+            _ => seg.push(c),
+        }
+    }
+    out.push_str(&seg);
+    changed.then_some(out)
+}
 
 /// The note appended to a successful write of `path`, or `None` when there
 /// is nothing to say.
@@ -290,6 +376,16 @@ fn css(src: &str, base: usize) -> Vec<String> {
                     ));
                     parens = 0;
                 }
+                // `flex-shrink: ;`: a value lost while retyping a file.
+                if c == b';'
+                    && let Some(decl) = src.get(decl_start..i).map(str::trim)
+                    && decl.ends_with(':')
+                {
+                    out.push(format!(
+                        "line {}: `{decl}` has no value",
+                        line_at(src, decl_start, base)
+                    ));
+                }
                 if c == b'{' {
                     opened.push(i);
                 } else if c == b'}' && opened.pop().is_none() {
@@ -425,5 +521,37 @@ mod tests {
         assert!(report("a.md", "x").is_none());
         let long = "<p>x</p>\n".repeat(450);
         assert!(report("a.html", &long).unwrap().contains("450 lines"));
+    }
+
+    /// Probe J's dropped `)`s are closed before the `;`; multi-line values,
+    /// selectors, quoted values and HTML outside `<style>` are left alone.
+    #[test]
+    fn css_missing_closing_parens_are_repaired() {
+        let css = ".g {\n  grid-template-columns: repeat(2, minmax(0, 1fr);\n}\n\
+                   .p { background: linear-gradient(transparent, rgba(0, 0, 0, 0.75); }\n\
+                   .t::after {\n  background:\n    radial-gradient(120px 80px at 75% 25%, \
+                   rgba(255,255,255,0.18), transparent 70%),\n    linear-gradient(red,\n      \
+                   blue);\n}\n.x:not(.y) { color: red; }\n.q { content: \"(\"; }\n";
+        let (out, lines) = repair_css_parens("css/pages.css", css);
+        assert_eq!(lines, [2, 4]);
+        assert!(out.contains("repeat(2, minmax(0, 1fr));"));
+        assert!(out.contains("rgba(0, 0, 0, 0.75)); }"));
+        assert!(
+            out.contains("\n      blue);\n"),
+            "multi-line value untouched"
+        );
+        assert_eq!(problems("css/pages.css", &out), Vec::<String>::new());
+
+        let html = "<p>f(x;</p>\n<style>\n.a { width: calc(100% - (2 * 8px); }\n</style>\n";
+        let (out, lines) = repair_css_parens("index.html", html);
+        assert_eq!(lines, [3]);
+        assert!(out.starts_with("<p>f(x;</p>") && out.contains("8px)); }"));
+        assert!(repair_css_parens("app.js", "f(x;").1.is_empty());
+
+        // A value lost in retyping is reported, not guessed at.
+        assert_eq!(
+            problems("base.css", ".s svg { fill: red; flex-shrink: ; }\n"),
+            ["line 1: `flex-shrink:` has no value"]
+        );
     }
 }

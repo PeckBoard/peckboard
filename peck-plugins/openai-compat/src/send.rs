@@ -29,9 +29,13 @@ const MAX_CONTINUE_NUDGES: usize = 2;
 const CONTINUE_NUDGE: &str =
     "Continue: make that tool call now. If you're done, give your final answer instead.";
 /// No cap on tool rounds per turn: a busy model may call as many tools as
-/// the task needs. A model that repeats the exact same calls this many
-/// rounds in a row is stuck instead, and the turn ends there.
-const MAX_IDENTICAL_TOOL_ROUNDS: usize = 3;
+/// the task needs. A model that repeats the exact same calls is told so
+/// (the repeat not run) from the `REPEAT_WARN_AT`th round in a row, and the
+/// turn ends at `MAX_IDENTICAL_TOOL_ROUNDS`.
+const REPEAT_WARN_AT: usize = 3;
+const MAX_IDENTICAL_TOOL_ROUNDS: usize = 5;
+/// Floor for the halved Thinking Budget of a turn's later rounds.
+const MIN_LATER_THINKING_BUDGET: usize = 2_048;
 /// Cap on the response body quoted in an HTTP-error crash reason.
 const MAX_ERROR_CHARS: usize = 2_000;
 /// Tool images shown to the model: only the newest one, within about 5 MB
@@ -90,6 +94,15 @@ struct FailedCall {
     name: String,
     times: usize,
     error: String,
+}
+
+/// What a turn's tool calls leave behind for later rounds.
+#[derive(Default)]
+struct TurnRecord {
+    /// Calls that failed and weren't redone successfully.
+    failures: Vec<FailedCall>,
+    /// Paths used successfully, for `retry_args` to correct a mistyped one.
+    paths: Vec<String>,
 }
 
 /// Record one tool call's outcome: a success clears that tool's failures
@@ -272,9 +285,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
     let mut identical_rounds = 0;
     let mut nudges = 0;
     let mut overflow_retried = false;
-    // Tool calls that failed this turn and weren't redone successfully, and
-    // the once-per-turn check on the final answer they trigger.
-    let mut failures: Vec<FailedCall> = Vec::new();
+    // Tool calls that failed this turn and weren't redone successfully (the
+    // once-per-turn check on the final answer they trigger), and the paths
+    // the turn used successfully.
+    let mut record = TurnRecord::default();
     let mut failure_checked = false;
     let mut awaiting_check_reply = false;
     let mut compacted = false;
@@ -315,11 +329,23 @@ pub fn run(payload: &Value) -> Result<(), String> {
         }
         // A thinking round is capped at the Thinking Budget (or the user's
         // Max Tokens, if lower); see `force_answer` for what happens at it.
-        let budget = thinking_budget.filter(|b| {
-            body.get("max_tokens")
-                .and_then(Value::as_u64)
-                .is_none_or(|cap| cap > *b as u64)
-        });
+        // Rounds after the turn's first get half: planning happens up front,
+        // and later rounds that reached the full budget were drafting file
+        // contents in their reasoning (24k chars, 5+ minutes, then the same
+        // content again in the write).
+        let budget = thinking_budget
+            .map(|b| {
+                if new_messages.is_empty() {
+                    b
+                } else {
+                    (b / 2).max(MIN_LATER_THINKING_BUDGET.min(b))
+                }
+            })
+            .filter(|b| {
+                body.get("max_tokens")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|cap| cap > *b as u64)
+            });
         if let Some(b) = budget {
             body["max_tokens"] = json!(b);
         }
@@ -684,11 +710,12 @@ pub fn run(payload: &Value) -> Result<(), String> {
             if tools.is_some()
                 && finish_reason.as_deref() == Some("stop")
                 && !failure_checked
-                && !failures.is_empty()
+                && !record.failures.is_empty()
             {
                 failure_checked = true;
                 awaiting_check_reply = true;
-                let check = json!({ "role": "user", "content": failed_call_check(&failures) });
+                let check =
+                    json!({ "role": "user", "content": failed_call_check(&record.failures) });
                 messages.push(check.clone());
                 new_messages.push(check);
                 continue;
@@ -701,6 +728,26 @@ pub fn run(payload: &Value) -> Result<(), String> {
         } else {
             identical_rounds = 1;
             last_signature = Some(signature);
+        }
+        // Stuck-ish: the repeat isn't run, and the model is told why and to
+        // change course. Ending the turn outright on the 3rd repeat killed
+        // an hour-long build over one malformed read_file.
+        if (REPEAT_WARN_AT..MAX_IDENTICAL_TOOL_ROUNDS).contains(&identical_rounds) {
+            for c in &calls {
+                let tool_msg = json!({
+                    "role": "tool",
+                    "tool_call_id": c.wire_id,
+                    "content": format!(
+                        "Not run: this is the same call as your previous {} replies, and its \
+                         result won't change. Use what it returned, or do something different \
+                         (other arguments, another tool, or your answer).",
+                        identical_rounds - 1
+                    ),
+                });
+                messages.push(tool_msg.clone());
+                new_messages.push(tool_msg);
+            }
+            continue;
         }
         if identical_rounds >= MAX_IDENTICAL_TOOL_ROUNDS {
             // Stuck, not busy: end the turn normally without running the
@@ -730,7 +777,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
             &mut new_messages,
             send_images,
             &mut round_images,
-            &mut failures,
+            &mut record,
         )? {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
@@ -1443,18 +1490,268 @@ fn persist_turn(session_id: &str, history: &mut Vec<Value>, new_messages: Vec<Va
 /// `write_file` / `edit_file` of a web file. edit_file's arguments are only
 /// its ops (and write_file's only the tail in append mode), so those files
 /// are read back.
-fn written_file_note(session_id: &str, call: &ToolCall) -> Option<String> {
-    let path = call.args.get("path")?.as_str()?;
+fn written_file_note(session_id: &str, tool: &str, args: &Value) -> Option<String> {
+    let path = args.get("path")?.as_str()?;
     if !check::is_checked(path) {
         return None;
     }
-    let appended = call.args.get("append").and_then(Value::as_bool) == Some(true);
-    let text = match call.name.as_str() {
-        "write_file" if !appended => call.args.get("content")?.as_str()?.to_string(),
+    let appended = args.get("append").and_then(Value::as_bool) == Some(true);
+    let text = match tool {
+        "write_file" if !appended => args.get("content")?.as_str()?.to_string(),
         "write_file" | "edit_file" => read_back(session_id, path)?,
         _ => return None,
     };
     check::report(path, &text)
+}
+
+/// Close the CSS parentheses the model dropped (`check::repair_css_parens`)
+/// in a write_file's content or a `.css` edit_file's op texts, in place.
+/// Returns the note telling the model, so its picture of the file matches.
+fn repair_written_css(tool: &str, args: &mut Value) -> Option<String> {
+    let path = args.get("path")?.as_str()?.to_string();
+    let mut lines: Vec<usize> = Vec::new();
+    let mut texts = 0;
+    match tool {
+        "write_file" => {
+            let content = args.get("content")?.as_str()?;
+            let (fixed, at) = check::repair_css_parens(&path, content);
+            if !at.is_empty() {
+                args["content"] = json!(fixed);
+                lines = at;
+            }
+        }
+        // An edit's text has no surrounding context in HTML, so only .css.
+        "edit_file" if path.to_ascii_lowercase().ends_with(".css") => {
+            for op in args.get_mut("edits")?.as_array_mut()? {
+                let Some(text) = op.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                let (fixed, at) = check::repair_css_parens(&path, text);
+                if !at.is_empty() {
+                    op["text"] = json!(fixed);
+                    texts += at.len();
+                }
+            }
+        }
+        _ => return None,
+    }
+    let n = lines.len() + texts;
+    if n == 0 {
+        return None;
+    }
+    let at = if lines.is_empty() {
+        String::new()
+    } else {
+        let shown: Vec<String> = lines.iter().take(12).map(usize::to_string).collect();
+        format!(" (line {})", shown.join(", "))
+    };
+    Some(format!(
+        "Auto-repaired {n} CSS declaration(s) missing a closing `)` before `;`{at}; the file has \
+         the fix. You often drop the last `)` of nested calls: write `repeat(2, minmax(0, \
+         1fr));` and `linear-gradient(transparent, rgba(0, 0, 0, .7));`."
+    ))
+}
+
+/// A read_file asking for several windows at once (`start_line: [34, 270]`,
+/// `line_count: [10, 12]` or one count for all) as one argument object per
+/// window. Seen: the host read the array as no window, the model resent the
+/// same call three times, and the turn ended mid-build.
+fn read_windows(tool: &str, args: &Value) -> Option<Vec<Value>> {
+    if tool != "read_file" {
+        return None;
+    }
+    let starts = args.get("start_line")?.as_array()?;
+    let counts = args.get("line_count");
+    let windows = starts
+        .iter()
+        .enumerate()
+        .map(|(i, start)| {
+            let mut w = args.clone();
+            w["start_line"] = start.clone();
+            match counts {
+                Some(Value::Array(c)) => match c.get(i) {
+                    Some(n) => w["line_count"] = n.clone(),
+                    None => {
+                        w.as_object_mut().map(|o| o.remove("line_count"));
+                    }
+                },
+                Some(n) => w["line_count"] = n.clone(),
+                None => {}
+            }
+            w
+        })
+        .collect();
+    Some(windows)
+}
+
+/// A standing hint appended to a successful result of `tool`. search_web:
+/// asked to research before building a site, the model ran one search and
+/// planned from the snippets alone, never opening a result.
+fn tool_hint(tool: &str) -> Option<&'static str> {
+    match tool {
+        "search_web" => Some(
+            "These are only titles and snippets, not research. Open the one or two most relevant \
+             results with parse_web (pass `url`), then pull just the parts you need with \
+             web_get_part (mode `search` or `lines`), and note what you learned in a file.",
+        ),
+        // Old results are compacted away in a long turn; notes in a file stay.
+        "parse_web" | "web_get_part" => Some(
+            "Write what's useful here (layout, components, patterns, the URL) into RESEARCH.md \
+             now: this result will be dropped from your context later in a long task.",
+        ),
+        _ => None,
+    }
+}
+
+/// The error of a `provider_invoke_mcp` reply, `None` when it succeeded.
+fn invoke_error(invoked: &Result<Value, String>) -> Option<String> {
+    match invoked {
+        Err(e) => Some(e.clone()),
+        Ok(v) if v.get("ok").and_then(Value::as_bool) == Some(true) => None,
+        Ok(v) => Some(
+            v.get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("tool failed")
+                .to_string(),
+        ),
+    }
+}
+
+/// Drop exact repeats from an edit_file's `edits` (seen: the same line-275
+/// update listed twice, which the host rejects as overlapping ranges).
+fn dedupe_edit_ops(tool: &str, args: &mut Value) {
+    if tool != "edit_file" {
+        return;
+    }
+    if let Some(ops) = args.get_mut("edits").and_then(Value::as_array_mut) {
+        let mut seen: Vec<Value> = Vec::new();
+        ops.retain(|op| {
+            let dup = seen.contains(op);
+            if !dup {
+                seen.push(op.clone());
+            }
+            !dup
+        });
+    }
+}
+
+/// Arguments fixed for one retry after `err`, with the note telling the
+/// model what changed; `None` when there is no mechanical fix. All three
+/// were seen looping until the repeat guard ended the turn:
+/// - edit_file ops starting at column 1 with an `end_column` past the end of
+///   the line: the model meant whole lines, so the columns are dropped.
+/// - a mistyped path (`/tmp/probe/yt1/…` for `tmp-probe/yt1/…`): replaced
+///   by the one path used earlier this turn within a small edit distance.
+/// - edit_file with no `path` at all: the most recent path, guarded by the
+///   edit's `original_hash`.
+fn retry_args(tool: &str, args: &Value, err: &str, known: &[String]) -> Option<(Value, String)> {
+    let lower = err.to_ascii_lowercase();
+    if tool == "edit_file" && lower.contains("beyond the end of line") {
+        let mut fixed = args.clone();
+        let mut changed = false;
+        for op in fixed.get_mut("edits")?.as_array_mut()? {
+            if op.get("start_column").and_then(Value::as_u64) == Some(1)
+                && let Some(o) = op.as_object_mut()
+            {
+                o.remove("start_column");
+                changed |= o.remove("end_column").is_some();
+            }
+        }
+        return changed.then(|| {
+            (
+                fixed,
+                "Retried as whole-line edits: ops that started at column 1 had an end_column past \
+                 the end of the line. To replace whole lines, omit start_column/end_column."
+                    .to_string(),
+            )
+        });
+    }
+    // edit_file without its `path` (seen right after reading the file it
+    // meant): the most recent path. Its `original_hash` must still match, so
+    // a wrong guess is rejected instead of editing the wrong file.
+    if tool == "edit_file"
+        && args.get("path").is_none()
+        && args.get("original_hash").is_some()
+        && lower.contains("path")
+        && lower.contains("required")
+    {
+        let last = known.last()?;
+        let mut fixed = args.clone();
+        fixed["path"] = json!(last);
+        return Some((
+            fixed,
+            format!(
+                "`path` was missing; used `{last}`, the file you used last. Always pass `path`."
+            ),
+        ));
+    }
+    let path_error = [
+        "path must be",
+        "not found",
+        "no such file",
+        "does not exist",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    let given = args.get("path")?.as_str()?;
+    if !path_error || known.iter().any(|k| k == given) {
+        return None;
+    }
+    let mut near: Vec<(usize, &String)> = known
+        .iter()
+        .map(|k| (edit_distance(given, k), k))
+        .filter(|(d, _)| *d <= 3)
+        .collect();
+    near.sort();
+    let best = near.first()?;
+    if near.get(1).is_some_and(|n| n.0 == best.0) {
+        return None;
+    }
+    let mut fixed = args.clone();
+    fixed["path"] = json!(best.1);
+    Some((
+        fixed,
+        format!(
+            "Path corrected from `{given}` to `{}` (the path you used earlier); use that one.",
+            best.1
+        ),
+    ))
+}
+
+/// Levenshtein distance in chars.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// Run each read_file window and join their numbered texts into one result,
+/// in the `provider_invoke_mcp` reply shape. The first failure fails all.
+fn read_each_window(session_id: &str, windows: &[Value]) -> Result<Value, String> {
+    let mut parts = Vec::new();
+    for args in windows {
+        let v = host::call_host(
+            HostFn::ProviderInvokeMcp,
+            &json!({ "session_id": session_id, "name": "read_file", "arguments": args }),
+        )?;
+        if v.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(v);
+        }
+        let result = v.get("result").cloned().unwrap_or(Value::Null);
+        parts.push(
+            file_result_text("read_file", &result).unwrap_or_else(|| tool_result_text(&result)),
+        );
+    }
+    Ok(json!({ "ok": true, "result": parts.join("\n\n") }))
 }
 
 /// The text of `path` through `read_file` windows, up to 6,000 lines.
@@ -1596,7 +1893,7 @@ fn alloc_tool_ids(key: &str, count: u64) -> u64 {
 /// Run one round's tool calls, feeding each result back as a `tool` turn.
 /// Images the tools return go on `ToolEnd` for the UI and into `images`
 /// (with the tool's name) for the caller to show the model; each call's
-/// outcome goes into `failures`. Returns `Ok(true)` when the user
+/// outcome goes into `record.failures`. Returns `Ok(true)` when the user
 /// interrupted between calls — the caller persists the partial exchange.
 fn run_tool_calls(
     session_id: &str,
@@ -1605,7 +1902,7 @@ fn run_tool_calls(
     new_messages: &mut Vec<Value>,
     send_images: bool,
     images: &mut Vec<RoundImage>,
-    failures: &mut Vec<FailedCall>,
+    record: &mut TurnRecord,
 ) -> Result<bool, String> {
     let base = alloc_tool_ids(session_id, calls.len() as u64);
     for (i, call) in calls.iter().enumerate() {
@@ -1621,14 +1918,42 @@ fn run_tool_calls(
                 input: call.args.clone(),
             },
         )?;
-        let invoked = host::call_host(
-            HostFn::ProviderInvokeMcp,
-            &json!({
-                "session_id": session_id,
-                "name": call.name,
-                "arguments": call.args,
-            }),
-        );
+        // What runs may differ from what was asked: CSS parens the model
+        // dropped are closed first, and multi-window reads run one by one.
+        let mut args = call.args.clone();
+        dedupe_edit_ops(&call.name, &mut args);
+        let repaired = repair_written_css(&call.name, &mut args);
+        let invoke = |args: &Value| match read_windows(&call.name, args) {
+            Some(windows) => read_each_window(session_id, &windows),
+            None => host::call_host(
+                HostFn::ProviderInvokeMcp,
+                &json!({
+                    "session_id": session_id,
+                    "name": call.name,
+                    "arguments": args,
+                }),
+            ),
+        };
+        let mut invoked = invoke(&args);
+        // One retry with a mechanical fix for errors a local model loops on.
+        let mut retried = None;
+        if let Some(err) = invoke_error(&invoked)
+            && let Some((fixed, note)) = retry_args(&call.name, &args, &err, &record.paths)
+        {
+            let again = invoke(&fixed);
+            if invoke_error(&again).is_none() {
+                invoked = again;
+                args = fixed;
+                retried = Some(note);
+            }
+        }
+        // Most recent last.
+        if invoke_error(&invoked).is_none()
+            && let Some(p) = args.get("path").and_then(Value::as_str)
+        {
+            record.paths.retain(|k| k != p);
+            record.paths.push(p.to_string());
+        }
         let (content, ok, call_images) = match invoked {
             Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
                 let result = v.get("result").cloned().unwrap_or(Value::Null);
@@ -1664,9 +1989,22 @@ fn run_tool_calls(
         };
         // A web file just written gets its structure checked while it's
         // fresh; the model then fixes it before judging a screenshot.
-        let content = match ok.then(|| written_file_note(session_id, call)).flatten() {
-            Some(note) => format!("{content}\n\n{note}"),
-            None => content,
+        let notes: Vec<String> = [
+            retried,
+            ok.then_some(repaired).flatten(),
+            ok.then(|| written_file_note(session_id, &call.name, &args))
+                .flatten(),
+            ok.then(|| tool_hint(&call.name))
+                .flatten()
+                .map(str::to_string),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let content = if notes.is_empty() {
+            content
+        } else {
+            format!("{content}\n\n{}", notes.join("\n\n"))
         };
         emit(
             session_id,
@@ -1677,7 +2015,7 @@ fn run_tool_calls(
                 images: call_images.clone(),
             },
         )?;
-        record_outcome(failures, &call.name, ok, &content);
+        record_outcome(&mut record.failures, &call.name, ok, &content);
         let (msg, new_msg) = (messages.len(), new_messages.len());
         images.extend(call_images.into_iter().map(|img| RoundImage {
             tool: call.name.clone(),
@@ -2147,6 +2485,12 @@ fn compact_message(m: &mut Value) -> bool {
             };
             for call in calls {
                 let f = &mut call["function"];
+                // A plan is the turn's architecture, and there is no tool to
+                // read it back (seen: the whole site plan put in propose_plan
+                // instead of ARCHITECTURE.md).
+                if f["name"] == "propose_plan" {
+                    continue;
+                }
                 let Some(raw) = f["arguments"].as_str() else {
                     continue;
                 };
@@ -2695,10 +3039,10 @@ mod tests {
         assert!(events.iter().any(|e| e["kind"] == "completed"));
     }
 
-    /// A model repeating the exact same call is stopped after
-    /// `MAX_IDENTICAL_TOOL_ROUNDS` rounds: the repeat isn't run, the turn
-    /// completes (not crashes) with a warning, and the stored history ends
-    /// on an assistant message with no dangling `tool_calls`.
+    /// A model repeating the exact same call is told the repeat wasn't run
+    /// from the 3rd round on, and stopped at `MAX_IDENTICAL_TOOL_ROUNDS`:
+    /// the turn completes (not crashes) with a warning, and the stored
+    /// history ends on an assistant message with no dangling `tool_calls`.
     #[test]
     fn repeated_identical_tool_calls_end_the_turn() {
         let same_call = |id: &str| {
@@ -2716,12 +3060,22 @@ mod tests {
                 1,
             )
         };
-        let mut host = FakeHost::new(vec![same_call("c1"), same_call("c2"), same_call("c3")]);
+        let mut host = FakeHost::new((1..=5).map(|i| same_call(&format!("c{i}"))).collect());
         host.tool_defs = Some(json!([{ "name": "t", "input_schema": { "type": "object" } }]));
         peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
 
-        assert_eq!(host.chat_bodies.lock().unwrap().len(), 3);
+        // Rounds 1-2 run; 3-4 are answered "Not run" without running; the
+        // 5th ends the turn.
+        assert_eq!(host.chat_bodies.lock().unwrap().len(), 5);
         assert_eq!(host.invoked.lock().unwrap().len(), 2);
+        let skipped = host.saved_history();
+        let not_run: Vec<_> = skipped
+            .iter()
+            .filter(|m| {
+                m["role"] == "tool" && m["content"].as_str().unwrap().starts_with("Not run")
+            })
+            .collect();
+        assert_eq!(not_run.len(), 2);
         let events = host.events.lock().unwrap();
         assert!(
             events
@@ -2850,6 +3204,9 @@ mod tests {
         peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
 
         let bodies = host.chat_bodies.lock().unwrap();
+        // The turn's first round gets the full Thinking Budget, later ones half.
+        assert_eq!(bodies[0]["max_tokens"], 8192);
+        assert_eq!(bodies[1]["max_tokens"], 4096);
         let msgs = bodies[1]["messages"].as_array().unwrap();
         let replayed = &msgs[msgs.len() - 2];
         assert_eq!(replayed["content"], "Checking it.");
@@ -3780,6 +4137,18 @@ mod tests {
             }
         }
         assert_eq!(compact_turn(&mut messages, &mut new_messages), 0);
+
+        // A plan keeps its markdown: the model has no way to read it back.
+        let plan = json!({ "markdown": page, "title": "Site" }).to_string();
+        let mut planned = json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{ "id": "p", "type": "function",
+                "function": { "name": "propose_plan", "arguments": plan } }],
+        });
+        let before = planned.clone();
+        assert!(!compact_message(&mut planned));
+        assert_eq!(planned, before);
     }
 
     /// read_file reaches the model as numbered lines under a header that
@@ -3811,5 +4180,104 @@ mod tests {
         let text = file_result_text("read_symbol", &sym).unwrap();
         assert!(text.contains("name: f") && text.ends_with("    7| fn f() {}"));
         assert!(file_result_text("write_file", &result).is_none());
+    }
+
+    /// read_file with array windows becomes one read per window, paired
+    /// with its own count or sharing a scalar one; a normal read is left as
+    /// one call.
+    #[test]
+    fn multi_window_reads_split_per_window() {
+        let args = json!({ "path": "a.css", "start_line": [34, 270], "line_count": [10, 12] });
+        let w = read_windows("read_file", &args).unwrap();
+        assert_eq!(
+            w,
+            [
+                json!({ "path": "a.css", "start_line": 34, "line_count": 10 }),
+                json!({ "path": "a.css", "start_line": 270, "line_count": 12 }),
+            ]
+        );
+        let shared = json!({ "path": "a", "start_line": [1, 50], "line_count": 20 });
+        assert_eq!(
+            read_windows("read_file", &shared).unwrap()[1]["line_count"],
+            20
+        );
+        assert!(read_windows("read_file", &json!({ "path": "a", "start_line": 3 })).is_none());
+        assert!(read_windows("list_files", &args).is_none());
+    }
+
+    /// A search_web result carries the read-the-results hint into the
+    /// model's tool message; other tools don't.
+    #[test]
+    fn search_results_carry_a_read_hint() {
+        let mut host = FakeHost::new(vec![
+            completion(
+                json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{ "id": "s", "type": "function",
+                        "function": { "name": "search_web", "arguments": "{\"query\":\"yt\"}" } }],
+                }),
+                10,
+                2,
+            ),
+            answer("ok"),
+        ]);
+        host.tool_defs =
+            Some(json!([{ "name": "search_web", "input_schema": { "type": "object" } }]));
+        host.tool_result = json!("1. YouTube - youtube.com");
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let bodies = host.chat_bodies.lock().unwrap();
+        let msgs = bodies[1]["messages"].as_array().unwrap();
+        let tool = msgs.iter().find(|m| m["role"] == "tool").unwrap();
+        let text = tool["content"].as_str().unwrap();
+        assert!(text.starts_with("1. YouTube") && text.contains("parse_web"));
+        assert!(tool_hint("read_file").is_none());
+    }
+
+    /// Probe J's two loops get one mechanical retry: column-1 edits that
+    /// overshoot the line become whole-line edits, and a mistyped path is
+    /// replaced by the one close path used earlier. Ambiguous or unrelated
+    /// errors get no retry.
+    #[test]
+    fn retry_args_fixes_overshooting_columns_and_mistyped_paths() {
+        let edit = json!({ "path": "a.css", "edits": [
+            { "op": "update", "start_line": 275, "end_line": 275, "start_column": 1,
+              "end_column": 54, "text": "x" },
+            { "op": "update", "start_line": 9, "end_line": 9, "start_column": 5,
+              "end_column": 7, "text": "y" },
+        ] });
+        let err = "edit 1: column 54 is beyond the end of line 275 (52 characters)";
+        let (fixed, note) = retry_args("edit_file", &edit, err, &[]).unwrap();
+        assert!(fixed["edits"][0].get("start_column").is_none());
+        assert!(fixed["edits"][0].get("end_column").is_none());
+        assert_eq!(fixed["edits"][1]["start_column"], 5);
+        assert!(note.contains("omit start_column"));
+
+        let known = vec![
+            "tmp-probe/yt1/css/pages.css".to_string(),
+            "tmp-probe/yt1/index.html".into(),
+        ];
+        let bad = json!({ "path": "/tmp/probe/yt1/css/pages.css", "start_line": 40 });
+        let err = "path must be relative and within the project folder";
+        let (fixed, note) = retry_args("read_file", &bad, err, &known).unwrap();
+        assert_eq!(fixed["path"], "tmp-probe/yt1/css/pages.css");
+        assert!(note.contains("corrected"));
+        let far = json!({ "path": "/etc/passwd" });
+        assert!(retry_args("read_file", &far, err, &known).is_none());
+        assert!(retry_args("read_file", &bad, "permission denied", &known).is_none());
+
+        // No path at all on a hash-guarded edit: the most recent path.
+        let pathless = json!({ "original_hash": "h", "edits": [] });
+        let err = "`path` (project-relative) is required";
+        let (fixed, _) = retry_args("edit_file", &pathless, err, &known).unwrap();
+        assert_eq!(fixed["path"], "tmp-probe/yt1/index.html");
+
+        let mut dup = json!({ "path": "a", "edits": [
+            { "op": "delete", "start_line": 1, "end_line": 1 },
+            { "op": "delete", "start_line": 1, "end_line": 1 },
+            { "op": "delete", "start_line": 3, "end_line": 3 },
+        ] });
+        dedupe_edit_ops("edit_file", &mut dup);
+        assert_eq!(dup["edits"].as_array().unwrap().len(), 2);
     }
 }

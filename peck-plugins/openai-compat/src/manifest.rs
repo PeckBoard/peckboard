@@ -107,7 +107,7 @@ pub fn manifest_json() -> String {
             {
                 "key": "thinking_budget",
                 "title": "Thinking Budget (Tokens)",
-                "description": "Cap on reasoning tokens per round while thinking is on. A round that hits it mid-reasoning is re-asked with its reasoning closed off (vLLM's continue_final_message), so the model acts on what it worked out instead of reasoning until the request times out. Servers that don't support this fall back to the cut-off reply with a warning. 0 = no cap.",
+                "description": "Cap on reasoning tokens per round while thinking is on: the full budget for a turn's first round, half (at least 2048) for the rounds after it. A round that hits it mid-reasoning is re-asked with its reasoning closed off (vLLM's continue_final_message), so the model acts on what it worked out instead of reasoning until the request times out. Servers that don't support this fall back to the cut-off reply with a warning. 0 = no cap.",
                 "type": "integer",
                 "default": 8192,
                 "min": 0,
