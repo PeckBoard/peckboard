@@ -561,6 +561,20 @@
   color: var(--text3);
   font-style: italic;
 }
+/* A `type: "model"` value the live catalog doesn't list (offline or
+   undiscovered model) — kept, but flagged so a typo is noticed. `--warning`
+   alone is under 3:1 on light surfaces, so the text stays `--text2` and the
+   amber goes on the marker. */
+.plugin-setting-not-in-catalog {
+  color: var(--text2);
+}
+.plugin-setting-not-in-catalog::before {
+  content: '⚠ ';
+  color: var(--warning);
+}
+.model-picker-empty {
+  padding: 6px 10px;
+}
 /* Masked secret field with a Reveal/Hide toggle (SecretInput). Sized to sit
    in a form-field column or as a cell of a .plugin-setting-kv-row. */
 .secret-input {

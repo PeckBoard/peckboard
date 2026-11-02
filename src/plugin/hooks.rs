@@ -636,6 +636,33 @@ mod tests {
     }
 
     #[test]
+    fn manifest_parses_model_setting_field() {
+        // `type: "model"` is part of the settings vocabulary for WASM/TS
+        // manifests too (story-writer's writer_model / reviewer_model).
+        let m: PluginManifest = serde_json::from_str(
+            r#"{ "description":"d","version":"1","repository":"r","hooks":[],
+                 "settings":[
+                   {"key":"writer_model","title":"Writer model","type":"model",
+                    "default":"claude:claude-opus-5-5","placeholder":"provider:model"}
+                 ] }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &m.settings[0].kind,
+            crate::plugin::settings::FieldKind::Model { default: Some(d), placeholder: Some(_) }
+                if d == "claude:claude-opus-5-5"
+        ));
+        // A misspelled `type` is rejected rather than silently dropped.
+        assert!(
+            serde_json::from_str::<PluginManifest>(
+                r#"{ "description":"d","version":"1","repository":"r","hooks":[],
+                     "settings":[{"key":"k","title":"t","type":"modle"}] }"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn manifest_rejects_missing_required_field() {
         // No `description`/`version`/`repository` — required, so it must fail
         // to deserialize rather than yield a blank, anonymous plugin.

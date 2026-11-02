@@ -19,6 +19,8 @@
 //! * `string_list` — variable-length list of plain strings with no
 //!   header-name restriction, used for the Ollama plugin's "additional
 //!   models" setting (model ids may carry `:tag` / `path/` characters).
+//! * `model` — a model id (`provider:model[@account]`), rendered as a
+//!   searchable picker over the live model catalog; stored as a string.
 //!
 //! Storage is the `plugin_settings` table (one row per
 //! `(plugin_id, key)`). Values are JSON-encoded so a key-value list can
@@ -113,6 +115,15 @@ pub enum FieldKind {
     StringList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_placeholder: Option<String>,
+    },
+    /// A model id (`provider:model[@account]`), picked in the UI from the
+    /// live `/api/models` catalog with free-text fallback. Stored as a plain
+    /// string, so a field switched from `string` to `model` keeps its value.
+    Model {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
     },
 }
 
@@ -316,6 +327,25 @@ pub fn validate_value(
                 ));
             }
             Ok(serde_json::Value::Array(out))
+        }
+        FieldKind::Model { .. } => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| ValidationError::wrong_type(&field.key, "string"))?
+                .trim();
+            if s.len() > MAX_STRING_LEN {
+                return Err(ValidationError::too_long(&field.key, MAX_STRING_LEN));
+            }
+            // Deliberately not checked against the live catalog: an id for
+            // an offline / undiscovered model is still a valid choice, and a
+            // provider going away must not make the stored value unsaveable.
+            if s.chars().any(|c| c.is_control()) {
+                return Err(ValidationError::out_of_range(
+                    &field.key,
+                    "model id must not contain control characters".into(),
+                ));
+            }
+            Ok(serde_json::Value::String(s.to_string()))
         }
     }
 }
@@ -553,6 +583,10 @@ pub fn effective_value(
             .unwrap_or(serde_json::Value::Null),
         FieldKind::KeyValueList { .. } => serde_json::Value::Array(Vec::new()),
         FieldKind::StringList { .. } => serde_json::Value::Array(Vec::new()),
+        FieldKind::Model { default, .. } => default
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
     }
 }
 
@@ -796,5 +830,31 @@ mod tests {
         // The secret value is gone — only the key name survives so the
         // user can see what slot is set without disclosing the secret.
         assert!(entries[0]["value"].is_null());
+    }
+
+    #[test]
+    fn model_field_stores_any_id_as_string_and_falls_back_to_default() {
+        let field: SettingField = serde_json::from_value(serde_json::json!({
+            "key": "writer_model", "title": "Writer model", "type": "model",
+            "default": "claude:claude-opus-5-5", "placeholder": "provider:model"
+        }))
+        .unwrap();
+        assert!(matches!(field.kind, FieldKind::Model { .. }));
+        // Account-scoped and not-in-catalog ids are both accepted verbatim
+        // (trimmed) — no catalog lookup at save time.
+        assert_eq!(
+            validate_value(&field, &serde_json::json!(" claude:claude-opus-5-5@acc_1 ")).unwrap(),
+            "claude:claude-opus-5-5@acc_1"
+        );
+        assert_eq!(
+            validate_value(&field, &serde_json::json!("ollama:offline-model:7b")).unwrap(),
+            "ollama:offline-model:7b"
+        );
+        assert!(validate_value(&field, &serde_json::json!("a\nb")).is_err());
+        assert!(validate_value(&field, &serde_json::json!(42)).is_err());
+        // A value stored while the field was `type: "string"` reads back as-is.
+        let stored = serde_json::json!("grok:grok-4");
+        assert_eq!(effective_value(&field, Some(&stored)), "grok:grok-4");
+        assert_eq!(effective_value(&field, None), "claude:claude-opus-5-5");
     }
 }

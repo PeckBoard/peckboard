@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { authedFetch, useAuthStore } from '../store/auth'
+import ModelSettingInput from './ModelSettingInput'
 import { HostCliMissingBanner } from './MissingCommandWarning'
 
 /**
@@ -33,6 +34,7 @@ type FieldKind =
       value_placeholder?: string
     }
   | { type: 'string_list'; item_placeholder?: string }
+  | { type: 'model'; default?: string; placeholder?: string }
 
 interface SchemaField {
   key: string
@@ -86,6 +88,7 @@ function initialValue(field: SchemaField, stored: StoredField | undefined): Form
     case 'string':
     case 'url':
     case 'enum':
+    case 'model':
       if (stored && !stored.masked && typeof stored.value === 'string') return stored.value
       // Secret strings: the API never returns the value; start empty
       // so the user can either leave it (preserves stored value) or
@@ -145,6 +148,8 @@ function encodeField(field: SchemaField, raw: FormValue): unknown {
       return (Array.isArray(raw) ? (raw as KvPair[]) : [])
         .filter((p) => p.key.trim() !== '')
         .map((p) => ({ key: p.key.trim(), value: p.value }))
+    case 'model':
+      return typeof raw === 'string' ? raw.trim() : ''
     case 'string_list':
       return (Array.isArray(raw) ? (raw as string[]) : [])
         .map((s) => s.trim())
@@ -373,10 +378,27 @@ function FieldRow({
         </label>
       )
     }
+    case 'model': {
+      return (
+        <label className="plugin-setting-field" data-field={field.key}>
+          {labelNode}
+          {descNode}
+          <ModelSettingInput
+            value={typeof value === 'string' ? value : ''}
+            placeholder={field.placeholder}
+            testId={`plugin-setting-model-${field.key}`}
+            onChange={(v) => onChange(v)}
+            onCommit={(v) => onCommit(v)}
+            onCommitIfDirty={(v) => onCommitIfDirty(v)}
+          />
+        </label>
+      )
+    }
     case 'integer': {
       return (
         <label className="plugin-setting-field" data-field={field.key}>
           {labelNode}
+          {descNode}
           {descNode}
           <input
             className="plugin-setting-input"
