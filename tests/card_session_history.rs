@@ -7,7 +7,8 @@
 //!   deleted: its transcript stays, but no agent can run in it again (HTTP
 //!   send answers 409 `session_sealed`, `send_or_queue` refuses) and the
 //!   orchestrator never resumes it.
-//! - Same-step resume (a backlog detour) still resumes the same session.
+//! - Moving a card back to backlog ends its run and seals its worker; the
+//!   next pickup starts a fresh session.
 //! - Deleting the card removes every session that ever worked it.
 
 use std::sync::Arc;
@@ -455,25 +456,57 @@ async fn orchestrator_spawns_fresh_instead_of_resuming_a_sealed_session() {
 }
 
 #[tokio::test]
-async fn backlog_detour_resumes_the_same_session_unsealed() {
-    let (state, _) = build_state().await;
-    // The card was worked on in_progress by w1, then moved to backlog.
+async fn moving_to_backlog_seals_the_worker_and_pickup_spawns_fresh() {
+    let (state, token) = build_state().await;
     seed_project(&state, "backlog").await;
-    seed_previous_worker(&state, "w1", "in_progress").await;
 
+    // First pickup: backlog → in_progress in session w1.
     spawn(&state).await;
+    let w1 = current_worker(&state).await;
 
-    assert_eq!(
-        current_worker(&state).await,
-        "w1",
-        "same-step work resumes w1"
-    );
-    // Give any (wrongly) spawned seal task a chance to run.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let w1 = state.db.get_session("w1").await.unwrap().unwrap();
-    assert!(w1.sealed_at.is_none());
+    // The user drags the card back to backlog.
+    let (status, body) = request(
+        &state,
+        &token,
+        "PUT",
+        "/api/projects/p1/cards/c1",
+        Some(serde_json::json!({ "step": "backlog" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The run ends at the move itself...
     let runs = state.db.list_card_sessions("c1").await.unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].session_id, "w1");
+    assert_eq!(runs[0].session_id, w1);
+    assert!(runs[0].ended_at.is_some());
+    assert_eq!(runs[0].outcome.as_deref(), Some("moved_to_backlog"));
+    // ...and the worker is done: agent stopped, session sealed.
+    assert!(wait_sealed(&state, &w1).await, "w1 must be sealed");
+    let sealed = state.db.get_session(&w1).await.unwrap().unwrap();
+    assert_eq!(sealed.sealed_reason.as_deref(), Some("moved_to_backlog"));
+    assert_eq!(sealed.worker_step, None);
+    assert!(!state.session_manager.is_running(&w1).await);
+
+    // Picked up again: a NEW session, never the sealed one.
+    spawn(&state).await;
+    let w2 = current_worker(&state).await;
+    assert_ne!(w2, w1, "a backlogged worker must not be resumed");
+    let runs = state.db.list_card_sessions("c1").await.unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].session_id, w2);
     assert!(runs[0].ended_at.is_none());
+
+    // The MCP `update_card` tool does the same.
+    tool(
+        &state,
+        "operator",
+        "update_card",
+        serde_json::json!({ "card_id": "c1", "step": "backlog" }),
+    )
+    .await;
+    let runs = state.db.list_card_sessions("c1").await.unwrap();
+    assert_eq!(runs[0].outcome.as_deref(), Some("moved_to_backlog"));
+    assert!(wait_sealed(&state, &w2).await, "w2 must be sealed");
+    let sealed = state.db.get_session(&w2).await.unwrap().unwrap();
+    assert_eq!(sealed.sealed_reason.as_deref(), Some("moved_to_backlog"));
 }

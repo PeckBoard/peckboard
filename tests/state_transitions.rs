@@ -576,32 +576,26 @@ async fn orchestrator_spawns_fresh_session_after_card_advanced() {
     let assigned = card.worker_session_id.as_deref().unwrap();
     assert_ne!(assigned, "prev-ws", "a severed session must not be resumed");
 }
-
 /// The resume link survives every detour the card can take without
-/// actually advancing: back to backlog, into wont_do, and back again.
-/// Only a move to a different real step (here `done`) severs it.
+/// actually advancing: into wont_do and back again. A move to a different
+/// real step (here `done`) severs it, and so does a move back to backlog —
+/// that starts the card over in a fresh session.
 #[tokio::test]
-async fn worker_resume_link_survives_backlog_and_wont_do_but_not_forward_moves() {
+async fn worker_resume_link_survives_wont_do_but_not_backlog_or_forward_moves() {
     let state = build_state().await;
     seed_project(&state).await;
     seed_resumable_card(&state, "c1", "in_progress", "prev-ws").await;
+    seed_resumable_card(&state, "c2", "in_progress", "prev-ws2").await;
 
-    let worker_step = |state: &Arc<AppState>| {
+    let worker_step = |state: &Arc<AppState>, sid: &'static str| {
+        let db = state.db.clone();
+        async move { db.get_session(sid).await.unwrap().unwrap().worker_step }
+    };
+    let move_to = |state: &Arc<AppState>, card: &'static str, step: &'static str| {
         let db = state.db.clone();
         async move {
-            db.get_session("prev-ws")
-                .await
-                .unwrap()
-                .unwrap()
-                .worker_step
-        }
-    };
-
-    for step in ["backlog", "in_progress", "wont_do", "in_progress"] {
-        state
-            .db
-            .update_card(
-                "c1",
+            db.update_card(
+                card,
                 UpdateCard {
                     step: Some(step.into()),
                     ..Default::default()
@@ -609,26 +603,28 @@ async fn worker_resume_link_survives_backlog_and_wont_do_but_not_forward_moves()
             )
             .await
             .unwrap();
+        }
+    };
+
+    for step in ["wont_do", "in_progress"] {
+        move_to(&state, "c1", step).await;
         assert_eq!(
-            worker_step(&state).await.as_deref(),
+            worker_step(&state, "prev-ws").await.as_deref(),
             Some("in_progress"),
             "detour through {step} must keep the resume link"
         );
     }
 
-    state
-        .db
-        .update_card(
-            "c1",
-            UpdateCard {
-                step: Some("done".into()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    move_to(&state, "c1", "backlog").await;
     assert_eq!(
-        worker_step(&state).await,
+        worker_step(&state, "prev-ws").await,
+        None,
+        "moving to backlog must sever the resume link"
+    );
+
+    move_to(&state, "c2", "done").await;
+    assert_eq!(
+        worker_step(&state, "prev-ws2").await,
         None,
         "moving to done must sever the resume link"
     );

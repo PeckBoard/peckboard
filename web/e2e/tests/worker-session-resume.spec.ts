@@ -5,11 +5,12 @@ import path from 'node:path'
 
 /**
  * Worker-session resume: a card that leaves `in_progress` only via a
- * detour (backlog, wont_do, or the blocked flag) must get its PREVIOUS
- * worker session back when it is picked up again — same session id, same
+ * detour (wont_do, or the blocked flag) must get its PREVIOUS worker
+ * session back when it is picked up again — same session id, same
  * conversation — instead of a freshly minted session that has lost all
- * context. Moving the card forward to a different real step severs that
- * link and the next step gets a fresh session.
+ * context. Moving the card back to backlog starts it over (the old worker
+ * is sealed, the pickup gets a new session), and moving it forward to a
+ * different real step severs the link too.
  */
 
 const E2E_USER = 'e2e-user'
@@ -128,29 +129,59 @@ async function moveCard(
 // tight on a loaded machine, so give these tests explicit headroom.
 test.describe.configure({ timeout: 120_000 })
 
-test('card moved to backlog and picked up again resumes the same worker session', async ({
+test('card moved to backlog is finished and picked up again in a new worker session', async ({
   request,
   baseURL,
 }) => {
   expect(baseURL).toBeTruthy()
   const { auth } = await authenticate(request)
-  const { project } = await makeProject(request, auth, 'resume-same-session', 'task')
+  const { project } = await makeProject(request, auth, 'backlog-fresh-session', 'task')
   const card = await makeCard(request, auth, project.id, 'Interruptible work')
 
   // First pickup: orchestrator advances backlog → in_progress and spawns.
   const firstSession = await waitForWorker(request, auth, project.id, card.id, 20_000)
 
-  // User drags the card back to backlog — worker is cancelled, but the
-  // resume link must survive this detour.
+  // User drags the card back to backlog — the card starts over: its run
+  // ends and the worker session is sealed (done).
   await moveCard(request, auth, project.id, card.id, 'backlog')
 
-  // The orchestrator re-picks the card on a later tick (the cancel has to
-  // land first, so allow a couple of ticks). It must RESUME the previous
-  // session rather than mint a new one.
-  const secondSession = await waitForWorker(request, auth, project.id, card.id, 30_000)
-  expect(secondSession).toBe(firstSession)
-})
+  const runsRes = await request.get(`/api/projects/${project.id}/cards/${card.id}/sessions`, {
+    headers: auth,
+  })
+  expect(runsRes.ok()).toBeTruthy()
+  const { sessions: runs } = (await runsRes.json()) as {
+    sessions: Array<{ session_id: string; ended_at: string | null; outcome: string | null }>
+  }
+  const firstRun = runs.find((r) => r.session_id === firstSession)
+  expect(firstRun?.ended_at, 'the run must end at the move').toBeTruthy()
+  expect(firstRun?.outcome).toBe('moved_to_backlog')
 
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`/api/sessions/${firstSession}`, { headers: auth })
+        if (!res.ok()) return null
+        const s = (await res.json()) as { sealed_reason?: string | null }
+        return s.sealed_reason ?? null
+      },
+      { timeout: 15_000 },
+    )
+    .toBe('moved_to_backlog')
+
+  // The orchestrator re-picks the card on a later tick (the cancel has to
+  // land first, so allow a couple of ticks) in a NEW session.
+  const deadline = Date.now() + 30_000
+  let secondSession: string | null = null
+  while (Date.now() < deadline) {
+    const c = await getCard(request, auth, project.id, card.id)
+    if (typeof c.worker_session_id === 'string' && c.worker_session_id !== firstSession) {
+      secondSession = c.worker_session_id
+      break
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  expect(secondSession, 'backlog pickup never got a new worker').toBeTruthy()
+})
 test('card advanced to the next step gets a fresh worker session', async ({ request, baseURL }) => {
   expect(baseURL).toBeTruthy()
   const { auth } = await authenticate(request)

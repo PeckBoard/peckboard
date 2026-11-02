@@ -1,6 +1,7 @@
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 
+use super::card_sessions::{MOVED_TO_BACKLOG, close_runs};
 use crate::db::Db;
 use crate::db::models::*;
 use crate::db::schema::*;
@@ -61,37 +62,48 @@ fn stamp_completed_at(prev_step: &str, update: &mut UpdateCard) {
 /// the card's step moves somewhere that session wasn't working.
 ///
 /// A worker session persists for its card while the card stays on the step
-/// the session was working, or detours through `backlog` / `wont_do` (being
-/// blocked is a flag, not a step, so it never lands here) — coming back to
-/// the worked step resumes the same session/conversation instead of
-/// spawning a fresh agent (see `spawn_worker_for_card`). Moving the card to
-/// any OTHER real step ends that: we null the session's `worker_step` so it
-/// is never picked as a resume candidate again. Lives in the DB write path
-/// (like `stamp_completed_at`) so every step transition — route handler,
-/// MCP tool, orchestrator — enforces the same rule.
+/// the session was working, or detours through `wont_do` (being blocked is a
+/// flag, not a step, so it never lands here) — coming back to the worked
+/// step resumes the same session/conversation instead of spawning a fresh
+/// agent (see `spawn_worker_for_card`). Moving the card to any OTHER real
+/// step ends that: we null the session's `worker_step` so it is never picked
+/// as a resume candidate again. Lives in the DB write path (like
+/// `stamp_completed_at`) so every step transition — route handler, MCP tool,
+/// plugin host, orchestrator — enforces the same rule.
+///
+/// Moving the card back to `backlog` starts it over: the open run is ended
+/// as [`MOVED_TO_BACKLOG`] and the link is severed for the card's current
+/// AND last worker, so the next pickup always mints a fresh session. The
+/// movers then seal that session (`seal_worker_session` /
+/// `seal_backlogged_worker`); the orchestrator seals it at the next pickup
+/// if no mover did.
 fn sever_worker_resume_link(
     conn: &mut SqliteConnection,
     prev_step: &str,
     card: &Card,
 ) -> anyhow::Result<()> {
-    if card.step == prev_step
-        || card.step == "backlog"
-        || card.step == "todo"
-        || card.step == "wont_do"
-    {
+    if card.step == prev_step || card.step == "todo" || card.step == "wont_do" {
         return Ok(());
     }
-    let Some(sid) = card.last_worker_session_id.as_deref() else {
-        return Ok(());
-    };
-    diesel::update(
-        sessions::table
-            .find(sid)
-            .filter(sessions::worker_step.is_not_null())
-            .filter(sessions::worker_step.ne(&card.step)),
-    )
-    .set(sessions::worker_step.eq::<Option<String>>(None))
-    .execute(conn)?;
+    let to_backlog = card.step == "backlog";
+    if to_backlog {
+        let now = chrono::Utc::now().to_rfc3339();
+        close_runs(conn, &card.id, None, MOVED_TO_BACKLOG, None, &now)?;
+    }
+    let current = card.worker_session_id.as_deref().filter(|_| to_backlog);
+    for sid in [current, card.last_worker_session_id.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        diesel::update(
+            sessions::table
+                .find(sid)
+                .filter(sessions::worker_step.is_not_null())
+                .filter(sessions::worker_step.ne(&card.step)),
+        )
+        .set(sessions::worker_step.eq::<Option<String>>(None))
+        .execute(conn)?;
+    }
     Ok(())
 }
 /// The slim per-card columns the project summary widget needs.

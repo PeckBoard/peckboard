@@ -50,15 +50,22 @@ pub enum SealOutcome {
     NotFound,
 }
 
+/// Run outcome and seal reason for a worker whose card was moved back to
+/// `backlog`: its run ends, the session is sealed, and the next pickup starts
+/// a fresh session (see `sever_worker_resume_link` in `db::crud::cards`).
+pub const MOVED_TO_BACKLOG: &str = "moved_to_backlog";
+
 /// `sessions.sealed_reason` for a session whose last run ended with
 /// `outcome`: `advanced` (its work moved the card on), `reviewed` (its
-/// review finished), `moved` (the user moved the card), `stopped`,
-/// `wont_do`; anything else — a crash, a run cut short — `superseded`.
+/// review finished), `moved` (the user moved the card), `moved_to_backlog`,
+/// `stopped`, `wont_do`; anything else — a crash, a run cut short —
+/// `superseded`.
 pub fn seal_reason_for_outcome(outcome: Option<&str>) -> &'static str {
     match outcome {
         Some("advanced" | "finished") => "advanced",
         Some("reviewed" | "changes_requested") => "reviewed",
         Some("moved") => "moved",
+        Some(MOVED_TO_BACKLOG) => MOVED_TO_BACKLOG,
         Some("stopped") => "stopped",
         Some("wont_do") => "wont_do",
         _ => "superseded",
@@ -67,7 +74,7 @@ pub fn seal_reason_for_outcome(outcome: Option<&str>) -> &'static str {
 
 /// Close the open runs on `card_id` — only `session_id`'s when given — with
 /// `outcome`. `summary = None` keeps whatever summary the row already has.
-fn close_runs(
+pub(crate) fn close_runs(
     conn: &mut SqliteConnection,
     card_id: &str,
     session_id: Option<&str>,

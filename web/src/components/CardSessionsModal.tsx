@@ -22,6 +22,7 @@ const OUTCOME_LABELS: Record<string, string> = {
   changes_requested: 'Changes requested',
   stopped: 'Stopped',
   moved: 'Moved',
+  moved_to_backlog: 'Moved to backlog',
   wont_do: "Won't do",
   crashed: 'Crashed',
   superseded: 'Superseded',

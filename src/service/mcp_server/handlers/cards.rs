@@ -110,6 +110,38 @@ fn cancel_stale_worker(ctx: &ToolCallContext, session_id: &str) {
     });
 }
 
+/// Seal the worker of a card an MCP tool just moved back to backlog: hard-
+/// cancel its agent, then seal it (`Db::seal_session`), so the next pickup
+/// mints a fresh session. The card update already ended its run and severed
+/// its resume link, so even if this loses a race with a dispatch (the MCP
+/// context carries no `SessionManager`, hence no session lock) the
+/// orchestrator never resumes it and seals it at the next pickup. Spawned
+/// in the background so the MCP tool returns immediately.
+fn seal_backlogged_worker(ctx: &ToolCallContext, session_id: &str) {
+    let registry = ctx.provider_registry.clone();
+    let db = ctx.db.clone();
+    let broadcaster = ctx.broadcaster.clone();
+    let session_id = session_id.to_string();
+    tracing::info!(session_id = %session_id, "MCP: sealing worker after card moved to backlog");
+    tokio::spawn(async move {
+        if let Some(registry) = registry {
+            crate::provider::manager::cancel_via_registry(&registry, &session_id).await;
+        }
+        let sealed = db
+            .seal_session(&session_id, Some(crate::db::crud::MOVED_TO_BACKLOG))
+            .await;
+        if let Ok(crate::db::crud::SealOutcome::Sealed { .. }) = sealed
+            && let Ok(Some(s)) = db.get_session(&session_id).await
+        {
+            broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "session-updated".into(),
+                session_id: session_id.clone(),
+                data: serde_json::to_value(&s).unwrap_or(serde_json::Value::Null),
+            });
+        }
+    });
+}
+
 /// Parse a nullable string-override field (e.g. `model`, `effort`) from tool
 /// args into the `Option<Option<String>>` an [`UpdateCard`] expects: `None`
 /// when the key is absent (leave the field unchanged), `Some(None)` for an
@@ -1101,11 +1133,15 @@ impl McpToolRegistry {
         // no reason.
         let stale_worker_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let stale_worker_writer = stale_worker_cell.clone();
+        let to_backlog_cell = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let to_backlog_writer = to_backlog_cell.clone();
         let card = ctx
             .db
             .update_card_atomic(card_id, move |existing| {
                 crate::card_policy::enforce_card_update_policy(&existing.step, &policy_intent)?;
                 let step_changing = new_step.as_deref().is_some_and(|s| s != existing.step);
+                *to_backlog_writer.lock().unwrap() =
+                    step_changing && new_step.as_deref() == Some("backlog");
                 let (worker_session_id, last_worker_session_id) =
                     if step_changing && let Some(sid) = existing.worker_session_id.clone() {
                         *stale_worker_writer.lock().unwrap() = Some(sid.clone());
@@ -1158,7 +1194,13 @@ impl McpToolRegistry {
         });
 
         let stale_sid = stale_worker_cell.lock().unwrap().take();
-        if let Some(sid) = stale_sid {
+        if *to_backlog_cell.lock().unwrap() {
+            // Back to backlog: the update already ended the run and severed
+            // the resume link; seal the worker so the next pickup is fresh.
+            if let Some(sid) = stale_sid.or_else(|| card.last_worker_session_id.clone()) {
+                seal_backlogged_worker(ctx, &sid);
+            }
+        } else if let Some(sid) = stale_sid {
             let _ = ctx.db.close_card_run(card_id, &sid, "moved", None).await;
             cancel_stale_worker(ctx, &sid);
         }

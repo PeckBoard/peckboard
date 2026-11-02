@@ -77,6 +77,9 @@ struct ToolCall {
     name: String,
     args: Value,
     arguments: String,
+    /// Why an argument couldn't be coerced (`coerce_args`), added to the
+    /// tool's error if the call fails.
+    notes: Vec<String>,
 }
 
 /// A tool that failed this turn and hasn't succeeded since: its name, how
@@ -1030,9 +1033,10 @@ fn parse_tool_calls(session_id: &str, msg: &Value, tools: Option<&Value>) -> Vec
             _ => json!({}),
         };
         let mut args = if args.is_object() { args } else { json!({}) };
-        if let Some(schema) = tool_schema(tools, &name) {
-            coerce_args(&mut args, schema);
-        }
+        let notes = match tool_schema(tools, &name) {
+            Some(schema) => coerce_args(&mut args, schema),
+            None => Vec::new(),
+        };
         let wire_id = call
             .get("id")
             .and_then(|v| v.as_str())
@@ -1046,6 +1050,7 @@ fn parse_tool_calls(session_id: &str, msg: &Value, tools: Option<&Value>) -> Vec
             name,
             arguments: args.to_string(),
             args,
+            notes,
         });
     }
     out
@@ -1082,15 +1087,18 @@ fn tool_schema<'a>(tools: Option<&'a Value>, name: &str) -> Option<&'a Value> {
 /// to resend it unchanged until the identical-call guard ends the turn.
 /// Coerce top-level arguments to the types the tool's schema declares; a
 /// value that can't be coerced is left for the host to reject as before.
-/// Leaked XML markup is salvaged first (`salvage_tool_markup`).
-fn coerce_args(args: &mut Value, schema: &Value) {
+/// Leaked XML markup is salvaged first (`salvage_tool_markup`). Returns a
+/// note for each array/object argument still left as text, to append to the
+/// tool's error.
+fn coerce_args(args: &mut Value, schema: &Value) -> Vec<String> {
     let (Some(obj), Some(props)) = (
         args.as_object_mut(),
         schema.get("properties").and_then(Value::as_object),
     ) else {
-        return;
+        return Vec::new();
     };
     salvage_tool_markup(obj, props);
+    let mut notes = Vec::new();
     let keys: Vec<String> = obj.keys().cloned().collect();
     for key in keys {
         let Some(prop) = props.get(&key) else {
@@ -1132,9 +1140,25 @@ fn coerce_args(args: &mut Value, schema: &Value) {
             None if value.as_str().is_some_and(|s| s.trim().is_empty()) => {
                 obj.remove(&key);
             }
+            // Still text: tell the model why, in the tool error. The host's
+            // own message ("`edits` must be an array") doesn't say the JSON
+            // was malformed, and the model resent the same call nine times.
+            None if matches!(ty, "array" | "object") => {
+                if let Some(s) = value.as_str() {
+                    let why = serde_json::from_str::<Value>(s.trim())
+                        .err()
+                        .map_or_else(|| format!("not a JSON {ty}"), |e| e.to_string());
+                    notes.push(format!(
+                        "`{key}` arrived as text that isn't valid JSON ({why}). Send it as a \
+                         real JSON {ty}, and escape every double quote inside a string value \
+                         as \\\" (in HTML, single-quoted attributes avoid the problem)."
+                    ));
+                }
+            }
             None => {}
         }
     }
+    notes
 }
 
 /// Closing tags of the XML tool-call format (vLLM's qwen3_coder parser).
@@ -1213,16 +1237,61 @@ fn parse_json_lenient(s: &str, ty: &str) -> Option<Value> {
     if !s.starts_with(open) {
         return None;
     }
-    [String::new(), close.to_string(), format!("\"{close}")]
-        .iter()
-        .filter_map(|suffix| serde_json::from_str::<Value>(&format!("{s}{suffix}")).ok())
-        .find(|v| {
-            if ty == "array" {
-                v.is_array()
-            } else {
-                v.is_object()
+    let parse = |s: &str| {
+        [String::new(), close.to_string(), format!("\"{close}")]
+            .iter()
+            .filter_map(|suffix| serde_json::from_str::<Value>(&format!("{s}{suffix}")).ok())
+            .find(|v| {
+                if ty == "array" {
+                    v.is_array()
+                } else {
+                    v.is_object()
+                }
+            })
+    };
+    parse(s).or_else(|| parse(&escape_stray_quotes(s)))
+}
+
+/// Repair the JSON local models write inside a string argument: a double
+/// quote left bare inside a string value (seen in edit_file `edits`:
+/// `"text": "<input placeholder=\"Search…">"`, every retry), and raw
+/// newlines or tabs. A quote closes a string only where JSON allows a string
+/// to end — followed by `,` `:` `}` `]` or nothing; any other quote inside a
+/// string is content and gets escaped.
+fn escape_stray_quotes(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut in_str = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if !in_str {
+            in_str = c == '"';
+            out.push(c);
+        } else if c == '\\' {
+            out.push(c);
+            if let Some(&n) = chars.get(i + 1) {
+                out.push(n);
+                i += 1;
             }
-        })
+        } else if c == '"' {
+            let next = chars[i + 1..].iter().find(|c| !c.is_whitespace());
+            if matches!(next, None | Some(',' | ':' | '}' | ']')) {
+                in_str = false;
+                out.push('"');
+            } else {
+                out.push_str("\\\"");
+            }
+        } else if c == '\n' {
+            out.push_str("\\n");
+        } else if c == '\t' {
+            out.push_str("\\t");
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
 }
 /// Emit the turn's single `Usage` event, or nothing when the server
 /// reported no counts.
@@ -1485,6 +1554,11 @@ fn run_tool_calls(
                 Vec::new(),
             ),
             Err(e) => (e, false, Vec::new()),
+        };
+        let content = if ok || call.notes.is_empty() {
+            content
+        } else {
+            format!("{content}\n{}", call.notes.join("\n"))
         };
         emit(
             session_id,
@@ -2779,6 +2853,35 @@ mod tests {
         // parser, say) is not leaked markup and stays intact.
         let code = "const TAGS: &[&str] = &[\"</parameter>\", \"</function>\"];";
         assert_eq!(coerce(json!({"command": code}))["command"], json!(code));
+    }
+
+    #[test]
+    fn stringified_json_with_bare_quotes_is_repaired() {
+        let schema = json!({"type": "object", "properties": {
+            "path": {"type": "string"},
+            "edits": {"type": "array", "items": {"type": "object"}},
+        }});
+        // Real edit_file calls from a probe: quotes inside the HTML left
+        // bare, at the end and in the middle, a raw newline too.
+        let want =
+            "<input type=\"text\" aria-label=\"Search videos\" placeholder=\"Search videos…\">";
+        for edits in [
+            r#"[{"op": "update", "start_line": 295, "end_line": 295, "text": "<input type=\"text\" aria-label=\"Search videos\" placeholder=\"Search videos…">"}]"#,
+            r#"[{"op": "update", "start_line": 295, "end_line": 295, "text": "<input type=\"text" aria-label=\"Search videos\" placeholder=\"Search videos…">"}]"#,
+            "[\n  {\n    \"op\": \"update\",\n    \"text\": \"<input type=\"text\" aria-label=\"Search videos\" placeholder=\"Search videos…\">\"\n  }\n]",
+        ] {
+            let mut args = json!({ "path": "a.html", "edits": edits });
+            let notes = coerce_args(&mut args, &schema);
+            assert!(notes.is_empty(), "{edits}: {notes:?}");
+            assert_eq!(args["edits"][0]["text"], want, "{edits}");
+            assert_eq!(args["edits"][0]["op"], "update");
+        }
+        // Beyond repair: left as text, with a note on why for the model.
+        let mut args = json!({ "edits": "[{\"op\": update}]" });
+        let notes = coerce_args(&mut args, &schema);
+        assert!(args["edits"].is_string());
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("`edits` arrived as text that isn't valid JSON"));
     }
 
     #[test]

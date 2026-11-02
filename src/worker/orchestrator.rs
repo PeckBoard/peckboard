@@ -652,11 +652,13 @@ async fn spawn_worker_for_card(
     // 2. Reuse or create the worker session. If the card's previous worker
     // session was working THIS step and its resume link is intact (the
     // card never moved to a different real step since — detours through
-    // backlog / wont_do / the blocked flag don't sever it, see
+    // wont_do / the blocked flag don't sever it, see
     // `sever_worker_resume_link` in db::crud::cards), resume that session:
     // the provider restores the old conversation via its conversation_id,
     // so the agent keeps its context instead of rediscovering the card
-    // from scratch.
+    // from scratch. A move back to backlog DOES sever it (and ends the
+    // run): the card starts over in a fresh session, and the old one is
+    // sealed below if its mover didn't already.
     // A session pinned to an out-of-quota account is never resumed or
     // reused while the card's auto-switch is on: a fresh session picks an
     // available model (`dispatch_model`). With auto-switch OFF it is kept,

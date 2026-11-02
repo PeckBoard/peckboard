@@ -220,6 +220,7 @@ export type CardRunOutcome =
   | 'changes_requested'
   | 'stopped'
   | 'moved'
+  | 'moved_to_backlog'
   | 'wont_do'
   | 'crashed'
   | 'superseded'
