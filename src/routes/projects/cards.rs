@@ -605,7 +605,9 @@ pub(super) async fn update_card(
         });
 
     let prev_step = prev_step_cell.lock().unwrap().take();
-    let moved_to_backlog = prev_step.is_some() && c.step == "backlog";
+    let restart_reason = prev_step
+        .as_ref()
+        .and_then(|_| crate::db::crud::intake_outcome(&c.step));
     if let Some(old_step) = prev_step {
         crate::plugin::notify::fire_card_step_after(
             &state.db,
@@ -634,23 +636,24 @@ pub(super) async fn update_card(
         }
     }
 
-    // Back to backlog starts the card over: the update already ended its
-    // run and severed the resume link (`sever_worker_resume_link`); seal its
-    // worker — the one that was running, else the last one — so the next
+    // Back to backlog or todo starts the card over: the update already ended
+    // its run and severed the resume link (`sever_worker_resume_link`); seal
+    // its worker — the one that was running, else the last one — so the next
     // pickup is a fresh session. Sealing terminates the agent first.
-    if moved_to_backlog {
+    if let Some(reason) = restart_reason {
         if let Some(sid) = stale_sid.or_else(|| c.last_worker_session_id.clone()) {
             tracing::info!(
                 card_id = %card_id,
                 session_id = %sid,
-                "Sealing worker after user moved card back to backlog"
+                reason,
+                "Sealing worker after user moved card back to an intake step"
             );
             let state_for_seal = state.clone();
             tokio::spawn(async move {
                 crate::worker::orchestrator::seal_worker_session(
                     &state_for_seal,
                     &sid,
-                    Some(crate::db::crud::MOVED_TO_BACKLOG),
+                    Some(reason),
                 )
                 .await;
             });

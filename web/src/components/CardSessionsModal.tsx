@@ -23,6 +23,7 @@ const OUTCOME_LABELS: Record<string, string> = {
   stopped: 'Stopped',
   moved: 'Moved',
   moved_to_backlog: 'Moved to backlog',
+  moved_to_todo: 'Moved to todo',
   wont_do: "Won't do",
   crashed: 'Crashed',
   superseded: 'Superseded',

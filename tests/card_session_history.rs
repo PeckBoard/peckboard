@@ -509,4 +509,27 @@ async fn moving_to_backlog_seals_the_worker_and_pickup_spawns_fresh() {
     assert!(wait_sealed(&state, &w2).await, "w2 must be sealed");
     let sealed = state.db.get_session(&w2).await.unwrap().unwrap();
     assert_eq!(sealed.sealed_reason.as_deref(), Some("moved_to_backlog"));
+
+    // Back to todo starts it over too: picked up again in w3, moved to todo,
+    // w3 is sealed and the next pickup is a fourth session.
+    spawn(&state).await;
+    let w3 = current_worker(&state).await;
+    assert!(w3 != w1 && w3 != w2);
+    let (status, body) = request(
+        &state,
+        &token,
+        "PUT",
+        "/api/projects/p1/cards/c1",
+        Some(serde_json::json!({ "step": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let runs = state.db.list_card_sessions("c1").await.unwrap();
+    assert_eq!(runs[0].session_id, w3);
+    assert_eq!(runs[0].outcome.as_deref(), Some("moved_to_todo"));
+    assert!(wait_sealed(&state, &w3).await, "w3 must be sealed");
+    let sealed = state.db.get_session(&w3).await.unwrap().unwrap();
+    assert_eq!(sealed.sealed_reason.as_deref(), Some("moved_to_todo"));
+    spawn(&state).await;
+    assert_ne!(current_worker(&state).await, w3);
 }

@@ -221,6 +221,7 @@ export type CardRunOutcome =
   | 'stopped'
   | 'moved'
   | 'moved_to_backlog'
+  | 'moved_to_todo'
   | 'wont_do'
   | 'crashed'
   | 'superseded'

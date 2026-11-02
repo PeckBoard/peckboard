@@ -54,20 +54,32 @@ pub enum SealOutcome {
 /// `backlog`: its run ends, the session is sealed, and the next pickup starts
 /// a fresh session (see `sever_worker_resume_link` in `db::crud::cards`).
 pub const MOVED_TO_BACKLOG: &str = "moved_to_backlog";
+/// The same for a card moved back to `todo`.
+pub const MOVED_TO_TODO: &str = "moved_to_todo";
+
+/// The run outcome / seal reason for moving a card to `step`, when `step` is
+/// an intake step (`backlog`, `todo`) that starts the card over; `None` for
+/// every other step.
+pub fn intake_outcome(step: &str) -> Option<&'static str> {
+    match step {
+        "backlog" => Some(MOVED_TO_BACKLOG),
+        "todo" => Some(MOVED_TO_TODO),
+        _ => None,
+    }
+}
 
 /// `sessions.sealed_reason` for a session whose last run ended with
 /// `outcome`: `advanced` (its work moved the card on), `reviewed` (its
 /// review finished), `moved` (the user moved the card), `moved_to_backlog`,
-/// `stopped`, `wont_do`; anything else — a crash, a run cut short —
-/// `superseded`.
+/// `moved_to_todo`, `stopped`, `wont_do`; anything else — a crash, a run cut
+/// short — `superseded`.
 pub fn seal_reason_for_outcome(outcome: Option<&str>) -> &'static str {
     match outcome {
         Some("advanced" | "finished") => "advanced",
         Some("reviewed" | "changes_requested") => "reviewed",
         Some("moved") => "moved",
         Some(MOVED_TO_BACKLOG) => MOVED_TO_BACKLOG,
-        Some("stopped") => "stopped",
-        Some("wont_do") => "wont_do",
+        Some(MOVED_TO_TODO) => MOVED_TO_TODO,
         _ => "superseded",
     }
 }

@@ -914,6 +914,7 @@ type ConfirmActionState = {
 const SEALED_REASONS: Record<string, string> = {
   superseded: 'The card moved on — a newer run picked it up.',
   moved_to_backlog: 'The card was moved back to backlog — it starts over in a new session.',
+  moved_to_todo: 'The card was moved back to todo — it starts over in a new session.',
   external_mcp: 'External OAuth client — its tool calls show here; no agent runs in this session.',
 }
 export default function ChatView({

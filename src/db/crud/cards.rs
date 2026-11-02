@@ -1,7 +1,7 @@
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 
-use super::card_sessions::{MOVED_TO_BACKLOG, close_runs};
+use super::card_sessions::{close_runs, intake_outcome};
 use crate::db::Db;
 use crate::db::models::*;
 use crate::db::schema::*;
@@ -71,26 +71,30 @@ fn stamp_completed_at(prev_step: &str, update: &mut UpdateCard) {
 /// `stamp_completed_at`) so every step transition — route handler, MCP tool,
 /// plugin host, orchestrator — enforces the same rule.
 ///
-/// Moving the card back to `backlog` starts it over: the open run is ended
-/// as [`MOVED_TO_BACKLOG`] and the link is severed for the card's current
+/// Moving the card back to an intake step (`backlog` or `todo`) starts it
+/// over: the open run is ended as `MOVED_TO_BACKLOG` / `MOVED_TO_TODO`
+/// (see [`intake_outcome`]) and the link is severed for the card's current
 /// AND last worker, so the next pickup always mints a fresh session. The
 /// movers then seal that session (`seal_worker_session` /
-/// `seal_backlogged_worker`); the orchestrator seals it at the next pickup
+/// `seal_restarted_worker`); the orchestrator seals it at the next pickup
 /// if no mover did.
 fn sever_worker_resume_link(
     conn: &mut SqliteConnection,
     prev_step: &str,
     card: &Card,
 ) -> anyhow::Result<()> {
-    if card.step == prev_step || card.step == "todo" || card.step == "wont_do" {
+    if card.step == prev_step || card.step == "wont_do" {
         return Ok(());
     }
-    let to_backlog = card.step == "backlog";
-    if to_backlog {
+    let intake = intake_outcome(&card.step);
+    if let Some(outcome) = intake {
         let now = chrono::Utc::now().to_rfc3339();
-        close_runs(conn, &card.id, None, MOVED_TO_BACKLOG, None, &now)?;
+        close_runs(conn, &card.id, None, outcome, None, &now)?;
     }
-    let current = card.worker_session_id.as_deref().filter(|_| to_backlog);
+    let current = card
+        .worker_session_id
+        .as_deref()
+        .filter(|_| intake.is_some());
     for sid in [current, card.last_worker_session_id.as_deref()]
         .into_iter()
         .flatten()
