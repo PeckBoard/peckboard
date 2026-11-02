@@ -103,6 +103,40 @@ struct TurnRecord {
     failures: Vec<FailedCall>,
     /// Paths used successfully, for `retry_args` to correct a mistyped one.
     paths: Vec<String>,
+    /// The user asked for research and no web tool has run yet: the first
+    /// file write is refused once (`RESEARCH_GATE`).
+    research_pending: bool,
+}
+
+/// Web tools that count as research for the gate.
+const WEB_TOOLS: &[&str] = &[
+    "search_web",
+    "fetch_web",
+    "parse_web",
+    "web_get_part",
+    "fetch_url",
+];
+
+/// Seen twice: asked to "research and plan before you build", the model ran
+/// one search and opened nothing, then (next probe) ran none at all and
+/// copied an earlier attempt from disk, calling that research.
+const RESEARCH_GATE: &str = "Not run: you were asked to research first, and you haven't used the web \
+     tools yet. Search for 2–3 real reference designs or examples with search_web, open the \
+     best results with parse_web, write what you learned into RESEARCH.md, then write files.";
+
+/// Whether the user's message asks for research before the work.
+fn asks_for_research(prompt: &str) -> bool {
+    let p = prompt.to_ascii_lowercase();
+    [
+        "research",
+        "look up",
+        "inspiration",
+        "look online",
+        "search the web",
+        "find examples",
+    ]
+    .iter()
+    .any(|w| p.contains(w))
 }
 
 /// Record one tool call's outcome: a success clears that tool's failures
@@ -288,7 +322,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
     // Tool calls that failed this turn and weren't redone successfully (the
     // once-per-turn check on the final answer they trigger), and the paths
     // the turn used successfully.
-    let mut record = TurnRecord::default();
+    let mut record = TurnRecord {
+        research_pending: asks_for_research(prompt),
+        ..TurnRecord::default()
+    };
     let mut failure_checked = false;
     let mut awaiting_check_reply = false;
     let mut compacted = false;
@@ -512,20 +549,19 @@ pub fn run(payload: &Value) -> Result<(), String> {
             return no_output(session_id);
         };
         // Thinking budget: the round was capped at Thinking Budget tokens and
-        // stopped there without a complete tool call — mid-reasoning, or mid-
-        // answer after a long reasoning. Replay the reasoning (finished or
-        // not) closed off and have the model continue that same message
-        // (vLLM's continue_final_message) with no cap, so only reasoning is
-        // bounded: it answers or calls a tool now instead of reasoning on
-        // until the request times out (seen on UI tasks: 10k+ tokens of
-        // design notes), and a long file write is never cut at the budget.
+        // stopped there — mid-reasoning, or mid-answer after a long
+        // reasoning. Replay the reasoning (finished or not) closed off and
+        // have the model continue that same message (vLLM's
+        // continue_final_message) with no cap, so only reasoning is bounded:
+        // it answers or calls a tool now instead of reasoning on until the
+        // request times out (seen on UI tasks: 10k+ tokens of design notes).
+        // Also when the cut reply carries tool calls: the cap covers the
+        // arguments too, and the server still parses a call cut mid-argument
+        // (seen: data.js written cut off mid-string, then two edit_file
+        // calls whose `edits` JSON ended mid-way), so it is redone uncapped.
         let mut forced_think: Option<String> = None;
         if budget.is_some()
             && finish_reason_of(&parsed) == Some("length")
-            && msg
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .is_none_or(|a| a.is_empty())
             && let Some(next) = force_answer(
                 &url,
                 &headers,
@@ -1934,7 +1970,17 @@ fn run_tool_calls(
                 }),
             ),
         };
-        let mut invoked = invoke(&args);
+        if WEB_TOOLS.contains(&call.name.as_str()) {
+            record.research_pending = false;
+        }
+        let gated =
+            record.research_pending && matches!(call.name.as_str(), "write_file" | "edit_file");
+        let mut invoked = if gated {
+            record.research_pending = false;
+            Ok(json!({ "ok": false, "error": RESEARCH_GATE }))
+        } else {
+            invoke(&args)
+        };
         // One retry with a mechanical fix for errors a local model loops on.
         let mut retried = None;
         if let Some(err) = invoke_error(&invoked)
@@ -3636,6 +3682,42 @@ mod tests {
         );
     }
 
+    /// A capped round cut off inside a tool call's arguments is redone
+    /// uncapped too; the cut call never runs.
+    #[test]
+    fn thinking_budget_redoes_a_cut_off_tool_call() {
+        let call = |content: &str| {
+            json!({
+                "role": "assistant",
+                "content": "",
+                "reasoning": "write data.js",
+                "tool_calls": [{ "id": "w", "type": "function", "function": {
+                    "name": "write_file",
+                    "arguments": json!({ "path": "d.js", "content": content }).to_string(),
+                } }],
+            })
+        };
+        let mut host = FakeHost::new(vec![
+            finished(call("const V = [{ id: 1, t: \"cut"), 10, 4096, "length"),
+            completion(call("const V = [{ id: 1 }];\n"), 20, 9),
+            answer("done"),
+        ]);
+        host.tool_defs =
+            Some(json!([{ "name": "write_file", "input_schema": { "type": "object" } }]));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        assert_eq!(
+            host.chat_bodies.lock().unwrap()[1]["continue_final_message"],
+            true
+        );
+        let invoked = host.invoked.lock().unwrap();
+        assert_eq!(invoked.len(), 1);
+        assert_eq!(
+            invoked[0]["arguments"]["content"],
+            "const V = [{ id: 1 }];\n"
+        );
+    }
+
     /// A tool call the server failed to parse (here the model wrote
     /// `<parameter=write_file>` where `<function=write_file>` belonged)
     /// arrives as text; it is recovered and run, and the raw markup is not
@@ -4279,5 +4361,54 @@ mod tests {
         ] });
         dedupe_edit_ops("edit_file", &mut dup);
         assert_eq!(dup["edits"].as_array().unwrap().len(), 2);
+    }
+
+    /// Asked to research, a file write before any web tool is refused once;
+    /// after a search the same write runs. Not asked: no gate.
+    #[test]
+    fn research_request_gates_the_first_write_until_the_web_is_used() {
+        let tool = |id: &str, name: &str| {
+            completion(
+                json!({ "role": "assistant", "content": "", "tool_calls": [{
+                    "id": id, "type": "function",
+                    "function": { "name": name, "arguments": "{\"path\":\"a.txt\",\"query\":\"q\"}" },
+                }] }),
+                10,
+                2,
+            )
+        };
+        let defs = json!([
+            { "name": "write_file", "input_schema": { "type": "object" } },
+            { "name": "search_web", "input_schema": { "type": "object" } },
+        ]);
+        let mut host = FakeHost::new(vec![
+            tool("w1", "write_file"),
+            tool("s", "search_web"),
+            tool("w2", "write_file"),
+            answer("done"),
+        ]);
+        host.tool_defs = Some(defs.clone());
+        let mut p = payload();
+        p["message"]["text"] = json!("Research and plan before you build a site.");
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&p)).unwrap();
+        let names: Vec<String> = host
+            .invoked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["search_web", "write_file"]);
+        assert!(
+            host.saved_history()
+                .iter()
+                .any(|m| m["tool_call_id"] == "w1"
+                    && m["content"].as_str().unwrap().contains("research first"))
+        );
+
+        let mut plain = FakeHost::new(vec![tool("w", "write_file"), answer("done")]);
+        plain.tool_defs = Some(defs);
+        peck_plugin_native_host::with_host(plain.host_fn(), || run(&payload())).unwrap();
+        assert_eq!(plain.invoked.lock().unwrap().len(), 1);
     }
 }

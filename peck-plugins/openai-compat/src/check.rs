@@ -376,15 +376,28 @@ fn css(src: &str, base: usize) -> Vec<String> {
                     ));
                     parens = 0;
                 }
-                // `flex-shrink: ;`: a value lost while retyping a file.
+                // `flex-shrink: ;`, or `border:` whose next line already
+                // starts another property: a value lost while writing.
                 if c == b';'
                     && let Some(decl) = src.get(decl_start..i).map(str::trim)
-                    && decl.ends_with(':')
                 {
-                    out.push(format!(
-                        "line {}: `{decl}` has no value",
-                        line_at(src, decl_start, base)
-                    ));
+                    let next_is_property = decl.split_once('\n').is_some_and(|(first, rest)| {
+                        let rest = rest.trim_start();
+                        let name: String = rest
+                            .chars()
+                            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                            .collect();
+                        first.trim_end().ends_with(':')
+                            && !name.is_empty()
+                            && rest[name.len()..].trim_start().starts_with(':')
+                    });
+                    if decl.ends_with(':') || next_is_property {
+                        let first = decl.lines().next().unwrap_or(decl).trim_end();
+                        out.push(format!(
+                            "line {}: `{first}` has no value",
+                            line_at(src, decl_start, base)
+                        ));
+                    }
                 }
                 if c == b'{' {
                     opened.push(i);
@@ -462,6 +475,26 @@ fn js(src: &str, base: usize) -> Vec<String> {
                             c as char
                         )];
                     }
+                }
+            }
+            // `v8: {` as an item of `const VIDEOS = [`: a key retyped from an
+            // object-shaped draft. Brackets still balance, the script dies.
+            b'\n' if stack.last().is_some_and(|(c, _)| *c == b'[') => {
+                let rest = src[i + 1..].trim_start_matches([' ', '\t']);
+                let key: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                    .collect();
+                let after = rest[key.len()..].trim_start_matches([' ', '\t']);
+                if key.chars().next().is_some_and(|c| !c.is_ascii_digit())
+                    && after.starts_with(':')
+                    && !after.starts_with("::")
+                {
+                    return vec![format!(
+                        "line {}: `{key}:` looks like an object key directly inside an array \
+                         (`[...]` items have no keys)",
+                        line_at(src, i + 1, base)
+                    )];
                 }
             }
             _ => {}
@@ -553,5 +586,27 @@ mod tests {
             problems("base.css", ".s svg { fill: red; flex-shrink: ; }\n"),
             ["line 1: `flex-shrink:` has no value"]
         );
+        assert_eq!(
+            problems(
+                "pages.css",
+                ".pill {\n  background: red;\n  border: \n  border-radius: 999px;\n}\n"
+            ),
+            ["line 3: `border:` has no value"]
+        );
+    }
+
+    /// Probe K's `v8: {` inside `const VIDEOS = [` is flagged; keys inside
+    /// objects, objects inside arrays and ternaries are not.
+    #[test]
+    fn js_key_inside_an_array_is_flagged() {
+        let bad = "const V = [\n  {\n    id: 1\n  },\n  v8: {\n    id: 8\n  }\n];\n";
+        assert_eq!(
+            problems("data.js", bad),
+            [
+                "line 5: `v8:` looks like an object key directly inside an array (`[...]` items have no keys)"
+            ]
+        );
+        let good = "const C = {\n  ch1: { a: [1,\n    2] },\n};\nconst V = [\n  { id: 1 },\n  ok\n    ? 1\n    : 2,\n];\n";
+        assert_eq!(problems("data.js", good), Vec::<String>::new());
     }
 }
