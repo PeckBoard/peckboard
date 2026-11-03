@@ -34,8 +34,6 @@ const CONTINUE_NUDGE: &str =
 /// turn ends at `MAX_IDENTICAL_TOOL_ROUNDS`.
 const REPEAT_WARN_AT: usize = 3;
 const MAX_IDENTICAL_TOOL_ROUNDS: usize = 5;
-/// Floor for the halved Thinking Budget of a turn's later rounds.
-const MIN_LATER_THINKING_BUDGET: usize = 2_048;
 /// Cap on the response body quoted in an HTTP-error crash reason.
 const MAX_ERROR_CHARS: usize = 2_000;
 /// Tool images shown to the model: only the newest one, within about 5 MB
@@ -85,6 +83,9 @@ struct ToolCall {
     /// Why an argument couldn't be coerced (`coerce_args`), added to the
     /// tool's error if the call fails.
     notes: Vec<String>,
+    /// Argument names the tool's schema doesn't have; the model is told they
+    /// were ignored.
+    ignored: Vec<String>,
 }
 
 /// A tool that failed this turn and hasn't succeeded since: its name, how
@@ -124,11 +125,15 @@ const RESEARCH_GATE: &str = "Not run: you were asked to research first, and you 
      tools yet. Search for 2–3 real reference designs or examples with search_web, open the \
      best results with parse_web, write what you learned into RESEARCH.md, then write files.";
 
-/// Whether the user's message asks for research before the work.
+/// Whether the user's message asks for research before the work. Phrases
+/// count only as words of prose, not inside a path or identifier: "fix the
+/// bug in research.py" or "update ResearchPanel.tsx" must not gate writes.
 fn asks_for_research(prompt: &str) -> bool {
     let p = prompt.to_ascii_lowercase();
+    let ident = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '-' | '\\');
     [
         "research",
+        "researching",
         "look up",
         "inspiration",
         "look online",
@@ -136,7 +141,22 @@ fn asks_for_research(prompt: &str) -> bool {
         "find examples",
     ]
     .iter()
-    .any(|w| p.contains(w))
+    .any(|w| {
+        p.match_indices(w).any(|(at, _)| {
+            let before = p[..at].chars().next_back();
+            let after = p[at + w.len()..].chars().next();
+            // A sentence may end right after the word (`… research.`).
+            let after_ok = match after {
+                None => true,
+                Some('.') => p[at + w.len() + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace),
+                Some(c) => !ident(c),
+            };
+            !before.is_some_and(ident) && after_ok
+        })
+    })
 }
 
 /// Record one tool call's outcome: a success clears that tool's failures
@@ -366,23 +386,15 @@ pub fn run(payload: &Value) -> Result<(), String> {
         }
         // A thinking round is capped at the Thinking Budget (or the user's
         // Max Tokens, if lower); see `force_answer` for what happens at it.
-        // Rounds after the turn's first get half: planning happens up front,
-        // and later rounds that reached the full budget were drafting file
-        // contents in their reasoning (24k chars, 5+ minutes, then the same
-        // content again in the write).
-        let budget = thinking_budget
-            .map(|b| {
-                if new_messages.is_empty() {
-                    b
-                } else {
-                    (b / 2).max(MIN_LATER_THINKING_BUDGET.min(b))
-                }
-            })
-            .filter(|b| {
-                body.get("max_tokens")
-                    .and_then(Value::as_u64)
-                    .is_none_or(|cap| cap > *b as u64)
-            });
+        // Every round gets the same budget. 0.1.128 halved it after the
+        // turn's first round to curb drafting in reasoning, but the cap also
+        // covers the answer, so every large file write was cut at ~4k tokens
+        // and had to be generated again.
+        let budget = thinking_budget.filter(|b| {
+            body.get("max_tokens")
+                .and_then(Value::as_u64)
+                .is_none_or(|cap| cap > *b as u64)
+        });
         if let Some(b) = budget {
             body["max_tokens"] = json!(b);
         }
@@ -559,9 +571,19 @@ pub fn run(payload: &Value) -> Result<(), String> {
         // arguments too, and the server still parses a call cut mid-argument
         // (seen: data.js written cut off mid-string, then two edit_file
         // calls whose `edits` JSON ended mid-way), so it is redone uncapped.
+        // vLLM reports `finish_reason: "tool_calls"` for such a cut call
+        // once it parses one (seen: write_file content cut at ~3,900 tokens
+        // of a 4,096 cap, `path` missing, reported as tool_calls), so the
+        // token count is the test as well as the finish reason.
+        let used_whole_cap = budget.is_some_and(|b| {
+            parsed
+                .pointer("/usage/completion_tokens")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n >= b as u64)
+        });
         let mut forced_think: Option<String> = None;
         if budget.is_some()
-            && finish_reason_of(&parsed) == Some("length")
+            && (finish_reason_of(&parsed) == Some("length") || used_whole_cap)
             && let Some(next) = force_answer(
                 &url,
                 &headers,
@@ -724,6 +746,27 @@ pub fn run(payload: &Value) -> Result<(), String> {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
         if calls.is_empty() {
+            // The reply ended inside a tool call: have it re-sent (bounded,
+            // like the continue nudge) instead of ending the turn on it.
+            if tools.is_some() && nudges < MAX_CONTINUE_NUDGES && has_cut_tool_call(&text) {
+                nudges += 1;
+                emit(
+                    session_id,
+                    &ProviderEvent::System {
+                        text: format!(
+                            "The reply ended inside a tool call (finish reason: {}); it was not \
+                             run and the model was asked to send it again.",
+                            finish_reason.as_deref().unwrap_or("unknown")
+                        ),
+                        subtype: "warning".into(),
+                        detail: Value::Null,
+                    },
+                )?;
+                let nudge = json!({ "role": "user", "content": CUT_CALL_NUDGE });
+                messages.push(nudge.clone());
+                new_messages.push(nudge);
+                continue;
+            }
             // "Let me check X." and then nothing: the agent announced a
             // step but stopped. Nudge it to act, a bounded number of times;
             // the nudge is persisted so the history stays consistent.
@@ -939,6 +982,18 @@ fn recover_inline_tool_calls(content: &str, tools: Option<&Value>) -> Option<(St
             Some(end) => (&after[..end], &after[end + CLOSE.len()..]),
             None => (after, ""),
         };
+        // A call that never reached `</function>` was cut off (the reply ran
+        // out of tokens): its arguments are partial and a later one (seen:
+        // `path` after `content`) is missing. Running it wrote a stylesheet
+        // cut mid-line, eleven times over. Leave it as text; `has_cut_tool_call`
+        // makes the model re-send it.
+        let complete = after.contains(CLOSE) || body.contains("</function>");
+        if !complete {
+            rest.push_str(OPEN);
+            rest.push_str(body);
+            cursor = next;
+            continue;
+        }
         if let Some(call) = parse_inline_call(body, &tool_names) {
             calls.push(call);
         } else {
@@ -951,6 +1006,20 @@ fn recover_inline_tool_calls(content: &str, tools: Option<&Value>) -> Option<(St
     rest.push_str(cursor);
     (!calls.is_empty()).then(|| (rest.trim_end().to_string(), calls))
 }
+
+/// Whether the reply's answer ends in a raw tool call that was cut off
+/// before `</function>` (see `recover_inline_tool_calls`).
+fn has_cut_tool_call(content: &str) -> bool {
+    let answer = content.rfind("</think>").map_or(content, |i| &content[i..]);
+    answer.rfind("<tool_call>").is_some_and(|at| {
+        !answer[at..].contains("</function>") && !answer[at..].contains("</tool_call>")
+    })
+}
+
+/// Sent when the reply ended inside a tool call.
+const CUT_CALL_NUDGE: &str = "Your last tool call was cut off before it finished (the reply ran \
+     out of room), so it was not run. Send it again. For a large file, write the first part with \
+     write_file, then add the rest with write_file `append: true` in further calls.";
 
 /// One `<tool_call>` body → an OpenAI tool call (`id` left empty; one is
 /// generated downstream), or `None` if no offered tool can be identified.
@@ -1172,12 +1241,30 @@ fn parse_tool_calls(session_id: &str, msg: &Value, tools: Option<&Value>) -> Vec
             .unwrap_or_else(|| {
                 format!("call_{}", alloc_tool_ids(&format!("{session_id}:wire"), 1))
             });
+        // Arguments the tool doesn't take are dropped by the host without a
+        // word (seen: run_command with `path: "tmp-probe"` listed the project
+        // root, and the model took it for tmp-probe).
+        let ignored = tool_schema(tools, &name)
+            .and_then(|s| s.get("properties"))
+            .and_then(Value::as_object)
+            .map(|props| {
+                args.as_object()
+                    .map(|o| {
+                        o.keys()
+                            .filter(|k| !props.contains_key(*k))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
         out.push(ToolCall {
             wire_id,
             name,
             arguments: args.to_string(),
             args,
             notes,
+            ignored,
         });
     }
     out
@@ -1225,6 +1312,20 @@ fn coerce_args(args: &mut Value, schema: &Value) -> Vec<String> {
         return Vec::new();
     };
     salvage_tool_markup(obj, props);
+    // A key with stray punctuation around it (seen: `"=command"`) is renamed
+    // to the schema property it names, unless that one is already given.
+    let stray: Vec<String> = obj
+        .keys()
+        .filter(|k| !props.contains_key(*k))
+        .cloned()
+        .collect();
+    for key in stray {
+        let clean = key.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+        if clean != key && props.contains_key(clean) && !obj.contains_key(clean) {
+            let v = obj.remove(&key).unwrap_or(Value::Null);
+            obj.insert(clean.to_string(), v);
+        }
+    }
     let mut notes = Vec::new();
     let keys: Vec<String> = obj.keys().cloned().collect();
     for key in keys {
@@ -1238,6 +1339,16 @@ fn coerce_args(args: &mut Value, schema: &Value) -> Vec<String> {
             continue;
         };
         let fixed = match (ty, value) {
+            // Plain text where a list of strings belongs (`args: "-la"`, sent
+            // three times in a row): split on whitespace like simple shell
+            // words. Text that looks like JSON still goes to the parser.
+            ("array", Value::String(s))
+                if prop.pointer("/items/type").and_then(Value::as_str) == Some("string")
+                    && !s.trim_start().starts_with('[')
+                    && !s.trim().is_empty() =>
+            {
+                Some(json!(s.split_whitespace().collect::<Vec<_>>()))
+            }
             ("array" | "object", Value::String(s)) => parse_json_lenient(s.trim(), ty),
             // A lone scalar where a list of strings belongs: one-item list.
             ("array", Value::Number(_) | Value::Bool(_))
@@ -1540,52 +1651,76 @@ fn written_file_note(session_id: &str, tool: &str, args: &Value) -> Option<Strin
     check::report(path, &text)
 }
 
-/// Close the CSS parentheses the model dropped (`check::repair_css_parens`)
-/// in a write_file's content or a `.css` edit_file's op texts, in place.
-/// Returns the note telling the model, so its picture of the file matches.
-fn repair_written_css(tool: &str, args: &mut Value) -> Option<String> {
+/// Close the parentheses the model dropped, in place: CSS declarations
+/// (`check::repair_css_parens`) and JS callback calls
+/// (`check::repair_js_parens`), in a write_file's content or an edit_file's
+/// op texts (`.css` / `.js` only). Returns the note telling the model, so its
+/// picture of the file matches.
+fn repair_written_code(tool: &str, args: &mut Value) -> Option<String> {
     let path = args.get("path")?.as_str()?.to_string();
-    let mut lines: Vec<usize> = Vec::new();
-    let mut texts = 0;
+    let (mut css, mut js): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+    let (mut css_ops, mut js_ops) = (0, 0);
     match tool {
         "write_file" => {
             let content = args.get("content")?.as_str()?;
-            let (fixed, at) = check::repair_css_parens(&path, content);
-            if !at.is_empty() {
+            let (fixed, at_css) = check::repair_css_parens(&path, content);
+            let (fixed, at_js) = check::repair_js_parens(&path, &fixed);
+            if !at_css.is_empty() || !at_js.is_empty() {
                 args["content"] = json!(fixed);
-                lines = at;
+                (css, js) = (at_css, at_js);
             }
         }
-        // An edit's text has no surrounding context in HTML, so only .css.
-        "edit_file" if path.to_ascii_lowercase().ends_with(".css") => {
+        // An edit's text has no surrounding context in HTML, so only .css
+        // and .js.
+        "edit_file" => {
             for op in args.get_mut("edits")?.as_array_mut()? {
                 let Some(text) = op.get("text").and_then(Value::as_str) else {
                     continue;
                 };
-                let (fixed, at) = check::repair_css_parens(&path, text);
-                if !at.is_empty() {
+                let (fixed, at_css) = if path.to_ascii_lowercase().ends_with(".css") {
+                    check::repair_css_parens(&path, text)
+                } else {
+                    (text.to_string(), Vec::new())
+                };
+                let (fixed, at_js) = check::repair_js_fragment(&path, &fixed);
+                if !at_css.is_empty() || !at_js.is_empty() {
                     op["text"] = json!(fixed);
-                    texts += at.len();
+                    css_ops += at_css.len();
+                    js_ops += at_js.len();
                 }
             }
         }
         _ => return None,
     }
-    let n = lines.len() + texts;
-    if n == 0 {
-        return None;
-    }
-    let at = if lines.is_empty() {
-        String::new()
-    } else {
-        let shown: Vec<String> = lines.iter().take(12).map(usize::to_string).collect();
-        format!(" (line {})", shown.join(", "))
+    let at = |lines: &[usize]| {
+        if lines.is_empty() {
+            String::new()
+        } else {
+            let shown: Vec<String> = lines.iter().take(12).map(usize::to_string).collect();
+            format!(" (line {})", shown.join(", "))
+        }
     };
-    Some(format!(
-        "Auto-repaired {n} CSS declaration(s) missing a closing `)` before `;`{at}; the file has \
-         the fix. You often drop the last `)` of nested calls: write `repeat(2, minmax(0, \
-         1fr));` and `linear-gradient(transparent, rgba(0, 0, 0, .7));`."
-    ))
+    let mut notes = Vec::new();
+    let n = css.len() + css_ops;
+    if n > 0 {
+        notes.push(format!(
+            "Auto-repaired {n} CSS declaration(s) missing a closing `)` before `;`{}; the file has \
+             the fix. You often drop the last `)` of nested calls: write `repeat(2, minmax(0, \
+             1fr));` and `linear-gradient(transparent, rgba(0, 0, 0, .7));`.",
+            at(&css)
+        ));
+    }
+    let n = js.len() + js_ops;
+    if n > 0 {
+        notes.push(format!(
+            "Auto-repaired {n} JS call(s) whose callback block ended in `}}` without the call's \
+             closing `)`{}; the file has the fix. You often write `list.forEach(x => {{ … }}` \
+             where `… }});` belongs: a single missing `)` stops the whole script, and the page \
+             renders blank.",
+            at(&js)
+        ));
+    }
+    (!notes.is_empty()).then(|| notes.join("\n\n"))
 }
 
 /// A read_file asking for several windows at once (`start_line: [34, 270]`,
@@ -1638,6 +1773,50 @@ fn tool_hint(tool: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// The note for arguments the tool doesn't take (`ToolCall::ignored`).
+fn ignored_note(tool: &str, ignored: &[String]) -> Option<String> {
+    if ignored.is_empty() {
+        return None;
+    }
+    let names = ignored
+        .iter()
+        .map(|k| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut note = format!(
+        "{names} isn't among {tool}'s documented arguments, so it was probably ignored; check \
+         the result against what you meant."
+    );
+    if matches!(tool, "run_command" | "run_background") {
+        note.push_str(
+            " It always runs in the project folder; put a folder in `args` (e.g. `[\"-la\", \
+             \"tmp-probe\"]`) to act on it.",
+        );
+    }
+    Some(note)
+}
+
+/// Whether a browser tool failed because the browser itself can't run (a
+/// host problem), not because of the page or the call.
+fn browser_unavailable(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "sidecar",
+        "no usable port",
+        "browser server",
+        "failed to launch",
+    ]
+    .iter()
+    .any(|p| e.contains(p))
+}
+
+/// Seen twice: the browser sidecar couldn't start (a host problem), and the
+/// model spent the rest of its turn on ps/ss/lsof instead of the task — once
+/// right after trying to open youtube.com for research.
+const BROWSER_DOWN_HINT: &str = "The browser is unavailable on this host; that's not something you can \
+     or should fix. Don't debug it. For research use search_web and parse_web instead. For checking \
+     pages, review the code and say in your report that the visual check was blocked.";
 
 /// The error of a `provider_invoke_mcp` reply, `None` when it succeeded.
 fn invoke_error(invoked: &Result<Value, String>) -> Option<String> {
@@ -1958,7 +2137,7 @@ fn run_tool_calls(
         // dropped are closed first, and multi-window reads run one by one.
         let mut args = call.args.clone();
         dedupe_edit_ops(&call.name, &mut args);
-        let repaired = repair_written_css(&call.name, &mut args);
+        let repaired = repair_written_code(&call.name, &mut args);
         let invoke = |args: &Value| match read_windows(&call.name, args) {
             Some(windows) => read_each_window(session_id, &windows),
             None => host::call_host(
@@ -2037,6 +2216,9 @@ fn run_tool_calls(
         // fresh; the model then fixes it before judging a screenshot.
         let notes: Vec<String> = [
             retried,
+            ignored_note(&call.name, &call.ignored),
+            (!ok && call.name.starts_with("browser_") && browser_unavailable(&content))
+                .then(|| BROWSER_DOWN_HINT.to_string()),
             ok.then_some(repaired).flatten(),
             ok.then(|| written_file_note(session_id, &call.name, &args))
                 .flatten(),
@@ -3250,9 +3432,10 @@ mod tests {
         peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
 
         let bodies = host.chat_bodies.lock().unwrap();
-        // The turn's first round gets the full Thinking Budget, later ones half.
+        // Every round gets the full Thinking Budget: the cap covers the
+        // answer too, so a halved one cut file writes off (0.1.128).
         assert_eq!(bodies[0]["max_tokens"], 8192);
-        assert_eq!(bodies[1]["max_tokens"], 4096);
+        assert_eq!(bodies[1]["max_tokens"], 8192);
         let msgs = bodies[1]["messages"].as_array().unwrap();
         let replayed = &msgs[msgs.len() - 2];
         assert_eq!(replayed["content"], "Checking it.");
@@ -3549,12 +3732,25 @@ mod tests {
             coerce(json!({"timeout_secs": "", "verbose": "true"})),
             json!({"verbose": true})
         );
-        // Strings stay strings, and junk is left for the host to reject.
+        // Strings stay strings; plain text for a string list is split into
+        // words (`args: "-la"`, seen three times in a row).
         assert_eq!(
             coerce(json!({"command": "[not json"}))["command"],
             json!("[not json")
         );
-        assert_eq!(coerce(json!({"args": "-la"}))["args"], json!("-la"));
+        assert_eq!(coerce(json!({"args": "-la"}))["args"], json!(["-la"]));
+        assert_eq!(
+            coerce(json!({"args": "-la tmp-probe"}))["args"],
+            json!(["-la", "tmp-probe"])
+        );
+        // Arguments a tool doesn't take are named back to the model.
+        let note = ignored_note("run_command", &["path".into()]).unwrap();
+        assert!(note.contains("`path`") && note.contains("project folder"));
+        assert!(ignored_note("read_file", &[]).is_none());
+        assert!(browser_unavailable(
+            "no usable port for the browser sidecar in 3111..3121"
+        ));
+        assert!(!browser_unavailable("page_id not found"));
         // Tool-call markup leaking into a string argument.
         assert_eq!(
             coerce(json!({"command": "frontend/page.tsx\n</parameter>\n>"}))["command"],
@@ -3587,6 +3783,15 @@ mod tests {
         // parser, say) is not leaked markup and stays intact.
         let code = "const TAGS: &[&str] = &[\"</parameter>\", \"</function>\"];";
         assert_eq!(coerce(json!({"command": code}))["command"], json!(code));
+        // A key with stray punctuation is renamed; a real key isn't clobbered.
+        assert_eq!(
+            coerce(json!({"=command": "ps", "args": ["aux"]})),
+            json!({"command": "ps", "args": ["aux"]})
+        );
+        assert_eq!(
+            coerce(json!({"=command": "x", "command": "ps"}))["command"],
+            json!("ps")
+        );
     }
 
     #[test]
@@ -3698,7 +3903,9 @@ mod tests {
             })
         };
         let mut host = FakeHost::new(vec![
-            finished(call("const V = [{ id: 1, t: \"cut"), 10, 4096, "length"),
+            // As vLLM reports it: the whole 8192-token cap used, yet
+            // `tool_calls` because it parsed the cut call.
+            finished(call("const V = [{ id: 1, t: \"cut"), 10, 8192, "tool_calls"),
             completion(call("const V = [{ id: 1 }];\n"), 20, 9),
             answer("done"),
         ]);
@@ -4410,5 +4617,53 @@ mod tests {
         plain.tool_defs = Some(defs);
         peck_plugin_native_host::with_host(plain.host_fn(), || run(&payload())).unwrap();
         assert_eq!(plain.invoked.lock().unwrap().len(), 1);
+
+        // Prose asks gate; paths and identifiers don't.
+        for yes in [
+            "Research and plan before you build.",
+            "Do some research first, then build it",
+            "look up how others do it",
+            "Find inspiration on dribbble",
+            "Do the research.",
+        ] {
+            assert!(asks_for_research(yes), "{yes}");
+        }
+        for no in [
+            "fix the bug in research.py",
+            "update ResearchPanel.tsx",
+            "rename src/research/ to src/studies/",
+            "add a research_id column",
+            "the lookup table is wrong",
+        ] {
+            assert!(!asks_for_research(no), "{no}");
+        }
+    }
+
+    /// A raw tool call cut off before `</function>` (Probe M: write_file
+    /// content cut mid-line, `path` never sent) is not run; the model is
+    /// asked to re-send it. A complete raw call still runs.
+    #[test]
+    fn cut_off_raw_tool_call_is_not_run_but_resent() {
+        let cut =
+            "<tool_call>\n<function=write_file>\n<parameter=content>\nbody { color: red; }\nimg {";
+        let mut host = FakeHost::new(vec![
+            answer(cut),
+            answer(
+                "<tool_call>\n<function=write_file>\n<parameter=path>\na.css\n</parameter>\n<parameter=content>\nimg { }\n</parameter>\n</function>\n</tool_call>",
+            ),
+            answer("done"),
+        ]);
+        host.tool_defs =
+            Some(json!([{ "name": "write_file", "input_schema": { "type": "object" } }]));
+        host.settings.insert("thinking".into(), json!("off"));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let invoked = host.invoked.lock().unwrap();
+        assert_eq!(invoked.len(), 1);
+        assert_eq!(invoked[0]["arguments"]["path"], "a.css");
+        let bodies = host.chat_bodies.lock().unwrap();
+        let second = bodies[1]["messages"].as_array().unwrap();
+        assert_eq!(second.last().unwrap()["content"], CUT_CALL_NUDGE);
+        assert!(has_cut_tool_call(cut) && !has_cut_tool_call("plain answer"));
     }
 }
