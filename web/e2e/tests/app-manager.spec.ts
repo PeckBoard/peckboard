@@ -55,6 +55,11 @@ async function openAppManager(page: Page): Promise<FrameLocator> {
 }
 
 test.describe('app-manager page', () => {
+  // The AI-session tests (install, upgrade, research) each wait on a real
+  // temp session plus the page's 2s status poll and ran 26-29s against the
+  // default 30s cap — a busy box tipped them over. Their own expects already
+  // allow up to 60s, so the test cap matches that.
+  test.describe.configure({ timeout: 60_000 })
   test('shows the target picker, distro banner and app grid for the local host', async ({
     request,
     page,
@@ -235,6 +240,55 @@ test.describe('app-manager page', () => {
     // The temp session ran the mock plan-review scenario — its transcript
     // renders, proving the deep link landed on the real conversation.
     await expect(page.getByText('Plan saved via propose_plan.').first()).toBeVisible({
+      timeout: 20_000,
+    })
+  })
+
+  test('upgrades an installed app via a temporary AI session held to official sources', async ({
+    request,
+    page,
+  }) => {
+    const token = await authenticate(request)
+    await loadApp(page, token)
+    test.skip(!(await pluginPresent(page)), 'app-manager wasm not built')
+
+    const f = await openAppManager(page)
+    // git is installed on the suite host (this repo is a git checkout).
+    const gitRow = f.locator('.approw').filter({ hasText: 'Distributed version control' })
+    await expect(gitRow.locator('.badge').first()).toHaveText('Installed', { timeout: 60_000 })
+    // The probed version line; the package-DB version may trail it after " — ".
+    const version = ((await gitRow.locator('.ver').textContent()) ?? '').split(' — ')[0].trim()
+
+    // Installed rows offer Upgrade next to Remove; it opens the same picker
+    // in upgrade mode, which names the official-sources rule up front.
+    const upgrade = gitRow.getByRole('button', { name: /^Upgrade Git on / })
+    await expect(upgrade).toBeEnabled()
+    await upgrade.click()
+    await expect(f.locator('#installBackdrop')).toHaveClass(/open/)
+    await expect(f.locator('#installModalTitle')).toHaveText('Upgrade Git')
+    await expect(f.locator('#installIntro')).toContainText('only at official sources')
+    await expect(f.locator('#installIntro')).toContainText('it changes nothing')
+    await expect(f.locator('#installStart')).toHaveText('Start upgrade session')
+    const modelSel = f.locator('select#f_model')
+    await expect(modelSel.locator('option[value="mock:plan-review"]')).toHaveCount(1, {
+      timeout: 20_000,
+    })
+    await modelSel.selectOption('mock:plan-review')
+    await f.locator('#installStart').click()
+    await expect(f.locator('#installBackdrop')).not.toHaveClass(/open/)
+    await expect(f.locator('#logTitle')).toHaveText('Upgrading Git via AI session')
+
+    // The mock session runs no commands, so the plugin's own version probe
+    // reads the same version back: the outcome says nothing was applied
+    // rather than claiming an upgrade.
+    await expect(f.locator('#logStatus')).toHaveText('No upgrade applied', { timeout: 30_000 })
+    await expect(f.locator('#logTail')).toContainText('No newer version was applied')
+    if (version) await expect(f.locator('#logTail')).toContainText(version)
+
+    // Deep link: the panel's button opens the real upgrade session.
+    await f.locator('#openSessionBtn').click()
+    await expect(page).toHaveURL(/\/sessions\//, { timeout: 20_000 })
+    await expect(page.getByText('Upgrade Git', { exact: false }).first()).toBeVisible({
       timeout: 20_000,
     })
   })

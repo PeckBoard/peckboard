@@ -15,16 +15,18 @@ The catalog knows each app's detect probe, install recipe, and remove command pe
 Provenance is honest: installed-with lines come from the package-database delta around the install, and vendor `curl | sh` installers (Claude Code, cursor-agent, Ollama) say plainly that they never touch the package database instead of showing an empty list. The dependency graph is queried from the package manager itself, honours autoremove semantics for removal impact, and offers a reverse lookup — which apps require this library.
 
 Apps the catalog does not know can be added by hand: on the local host the install session identifies the software under strict official-sources-only rules, and a research session fills in a manual row's blanks (what it is, official site, detect probe, commands). A command proposed by an agent is never run as-is — it lands as a suggestion that only becomes runnable when someone clicks _Use this command_.
+Installed apps on the local host also get an **Upgrade** button. It starts a temporary AI session on the model you pick that checks the project's official sources only (its own site, repository or releases page, the distribution's official repositories, or its own registry entry) for a newer release. If there is one, the session upgrades the existing install the same way it was installed; if the app is already the latest, it changes nothing. As with installs, the outcome comes from re-reading the app's version before and after ("Upgraded A → B" or "No upgrade applied"), not from what the agent reports.
 
-| Tool                 | What it does                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------ |
-| `app_targets`        | Lists configured targets: the local host plus any remote SSH hosts                   |
-| `app_list`           | The catalog plus hand-added apps, with per-target installed state and version        |
-| `app_status`         | One app on one target: installed, version, and any in-flight job's state and log     |
-| `app_install`        | Starts an install and returns a job id; local installs need a thinking-capable model |
-| `app_remove`         | Starts a removal — always a deterministic scripted command                           |
-| `app_deps`           | The cached dependency graph: per-app trees, reverse lookup, and removal impact       |
-| `app_record_details` | Records what a hand-added app is — blanks only; commands land as suggestions         |
+| Tool                 | What it does                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------- |
+| `app_targets`        | Lists configured targets: the local host plus any remote SSH hosts                     |
+| `app_list`           | The catalog plus hand-added apps, with per-target installed state and version          |
+| `app_status`         | One app on one target: installed, version, and any in-flight job's state and log       |
+| `app_install`        | Starts an install and returns a job id; local installs need a thinking-capable model   |
+| `app_upgrade`        | Upgrades an installed app on the local host via an AI session held to official sources |
+| `app_remove`         | Starts a removal — always a deterministic scripted command                             |
+| `app_deps`           | The cached dependency graph: per-app trees, reverse lookup, and removal impact         |
+| `app_record_details` | Records what a hand-added app is — blanks only; commands land as suggestions           |
 
 Other plugins can hand off to the dashboard with a deep link (`?install=python3,pip&from=graphify`) that renders a request bar naming who asked and for what — it only prefills; a human still clicks Install.
 
