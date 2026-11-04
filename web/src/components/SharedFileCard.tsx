@@ -12,6 +12,7 @@ import AudioPlayer from './AudioPlayer'
 import { CodePreview } from './ToolUseBlock'
 import type { SharedFile } from './chat/events'
 import { authedFetch } from '../store/auth'
+import { mintUrl } from '../lib/sharedFileUrl'
 import { useMediaElementPlayback } from '../media/playback'
 import ModelViewer, { type ModelSource } from './ModelViewer'
 import {
@@ -128,17 +129,6 @@ function formatBytes(n: number): string {
     i++
   }
   return `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
-}
-
-/** Mint a fresh 10-minute signed URL for one shared file. */
-async function mintUrl(sessionId: string, fileId: string): Promise<string> {
-  const res = await authedFetch(`/api/sessions/${sessionId}/shared-files/${fileId}/url`, {
-    method: 'POST',
-  })
-  if (!res.ok)
-    throw new Error(res.status === 404 ? 'File no longer available' : `HTTP ${res.status}`)
-  const { url } = (await res.json()) as { url: string }
-  return url
 }
 
 /** Start a browser download: the signed URL with `download=1` answers with

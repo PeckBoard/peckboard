@@ -6,7 +6,10 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
+  /* Not just hidden: focusing the input in the off-screen drawer would scroll
+     a hidden box sideways, shifting everything on the page. */
   overflow: hidden;
+  overflow: clip;
   color: var(--text);
   background:
     radial-gradient(
@@ -1008,7 +1011,7 @@
 @media (max-width: 767px) {
   .assistant-page {
     --assistant-drawer-width: 100%;
-    overflow: hidden;
+    overflow: clip;
     background:
       radial-gradient(
         circle at 50% 25%,
@@ -1168,6 +1171,119 @@
     border-radius: 18px 18px 0 0;
     box-shadow: 0 -16px 50px rgba(0, 0, 0, 0.35);
     transform: translateY(100%);
+  }
+}
+
+/* The assistant's image, video, or 3D model: above the orb, which moves down
+   into the rest of the page. TopicRing re-measures and fits itself there. */
+.assistant-page[data-media-open='true'] .assistant-topic-stage {
+  top: 58%;
+}
+.assistant-media-stage {
+  position: absolute;
+  z-index: 12;
+  top: 64px;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(820px, calc(100% - 48px));
+  height: calc(58% - 72px);
+  transform: translateX(-50%);
+}
+.assistant-media-frame {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(231, 247, 250, 0.24);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+.assistant-media-video,
+.assistant-media-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.assistant-media-video {
+  background: #000;
+}
+.assistant-media-image {
+  transition: transform 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.assistant-media-model {
+  width: 100%;
+  height: 100%;
+}
+.assistant-media-model .model-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+.assistant-media-model .model-viewer-modal .model-viewer-stage {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+.assistant-media-note {
+  padding: 16px;
+  color: color-mix(in srgb, var(--text) 70%, transparent);
+  text-align: center;
+}
+.assistant-media-sound {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  cursor: pointer;
+}
+.assistant-media-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.assistant-media-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--text) 70%, transparent);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-media-close {
+  flex: none;
+  width: 44px;
+  height: 32px;
+  border: 1px solid rgba(231, 247, 250, 0.24);
+  border-radius: 999px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+@media (max-width: 767px) {
+  .assistant-page[data-media-open='true'] .assistant-topic-stage {
+    top: 52%;
+  }
+  .assistant-media-stage {
+    top: 56px;
+    width: calc(100% - 24px);
+    height: calc(52% - 62px);
   }
 }
 

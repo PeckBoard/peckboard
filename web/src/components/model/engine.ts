@@ -458,6 +458,13 @@ function countTriangles(root: Object3D): number {
   return n
 }
 
+/** How long a voice-commanded camera move takes. */
+const MOVE_MS = 500
+/** How close to straight up / down a tilt may go (radians). */
+const POLE_MARGIN = 0.05
+const MAX_ZOOM_IN = 20
+const MAX_ZOOM_OUT = 5
+
 export class ModelStage {
   readonly info: ModelInfo
   private scene = new Scene()
@@ -485,6 +492,13 @@ export class ModelStage {
   private playing = false
   private clock = new Clock()
   private layer = 0
+  /** Runs the current voice-command move to its end. */
+  private finishMove: (() => void) | null = null
+  /** Distance `fit` framed the model at: the bounds for `zoom`. */
+  private fitDistance = 1
+  /** Where `fit` put the camera, relative to its target. */
+  private fitOffset = new Vector3()
+  private onSettled: (() => void) | null = null
 
   constructor(loaded: Loaded, format: ModelFormat, dark: boolean) {
     stageCount++
@@ -569,6 +583,7 @@ export class ModelStage {
 
   /** Reset the camera to frame the model. */
   fit() {
+    this.finishMove?.()
     const b = this.loaded.gcode?.bounds
     const box = b
       ? new Box3(new Vector3(...b.min), new Vector3(...b.max))
@@ -576,10 +591,13 @@ export class ModelStage {
     if (box.isEmpty()) box.set(new Vector3(), new Vector3(1, 1, 1))
     const c = box.getCenter(new Vector3())
     const size = box.getSize(new Vector3())
-    const r = Math.max(size.x, size.y, size.z, 1e-3) * 0.6
+    // The longest side frames a bar; a cube's corners need its diagonal.
+    const r = Math.max(Math.max(size.x, size.y, size.z, 1e-3) * 0.6, size.length() * 0.52)
     const dist = r / Math.sin((this.camera.fov * Math.PI) / 360)
     const dir = this.zUp ? new Vector3(0.55, -0.75, 0.6) : new Vector3(0.6, 0.45, 0.85)
     this.camera.position.copy(c).addScaledVector(dir, dist)
+    this.fitOffset.copy(this.camera.position).sub(c)
+    this.fitDistance = this.fitOffset.length()
     this.camera.near = dist / 100
     this.camera.far = dist * 100
     this.camera.updateProjectionMatrix()
@@ -590,6 +608,97 @@ export class ModelStage {
       this.controls.update()
     }
     this.kick()
+    this.onSettled?.()
+  }
+
+  /** Be told when a `rotate` / `zoom` / `fit` has landed. */
+  setOnSettled(fn: (() => void) | null) {
+    this.onSettled = fn
+  }
+
+  private orbitTarget(): Vector3 {
+    return this.controls ? this.controls.target : this.target
+  }
+
+  /** Move the camera over ~½ s (at once with reduced motion or no live view).
+   *  `at` gives the offset from the target at progress t. */
+  private moveCamera(at: (t: number) => Vector3) {
+    this.finishMove?.()
+    const target = this.orbitTarget()
+    const place = (t: number) => {
+      this.camera.position.copy(target).add(at(t))
+      this.camera.lookAt(target)
+      this.controls?.update()
+      this.kick()
+    }
+    let raf = 0
+    const finish = () => {
+      cancelAnimationFrame(raf)
+      this.finishMove = null
+      place(1)
+      this.onSettled?.()
+    }
+    const instant =
+      !this.host ||
+      !this.visible ||
+      document.hidden ||
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (instant) return finish()
+    this.finishMove = finish
+    const started = performance.now()
+    const step = (now: number) => {
+      const t = Math.min(1, (now - started) / MOVE_MS)
+      if (t >= 1) return finish()
+      place(1 - (1 - t) * (1 - t) * (1 - t))
+      raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+  }
+
+  /** Turn the model by `degrees`, keeping the camera's framing. `vertical`
+   *  is a turntable around the up axis; `horizontal` tilts it toward the
+   *  viewer, stopping short of the poles, where the orbit would flip. */
+  rotate(axis: 'vertical' | 'horizontal', degrees: number) {
+    this.finishMove?.()
+    const start = this.camera.position.clone().sub(this.orbitTarget())
+    const up = this.camera.up.clone().normalize()
+    const rad = (degrees * Math.PI) / 180
+    if (axis === 'vertical') {
+      // The camera goes the other way round for the model to turn this way.
+      this.moveCamera((t) => start.clone().applyAxisAngle(up, -rad * t))
+      return
+    }
+    const polar = start.angleTo(up)
+    const next = Math.min(Math.PI - POLE_MARGIN, Math.max(POLE_MARGIN, polar - rad))
+    const side = new Vector3().crossVectors(up, start).normalize()
+    this.moveCamera((t) => start.clone().applyAxisAngle(side, (next - polar) * t))
+  }
+
+  /** Move in by `factor` (above 1) or out (below 1), within sane limits. */
+  zoom(factor: number) {
+    this.finishMove?.()
+    const start = this.camera.position.clone().sub(this.orbitTarget())
+    const from = start.length()
+    const to = Math.min(
+      this.fitDistance * MAX_ZOOM_OUT,
+      Math.max(this.fitDistance / MAX_ZOOM_IN, from / factor),
+    )
+    this.moveCamera((t) => start.clone().setLength(from + (to - from) * t))
+  }
+
+  /** The turn and zoom relative to `fit`, measured from the camera itself. */
+  viewState(): { yaw: number; polar: number; zoom: number } {
+    const offset = this.camera.position.clone().sub(this.orbitTarget())
+    const up = this.camera.up.clone().normalize()
+    const flat = (v: Vector3) => v.clone().projectOnPlane(up)
+    const a = flat(this.fitOffset)
+    const b = flat(offset)
+    const signed = Math.atan2(new Vector3().crossVectors(b, a).dot(up), a.dot(b))
+    return {
+      yaw: (signed * 180) / Math.PI,
+      polar: (offset.angleTo(up) * 180) / Math.PI,
+      zoom: this.fitDistance / offset.length(),
+    }
   }
 
   setWireframe(on: boolean) {
@@ -699,6 +808,7 @@ export class ModelStage {
 
   /** Give the canvas up; returns a snapshot of the last view. */
   detach(): string | null {
+    this.finishMove?.()
     if (liveStage !== this) return null
     const snap = this.host ? this.capture(this.host.clientWidth, this.host.clientHeight) : null
     if (this.raf) cancelAnimationFrame(this.raf)

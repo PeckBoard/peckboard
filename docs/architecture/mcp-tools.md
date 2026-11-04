@@ -114,6 +114,32 @@ parent, blocked for pre-hatcher sessions by the read-only allowlist.
 Subagent sessions are ordinary sessions — readable with
 `read_worker_session`/`search_sessions`, terminable via session-control.
 
+## Assistant Media Embeds
+
+The voice assistant can show an image, video, or 3D model above the orb on
+the Assistant page and control it. Only the voice session gets these tools
+(hidden and refused elsewhere). They send a per-user `assistant-media` frame
+(`handlers/voice_media.rs` to `store/assistantMedia.ts`), so the browser applies
+the command and clamps it; results report what was sent.
+
+| Tool          | Arguments                                                                    | Effect                                                 |
+| ------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------ |
+| show_media    | `path` or `url`; optional `kind`, `title`                                    | Opens the embed, replacing any other. Videos autoplay. |
+| media_control | `action` plus `seconds` or `by` (seek), `degrees`, `axis` (rotate), `factor` | Video: play, pause, seek, mute, unmute.                |
+|               |                                                                              | Image or model: rotate, zoom, reset.                   |
+| hide_media    | none                                                                         | Closes it.                                             |
+
+A `path` is relative to the assistant's folder, or absolute inside any
+registered folder, and is copied into the shared-file store. A `url` must be a
+direct link to the file: it goes through the link-preview proxy, because the
+page's CSP blocks remote media. Pages like YouTube can't be driven.
+
+While this video plays, the mic keeps listening and Assistant speech doesn't
+pause it (`voiceControlled` in `media/playback.ts`). It drops to 20% volume
+while anyone is talking instead. The mic can therefore also hear speech in the
+video: server recognition requests echo cancellation, but browser Web Speech
+has no such setting.
+
 ## Driving the User's Screen and Views
 
 Chat sessions and external OAuth clients can open things in the **user's

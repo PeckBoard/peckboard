@@ -27,6 +27,7 @@ mod ui_match;
 mod variables;
 mod views;
 mod voice;
+mod voice_media;
 mod voice_nav;
 mod voice_prompt;
 mod voice_pronunciation;

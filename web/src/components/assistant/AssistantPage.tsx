@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAssistantActivity } from '../../store/assistantActivity'
+import { useAssistantMedia } from '../../store/assistantMedia'
 import { useAssistantTopics } from '../../store/assistantTopics'
 import { useRepeatingTasksStore } from '../../store/repeatingTasks'
 import { useResourcesStore } from '../../store/resources'
@@ -12,6 +13,7 @@ import AssistantActivity from './AssistantActivity'
 import AssistantCaptions from './AssistantCaptions'
 import AssistantOrb from './AssistantOrb'
 import AssistantEmbedCard from './AssistantEmbedCard'
+import AssistantMediaStage from './AssistantMediaStage'
 import AssistantTranscriptDrawer from './AssistantTranscriptDrawer'
 import AssistantUpcoming from './AssistantUpcoming'
 import TopicRing from './TopicRing'
@@ -49,6 +51,7 @@ export default function AssistantPage() {
   const loading = useAssistantTopics((state) => state.loading)
   const error = useAssistantTopics((state) => state.error)
   const orbState = useOrbState()
+  const mediaOpen = useAssistantMedia((state) => state.media !== null)
 
   const recognitionSupported = useVoiceStore((state) => state.recognitionSupported)
   const panelOpen = useVoiceStore((state) => state.panelOpen)
@@ -100,6 +103,7 @@ export default function AssistantPage() {
       data-state={orbState}
       data-transcript-open={transcriptOpen ? 'true' : 'false'}
       data-upcoming-open={upcomingOpen ? 'true' : 'false'}
+      data-media-open={mediaOpen ? 'true' : 'false'}
       onPointerDown={unlockSpeech}
     >
       <div className="assistant-ambient assistant-ambient-one" aria-hidden />
@@ -144,11 +148,14 @@ export default function AssistantPage() {
         </button>
       </div>
 
+      <AssistantMediaStage />
+
       <TopicRing
         topics={topics}
         currentId={currentId}
         absorbing={absorbing}
         absorbDurationMs={durationMs}
+        compact={mediaOpen}
         onFocus={(id) => void useAssistantTopics.getState().focus(id)}
       >
         <AssistantOrb

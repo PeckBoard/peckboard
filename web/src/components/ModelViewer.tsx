@@ -149,6 +149,9 @@ interface ModelViewerProps {
   variant?: 'inline' | 'modal'
   /** Inline: open the larger viewer (fullscreen button). */
   onExpand?: () => void
+  /** Hands over the loaded stage (and `null` when it goes), so a host can
+   *  drive the camera: the Assistant's voice commands. */
+  onStage?: (stage: ModelStage | null) => void
 }
 
 function ViewerNote({ state, children }: { state: string; children: ReactNode }) {
@@ -174,7 +177,13 @@ export default function ModelViewer(props: ModelViewerProps) {
   return <LiveModelViewer {...props} />
 }
 
-function LiveModelViewer({ source, format, variant = 'inline', onExpand }: ModelViewerProps) {
+function LiveModelViewer({
+  source,
+  format,
+  variant = 'inline',
+  onExpand,
+  onStage,
+}: ModelViewerProps) {
   const modal = variant === 'modal'
   const rootRef = useRef<HTMLDivElement | null>(null)
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -232,6 +241,10 @@ function LiveModelViewer({ source, format, variant = 'inline', onExpand }: Model
       setStage(null)
     }
   }, [loadWanted, source, format])
+
+  useEffect(() => {
+    onStage?.(stage)
+  }, [stage, onStage])
 
   // Register for the live canvas once parsed.
   useEffect(() => {

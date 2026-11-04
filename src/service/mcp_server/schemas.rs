@@ -54,6 +54,9 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "answer_question",
         "reattach_worker",
         "show_view",
+        "show_media",
+        "media_control",
+        "hide_media",
         "voice_queue",
         "voice_pronunciation",
         "assistant_topics",
@@ -97,6 +100,9 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "get_review_doc",
         "submit_review_revision",
         "show_view",
+        "show_media",
+        "media_control",
+        "hide_media",
         "voice_queue",
         "voice_pronunciation",
         "assistant_topics",
@@ -2193,6 +2199,46 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "id": { "type": "string", "description": "Exact id, when known (e.g. from a candidates list)." },
                         "name": { "type": "string", "description": "Name as the user said it, e.g. \"stashify\". For target page: sessions, projects, folders, views, settings, reports, repeating_tasks, terminals, review, usage, or agents." }
                     },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "show_media".into(),
+                description: "Voice assistant only: show an image, video, or 3D model above the orb on the Assistant page, replacing anything already showing. Videos autoplay with sound. Give a local file as 'path' (relative to your folder, or absolute inside any registered folder) or a direct link to the file as 'url'. Pages like YouTube are not direct media files.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Local file. Exactly one of path or url." },
+                        "url": { "type": "string", "description": "Direct http(s) link to the media file. Exactly one of path or url." },
+                        "kind": { "type": "string", "enum": ["image", "video", "model"], "description": "Only needed when the file name doesn't show it. Models: stl, 3mf, obj, ply, amf, gcode, glb, gltf, fbx, dae, usdz." },
+                        "title": { "type": "string", "description": "Caption to show. Defaults to the file name." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "media_control".into(),
+                description: "Voice assistant only: control what show_media is showing. Video: play, pause, mute, unmute, seek. Image or model: rotate, zoom, reset. Errors if nothing is showing or the action doesn't fit it. Examples: \"skip to 30 seconds\" = action seek, seconds 30. \"back 10 seconds\" = action seek, by -10. \"rotate 90 degrees\" = action rotate, degrees 90. \"zoom in\" = action zoom, factor 1.5.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["play", "pause", "seek", "mute", "unmute", "rotate", "zoom", "reset"], "description": "What to do." },
+                        "seconds": { "type": "number", "description": "seek: the position to jump to, in seconds. Use either seconds or by." },
+                        "by": { "type": "number", "description": "seek: seconds to move from the current position; negative goes back." },
+                        "degrees": { "type": "number", "description": "rotate: how far; negative reverses direction." },
+                        "axis": { "type": "string", "enum": ["vertical", "horizontal"], "description": "rotate, models only: vertical (default) spins it like a turntable; horizontal tilts it toward the viewer." },
+                        "factor": { "type": "number", "description": "zoom: above 1 zooms in, below 1 zooms out (1.5 is a normal step)." }
+                    },
+                    "required": ["action"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "hide_media".into(),
+                description: "Voice assistant only: close what show_media is showing. Call it when the user is done reviewing it (\"I'm done\", \"close it\").".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
                     "additionalProperties": false
                 }),
             },

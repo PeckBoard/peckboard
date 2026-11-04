@@ -6,8 +6,18 @@
  * pauses all of them (`pauseAllMedia`), and the always-on Assistant mic
  * ignores what it hears while any of them is audible (`mediaAudible`) — it
  * would otherwise transcribe the clip.
+ *
+ * A `voiceControlled` player (the Assistant page's media embed) is the
+ * exception: the user steers it by talking, so the mic keeps listening while
+ * it plays and Assistant speech doesn't pause it. It lowers its own volume
+ * instead (`assistant/AssistantMediaStage`).
  */
 import { useEffect, useState, type RefObject } from 'react'
+
+export interface MediaOptions {
+  /** Stays out of the mic gate and survives Assistant speech. */
+  voiceControlled?: boolean
+}
 
 export interface MediaHandle {
   /** Call when this player starts (or resumes) playing. Pauses the rest. */
@@ -21,6 +31,7 @@ export interface MediaHandle {
 
 interface Entry {
   pause: () => void
+  voiceControlled: boolean
 }
 
 const playingNow = new Set<Entry>()
@@ -35,11 +46,11 @@ function notify() {
 }
 
 /** Register a player; `pause` must stop it (and should lead to `stopped`). */
-export function registerMedia(pause: () => void): MediaHandle {
-  const entry: Entry = { pause }
+export function registerMedia(pause: () => void, options: MediaOptions = {}): MediaHandle {
+  const entry: Entry = { pause, voiceControlled: options.voiceControlled ?? false }
   const stop = () => {
     if (!playingNow.delete(entry)) return
-    lastStoppedAt = Date.now()
+    if (!entry.voiceControlled) lastStoppedAt = Date.now()
     notify()
   }
   return {
@@ -63,8 +74,9 @@ export function registerMedia(pause: () => void): MediaHandle {
 
 /** Pause every registered player (e.g. the Assistant starts speaking). */
 export function pauseAllMedia(): void {
-  if (playingNow.size === 0) return
-  for (const e of [...playingNow]) {
+  const pausable = [...playingNow].filter((e) => !e.voiceControlled)
+  if (pausable.length === 0) return
+  for (const e of pausable) {
     playingNow.delete(e)
     e.pause()
   }
@@ -79,7 +91,8 @@ export function isMediaPlaying(): boolean {
 
 /** Playing now, or stopped so recently its sound may still reach the mic. */
 export function mediaAudible(): boolean {
-  return playingNow.size > 0 || Date.now() - lastStoppedAt < AUDIBLE_TAIL_MS
+  const gating = [...playingNow].some((e) => !e.voiceControlled)
+  return gating || Date.now() - lastStoppedAt < AUDIBLE_TAIL_MS
 }
 
 export function subscribeMediaPlaying(fn: (playing: boolean) => void): () => void {
@@ -104,11 +117,13 @@ export function useMediaElementPlayback(
   ref: RefObject<HTMLMediaElement | null>,
   // Re-attach when the element is swapped (e.g. a re-minted `src`).
   key?: unknown,
+  options?: MediaOptions,
 ): void {
+  const voiceControlled = options?.voiceControlled ?? false
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    const h = registerMedia(() => el.pause())
+    const h = registerMedia(() => el.pause(), { voiceControlled })
     const onPlay = () => h.playing()
     const onStop = () => h.stopped()
     el.addEventListener('play', onPlay)
@@ -125,5 +140,5 @@ export function useMediaElementPlayback(
       el.removeEventListener('emptied', onStop)
       h.unregister()
     }
-  }, [ref, key])
+  }, [ref, key, voiceControlled])
 }

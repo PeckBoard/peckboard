@@ -118,6 +118,9 @@ impl ToolGate {
         if matches!(
             name,
             "show_view"
+                | "show_media"
+                | "media_control"
+                | "hide_media"
                 | "voice_queue"
                 | "voice_pronunciation"
                 | "voice_prompt"
@@ -169,6 +172,11 @@ impl ToolGate {
 
         if name == "show_view" && !self.voice {
             return Some("tool 'show_view' is blocked: only the voice assistant session drives the user's screen.".to_string());
+        }
+        if matches!(name, "show_media" | "media_control" | "hide_media") && !self.voice {
+            return Some(format!(
+                "tool '{name}' is blocked: only the voice assistant session shows media on the Assistant page."
+            ));
         }
         if name == "voice_queue" && !self.voice {
             return Some("tool 'voice_queue' is blocked: only the voice assistant session has a relay queue.".to_string());

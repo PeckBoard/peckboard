@@ -103,6 +103,12 @@ export function describeTool(
     case 'show_view':
     case 'ui_open':
       return 'Opening it on screen…'
+    case 'show_media':
+      return 'Opening it above the orb…'
+    case 'media_control':
+      return 'Adjusting it…'
+    case 'hide_media':
+      return 'Closing it…'
     case 'voice_queue':
       return 'Checking what is waiting…'
     case 'run_command':

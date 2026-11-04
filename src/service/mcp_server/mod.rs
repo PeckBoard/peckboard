@@ -87,6 +87,9 @@ impl McpToolRegistry {
             "remove_view_widget" => self.handle_remove_view_widget(args, ctx).await,
             "delete_view" => self.handle_delete_view(args, ctx).await,
             "show_view" => self.handle_show_view(args, ctx).await,
+            "show_media" => self.handle_show_media(args, ctx).await,
+            "media_control" => self.handle_media_control(args, ctx).await,
+            "hide_media" => self.handle_hide_media(args, ctx).await,
             "voice_queue" => self.handle_voice_queue(args, ctx).await,
             "voice_pronunciation" => self.handle_voice_pronunciation(args, ctx).await,
             "assistant_memory" => self.handle_assistant_memory(args, ctx).await,
@@ -692,7 +695,10 @@ mod tests {
             assert!(names.contains(&t), "{t}");
         }
         assert!(names.contains(&"assistant_memory"));
-        assert_eq!(names.len(), 111);
+        for t in ["show_media", "media_control", "hide_media"] {
+            assert!(names.contains(&t), "{t}");
+        }
+        assert_eq!(names.len(), 114);
     }
 
     #[test]

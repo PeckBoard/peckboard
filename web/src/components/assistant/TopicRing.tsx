@@ -14,6 +14,8 @@ interface TopicRingProps {
   currentId: string | null
   absorbing: AbsorbingTopic | null
   absorbDurationMs: number
+  /** Sharing the page with the media stage: fit the space, however small. */
+  compact?: boolean
   onFocus: (id: string) => void
   children: ReactNode
 }
@@ -77,12 +79,17 @@ function topicIcon(kind: TopicKind) {
   )
 }
 
-function buildGeometry(width: number, measuredHeight: number, topicCount: number): RingGeometry {
+function buildGeometry(
+  width: number,
+  measuredHeight: number,
+  topicCount: number,
+  compact: boolean,
+): RingGeometry {
   const mobile = width < 768
   if (mobile) {
-    const orbWidth = Math.min(width - 92, 300)
+    const orbWidth = Math.min(width - 92, 300, compact ? measuredHeight * 0.85 : Infinity)
     const orbHeight = orbWidth
-    const centerY = 72 + orbHeight / 2
+    const centerY = (compact ? 8 : 72) + orbHeight / 2
     const rows = Math.ceil(topicCount / 2)
     const height = Math.max(measuredHeight, centerY + orbHeight / 2 + 76 + rows * 78)
     return {
@@ -172,6 +179,7 @@ export default function TopicRing({
   currentId,
   absorbing,
   absorbDurationMs,
+  compact = false,
   onFocus,
   children,
 }: TopicRingProps) {
@@ -198,13 +206,16 @@ export default function TopicRing({
     if (!root) return
     const measure = () => {
       const bounds = root.getBoundingClientRect()
-      setGeometry(buildGeometry(bounds.width, Math.max(bounds.height, 620), ringTopics.length))
+      // Normally the ring keeps a minimum height; sharing the page with the
+      // media stage, it has to fit what's left.
+      const height = compact ? bounds.height : Math.max(bounds.height, 620)
+      setGeometry(buildGeometry(bounds.width, height, ringTopics.length, compact))
     }
     const observer = new ResizeObserver(measure)
     observer.observe(root)
     measure()
     return () => observer.disconnect()
-  }, [ringTopics.length])
+  }, [ringTopics.length, compact])
 
   const placements = useMemo(() => {
     const result = new Map<string, Placement>()

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { useAssistantMedia } from './assistantMedia'
 import type { Event } from '../types/api'
 import { useUiStore } from './ui'
 import { useSessionsStore } from './sessions'
@@ -236,6 +237,11 @@ export const useWsStore = create<WsState>((set, get) => ({
         // something on the user's screen. Per-user: the server only sends
         // it to this user's foreground tab(s), so just follow it.
         window.dispatchEvent(new CustomEvent('peckboard:ui-navigate', { detail: msg.data }))
+        return
+      }
+      if (msg.type === 'assistant-media') {
+        // The voice assistant's show_media / media_control / hide_media.
+        useAssistantMedia.getState().applyFrame(msg.data)
         return
       }
       if (msg.type === 'views-changed') {
