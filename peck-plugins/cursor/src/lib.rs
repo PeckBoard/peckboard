@@ -69,9 +69,9 @@ pub fn registration() -> serde_json::Value {
         "effort_levels": [],
         "capabilities": {
             "supports_thinking": true,
-            // cursor-agent takes no image input; attachments are dropped
-            // with a transcript notice instead.
-            "supports_images_in": false,
+            // Images go through cursor-agent's `--image` flag, which is
+            // hidden from `--help`. Other attachments get a transcript notice.
+            "supports_images_in": true,
             "supports_usage": true,
             "supports_resume": true,
             "interrupt_kind": "hard_kill",

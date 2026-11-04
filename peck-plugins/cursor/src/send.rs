@@ -11,6 +11,13 @@ use crate::parser::{self, TurnState};
 /// Crash reason for a child that exited without streaming anything.
 const EMPTY_EXIT_REASON: &str = "cursor-agent exited without output";
 
+/// Session-folder directory image attachments are staged into so
+/// `--image PATH` can read them.
+const IMAGE_DIR: &str = ".peckboard-cursor-images";
+
+/// The prompt for a message that is only images: `--print` needs some text.
+const IMAGE_ONLY_PROMPT: &str = "See the attached image(s).";
+
 pub fn run(payload: &Value) -> Result<(), String> {
     let session_id = payload
         .get("session_id")
@@ -91,30 +98,36 @@ pub fn run(payload: &Value) -> Result<(), String> {
             approve_servers(&cli, w, &working_dir);
         }
     }
+    // Image attachments are staged into the session folder for `--image`;
+    // anything else is dropped with a transcript notice.
+    let attachments = message
+        .get("attachments")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let (image_paths, dropped) = stage_image_attachments(session_id, &attachments);
+    let prompt = if prompt.trim().is_empty() && !image_paths.is_empty() {
+        IMAGE_ONLY_PROMPT.to_string()
+    } else {
+        prompt
+    };
     let args = argv::build_cli_args(
         &model,
         &prompt,
         conversation_id.as_deref(),
         &system_prompt,
         crate::settings::bool("auto_approve", true),
+        &image_paths,
     );
 
-    // `cursor-agent --help` carries no image/attachment flag, so say so in
-    // the transcript rather than silently answering the text alone.
-    let attachments = message
-        .get("attachments")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    if attachments > 0 {
+    if dropped > 0 {
         let _ = emit(
             session_id,
             &ProviderEvent::Text {
-                text: attachments_dropped_note("cursor-agent", attachments),
+                text: attachments_dropped_note(dropped),
             },
         );
     }
-
     host::call_host(
         HostFn::ProviderSpawn,
         &json!({
@@ -253,6 +266,15 @@ fn classify_failed_exit(stderr: &str) -> (String, CrashKind) {
     let tail = stderr.trim();
     if tail.is_empty() {
         (EMPTY_EXIT_REASON.into(), CrashKind::NoOutput)
+    } else if tail.contains("unknown option '--image'") {
+        // `--image` is hidden and marked internal in the CLI, so an update
+        // can remove it. Name that instead of a bare parser error.
+        (
+            "This cursor-agent version no longer accepts the `--image` flag Peckboard uses to \
+             send images. Resend without the image, or switch the session to another provider."
+                .into(),
+            CrashKind::Unknown,
+        )
     } else {
         (tail.to_string(), CrashKind::Unknown)
     }
@@ -303,16 +325,89 @@ fn approve_servers(cli: &str, wiring: &mcp::McpWiring, working_dir: &str) {
     }
 }
 
-/// The transcript note for attachments a text-only CLI can't take.
-fn attachments_dropped_note(provider: &str, count: usize) -> String {
+/// The transcript note for attachments that couldn't be sent: non-image
+/// files, or images the host couldn't stage.
+fn attachments_dropped_note(count: usize) -> String {
     let plural = if count == 1 { "" } else { "s" };
     format!(
         "**Note:** {count} attachment{plural} on your message {} not sent — \
-         the `{provider}` CLI accepts text only. Save the file into the \
-         working directory and reference it by path, or switch the session \
-         to a provider with image support (Claude, Ollama).",
+         `cursor-agent` only takes images, up to 20 MiB each. For other files, \
+         save them into the working directory and reference them by path.",
         if count == 1 { "was" } else { "were" }
     )
+}
+
+fn is_image_attachment(att: &Value) -> bool {
+    let mime = att.get("mime_type").and_then(|v| v.as_str()).unwrap_or("");
+    if mime.to_ascii_lowercase().starts_with("image/") {
+        return true;
+    }
+    let name = att.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
+}
+
+/// Stage image attachments into `IMAGE_DIR` under the session folder via
+/// the host, so `cursor-agent --image PATH` can read them. Returns (staged
+/// paths, dropped count).
+fn stage_image_attachments(session_id: &str, attachments: &[Value]) -> (Vec<String>, usize) {
+    let mut paths = Vec::new();
+    let mut dropped = 0usize;
+    for (i, att) in attachments.iter().enumerate() {
+        let data = att
+            .get("data_base64")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !is_image_attachment(att) || data.is_empty() {
+            dropped += 1;
+            continue;
+        }
+        let name = att
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or("image");
+        let rel = format!("{IMAGE_DIR}/{}", safe_filename(name, i));
+        match host::call_host(
+            HostFn::ProviderWriteFile,
+            &json!({
+                "session_id": session_id,
+                "path": rel,
+                "contents_base64": data,
+            }),
+        ) {
+            Ok(v) => paths.push(
+                v.get("path")
+                    .and_then(|p| p.as_str())
+                    .map(str::to_string)
+                    .unwrap_or(rel),
+            ),
+            Err(_) => dropped += 1,
+        }
+    }
+    (paths, dropped)
+}
+
+/// A path-safe staged name; the index keeps two same-named images apart.
+fn safe_filename(name: &str, idx: usize) -> String {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{idx}-{cleaned}")
 }
 
 /// Read a session-folder file via the host; `None` when absent or on any
@@ -430,13 +525,27 @@ mod tests {
 
     #[test]
     fn attachments_note_pluralizes() {
-        assert!(
-            attachments_dropped_note("cursor-agent", 1)
-                .contains("1 attachment on your message was")
-        );
-        assert!(
-            attachments_dropped_note("cursor-agent", 3)
-                .contains("3 attachments on your message were")
-        );
+        assert!(attachments_dropped_note(1).contains("1 attachment on your message was"));
+        assert!(attachments_dropped_note(3).contains("3 attachments on your message were"));
+    }
+
+    #[test]
+    fn images_are_detected_by_mime_or_filename() {
+        assert!(is_image_attachment(&json!({"mime_type": "image/png"})));
+        assert!(is_image_attachment(&json!({"filename": "a.JPG"})));
+        assert!(!is_image_attachment(
+            &json!({"mime_type": "application/pdf", "filename": "a.pdf"})
+        ));
+    }
+
+    #[test]
+    fn staged_names_cannot_escape_the_image_dir() {
+        assert_eq!(safe_filename("../../etc/my pic.png", 2), "2-my_pic.png");
+    }
+
+    #[test]
+    fn a_removed_image_flag_gets_a_clear_reason() {
+        let (reason, _) = classify_failed_exit("error: unknown option '--image'\n");
+        assert!(reason.contains("no longer accepts"), "{reason}");
     }
 }

@@ -1472,11 +1472,13 @@ impl PluginProviderRuntime {
     }
 
     /// `peckboard_provider_write_file {session_id, path, contents}` — write
-    /// a file under the session folder. `contents` is UTF-8 text;
-    /// `contents_base64` carries raw bytes (codex image staging). Exactly one
-    /// of the two must be present. `path` is relative; `..` and absolute
-    /// paths are rejected. Used for workspace MCP config and the Claude
-    /// subagent-context file.
+    /// a file under the session folder. `contents` is UTF-8 text, capped at
+    /// 1 MiB; `contents_base64` carries raw bytes (image attachments staged
+    /// for `--image`), capped at the 20 MiB request-body limit so an image the
+    /// server accepted can always be staged. Exactly one of the two must be
+    /// present. `path` is relative; `..` and absolute paths are rejected. Used
+    /// for workspace MCP config, image staging and the Claude subagent-context
+    /// file.
     pub fn write_file_json(&self, plugin_id: &str, input: &str) -> String {
         #[derive(Deserialize)]
         struct WriteFileRequest {
@@ -1492,19 +1494,21 @@ impl PluginProviderRuntime {
             Ok(r) => r,
             Err(e) => return error_json(format!("invalid write_file request: {e}")),
         };
-        let bytes: Vec<u8> = match (req.contents, req.contents_base64) {
-            (Some(text), None) => text.into_bytes(),
+        const MAX_TEXT_BYTES: usize = 1024 * 1024;
+        const MAX_BINARY_BYTES: usize = 20 * 1024 * 1024;
+        let (bytes, cap): (Vec<u8>, usize) = match (req.contents, req.contents_base64) {
+            (Some(text), None) => (text.into_bytes(), MAX_TEXT_BYTES),
             (None, Some(b64)) => {
                 use base64::Engine as _;
                 match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
-                    Ok(b) => b,
+                    Ok(b) => (b, MAX_BINARY_BYTES),
                     Err(e) => return error_json(format!("invalid contents_base64: {e}")),
                 }
             }
             _ => return error_json("provide exactly one of contents or contents_base64"),
         };
-        if bytes.len() > 1024 * 1024 {
-            return error_json("file too large (max 1 MiB)");
+        if bytes.len() > cap {
+            return error_json(format!("file too large (max {} MiB)", cap / (1024 * 1024)));
         }
         let turn = match self.owned_turn(plugin_id, &req.session_id) {
             Ok(t) => t,
@@ -2633,6 +2637,39 @@ mod tests {
         rt
     }
 
+    /// A screenshot is routinely over 1 MiB, so staging an image attachment
+    /// must not hit the text-config cap; text stays capped.
+    #[test]
+    fn write_file_caps_text_at_1_mib_but_takes_a_large_image() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, dir.path().to_str().unwrap());
+        let mib = 1024 * 1024;
+        let encode = |n: usize| base64::engine::general_purpose::STANDARD.encode(vec![7u8; n]);
+        let write = |body: serde_json::Value| runtime.write_file_json("p1", &body.to_string());
+
+        let ok = write(serde_json::json!({
+            "session_id": "s1", "path": "img/big.png", "contents_base64": encode(5 * mib),
+        }));
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+        assert_eq!(
+            std::fs::metadata(dir.path().join("img/big.png"))
+                .unwrap()
+                .len(),
+            5 * mib as u64
+        );
+
+        let huge = write(serde_json::json!({
+            "session_id": "s1", "path": "img/huge.png", "contents_base64": encode(21 * mib),
+        }));
+        assert!(huge.contains("max 20 MiB"), "{huge}");
+
+        let text = write(serde_json::json!({
+            "session_id": "s1", "path": "a.txt", "contents": "x".repeat(mib + 1),
+        }));
+        assert!(text.contains("max 1 MiB"), "{text}");
+    }
     /// A worker retired by a terminal card tool must not linger for
     /// background work once its turn settles: the run is stopped (and so
     /// stops reporting `is_running`), where a plain retire keeps lingering.
