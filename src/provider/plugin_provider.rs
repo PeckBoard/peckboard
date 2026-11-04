@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::time::{Duration, Instant};
 
@@ -1478,7 +1478,8 @@ impl PluginProviderRuntime {
     /// server accepted can always be staged. Exactly one of the two must be
     /// present. `path` is relative; `..` and absolute paths are rejected. Used
     /// for workspace MCP config, image staging and the Claude subagent-context
-    /// file.
+    /// file. `project_root` resolves `.cursor/mcp.json` at the session's git
+    /// root instead of the session folder; see [`project_config_base`].
     pub fn write_file_json(&self, plugin_id: &str, input: &str) -> String {
         #[derive(Deserialize)]
         struct WriteFileRequest {
@@ -1489,6 +1490,8 @@ impl PluginProviderRuntime {
             /// Raw bytes, standard base64. Mutually exclusive with `contents`.
             #[serde(default)]
             contents_base64: Option<String>,
+            #[serde(default)]
+            project_root: bool,
         }
         let req: WriteFileRequest = match serde_json::from_str(input) {
             Ok(r) => r,
@@ -1528,7 +1531,11 @@ impl PluginProviderRuntime {
         {
             return error_json("path must be a relative file under the session folder");
         }
-        let dest = folder.join(rel);
+        let base = match project_config_base(folder, &req.path, req.project_root) {
+            Ok(base) => base,
+            Err(e) => return error_json(e),
+        };
+        let dest = base.join(rel);
         if let Some(parent) = dest.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 return error_json(format!("create_dir: {e}"));
@@ -1549,6 +1556,8 @@ impl PluginProviderRuntime {
         struct ReadFileRequest {
             session_id: String,
             path: String,
+            #[serde(default)]
+            project_root: bool,
         }
         let req: ReadFileRequest = match serde_json::from_str(input) {
             Ok(r) => r,
@@ -1572,7 +1581,11 @@ impl PluginProviderRuntime {
         {
             return error_json("path must be a relative file under the session folder");
         }
-        let dest = folder.join(rel);
+        let base = match project_config_base(folder, &req.path, req.project_root) {
+            Ok(base) => base,
+            Err(e) => return error_json(e),
+        };
+        let dest = base.join(rel);
         match std::fs::read(&dest) {
             Ok(bytes) if bytes.len() > 1024 * 1024 => error_json("file too large (max 1 MiB)"),
             Ok(bytes) => match String::from_utf8(bytes) {
@@ -1610,6 +1623,22 @@ const PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
 /// changed long ago can't keep answering from memory.
 const PROBE_CACHE_MAX_STALE: Duration = Duration::from_secs(60 * 60);
 
+/// Where a provider's config path resolves from. Normally the session folder.
+/// With `project_root`, the nearest ancestor holding a `.git` (or the folder
+/// itself outside a repo), because cursor-agent reads `.cursor/mcp.json` only
+/// from there: a file written in a session folder below a repo's root is never
+/// found, and that session gets no MCP servers. Limited to that one file, so
+/// this can't become a general way to write outside the session folder.
+fn project_config_base(folder: &Path, path: &str, project_root: bool) -> Result<PathBuf, String> {
+    if !project_root {
+        return Ok(folder.to_path_buf());
+    }
+    if path != ".cursor/mcp.json" {
+        return Err("project_root only applies to .cursor/mcp.json".into());
+    }
+    let root = folder.ancestors().find(|dir| dir.join(".git").exists());
+    Ok(root.unwrap_or(folder).to_path_buf())
+}
 struct ProbeCache {
     entries: std::sync::Mutex<HashMap<String, (Instant, String)>>,
     /// Keys with a background refresh in flight — at most one per key.
@@ -2635,6 +2664,34 @@ mod tests {
             )
             .unwrap();
         rt
+    }
+
+    /// cursor-agent only reads `.cursor/mcp.json` at the git root, so that one
+    /// file can resolve there from a session folder below it.
+    #[test]
+    fn project_root_reaches_only_the_mcp_config_at_the_git_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let sub = repo.join("packages/app");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+
+        assert_eq!(
+            project_config_base(&sub, ".cursor/mcp.json", true).unwrap(),
+            repo
+        );
+        assert_eq!(
+            project_config_base(&sub, ".cursor/mcp.json", false).unwrap(),
+            sub
+        );
+        assert!(project_config_base(&sub, "other.txt", true).is_err());
+
+        let outside = dir.path().join("plain");
+        std::fs::create_dir(&outside).unwrap();
+        assert_eq!(
+            project_config_base(&outside, ".cursor/mcp.json", true).unwrap(),
+            outside
+        );
     }
 
     /// A screenshot is routinely over 1 MiB, so staging an image attachment

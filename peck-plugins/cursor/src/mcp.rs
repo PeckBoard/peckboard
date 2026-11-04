@@ -17,10 +17,10 @@
 //! skips the write.
 //!
 //! Server approval (`cursor-agent mcp enable <name>`) is sticky per server
-//! config; it resets when the entry changes (e.g. a new port), so the send
-//! path re-asserts it before every turn — idempotent, cached by the host's
-//! probe TTL, and scoped to the servers we wrote (unlike `--approve-mcps`,
-//! which would blanket-approve unrelated user servers).
+//! config; it resets when the entry changes (e.g. a new port or token), so the
+//! send path re-asserts it before every turn for EVERY server in the file:
+//! Peckboard's, the ones from Settings, and the ones the project added itself.
+//! An unapproved server stays "not loaded (needs approval)" in a headless turn.
 
 pub const TOKEN_ENV_VAR: &str = "PECKBOARD_MCP_TOKEN";
 const RESERVED: &str = "peckboard";
@@ -58,15 +58,16 @@ pub fn parse_contents(contents: &str) -> Option<McpWiring> {
     })
 }
 
-/// Servers to `cursor-agent mcp enable` for this turn: peckboard first,
-/// then every managed user server.
-pub fn approval_server_names(wiring: &McpWiring) -> Vec<String> {
-    let mut names = vec![RESERVED.to_string()];
-    for (name, _) in &wiring.extra_servers {
-        if name != RESERVED {
-            names.push(name.clone());
-        }
-    }
+/// Every server configured in a `.cursor/mcp.json`, peckboard first: all of
+/// them get approved for the turn.
+pub fn configured_server_names(mcp_json: &str) -> Vec<String> {
+    let json: serde_json::Value = serde_json::from_str(mcp_json).unwrap_or_default();
+    let mut names: Vec<String> = json
+        .get("mcpServers")
+        .and_then(|s| s.as_object())
+        .map(|servers| servers.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort_by_key(|name| name != RESERVED);
     names
 }
 
@@ -295,11 +296,17 @@ mod tests {
     }
 
     #[test]
-    fn approval_names_are_peckboard_then_managed_extras() {
-        let names = approval_server_names(&wiring(vec![
-            gh_entry(),
-            ("peckboard".into(), serde_json::json!({"command":"evil"})),
-        ]));
-        assert_eq!(names, vec!["peckboard".to_string(), "github".to_string()]);
+    fn every_configured_server_is_approved_including_hand_written_ones() {
+        let text = merge_workspace_mcp_json(
+            Some(r#"{"mcpServers":{"aaa-by-hand":{"type":"http","url":"https://x/mcp"}}}"#),
+            &wiring(vec![gh_entry()]),
+        )
+        .unwrap()
+        .unwrap();
+        let names = configured_server_names(&text);
+        assert_eq!(names[0], "peckboard");
+        assert!(names.contains(&"github".to_string()));
+        assert!(names.contains(&"aaa-by-hand".to_string()));
+        assert_eq!(names.len(), 3);
     }
 }

@@ -25,6 +25,9 @@ pub fn build_cli_args(
     if auto_approve {
         args.push("--force".to_string());
         args.push("--trust".to_string());
+        // Also covers `~/.cursor/mcp.json`, which the send path can't list
+        // for `mcp enable`.
+        args.push("--approve-mcps".to_string());
     }
     // Hidden from `--help` and marked internal in the CLI, but it is how
     // `--print` attaches images: it fills the message's `selectedImages`.

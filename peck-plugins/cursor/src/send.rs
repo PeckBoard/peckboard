@@ -17,6 +17,8 @@ const IMAGE_DIR: &str = ".peckboard-cursor-images";
 
 /// The prompt for a message that is only images: `--print` needs some text.
 const IMAGE_ONLY_PROMPT: &str = "See the attached image(s).";
+/// The project MCP config cursor-agent reads, relative to the project root.
+const MCP_JSON: &str = ".cursor/mcp.json";
 
 pub fn run(payload: &Value) -> Result<(), String> {
     let session_id = payload
@@ -77,25 +79,18 @@ pub fn run(payload: &Value) -> Result<(), String> {
         .and_then(|v| v.as_str())
         .and_then(mcp::parse_contents);
     if let Some(w) = &wiring {
-        // Merge into the workspace `.cursor/mcp.json`, preserving user
-        // servers and unrelated keys; a file we can't merge (invalid JSON)
-        // is left untouched and the turn runs without MCP wiring rather
-        // than clobbering it.
-        let existing = read_workspace_file(session_id, ".cursor/mcp.json");
-        let wired = match mcp::merge_workspace_mcp_json(existing.as_deref(), w) {
-            Ok(Some(text)) => {
-                write_workspace_file(session_id, ".cursor/mcp.json", &text);
-                true
-            }
-            Ok(None) => true,
-            Err(_) => false,
+        // The token env must match the turn's spawn env — cursor-agent
+        // hashes the env-interpolated server config when recording the
+        // approval.
+        env.insert(mcp::TOKEN_ENV_VAR.into(), w.token.clone());
+        let notes = match wire_workspace_mcp(session_id, w) {
+            Ok(names) => approve_servers(&cli, &names, &env, &env_remove, &working_dir),
+            Err(e) => vec![format!(
+                "**Note:** MCP servers won't load this turn, including Peckboard's tools: {e}"
+            )],
         };
-        if wired {
-            // The token env must match the turn's spawn env — cursor-agent
-            // hashes the env-interpolated server config when recording the
-            // approval.
-            env.insert(mcp::TOKEN_ENV_VAR.into(), w.token.clone());
-            approve_servers(&cli, w, &working_dir);
+        for text in notes {
+            let _ = emit(session_id, &ProviderEvent::Text { text });
         }
     }
     // Image attachments are staged into the session folder for `--image`;
@@ -304,25 +299,70 @@ fn killed_by_signal_reason(provider: &str, signal: i32) -> String {
 /// re-asserted before every turn. Failures are ignored — worst case the
 /// agent runs without that server's tools, same as before wiring. The
 /// host's 60 s probe cache makes per-turn re-runs cheap.
-fn approve_servers(cli: &str, wiring: &mcp::McpWiring, working_dir: &str) {
-    let mut probe_env = serde_json::Map::new();
-    // The approval is recorded against the env-INTERPOLATED server config,
-    // so `enable` must resolve the exact same header value as the turn.
-    probe_env.insert(mcp::TOKEN_ENV_VAR.to_string(), json!(wiring.token));
-    for name in mcp::approval_server_names(wiring) {
-        let _ = host::call_host(
+fn approve_servers(
+    cli: &str,
+    names: &[String],
+    env: &std::collections::HashMap<String, String>,
+    env_remove: &[String],
+    working_dir: &str,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for name in names {
+        // The turn's exact env: the approval is recorded against the
+        // env-INTERPOLATED server config, so `enable` must resolve the same
+        // values as the turn, and an account's config dir must match too.
+        let result = host::call_host(
             HostFn::ProviderProbe,
             &json!({
                 "command": cli,
                 "args": ["mcp", "enable", name],
-                "env": probe_env,
-                // Approval is workspace-scoped; hosts that support a probe
-                // cwd honour it, older ones ignore the field.
+                "env": env,
+                "env_remove": env_remove,
+                // Approval is workspace-scoped.
                 "cwd": working_dir,
-                "timeout_ms": 10_000,
+                "timeout_ms": 20_000,
             }),
         );
+        if let Some(detail) = approval_failure(&result) {
+            notes.push(format!(
+                "**Note:** MCP server `{name}` couldn't be approved, so its tools won't load \
+                 this turn: {detail}"
+            ));
+        }
     }
+    notes
+}
+
+/// Why an `mcp enable` probe failed; `None` when it succeeded.
+fn approval_failure(result: &Result<Value, String>) -> Option<String> {
+    let v = match result {
+        Ok(v) => v,
+        Err(e) => return Some(e.clone()),
+    };
+    if v.get("exit_code").and_then(|c| c.as_i64()) == Some(0) {
+        return None;
+    }
+    let text = |key: &str| v.get(key).and_then(|s| s.as_str()).unwrap_or("").trim();
+    let detail = [text("stderr"), text("stdout")]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or("`cursor-agent mcp enable` failed");
+    Some(detail.to_string())
+}
+
+/// Merge Peckboard's servers into the `.cursor/mcp.json` the CLI actually
+/// reads, and return every server configured there — Peckboard's and the
+/// ones the project added itself.
+fn wire_workspace_mcp(session_id: &str, wiring: &mcp::McpWiring) -> Result<Vec<String>, String> {
+    let existing = read_workspace_mcp_json(session_id)?;
+    let text = match mcp::merge_workspace_mcp_json(existing.as_deref(), wiring)? {
+        Some(text) => {
+            write_workspace_mcp_json(session_id, &text)?;
+            text
+        }
+        None => existing.unwrap_or_default(),
+    };
+    Ok(mcp::configured_server_names(&text))
 }
 
 /// The transcript note for attachments that couldn't be sent: non-image
@@ -410,27 +450,34 @@ fn safe_filename(name: &str, idx: usize) -> String {
     format!("{idx}-{cleaned}")
 }
 
-/// Read a session-folder file via the host; `None` when absent or on any
-/// host error (treated as a missing file, like the old `read_to_string().ok()`).
-fn read_workspace_file(session_id: &str, path: &str) -> Option<String> {
+/// `.cursor/mcp.json` at the project root, where cursor-agent looks: the
+/// nearest ancestor with a `.git`, so a session folder below a repo's root
+/// shares the root's file. A read failure is an error, never "absent": merging
+/// into nothing would overwrite a file that does exist.
+fn read_workspace_mcp_json(session_id: &str) -> Result<Option<String>, String> {
     let v = host::call_host(
         HostFn::ProviderReadFile,
-        &json!({ "session_id": session_id, "path": path }),
-    )
-    .ok()?;
+        &json!({ "session_id": session_id, "path": MCP_JSON, "project_root": true }),
+    )?;
     if !v.get("exists").and_then(|e| e.as_bool()).unwrap_or(false) {
-        return None;
+        return Ok(None);
     }
-    v.get("contents")
+    Ok(v.get("contents")
         .and_then(|c| c.as_str())
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
-fn write_workspace_file(session_id: &str, path: &str, contents: &str) {
-    let _ = host::call_host(
+fn write_workspace_mcp_json(session_id: &str, contents: &str) -> Result<(), String> {
+    host::call_host(
         HostFn::ProviderWriteFile,
-        &json!({ "session_id": session_id, "path": path, "contents": contents }),
-    );
+        &json!({
+            "session_id": session_id,
+            "path": MCP_JSON,
+            "contents": contents,
+            "project_root": true,
+        }),
+    )
+    .map(|_| ())
 }
 
 fn emit(session_id: &str, event: &ProviderEvent) -> Result<(), String> {
@@ -547,5 +594,18 @@ mod tests {
     fn a_removed_image_flag_gets_a_clear_reason() {
         let (reason, _) = classify_failed_exit("error: unknown option '--image'\n");
         assert!(reason.contains("no longer accepts"), "{reason}");
+    }
+
+    #[test]
+    fn approval_failures_name_the_reason() {
+        assert_eq!(approval_failure(&Ok(json!({"exit_code": 0}))), None);
+        assert_eq!(
+            approval_failure(&Ok(json!({"exit_code": 1, "stderr": " nope \n"}))).as_deref(),
+            Some("nope")
+        );
+        assert_eq!(
+            approval_failure(&Err("probe timed out".into())).as_deref(),
+            Some("probe timed out")
+        );
     }
 }
