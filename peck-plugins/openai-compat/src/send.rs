@@ -34,6 +34,15 @@ const CONTINUE_NUDGE: &str =
 /// turn ends at `MAX_IDENTICAL_TOOL_ROUNDS`.
 const REPEAT_WARN_AT: usize = 3;
 const MAX_IDENTICAL_TOOL_ROUNDS: usize = 5;
+/// Reads of the same file window allowed with no file change in between; the
+/// next are refused, and the turn ends after `MAX_READ_REFUSALS` refusals.
+/// Seen: 265 read_file calls cycling through seven files in a "final review",
+/// a cycle too long for `repeat_run`.
+const MAX_UNCHANGED_READS: usize = 3;
+const MAX_READ_REFUSALS: usize = 12;
+const REREAD_REFUSED: &str = "Not run: you have read this several times this turn and no file has \
+     changed since. Reading it again won't show anything new. Make a specific fix, or finish now \
+     with your report, including what you could not verify.";
 /// Cap on the response body quoted in an HTTP-error crash reason.
 const MAX_ERROR_CHARS: usize = 2_000;
 /// Tool images shown to the model: only the newest one, within about 5 MB
@@ -104,27 +113,48 @@ struct TurnRecord {
     failures: Vec<FailedCall>,
     /// Paths used successfully, for `retry_args` to correct a mistyped one.
     paths: Vec<String>,
-    /// The user asked for research and no web tool has run yet: the first
-    /// file write is refused once (`RESEARCH_GATE`).
+    /// The user asked for research and no web page has been read yet: the
+    /// first file write is refused once (`RESEARCH_GATE`).
     research_pending: bool,
+    /// `read_file` calls per file window since the last file change.
+    reads: Vec<(String, usize)>,
+    /// Reads refused by `MAX_UNCHANGED_READS` this turn.
+    read_refusals: usize,
 }
 
-/// Web tools that count as research for the gate.
-const WEB_TOOLS: &[&str] = &[
-    "search_web",
-    "fetch_web",
-    "parse_web",
-    "web_get_part",
-    "fetch_url",
-];
+impl TurnRecord {
+    /// Count a read_file of this window; returns how many times it has now
+    /// been asked for since the last file change.
+    fn note_read(&mut self, args: &Value) -> usize {
+        let field = |k: &str| args.get(k).map_or(String::new(), Value::to_string);
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+        let key = format!(
+            "{}|{}|{}",
+            path.trim_start_matches('/'),
+            field("start_line"),
+            field("line_count")
+        );
+        if let Some(entry) = self.reads.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 += 1;
+            return entry.1;
+        }
+        self.reads.push((key, 1));
+        1
+    }
+}
+
+/// Tools that read a web page; only these satisfy the research gate. Not
+/// `search_web`: four probes ran a search or two, opened no result, and
+/// planned from the snippets.
+const PAGE_READ_TOOLS: &[&str] = &["fetch_web", "parse_web", "web_get_part", "fetch_url"];
 
 /// Seen twice: asked to "research and plan before you build", the model ran
 /// one search and opened nothing, then (next probe) ran none at all and
 /// copied an earlier attempt from disk, calling that research.
-const RESEARCH_GATE: &str = "Not run: you were asked to research first, and you haven't used the web \
-     tools yet. Search for 2–3 real reference designs or examples with search_web, open the \
-     best results with parse_web, write what you learned into RESEARCH.md, then write files.";
-
+const RESEARCH_GATE: &str = "Not run: you were asked to research first, and you haven't read any \
+     web page yet (search results are only snippets). Open 2–3 real reference designs or \
+     examples with parse_web (from search results, or sites you know), write what you learned \
+     into RESEARCH.md, then write files.";
 /// Whether the user's message asks for research before the work. Phrases
 /// count only as words of prose, not inside a path or identifier: "fix the
 /// bug in research.py" or "update ResearchPanel.tsx" must not gate writes.
@@ -335,8 +365,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
         )?;
     }
 
-    let mut last_signature: Option<String> = None;
-    let mut identical_rounds = 0;
+    let mut signatures: Vec<String> = Vec::new();
     let mut nudges = 0;
     let mut overflow_retried = false;
     // Tool calls that failed this turn and weren't redone successfully (the
@@ -767,6 +796,25 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 new_messages.push(nudge);
                 continue;
             }
+            // A tool call too garbled to read must not pass as the final
+            // answer: the turn would end "complete" mid-task.
+            if tools.is_some() && nudges < MAX_CONTINUE_NUDGES && has_garbled_tool_call(&text) {
+                nudges += 1;
+                emit(
+                    session_id,
+                    &ProviderEvent::System {
+                        text: "The reply ended in a tool call too garbled to read; it was not \
+                               run and the model was asked to send it again."
+                            .into(),
+                        subtype: "warning".into(),
+                        detail: Value::Null,
+                    },
+                )?;
+                let nudge = json!({ "role": "user", "content": GARBLED_CALL_NUDGE });
+                messages.push(nudge.clone());
+                new_messages.push(nudge);
+                continue;
+            }
             // "Let me check X." and then nothing: the agent announced a
             // step but stopped. Nudge it to act, a bounded number of times;
             // the nudge is persisted so the history stays consistent.
@@ -801,13 +849,12 @@ pub fn run(payload: &Value) -> Result<(), String> {
             }
             break;
         }
-        let signature = tool_call_signature(&calls);
-        if last_signature.as_deref() == Some(signature.as_str()) {
-            identical_rounds += 1;
-        } else {
-            identical_rounds = 1;
-            last_signature = Some(signature);
-        }
+        // How many times the latest round (or the latest pair of rounds)
+        // repeats back to back. Pairs too: Probe P alternated a read_file
+        // and a no-op edit_file eleven times, which the one-round count never
+        // saw. A re-read after each *different* edit is no cycle.
+        signatures.push(tool_call_signature(&calls));
+        let identical_rounds = repeat_run(&signatures);
         // Stuck-ish: the repeat isn't run, and the model is told why and to
         // change course. Ending the turn outright on the 3rd repeat killed
         // an hour-long build over one malformed read_file.
@@ -859,6 +906,22 @@ pub fn run(payload: &Value) -> Result<(), String> {
             &mut record,
         )? {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
+        }
+        // The nudge budget guards against stalling in a row, not across a
+        // long build: a round of real work earns it back.
+        nudges = 0;
+        if record.read_refusals >= MAX_READ_REFUSALS {
+            emit(
+                session_id,
+                &ProviderEvent::System {
+                    text: "Turn stopped: the model kept re-reading files that had not changed. \
+                           Send a message to continue."
+                        .into(),
+                    subtype: "warning".into(),
+                    detail: Value::Null,
+                },
+            )?;
+            break;
         }
         // The model sees this round's image now; history keeps a stub.
         // Earlier images of this turn go back to their stubs first: vLLM
@@ -1015,6 +1078,21 @@ fn has_cut_tool_call(content: &str) -> bool {
         !answer[at..].contains("</function>") && !answer[at..].contains("</tool_call>")
     })
 }
+
+/// Whether the reply's answer ends in a complete raw tool call that
+/// `recover_inline_tool_calls` couldn't read (seen: `<=read_file>` and
+/// `=path>`, the `<function` and `<parameter` lost). Only at the very end,
+/// so an answer that merely quotes the tags is still an answer.
+fn has_garbled_tool_call(content: &str) -> bool {
+    let answer = content.rfind("</think>").map_or(content, |i| &content[i..]);
+    let end = answer.trim_end();
+    answer.contains("<tool_call>")
+        && (end.ends_with("</tool_call>") || end.ends_with("</function>"))
+}
+
+/// Sent when the reply ended in an unreadable tool call.
+const GARBLED_CALL_NUDGE: &str = "Your last tool call was garbled (its tags were malformed), so it \
+     was not run. Send that call again as a normal tool call.";
 
 /// Sent when the reply ended inside a tool call.
 const CUT_CALL_NUDGE: &str = "Your last tool call was cut off before it finished (the reply ran \
@@ -1179,6 +1257,13 @@ fn announces_unfinished_step(answer: &str) -> bool {
         "let's ",
         "i am going to ",
         "i'm going to ",
+        // Seen ending a turn: "Now I'll align the HTML. Starting with the home
+        // page." The announcement is the sentence before this one.
+        "starting with ",
+        "starting on ",
+        "beginning with ",
+        "continuing with ",
+        "moving on to ",
     ]
     .iter()
     .any(|p| lower.starts_with(p))
@@ -1279,6 +1364,26 @@ fn tool_call_signature(calls: &[ToolCall]) -> String {
         .map(|c| format!("{}\u{0}{}", c.name, c.arguments))
         .collect::<Vec<_>>()
         .join("\u{1}")
+}
+
+/// How many times the tail of `history` repeats back to back: the last round
+/// alone (`… A A A` → 3) or the last two rounds as a block (`A B A B A B`
+/// → 3), whichever is longer.
+fn repeat_run(history: &[String]) -> usize {
+    let run = |period: usize| {
+        if history.len() < period {
+            return 0;
+        }
+        let block = &history[history.len() - period..];
+        if period == 2 && block[0] == block[1] {
+            return 0; // that's a period-1 run, counted there
+        }
+        history
+            .rchunks_exact(period)
+            .take_while(|c| *c == block)
+            .count()
+    };
+    run(1).max(run(2))
 }
 
 /// The `parameters` schema the server was offered for tool `name`.
@@ -1418,6 +1523,12 @@ fn salvage_tool_markup(
         let Value::String(s) = value else {
             continue;
         };
+        // Markup leaked in front of a value (seen: `path:
+        // "<parameter=search.html"`): drop the prefix; a still-wrong path is
+        // then corrected by `retry_args`.
+        if let Some(rest) = s.strip_prefix("<parameter=") {
+            *s = rest.trim_start_matches('>').to_string();
+        }
         let Some((cut, tag)) = TOOL_MARKUP_TAGS
             .iter()
             .filter_map(|t| s.find(t).map(|i| (i, *t)))
@@ -1651,6 +1762,41 @@ fn written_file_note(session_id: &str, tool: &str, args: &Value) -> Option<Strin
     check::report(path, &text)
 }
 
+/// The structure problems a web file has right now, appended to a
+/// read_file of it (any window). Seen: the model read data.js after a note
+/// about an unclosed `{` and declared it "complete and balanced"; the page
+/// never loaded. `None` when the file is clean or not a web file.
+fn read_file_note(session_id: &str, args: &Value) -> Option<String> {
+    let path = args.get("path")?.as_str()?;
+    if !check::is_checked(path) {
+        return None;
+    }
+    let problems = check::problems(path, &read_back(session_id, path)?);
+    if problems.is_empty() {
+        return None;
+    }
+    let list: Vec<String> = problems.iter().map(|p| format!("- {p}")).collect();
+    Some(format!(
+        "{path} currently has structure problems (whole file checked):\n{}",
+        list.join("\n")
+    ))
+}
+
+/// Whether a search_web failure is the search provider throttling us.
+fn search_rate_limited(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("rate-limit")
+        || e.contains("rate limit")
+        || e.contains("http 202")
+        || e.contains("429")
+}
+
+/// Seen: six search_web calls in a row, each rate-limited.
+const SEARCH_LIMITED_HINT: &str = "Web search is rate-limited right now; retrying won't help for a \
+     while. Read known pages directly instead with parse_web (e.g. a product's own site, its design \
+     system or developer docs, well-known design write-ups), or carry on and note in your report \
+     that search was unavailable.";
+
 /// Close the parentheses the model dropped, in place: CSS declarations
 /// (`check::repair_css_parens`) and JS callback calls
 /// (`check::repair_js_parens`), in a write_file's content or an edit_file's
@@ -1849,6 +1995,25 @@ fn dedupe_edit_ops(tool: &str, args: &mut Value) {
         });
     }
 }
+
+/// Whether an edit_file changes nothing: no ops, or only inserts of empty
+/// text (seen: `{op: insert, line: 91, text: ""}` sent eleven times, each
+/// "succeeding", between re-reads of the same lines).
+fn edit_is_noop(args: &Value) -> bool {
+    let Some(ops) = args.get("edits").and_then(Value::as_array) else {
+        return false;
+    };
+    ops.iter().all(|op| {
+        op.get("op").and_then(Value::as_str) == Some("insert")
+            && op
+                .get("text")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+    })
+}
+
+const NOOP_EDIT: &str = "Not run: this edit changes nothing (it only inserts empty text). Decide \
+     what the lines should become and send that as an `update` with the new text, or move on.";
 
 /// Arguments fixed for one retry after `err`, with the note telling the
 /// model what changed; `None` when there is no mechanical fix. All three
@@ -2149,14 +2314,27 @@ fn run_tool_calls(
                 }),
             ),
         };
-        if WEB_TOOLS.contains(&call.name.as_str()) {
+        if PAGE_READ_TOOLS.contains(&call.name.as_str()) {
             record.research_pending = false;
         }
         let gated =
             record.research_pending && matches!(call.name.as_str(), "write_file" | "edit_file");
+        if matches!(
+            call.name.as_str(),
+            "write_file" | "edit_file" | "file_delete" | "run_command" | "run_background"
+        ) {
+            record.reads.clear();
+        }
         let mut invoked = if gated {
             record.research_pending = false;
             Ok(json!({ "ok": false, "error": RESEARCH_GATE }))
+        } else if call.name == "read_file" && record.note_read(&args) > MAX_UNCHANGED_READS {
+            record.read_refusals += 1;
+            Ok(json!({ "ok": false, "error": REREAD_REFUSED }))
+        } else if call.name == "edit_file" && edit_is_noop(&args) {
+            Ok(json!({ "ok": false, "error": NOOP_EDIT }))
+        } else if is_copied_placeholder(&args) {
+            Ok(json!({ "ok": false, "error": COPIED_PLACEHOLDER }))
         } else {
             invoke(&args)
         };
@@ -2219,8 +2397,13 @@ fn run_tool_calls(
             ignored_note(&call.name, &call.ignored),
             (!ok && call.name.starts_with("browser_") && browser_unavailable(&content))
                 .then(|| BROWSER_DOWN_HINT.to_string()),
+            (!ok && call.name == "search_web" && search_rate_limited(&content))
+                .then(|| SEARCH_LIMITED_HINT.to_string()),
             ok.then_some(repaired).flatten(),
             ok.then(|| written_file_note(session_id, &call.name, &args))
+                .flatten(),
+            (ok && call.name == "read_file")
+                .then(|| read_file_note(session_id, &args))
                 .flatten(),
             ok.then(|| tool_hint(&call.name))
                 .flatten()
@@ -2662,23 +2845,44 @@ fn message_chars(m: &Value) -> usize {
 
 /// Tool rounds at the end of a turn that compaction leaves verbatim.
 const KEEP_RECENT_ROUNDS: usize = 4;
-/// Longest tool-call argument string kept in a compacted round.
-const COMPACT_ARG_CHARS: usize = 300;
 /// Longest tool result kept in a compacted round (its start is kept).
 const COMPACT_RESULT_CHARS: usize = 600;
 const ELIDED_MARK: &str = "elided to save context";
+/// Refusal for a call whose arguments carry a compaction note (seen:
+/// `"edits": "[1 lines, 4218 chars elided to save context; …]"`).
+const COPIED_PLACEHOLDER: &str = "Not run: these arguments contain a history note (\"elided to save \
+     context\"), not real content. Earlier calls were shortened in your history; write the actual \
+     content again (re-read the file first if you need it).";
+
+/// Whether an argument is a compaction note and nothing else. Whole values
+/// only: a real file that mentions the phrase (this one, say) must still be
+/// writable.
+fn is_copied_placeholder(args: &Value) -> bool {
+    args.as_object().is_some_and(|o| {
+        o.values().filter_map(Value::as_str).any(|s| {
+            let s = s.trim();
+            s.len() < 300 && s.starts_with('[') && s.ends_with(']') && s.contains(ELIDED_MARK)
+        })
+    })
+}
 
 /// Compact this turn's older rounds in place, in both the request
 /// (`messages`, whose last `new_messages.len()` entries are this turn's) and
-/// the turn's persisted messages. In every round before the last
-/// `KEEP_RECENT_ROUNDS`: long tool-call argument strings (file contents
-/// already written) and long tool results become short notes, and replayed
-/// reasoning is dropped. A long build is one turn of 50+ rounds, and without
-/// this every file the model ever wrote and every result it ever read is
-/// resent on every round until the context fills (and a local model gets
-/// worse long before that). Only called past the Compact Long Turns budget:
-/// rewriting old rounds costs a prefix-cache miss from that point on.
-/// Returns how many messages changed.
+/// the turn's persisted messages. Every round before the last
+/// `KEEP_RECENT_ROUNDS` becomes plain text: the assistant keeps only what it
+/// said, and each result becomes a short `user` note saying what was run and
+/// what came back (same message count, so stored indices stay valid). A long
+/// build is one turn of 50+ rounds, and without this every file the model
+/// ever wrote and every result it ever read is resent on every round until
+/// the context fills (and a local model gets worse long before that).
+///
+/// Text, not shortened calls: when old calls kept their shape with a
+/// placeholder where the content was, the model copied them — the
+/// placeholder sent as `edits` or as a whole file's `content`, three probes
+/// running. Only the last rounds keep real calls, and those are genuine.
+/// Only called past the Compact Long Turns budget: rewriting old rounds
+/// costs a prefix-cache miss from that point on. Returns how many messages
+/// changed.
 fn compact_turn(messages: &mut [Value], new_messages: &mut [Value]) -> usize {
     let start = messages.len().saturating_sub(new_messages.len());
     let assistants: Vec<usize> = (0..new_messages.len())
@@ -2688,85 +2892,129 @@ fn compact_turn(messages: &mut [Value], new_messages: &mut [Value]) -> usize {
         return 0;
     }
     let keep_from = assistants[assistants.len() - KEEP_RECENT_ROUNDS];
+    let mut names: Vec<(String, String)> = Vec::new();
     let mut changed = 0;
     for k in 0..keep_from {
         let mut hit = false;
         for m in [&mut messages[start + k], &mut new_messages[k]] {
-            hit |= compact_message(m);
+            hit |= compact_message(m, &mut names);
         }
         changed += usize::from(hit);
     }
     changed
 }
 
-/// Compact one message (see `compact_turn`); `true` if it changed.
-fn compact_message(m: &mut Value) -> bool {
+/// The few arguments worth keeping in a summary of an old call.
+fn call_brief(name: &str, args: &serde_json::Map<String, Value>) -> String {
+    let short = |v: &Value| {
+        let s = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let s: String = s.chars().take(120).collect();
+        s.replace('\n', " ")
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for key in [
+        "path",
+        "command",
+        "args",
+        "url",
+        "query",
+        "start_line",
+        "line_count",
+        "action",
+    ] {
+        if let Some(v) = args.get(key) {
+            parts.push(format!("{key}={}", short(v)));
+        }
+    }
+    for (key, unit) in [("content", "content"), ("edits", "edit ops")] {
+        match args.get(key) {
+            Some(Value::String(s)) => parts.push(format!("{} lines of {unit}", s.lines().count())),
+            Some(Value::Array(a)) => parts.push(format!("{} {unit}", a.len())),
+            _ => {}
+        }
+    }
+    format!("{name} ({})", parts.join(", "))
+}
+
+/// Compact one message (see `compact_turn`); `true` if it changed. `names`
+/// maps the call ids summarised so far to their summaries, for the notes
+/// that replace their results. Summaries live in those `user` notes, never
+/// in the assistant's own words: written there, the model continued the
+/// pattern and sent a summary as its reply instead of a tool call.
+fn compact_message(m: &mut Value, names: &mut Vec<(String, String)>) -> bool {
     let mut changed = false;
     match m["role"].as_str() {
         Some("assistant") => {
-            if let Some(obj) = m.as_object_mut() {
-                changed |= obj.remove("reasoning").is_some();
-                changed |= obj.remove("reasoning_content").is_some();
-            }
-            let Some(calls) = m.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            let Some(obj) = m.as_object_mut() else {
+                return false;
+            };
+            changed |= obj.remove("reasoning").is_some();
+            changed |= obj.remove("reasoning_content").is_some();
+            let Some(Value::Array(calls)) = obj.remove("tool_calls") else {
                 return changed;
             };
-            for call in calls {
-                let f = &mut call["function"];
+            for call in &calls {
+                let f = &call["function"];
+                let name = f["name"].as_str().unwrap_or("tool").to_string();
+                let args = f["arguments"]
+                    .as_str()
+                    .and_then(|r| serde_json::from_str::<Value>(r).ok())
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
                 // A plan is the turn's architecture, and there is no tool to
-                // read it back (seen: the whole site plan put in propose_plan
-                // instead of ARCHITECTURE.md).
-                if f["name"] == "propose_plan" {
-                    continue;
-                }
-                let Some(raw) = f["arguments"].as_str() else {
-                    continue;
+                // read it back: its text stays in full.
+                let brief = if name == "propose_plan" {
+                    let plan = args.get("markdown").and_then(Value::as_str).unwrap_or("");
+                    format!("propose_plan with this plan:\n{plan}\n")
+                } else {
+                    call_brief(&name, &args)
                 };
-                let Ok(Value::Object(mut args)) = serde_json::from_str::<Value>(raw) else {
-                    continue;
-                };
-                let mut shrunk = false;
-                for v in args.values_mut() {
-                    let long = match v {
-                        Value::String(s) if s.chars().count() > COMPACT_ARG_CHARS => {
-                            Some((s.lines().count(), s.chars().count()))
-                        }
-                        Value::Array(_) | Value::Object(_)
-                            if v.to_string().len() > COMPACT_ARG_CHARS =>
-                        {
-                            let s = v.to_string();
-                            Some((s.lines().count(), s.len()))
-                        }
-                        _ => None,
-                    };
-                    if let Some((lines, chars)) = long {
-                        *v = json!(format!(
-                            "[{lines} lines, {chars} chars {ELIDED_MARK}; this call already ran — \
-                             read the file if you need its current content]"
-                        ));
-                        shrunk = true;
-                    }
-                }
-                if shrunk {
-                    f["arguments"] = json!(Value::Object(args).to_string());
-                    changed = true;
+                if let Some(id) = call["id"].as_str() {
+                    names.push((id.to_string(), brief));
                 }
             }
+            let text = obj
+                .get("content")
+                .and_then(Value::as_str)
+                .map_or("", str::trim)
+                .to_string();
+            let said = if text.is_empty() {
+                "Continuing."
+            } else {
+                &text
+            };
+            obj.insert("content".into(), json!(said));
+            changed = true;
         }
         Some("tool") => {
-            if let Some(text) = m["content"].as_str()
-                && text.chars().count() > COMPACT_RESULT_CHARS
-                && !text.contains(ELIDED_MARK)
-            {
-                let total = text.chars().count();
-                let head: String = text.chars().take(COMPACT_RESULT_CHARS / 2).collect();
-                m["content"] = json!(format!(
-                    "{head}\n[… {} more chars of this old result {ELIDED_MARK}; run the tool \
-                     again if you need them …]",
+            let id = m["tool_call_id"].as_str().unwrap_or("").to_string();
+            let brief = names
+                .iter()
+                .find(|(k, _)| *k == id)
+                .map_or("a tool", |(_, b)| b.as_str())
+                .to_string();
+            let text = m["content"].as_str().unwrap_or("");
+            let total = text.chars().count();
+            let head: String = text.chars().take(COMPACT_RESULT_CHARS / 2).collect();
+            let more = if total > COMPACT_RESULT_CHARS / 2 {
+                format!(
+                    " … ({} more chars dropped; run the tool again if you need them)",
                     thousands(total - COMPACT_RESULT_CHARS / 2)
-                ));
-                changed = true;
-            }
+                )
+            } else {
+                String::new()
+            };
+            *m = json!({
+                "role": "user",
+                "content": format!(
+                    "[Earlier step, shortened to save context. You ran {brief}. Result: {}{more}]",
+                    head.replace('\n', " ")
+                ),
+            });
+            changed = true;
         }
         _ => {}
     }
@@ -3580,6 +3828,9 @@ mod tests {
                 .any(|e| e["kind"] == "completed")
         );
 
+        assert!(announces_unfinished_step(
+            "Now I'll align the HTML to the CSS class names. Starting with the home page."
+        ));
         assert!(announces_unfinished_step("Now I’ll run the tests."));
         assert!(announces_unfinished_step("Here is the plan:\n\n"));
         assert!(!announces_unfinished_step("Let me know if you need more."));
@@ -3755,6 +4006,11 @@ mod tests {
         assert_eq!(
             coerce(json!({"command": "frontend/page.tsx\n</parameter>\n>"}))["command"],
             json!("frontend/page.tsx")
+        );
+        // … and in front of one (Probe S: `path: "<parameter=search.html"`).
+        assert_eq!(
+            coerce(json!({"command": "<parameter=search.html"}))["command"],
+            json!("search.html")
         );
 
         // XML and JSON mixed into one parameter (a real read_file call): the
@@ -4374,12 +4630,13 @@ mod tests {
         assert!(events.iter().any(|e| e["kind"] == "completed"));
     }
 
-    /// Compaction shortens written file contents, long results and reasoning
-    /// in all but the last 4 rounds of the turn, in the request and in what
-    /// gets persisted alike; arguments stay valid JSON; history before the
-    /// turn is untouched; a second pass changes nothing.
+    /// Compaction turns all but the last 4 rounds into text: no tool calls
+    /// left to imitate, results as short `user` notes, the same message
+    /// count, in the request and in what gets persisted alike; history before
+    /// the turn is untouched; a second pass changes nothing; a plan keeps
+    /// its full text.
     #[test]
-    fn compact_turn_shortens_old_rounds_only() {
+    fn compact_turn_turns_old_rounds_into_text() {
         let page = "<div>card</div>\n".repeat(100);
         let round = |i: usize| {
             let args = json!({ "path": format!("p{i}.html"), "content": page }).to_string();
@@ -4401,43 +4658,61 @@ mod tests {
         let older = json!({ "role": "tool", "tool_call_id": "old", "content": page });
         let mut messages = vec![json!({ "role": "user", "content": "go" }), older.clone()];
         messages.extend(new_messages.clone());
-        let before = estimate_tokens(&messages);
+        let (before, count) = (estimate_tokens(&messages), messages.len());
 
         // Rounds 0 and 1 compacted (2 messages each), rounds 2-5 kept.
         assert_eq!(compact_turn(&mut messages, &mut new_messages), 4);
-        // Two 1.6k-char writes and two 1.6k-char results gone (~2k tokens).
+        assert_eq!(messages.len(), count);
         assert!(estimate_tokens(&messages) + 1_500 < before);
         assert_eq!(messages[1], older);
         for (k, m) in new_messages.iter().enumerate() {
+            assert_eq!(&messages[2 + k], m);
             let compacted = k < 4;
-            assert_eq!(messages[2 + k]["tool_calls"], m["tool_calls"]);
-            if m["role"] == "assistant" {
-                assert_eq!(m.get("reasoning").is_none(), compacted);
-                let raw = m["tool_calls"][0]["function"]["arguments"]
-                    .as_str()
-                    .unwrap();
-                let args: Value = serde_json::from_str(raw).unwrap();
-                assert_eq!(args["path"], format!("p{}.html", k / 2));
-                let content = args["content"].as_str().unwrap();
-                assert_eq!(content.contains(ELIDED_MARK), compacted, "message {k}");
+            let text = m["content"].as_str().unwrap();
+            if k % 2 == 0 {
+                assert_eq!(m.get("tool_calls").is_none(), compacted, "message {k}");
+                assert_eq!(m.get("reasoning").is_none(), compacted, "message {k}");
+                if compacted {
+                    assert_eq!(text, "Continuing.", "message {k}");
+                }
             } else {
-                let text = m["content"].as_str().unwrap();
-                assert_eq!(text.contains(ELIDED_MARK), compacted, "message {k}");
+                assert_eq!(
+                    m["role"],
+                    if compacted { "user" } else { "tool" },
+                    "message {k}"
+                );
+                if compacted {
+                    assert!(
+                        text.contains(&format!(
+                            "You ran write_file (path=p{}.html, 100 lines of content)",
+                            k / 2
+                        )),
+                        "{text}"
+                    );
+                    assert!(m.get("tool_call_id").is_none());
+                }
             }
         }
         assert_eq!(compact_turn(&mut messages, &mut new_messages), 0);
 
         // A plan keeps its markdown: the model has no way to read it back.
-        let plan = json!({ "markdown": page, "title": "Site" }).to_string();
+        let plan = json!({ "markdown": "# Plan\n- index.html", "title": "Site" }).to_string();
         let mut planned = json!({
             "role": "assistant",
             "content": "",
             "tool_calls": [{ "id": "p", "type": "function",
                 "function": { "name": "propose_plan", "arguments": plan } }],
         });
-        let before = planned.clone();
-        assert!(!compact_message(&mut planned));
-        assert_eq!(planned, before);
+        let mut names = Vec::new();
+        assert!(compact_message(&mut planned, &mut names));
+        let mut result = json!({ "role": "tool", "tool_call_id": "p", "content": "saved" });
+        assert!(compact_message(&mut result, &mut names));
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .contains("# Plan\n- index.html")
+        );
     }
 
     /// read_file reaches the model as numbered lines under a header that
@@ -4570,8 +4845,8 @@ mod tests {
         assert_eq!(dup["edits"].as_array().unwrap().len(), 2);
     }
 
-    /// Asked to research, a file write before any web tool is refused once;
-    /// after a search the same write runs. Not asked: no gate.
+    /// Asked to research, a file write before any web *page* was read is
+    /// refused once, even after a search; the retry runs. Not asked: no gate.
     #[test]
     fn research_request_gates_the_first_write_until_the_web_is_used() {
         let tool = |id: &str, name: &str| {
@@ -4589,8 +4864,10 @@ mod tests {
             { "name": "search_web", "input_schema": { "type": "object" } },
         ]);
         let mut host = FakeHost::new(vec![
-            tool("w1", "write_file"),
+            // A search alone isn't research: the write after it is still
+            // refused once; the retry runs (the gate is one-shot).
             tool("s", "search_web"),
+            tool("w1", "write_file"),
             tool("w2", "write_file"),
             answer("done"),
         ]);
@@ -4665,5 +4942,159 @@ mod tests {
         let second = bodies[1]["messages"].as_array().unwrap();
         assert_eq!(second.last().unwrap()["content"], CUT_CALL_NUDGE);
         assert!(has_cut_tool_call(cut) && !has_cut_tool_call("plain answer"));
+    }
+
+    /// Probe T's last reply was a tool call with its tags mangled, and the
+    /// turn ended "complete" on it. It is re-sent instead; an answer that
+    /// only quotes the tags still ends the turn.
+    #[test]
+    fn garbled_raw_tool_call_is_resent_not_taken_as_the_answer() {
+        let garbled = "Let me read the rest.\n\n<tool_call>\n<=read_file>\n<parameter=line_count>\n187\n</parameter>\n=path>\nsite/channel.html\n</parameter>\n</function>\n</tool_call>";
+        let mut host = FakeHost::new(vec![
+            answer(garbled),
+            answer(
+                "<tool_call>\n<function=read_file>\n<parameter=path>\nsite/notes.txt\n</parameter>\n</function>\n</tool_call>",
+            ),
+            answer("done"),
+        ]);
+        host.tool_defs =
+            Some(json!([{ "name": "read_file", "input_schema": { "type": "object" } }]));
+        host.settings.insert("thinking".into(), json!("off"));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let invoked = host.invoked.lock().unwrap();
+        assert_eq!(invoked.len(), 1);
+        assert_eq!(invoked[0]["arguments"]["path"], "site/notes.txt");
+        let bodies = host.chat_bodies.lock().unwrap();
+        let second = bodies[1]["messages"].as_array().unwrap();
+        assert_eq!(second.last().unwrap()["content"], GARBLED_CALL_NUDGE);
+        assert!(!has_garbled_tool_call(
+            "The parser reads `<tool_call>` blocks and that is all."
+        ));
+    }
+
+    /// Reading a web file that is broken shows its problems with the read
+    /// (Probe O called a broken data.js "complete and balanced"); a
+    /// rate-limited search gets the don't-retry hint.
+    #[test]
+    fn reads_of_broken_web_files_carry_their_problems() {
+        let mut host = FakeHost::new(vec![
+            completion(
+                json!({ "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "r", "type": "function",
+                    "function": { "name": "read_file", "arguments": "{\"path\":\"yt/js/data.js\"}" },
+                }] }),
+                10,
+                2,
+            ),
+            answer("done"),
+        ]);
+        host.tool_defs =
+            Some(json!([{ "name": "read_file", "input_schema": { "type": "object" } }]));
+        host.tool_result =
+            json!({ "content": "const A = [\n  { id: 1 },\n", "path": "yt/js/data.js" });
+        host.settings.insert("thinking".into(), json!("off"));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let saved = host.saved_history();
+        let read = saved.iter().find(|m| m["tool_call_id"] == "r").unwrap();
+        let text = read["content"].as_str().unwrap();
+        assert!(text.contains("currently has structure problems"), "{text}");
+        assert!(text.contains("never closed"), "{text}");
+
+        assert!(search_rate_limited(
+            "web search returned HTTP 202 (DuckDuckGo may be rate-limiting; try again)"
+        ));
+        assert!(!search_rate_limited("dns resolution failed"));
+    }
+
+    /// Probe U's review loop: three reads per file window, then refusals,
+    /// and the turn stops after `MAX_READ_REFUSALS`; a cycle over several
+    /// files never trips `repeat_run`. A file change resets the count.
+    #[test]
+    fn unchanged_rereads_are_refused_then_end_the_turn() {
+        let read = |p: &str| {
+            answer(&format!(
+                "<tool_call>\n<function=read_file>\n<parameter=path>\n{p}\n</parameter>\n</function>\n</tool_call>"
+            ))
+        };
+        let mut replies = Vec::new();
+        for _ in 0..20 {
+            for p in ["a.txt", "/b.txt", "c.txt"] {
+                replies.push(read(p));
+            }
+        }
+        let mut host = FakeHost::new(replies);
+        host.tool_defs =
+            Some(json!([{ "name": "read_file", "input_schema": { "type": "object" } }]));
+        host.settings.insert("thinking".into(), json!("off"));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        assert_eq!(host.invoked.lock().unwrap().len(), 9);
+        // 9 reads, then 12 refusals ending the turn: no further requests.
+        assert_eq!(host.chat_bodies.lock().unwrap().len(), 21);
+
+        let mut record = TurnRecord::default();
+        let args = json!({ "path": "a.txt" });
+        assert_eq!(record.note_read(&args), 1);
+        assert_eq!(record.note_read(&json!({ "path": "/a.txt" })), 2);
+        assert_eq!(
+            record.note_read(&json!({ "path": "a.txt", "start_line": 5 })),
+            1
+        );
+    }
+
+    /// Probe P's read / no-op-edit alternation counts as a repeat; an edit
+    /// loop that changes something each time does not; empty inserts are
+    /// no-op edits.
+    #[test]
+    fn alternating_cycles_count_and_noop_edits_are_caught() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(repeat_run(&s(&["A", "A", "A"])), 3);
+        assert_eq!(repeat_run(&s(&["x", "A", "B", "A", "B", "A", "B"])), 3);
+        assert_eq!(repeat_run(&s(&["A", "B1", "A", "B2", "A", "B3"])), 1);
+        assert_eq!(repeat_run(&s(&["A", "B"])), 1);
+
+        let noop = json!({ "path": "a.css", "edits": [
+            { "op": "insert", "line": 91, "text": "", "column": 1, "edits": [] },
+        ] });
+        assert!(edit_is_noop(&noop));
+        let real = json!({ "path": "a.css", "edits": [
+            { "op": "insert", "line": 91, "text": "\n" },
+        ] });
+        assert!(!edit_is_noop(&real));
+        assert!(!edit_is_noop(&json!({ "path": "a" })));
+    }
+
+    /// Probe Q copied a compaction placeholder as its `edits`: such a call
+    /// is refused, not run, and compacted values read as notes.
+    #[test]
+    fn copied_compaction_placeholders_are_refused() {
+        let args = json!({ "path": "a.css", "original_hash": "h",
+            "edits": format!("[1 lines, 4218 chars {ELIDED_MARK}; this call already ran]") })
+        .to_string();
+        let mut host = FakeHost::new(vec![
+            completion(
+                json!({ "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "e", "type": "function",
+                    "function": { "name": "edit_file", "arguments": args },
+                }] }),
+                10,
+                2,
+            ),
+            answer("done"),
+        ]);
+        host.tool_defs =
+            Some(json!([{ "name": "edit_file", "input_schema": { "type": "object" } }]));
+        host.settings.insert("thinking".into(), json!("off"));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        assert!(host.invoked.lock().unwrap().is_empty());
+        let saved = host.saved_history();
+        let reply = saved.iter().find(|m| m["tool_call_id"] == "e").unwrap();
+        assert!(reply["content"].as_str().unwrap().contains("history note"));
+
+        // Real content that only mentions the phrase is not a placeholder.
+        assert!(!is_copied_placeholder(&json!({
+            "path": "notes.md",
+            "content": format!("Old results were {ELIDED_MARK} in earlier versions.\n"),
+        })));
     }
 }

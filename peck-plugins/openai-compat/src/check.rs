@@ -185,10 +185,6 @@ fn repair_js_region(src: &str, base: usize, whole: bool) -> (String, Vec<usize>)
     let mut i = 0;
     // The last significant byte (comments skipped), for regex detection.
     let mut prev: Option<usize> = None;
-    // Where the current line starts, the stack depth there, and the last
-    // significant byte before it (to tell whether a statement starts here).
-    let (mut line_start, mut line_depth, mut before_line): (usize, usize, Option<u8>) =
-        (0, 0, None);
     while i < b.len() {
         match b[i] {
             b'/' if b.get(i + 1) == Some(&b'/') => {
@@ -202,27 +198,36 @@ fn repair_js_region(src: &str, base: usize, whole: bool) -> (String, Vec<usize>)
             b'/' if let Some(end) = regex_end(b, i, prev) => {
                 i = end;
             }
-            b'"' | b'\'' | b'`' => i = string_end(b, i),
-            b'\n' => {
-                // A statement that starts on this line and ends it with `;`
-                // while `(` opened on this line are still open: the model
-                // dropped their `)` before the `;` (seen:
-                // `Object.fromEntries(CHANNELS.map(c => [c.id, c]);`).
-                let starts_statement = matches!(before_line, None | Some(b';' | b'{' | b'}'));
-                let opened = &stack[line_depth.min(stack.len())..];
-                if starts_statement
-                    && let Some(p) = prev.filter(|p| *p >= line_start && b[*p] == b';')
-                    && !opened.is_empty()
-                    && opened.iter().all(|(c, _)| *c == b'(')
-                    && !opened.iter().any(|&(_, at)| word_before(b, at) == b"for")
-                {
-                    let k = opened.len();
-                    out.push_str(&src[last..p]);
+            b'"' | b'\'' => i = string_end(b, i),
+            // A `${…}` expression ending with a `(` still open lost its `)`
+            // (seen: `${formatViews(Math.round(video.likes * 0.12)}`).
+            b'`' => {
+                let (end, fixes) = template_fixes(b, i);
+                for (at, k) in fixes {
+                    out.push_str(&src[last..at]);
                     out.push_str(&")".repeat(k));
-                    last = p;
-                    stack.truncate(stack.len() - k);
-                    lines.push(line_at(src, p, base));
+                    last = at;
+                    lines.push(line_at(src, at, base));
                 }
+                i = end;
+            }
+            // A `;` while `(` of this statement are still open: outside a
+            // `for (…;…;…)` head that is never valid, so their `)` were
+            // dropped before it (seen: `Object.fromEntries(L.map(c => [c.id,
+            // c]);` and `tabs.forEach(t => t.addEventListener('click', () =>
+            // { … });` where `}));` belongs).
+            b';' => {
+                let open = stack.iter().rev().take_while(|(c, _)| *c == b'(').count();
+                let opened = &stack[stack.len() - open..];
+                if open > 0 && !opened.iter().any(|&(_, at)| word_before(b, at) == b"for") {
+                    out.push_str(&src[last..i]);
+                    out.push_str(&")".repeat(open));
+                    last = i;
+                    stack.truncate(stack.len() - open);
+                    lines.push(line_at(src, i, base));
+                }
+            }
+            b'\n' => {
                 // `v8: {` as an item of an array: the key slipped in from an
                 // object-shaped draft; an array item can't have one, so drop
                 // it.
@@ -249,9 +254,6 @@ fn repair_js_region(src: &str, base: usize, whole: bool) -> (String, Vec<usize>)
                         lines.push(line_at(src, i + 1, base));
                     }
                 }
-                line_start = i + 1;
-                line_depth = stack.len();
-                before_line = prev.map(|p| b[p]);
             }
             c @ (b'(' | b'[') => stack.push((c, i)),
             // A function body (`=> {`, `) {`) is pushed as `B`; any other
@@ -259,11 +261,28 @@ fn repair_js_region(src: &str, base: usize, whole: bool) -> (String, Vec<usize>)
             // legitimately be followed by `=`, `instanceof`, … inside `(`
             // (`while (({value, done} = it.next()))`), so never repaired.
             b'{' => stack.push((if opens_body(b, i) { b'B' } else { b'{' }, i)),
-            b')' | b']' => {
-                stack.pop();
+            // A closer pops only its own opener. A stray one is the model's
+            // slip (the check reports it); popping the wrong entry made the
+            // `;` rule close an outer call at a later `;` (seen: `…, .15)");`
+            // with a stray `)` became `…, .15)"));`).
+            c @ (b')' | b']') => {
+                let want = if c == b')' { b'(' } else { b'[' };
+                if stack.last().map(|e| e.0) == Some(want) {
+                    stack.pop();
+                } else if c == b')' && b.get(i + 1) == Some(&b';') && whole {
+                    // A `)` with no `(` open, right before `;`: one too many
+                    // (seen: `… + ", rgba(255,255,255,.15)");`). Drop it.
+                    out.push_str(&src[last..i]);
+                    last = i + 1;
+                    lines.push(line_at(src, i, base));
+                }
             }
             b'}' => {
-                let open = stack.pop();
+                let open = if stack.last().is_some_and(|e| matches!(e.0, b'{' | b'B')) {
+                    stack.pop()
+                } else {
+                    None
+                };
                 let body_at = open.filter(|e| e.0 == b'B').map(|e| e.1);
                 // Only a callback passed on the line that opens the call
                 // (`list.forEach(x => {`): a `(` left open further up is a
@@ -431,6 +450,61 @@ fn string_end(b: &[u8], at: usize) -> usize {
     b.len()
 }
 
+/// Walk the template literal opening at `at` like `string_end`, and list
+/// each `${…}` expression that closes with `(` still open: `(index of its
+/// closing `}`, missing `)` count)`. An expression must balance on its own,
+/// so the `)` belong right before that `}`. Nothing for an unterminated
+/// template (the end is unknown).
+fn template_fixes(b: &[u8], at: usize) -> (usize, Vec<(usize, usize)>) {
+    let mut fixes = Vec::new();
+    let mut i = at + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'`' => return (i, fixes),
+            b'$' if b.get(i + 1) == Some(&b'{') => {
+                let (mut depth, mut parens) = (0i32, 0i32);
+                // The `{` of `${` is the expression's last significant byte
+                // so far; regex literals inside (`.replace(/[()]/g, …)`) are
+                // skipped like in the main scan.
+                let mut prev: Option<usize> = Some(i + 1);
+                i += 1;
+                while i < b.len() {
+                    match b[i] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                if parens > 0 {
+                                    fixes.push((i, parens as usize));
+                                }
+                                break;
+                            }
+                        }
+                        b'(' => parens += 1,
+                        b')' => parens -= 1,
+                        b'"' | b'\'' => i = string_end(b, i),
+                        b'/' if let Some(end) = regex_end(b, i, prev) => i = end,
+                        b'`' => {
+                            let (end, inner) = template_fixes(b, i);
+                            fixes.extend(inner);
+                            i = end;
+                        }
+                        _ => {}
+                    }
+                    if i < b.len() && !b[i].is_ascii_whitespace() {
+                        prev = Some(i);
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (b.len(), Vec::new())
+}
+
 /// The note appended to a successful write of `path`, or `None` when there
 /// is nothing to say.
 pub fn report(path: &str, content: &str) -> Option<String> {
@@ -447,10 +521,13 @@ pub fn report(path: &str, content: &str) -> Option<String> {
         }
     }
     if lines > LONG_FILE_LINES {
+        // Not "split it": the model then retyped a 531-line stylesheet into
+        // two files, and retyping is where it drops characters.
         note.push_str(&format!(
-            "{path} is {lines} lines. Long files are where generated code goes wrong: split it \
-             (shared CSS, one file per page, repeated items rendered from a data array in JS) and \
-             keep each file under ~300 lines.\n"
+            "{path} is {lines} lines. Don't rewrite or split this file just for its size — \
+             retyping a file is where characters get lost; change it with small edit_file \
+             edits. Keep the files you create from now on under ~300 lines (shared CSS, one file \
+             per page, repeated items rendered from a data array in JS).\n"
         ));
     }
     (!note.is_empty()).then(|| note.trim_end().to_string())
@@ -461,11 +538,198 @@ pub fn problems(path: &str, content: &str) -> Vec<String> {
     let mut out = match ext(path).as_str() {
         "html" | "htm" => html(content),
         "css" => css(content, 1),
-        "js" | "mjs" => js(content, 1),
+        "js" | "mjs" => {
+            let mut found = js(content, 1);
+            found.extend(repeated_keys(content));
+            found
+        }
         _ => Vec::new(),
     };
+    if matches!(ext(path).as_str(), "html" | "htm" | "js" | "mjs") {
+        out.extend(svg_paths(content));
+    }
     out.truncate(MAX_PROBLEMS);
     out
+}
+
+/// SVG `d="…"` path data (in markup, or in JS strings holding icons) whose
+/// commands have the wrong number of arguments: the model drops numbers
+/// from arcs (seen: `a6 0 0 0-3-5.19` for `a6 6 0 0 0-3-5.19`), and the
+/// icon renders broken. First bad path only.
+fn svg_paths(src: &str) -> Vec<String> {
+    let mut rest = src;
+    let mut offset = 0;
+    while let Some(at) = rest.find("d=\"") {
+        let start = at + 3;
+        let Some(len) = rest[start..].find('"') else {
+            break;
+        };
+        let data = &rest[start..start + len];
+        let word_start = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric();
+        if word_start
+            && data.len() < 4_000
+            && data.trim_start().starts_with(['M', 'm'])
+            && let Some(why) = path_data_problem(data)
+        {
+            let shown: String = data.chars().take(40).collect();
+            return vec![format!(
+                "line {}: SVG path `d=\"{shown}…\"` is malformed ({why})",
+                line_at(src, offset + at, 1)
+            )];
+        }
+        offset += start + len;
+        rest = &rest[start + len..];
+    }
+    Vec::new()
+}
+
+/// Why SVG path data is malformed, or `None`: every command needs its
+/// arguments in whole groups (A takes 7, its two flags single digits that
+/// may run together, `a6 6 0 01-3 5`).
+fn path_data_problem(d: &str) -> Option<String> {
+    let b = d.as_bytes();
+    let (mut i, mut cmd, mut count) = (0, 0u8, 0usize);
+    let arity = |c: u8| match c.to_ascii_uppercase() {
+        b'M' | b'L' | b'T' => 2,
+        b'H' | b'V' => 1,
+        b'C' => 6,
+        b'S' | b'Q' => 4,
+        b'A' => 7,
+        _ => 0,
+    };
+    let close = |cmd: u8, count: usize| -> Option<String> {
+        let n = arity(cmd);
+        (cmd != 0 && (n == 0 && count > 0 || n > 0 && (count == 0 || !count.is_multiple_of(n))))
+            .then(|| {
+                format!(
+                    "`{}` has {count} numbers, needs a multiple of {n}",
+                    cmd as char
+                )
+            })
+    };
+    while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_alphabetic() {
+            if !b"MmLlHhVvCcSsQqTtAaZz".contains(&c) {
+                return Some(format!("unknown command `{}`", c as char));
+            }
+            if let Some(why) = close(cmd, count) {
+                return Some(why);
+            }
+            (cmd, count) = (c, 0);
+            i += 1;
+        } else if c.is_ascii_whitespace() || c == b',' {
+            i += 1;
+        } else if matches!(cmd.to_ascii_uppercase(), b'A') && matches!(count % 7, 3 | 4) {
+            // An arc flag: one digit, 0 or 1.
+            if !matches!(c, b'0' | b'1') {
+                return Some(
+                    "an arc (`a`) needs 7 numbers: rx ry rotation large-arc-flag sweep-flag x y"
+                        .into(),
+                );
+            }
+            count += 1;
+            i += 1;
+        } else if c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.') {
+            let mut j = i + 1;
+            let mut dot = c == b'.';
+            while j < b.len() {
+                let d = b[j];
+                if d.is_ascii_digit() {
+                    j += 1;
+                } else if d == b'.' && !dot {
+                    dot = true;
+                    j += 1;
+                } else if matches!(d, b'e' | b'E') {
+                    j += 1;
+                    if j < b.len() && matches!(b[j], b'-' | b'+') {
+                        j += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            count += 1;
+            i = j;
+        } else {
+            return Some(format!("unexpected `{}`", c as char));
+        }
+    }
+    close(cmd, count)
+}
+
+/// The first line where the same `key:` appears twice: a fragment the model
+/// repeated mid-line (seen: `durationSecs: 908, 310000, views: 310000, age:
+/// …, durationSecs: 908,` — balanced brackets, dead script). Quoted text is
+/// skipped; minified lines (over 1,000 chars) are ignored.
+fn repeated_keys(src: &str) -> Vec<String> {
+    for (n, line) in src.lines().enumerate() {
+        if line.len() > 1_000 {
+            continue;
+        }
+        // Blank out quoted text so keys inside strings don't count.
+        let mut code = String::with_capacity(line.len());
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for c in line.chars() {
+            match quote {
+                Some(_) if escaped => escaped = false,
+                Some(_) if c == '\\' => escaped = true,
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if matches!(c, '"' | '\'' | '`') => quote = Some(c),
+                None => code.push(c),
+            }
+            if quote.is_some() {
+                code.push(' ');
+            }
+        }
+        let code = code.split("//").next().unwrap_or("");
+        // Keys per object: `[{ id: 1 }, { id: 2 }]` repeats `id:` across
+        // sibling objects, which is fine; only a repeat inside one `{…}`
+        // (or one line with no braces) counts.
+        let mut scopes: Vec<Vec<&str>> = vec![Vec::new()];
+        let b = code.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
+                i += 1;
+            }
+            if i > start {
+                let word = &code[start..i];
+                let rest = code[i..].trim_start();
+                let prev = code[..start].trim_end().chars().last();
+                // `key:` after `{`, `,` or the line start (not `a ? b : c`).
+                let key_pos = prev.is_none_or(|p| matches!(p, '{' | ','));
+                if key_pos
+                    && rest.starts_with(':')
+                    && !rest.starts_with("::")
+                    && !b[start].is_ascii_digit()
+                    && let Some(keys) = scopes.last_mut()
+                {
+                    if keys.contains(&word) {
+                        return vec![format!(
+                            "line {}: `{word}:` appears twice in one object on one line — \
+                             looks like a repeated fragment",
+                            n + 1
+                        )];
+                    }
+                    keys.push(word);
+                }
+            } else {
+                match b[i] {
+                    b'{' => scopes.push(Vec::new()),
+                    b'}' if scopes.len() > 1 => {
+                        scopes.pop();
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+    }
+    Vec::new()
 }
 
 fn ext(path: &str) -> String {
@@ -848,6 +1112,33 @@ fn js(src: &str, base: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Probe S's broken icons are flagged: an arc that lost a number, and a
+    /// path mangled by a column edit; well-formed paths (run-together arc
+    /// flags, exponents, implicit repeats) pass.
+    #[test]
+    fn malformed_svg_paths_are_flagged() {
+        let short_arc = "<svg><path d=\"M12 22a2 2 0 0 0-2-2zm6-6v-6a6 0 0 0-3-5.19\"/></svg>\n";
+        let found = problems("channel.html", short_arc);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.starts_with("line 1: SVG path") && p.contains("arc")),
+            "{found:?}"
+        );
+        let mangled = "const I = '<svg><path d=\"M8 5v14l11/svg></span>an>\"/>';\n";
+        assert!(
+            svg_paths(mangled)
+                .iter()
+                .any(|p| p.contains("unexpected `/`"))
+        );
+        for ok in [
+            "M12 22a2 2 0 0 0-2-2h4a2 2 0 0 0-2 2z",
+            "M0 0a6 6 0 01-3 5L1e-3 2 3 4Z",
+            "m1 2 3 4 5 6c1 2 3 4 5 6s1 2 3 4",
+        ] {
+            assert_eq!(path_data_problem(ok), None, "{ok}");
+        }
+    }
     /// The garble from Probe I's page, a CSS gradient missing its `)`, and
     /// a clean page that must stay quiet.
     #[test]
@@ -1009,6 +1300,51 @@ mod tests {
         assert_eq!(
             problems("fmt.js", "function f(m) {\n  return `${m}:00;\n}\n"),
             ["line 2: template literal (`) is never closed"]
+        );
+
+        // Probe P's repeated fragment is flagged; keys repeated across sibling
+        // objects on one line are not.
+        let looped = "const V = [\n  { id: 'v4', title: 'T',\n    views: 310000, age: '1 month', \
+                      durationSecs: 908, 310000, views: 310000, age: '1 month' },\n];\n";
+        assert!(
+            problems("data.js", looped)
+                .iter()
+                .any(|p| p.starts_with("line 3: `views:` appears twice")),
+            "{:?}",
+            problems("data.js", looped)
+        );
+        assert!(repeated_keys("const L = [{ id: 1, n: 'a' }, { id: 2, n: 'b' }];\n").is_empty());
+    }
+
+    /// Probe P: `});` closing two calls opened on one line gets `}));`, and
+    /// a `${…}` expression that lost its `)` gets it before its `}`; a
+    /// regex inside `${…}` and `for (…;…;…)` heads are left alone.
+    #[test]
+    fn js_semicolon_and_template_parens_are_repaired() {
+        let tabs = "tabs.forEach(t => t.addEventListener('click', () => {\n  t.classList.add('on');\n});\n";
+        let (out, lines) = repair_js_parens("channel.js", tabs);
+        assert_eq!(lines, [3]);
+        assert!(out.ends_with("\n}));\n"), "{out}");
+
+        let tpl = "const h = `<b>${fmt(Math.round(v * 0.12)}</b>`;\n";
+        let (out, lines) = repair_js_parens("watch.js", tpl);
+        assert_eq!(lines, [1]);
+        assert!(out.contains("${fmt(Math.round(v * 0.12))}"), "{out}");
+
+        let good = "const re = RegExp(`^${f.call(o).replace(/[()[\\]{}]/g, '\\\\$&')}$`);\n\
+                    for (let i = 0; i < n; i++) { go(i); }\n";
+        let (out, lines) = repair_js_parens("lib.js", good);
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(out, good);
+
+        // Probe Q: a stray `)` right before `;` inside a callback is dropped,
+        // and it no longer makes the `;` rule close the outer call.
+        let stray = "items.forEach(pl => {\n  c.style.background = \"g(1, \" + pl.color + \", x)\");\n  more();\n});\n";
+        let (out, lines) = repair_js_parens("page.js", stray);
+        assert_eq!(lines, [2]);
+        assert!(
+            out.contains("+ \", x)\";\n") && out.ends_with("\n});\n"),
+            "{out}"
         );
     }
 }
