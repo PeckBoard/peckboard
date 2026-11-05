@@ -340,7 +340,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
     vec![
             McpToolDef {
                 name: "share_file".into(),
-                description: "Share a file from the project folder into the chat so the user can preview and download it. Use this to hand the user any artifact you produced for them — zips, tarballs, builds/binaries, images, videos, PDFs, reports, logs, CSV/JSON exports. The file is snapshotted at call time (later edits don't change the shared copy); images and videos show an inline preview, text files open in a viewer, and every card has a download button. Max 2 GB. Path is relative to the project folder (an absolute path inside the folder also works).".into(),
+                description: "Share a file from the project folder into the chat so the user can preview and download it. Use this to hand the user any artifact you produced for them — zips, tarballs, builds/binaries, images, videos, PDFs, reports, logs, CSV/JSON exports. The file is snapshotted at call time (later edits don't change the shared copy); images and videos show an inline preview, text files open in a viewer, .html files open as a live interactive preview in a side pane (use this for UI mockups; the file must be self-contained, because relative links to sibling files won't load), and every card has a download button. Max 2 GB. Path is relative to the project folder (an absolute path inside the folder also works).".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -443,7 +443,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "propose_plan".into(),
-                description: "Save (or revise) your plan for the current work as Markdown (may include ```mermaid diagrams and other visuals). The plan persists across model switches, termination, and session clears, and is viewable from the 3-dots menu. Call again to revise it (bumps the version).".into(),
+                description: "Save (or revise) your plan for the current work as Markdown (may include ```mermaid diagrams and other visuals). A self-contained ```html fenced block becomes an interactive mockup the user can open in a side pane, with scripts running in a sandbox; use one when a proposal is easier to judge by clicking through it. The plan persists across model switches, termination, and session clears, and is viewable from the 3-dots menu. Call again to revise it (bumps the version).".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

@@ -32,6 +32,12 @@ export function isMermaidCode(node: unknown): boolean {
   return classList(el).includes('language-mermaid')
 }
 
+/** True for a `<code>` element fenced as html. */
+export function isHtmlCode(node: unknown): boolean {
+  const el = node as HastNode | undefined
+  if (!el || el.tagName !== 'code') return false
+  return classList(el).includes('language-html')
+}
 /** Every text node under `node`, concatenated — the fence's own source. */
 function nodeText(node: unknown): string {
   const el = node as HastNode | undefined

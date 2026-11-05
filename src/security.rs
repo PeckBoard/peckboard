@@ -47,7 +47,11 @@ static CSP: std::sync::LazyLock<HeaderValue> = std::sync::LazyLock::new(|| {
 /// global `frame-ancestors 'none'` would forbid embedding it at all. `/api/*`
 /// is untouched and keeps core's global policy.
 pub async fn security_headers(request: Request, next: Next) -> Response {
-    let exempt = is_plugin_api(request.uri().path());
+    // The mockup frame sets its own sandboxing CSP; the global one would stop
+    // its scripts from running and `X-Frame-Options: DENY` would stop the app
+    // from framing it. See `routes::mockup_frame`.
+    let path = request.uri().path();
+    let exempt = is_plugin_api(path) || path == crate::routes::mockup_frame::MOCKUP_FRAME_PATH;
     let mut response = next.run(request).await;
     if exempt {
         return response;

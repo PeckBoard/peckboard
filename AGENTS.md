@@ -404,6 +404,14 @@ expected to use:
   download-only). Bytes come from short-lived signed URLs
   (`POST /api/sessions/{id}/shared-files/{fid}/url`). Reuse it anywhere a
   downloadable agent artifact is shown.
+- **`MockupPane`** (`web/src/components/MockupPane.tsx`, opened through
+  `store/mockupPane.ts`) — the closable right-hand pane an agent's HTML
+  mockup runs in. Fenced ` ```html ` blocks (via `chatMarkdownComponents`)
+  and shared `.html` files open it. Mockups run in `GET /mockup-frame`
+  (`src/routes/mockup_frame.rs`), never in a `srcdoc` frame: that inherits
+  the app's `script-src 'self'` and its scripts silently don't run. Never
+  add `allow-same-origin`: the opaque origin is what keeps a mockup away
+  from the user's login.
 - **`LinkPreviews` + `LinkPreview`** (`web/src/components/LinkPreview.tsx`)
   — previews for the http(s) links in a message (max 3, none from code):
   site cards, click-to-load sandboxed embeds (YouTube, X, Bluesky; at most

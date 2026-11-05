@@ -1,0 +1,110 @@
+/* The right-hand mockup pane, and the ```html block that opens it. */
+
+.mockup-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
+  height: 100%;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+}
+
+/* Straddles the border so the grab area is wider than the line it looks like. */
+.mockup-pane-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.mockup-pane-handle:hover,
+.mockup-pane-handle:focus-visible,
+.mockup-pane--resizing .mockup-pane-handle {
+  background: var(--accent);
+  outline: none;
+}
+
+.mockup-pane--resizing {
+  user-select: none;
+}
+
+.mockup-pane--resizing .mockup-pane-frame {
+  pointer-events: none;
+}
+
+.mockup-pane-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  padding-top: calc(var(--space-2) + env(safe-area-inset-top, 0px));
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.mockup-pane-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* White whatever the app's theme: an unstyled mockup has dark default text and
+   a transparent page, which would be unreadable on a dark surface. */
+.mockup-pane-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.mockup-pane-error {
+  padding: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+
+/* A side-by-side split is unusable on a phone: cover the view instead. */
+@media (max-width: 768px) {
+  .mockup-pane {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    width: 100% !important;
+    border-left: 0;
+  }
+
+  .mockup-pane-handle {
+    display: none;
+  }
+}
+
+/* ─── ```html block ─── */
+.html-fence-bar {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-2);
+  font-family: var(--font);
+  white-space: normal;
+}
+
+.html-fence-source > summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
+
+.html-fence-source[open] > summary {
+  margin-bottom: var(--space-2);
+}

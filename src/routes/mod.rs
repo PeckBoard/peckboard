@@ -22,6 +22,7 @@ pub mod mcp;
 pub mod mcp_oauth;
 pub mod me;
 pub mod misc;
+pub mod mockup_frame;
 pub mod notifications;
 pub mod oauth_server;
 pub mod ollama;
@@ -152,6 +153,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(update::router(state.clone()))
         .merge(workflows::router(state.clone()))
         .merge(misc::router(state))
+        // Public, empty page that agent HTML mockups run inside; it owns its
+        // CSP and an opaque origin. See src/routes/mockup_frame.rs.
+        .merge(mockup_frame::router())
         .fallback(static_handler)
 }
 

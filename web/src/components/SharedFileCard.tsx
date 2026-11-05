@@ -24,6 +24,7 @@ import {
   SNIFF_BYTES,
   type ModelFormat,
 } from './model/formats'
+import { useMockupPaneStore } from '../store/mockupPane'
 
 /** Previewable kinds of a shared file. Text is decided by extension first —
  *  `mime_guess` maps e.g. `.ts` to a video type. `model` is an inline 3D
@@ -80,6 +81,9 @@ const ARCHIVE_EXTS = new Set(['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar
 
 /** Text files above this are download-only (no inline viewer). */
 const MAX_TEXT_PREVIEW_BYTES = 1024 * 1024
+/** HTML above this stays download-only: the whole file is fetched into memory
+ *  to hand to the mockup frame. */
+const MAX_MOCKUP_BYTES = 20 * 1024 * 1024
 /** Audio above this skips the waveform (it downloads + decodes the whole
  *  file) and shows a plain progress bar. */
 const MAX_WAVEFORM_BYTES = 25 * 1024 * 1024
@@ -88,6 +92,22 @@ function extOf(name: string): string {
   return name.match(/\.([A-Za-z0-9]+)$/)?.[1]?.toLowerCase() ?? ''
 }
 
+/** A shared file that opens as a live mockup rather than in the modal. */
+function opensAsMockup(file: SharedFile): boolean {
+  const isHtml = ['html', 'htm'].includes(extOf(file.filename)) || file.mimeType === 'text/html'
+  return isHtml && file.size <= MAX_MOCKUP_BYTES
+}
+
+function openSharedMockup(sessionId: string, file: SharedFile): void {
+  useMockupPaneStore.getState().open({
+    title: file.filename,
+    load: async () => {
+      const res = await fetch(await mintUrl(sessionId, file.id))
+      if (!res.ok) throw new Error(`Could not load ${file.filename} (HTTP ${res.status})`)
+      return res.text()
+    },
+  })
+}
 function sharedFileKind(file: SharedFile): SharedFileKind {
   const ext = extOf(file.filename)
   if (modelFormatFromName(file.filename)) return 'model'
@@ -643,7 +663,12 @@ export default function SharedFileCard({
     (kind === 'model' || kind === 'cad') && printFarmAccepts(file.filename),
   )
 
+  const mockup = opensAsMockup(file)
   const openPreview = () => {
+    if (mockup) {
+      openSharedMockup(sessionId, file)
+      return
+    }
     const el = mediaRef.current
     // The modal picks up where the inline player is; the inline one pauses.
     const start = el ? { time: el.currentTime, play: true } : undefined
@@ -710,6 +735,16 @@ export default function SharedFileCard({
       </button>
       <DownloadButton sessionId={sessionId} file={file} />
       {printFarm && <SendToPrinterButton sessionId={sessionId} file={file} />}
+      {mockup && (
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={openPreview}
+          data-testid="shared-file-open-mockup"
+        >
+          Open preview
+        </button>
+      )}
       {preview && (
         <FilePreviewModal
           sessionId={sessionId}

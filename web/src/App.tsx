@@ -33,6 +33,7 @@ import SessionMemoryModal from './components/SessionMemoryModal'
 import ReportBrowser from './components/ReportBrowser'
 import ReportView from './components/ReportView'
 import PlanView from './components/PlanView'
+import MockupPane from './components/MockupPane'
 import ReviewListView from './components/review/ReviewListView'
 import ReviewView from './components/review/ReviewView'
 import { popOutTerminal, useTerminalsStore } from './store/terminals'
@@ -2436,6 +2437,7 @@ function App() {
           </ErrorBoundary>
         </div>
       </main>
+      {authenticated && <MockupPane />}
 
       {authenticated && <SoundsListener />}
       {/* On the Assistant page its transcript drawer hosts the panel; anywhere
