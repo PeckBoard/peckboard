@@ -43,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/voice/session", post(voice_session))
         .route("/api/voice/activity", post(voice_activity))
+        .route("/api/voice/mic-report", post(mic_report))
         .route("/api/voice/linked", get(linked_activity))
         .route("/api/voice/queue", get(list_queue))
         .route("/api/voice/queue/next", post(release_queue_next))
@@ -63,6 +64,32 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 }
 
 const ADMIN_ONLY: &str = "the Assistant is admin-only";
+
+/// How much of a mic test report is kept: it only ever goes to the log.
+const MIC_REPORT_MAX_CHARS: usize = 4000;
+
+#[derive(serde::Deserialize)]
+struct MicReport {
+    report: String,
+}
+
+/// POST /api/voice/mic-report — log what Settings → Assistant → Test microphone
+/// saw, because a web view's mic failures can only be observed on that machine.
+async fn mic_report(
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<MicReport>,
+) -> Result<StatusCode, ApiError> {
+    if !user.is_admin() {
+        return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
+    }
+    let report: String = body.report.chars().take(MIC_REPORT_MAX_CHARS).collect();
+    // Control characters would let a report forge extra log lines.
+    let report = report
+        .replace(['\n', '\r'], " | ")
+        .replace(char::is_control, " ");
+    tracing::info!(user = %user.user_id, "mic test: {report}");
+    Ok(StatusCode::NO_CONTENT)
+}
 
 /// GET /api/voice/settings → the Assistant's admin settings
 /// (`service::assistant_settings`).

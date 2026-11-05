@@ -133,6 +133,34 @@ const RECOGNITION_STALL_MS = 90_000
 
 /** Console trace for the speech loop — every speak / cancel / recognition
  *  transition, so a silent assistant can be diagnosed from DevTools. */
+/** Error code of a recognizer that never fired a single event. */
+export const NO_RESPONSE = 'no-response'
+/** How long the Mac web view gets to show any sign of life. */
+const NO_RESPONSE_MS = 30_000
+
+/** The Mac app or `peckboard --desktop`: a WKWebView, whose user agent has
+ *  no `Safari/` token. Web Speech there can fail without firing any event. */
+export function isMacWebView(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent
+  return /Macintosh/.test(ua) && /AppleWebKit/.test(ua) && !/(Safari|Chrome|Firefox)\//.test(ua)
+}
+
+/** Ask for the microphone directly, so the OS prompt appears whatever Web
+ *  Speech does. Returns the failure's name, or `null` if it can't be asked
+ *  or was allowed. */
+export async function requestMicOnce(): Promise<string | null> {
+  const devices = navigator.mediaDevices
+  if (!devices?.getUserMedia) return null
+  try {
+    const stream = await devices.getUserMedia({ audio: true })
+    for (const t of stream.getTracks()) t.stop()
+    return null
+  } catch (e) {
+    return e instanceof Error ? e.name : 'Error'
+  }
+}
+
 export function voiceLog(...args: unknown[]): void {
   console.info('[voice]', ...args)
 }
@@ -208,9 +236,11 @@ export class WebSpeechEngine implements SpeechEngine {
     // speech streams interims first; a hallucinated final (Chrome on
     // near-silence or headset noise) typically arrives out of nowhere.
     let heardInterim = false
+    let sawEvent = false
     const gen = ++this.recGen
     const startedAt = Date.now()
     rec.onresult = (ev) => {
+      sawEvent = true
       lastEventAt = Date.now()
       let interim = ''
       let interimConfidence = 0
@@ -255,6 +285,7 @@ export class WebSpeechEngine implements SpeechEngine {
       }
     }
     rec.onerror = (ev) => {
+      sawEvent = true
       lastEventAt = Date.now()
       voiceLog('recognition error:', ev.error)
       cb.onError(ev.error)
@@ -272,6 +303,7 @@ export class WebSpeechEngine implements SpeechEngine {
     // would read "Listening" while dead. End it so the caller reopens one.
     let lastEventAt = Date.now()
     const touch = () => {
+      sawEvent = true
       lastEventAt = Date.now()
     }
     rec.onaudiostart = touch
@@ -280,6 +312,14 @@ export class WebSpeechEngine implements SpeechEngine {
     const watchdog = setInterval(() => {
       if (this.recognition !== rec) {
         clearInterval(watchdog)
+        return
+      }
+      if (!sawEvent && isMacWebView() && Date.now() - startedAt >= NO_RESPONSE_MS) {
+        clearInterval(watchdog)
+        voiceLog(`recognition never responded in ${NO_RESPONSE_MS} ms`)
+        this.stopListening()
+        cb.onError(NO_RESPONSE)
+        cb.onEnd()
         return
       }
       if (Date.now() - lastEventAt < RECOGNITION_STALL_MS) return

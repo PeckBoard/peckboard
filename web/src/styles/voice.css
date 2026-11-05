@@ -516,3 +516,17 @@
     min-height: 44px;
   }
 }
+
+.mic-test-button {
+  align-self: flex-start;
+}
+.mic-test-output {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

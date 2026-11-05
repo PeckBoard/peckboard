@@ -2,7 +2,15 @@ import { create } from 'zustand'
 import type { Event } from '../types/api'
 import { authedFetch } from './auth'
 import { useWsStore } from './ws'
-import { getSpeechEngine, MIN_FINAL_CONFIDENCE, voiceLog, type HeardMeta } from '../voice/engine'
+import {
+  getSpeechEngine,
+  isMacWebView,
+  MIN_FINAL_CONFIDENCE,
+  NO_RESPONSE,
+  requestMicOnce,
+  voiceLog,
+  type HeardMeta,
+} from '../voice/engine'
 import {
   DEFAULT_KOKORO_VOICE,
   installKokoroEngine,
@@ -12,6 +20,7 @@ import {
 } from '../voice/kokoro'
 import {
   serverSttProblem,
+  wantsServerRecognition,
   STALLED,
   STT_UNAVAILABLE,
   useSpeechRecognitionPrefs,
@@ -850,9 +859,33 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     armEndOfTurn()
   }
 
+  /** Mac web view only: 'done' once the OS has been asked for the mic. */
+  let micPreflight: 'pending' | 'running' | 'done' = 'pending'
+
   const startRecognition = () => {
     clearRestart()
     if (!micWanted || !get().panelOpen || recActive) return
+    if (micPreflight !== 'done' && isMacWebView() && !wantsServerRecognition()) {
+      if (micPreflight === 'running') return
+      micPreflight = 'running'
+      void requestMicOnce().then((failure) => {
+        micPreflight = 'done'
+        if (failure === 'NotAllowedError') {
+          micWanted = false
+          set({
+            micOn: false,
+            interim: '',
+            error:
+              'macOS refused the microphone. Allow PeckBoard in System Settings → Privacy & Security → Microphone, then turn the mic back on.',
+          })
+          refreshStatus()
+          return
+        }
+        if (failure) voiceLog('microphone request failed:', failure)
+        startRecognition()
+      })
+      return
+    }
     recActive = true
     recStartedAt = Date.now()
     let heard = false
@@ -911,6 +944,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
             code === 'service-not-allowed' ||
             code === 'audio-capture' ||
             code === 'unsupported' ||
+            code === NO_RESPONSE ||
             code === STT_UNAVAILABLE
           ) {
             micWanted = false
@@ -924,9 +958,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
                     ? 'No microphone was found. Connect one and turn the mic back on.'
                     : code === 'unsupported'
                       ? 'Speech recognition is not available in this browser.'
-                      : code === 'service-not-allowed'
-                        ? 'Speech recognition is blocked or off. On a Mac, check Speech Recognition and Microphone in System Settings → Privacy & Security, and that Dictation is on. Then turn the mic back on.'
-                        : 'Microphone access was denied. Allow the microphone for this site and try again.',
+                      : code === NO_RESPONSE
+                        ? 'Speech recognition never responded, so the mic is off. Run Test microphone in Settings → Assistant to see why.'
+                        : code === 'service-not-allowed'
+                          ? 'Speech recognition is blocked or off. On a Mac, check Speech Recognition and Microphone in System Settings → Privacy & Security, and that Dictation is on. Then turn the mic back on.'
+                          : 'Microphone access was denied. Allow the microphone for this site and try again.',
             })
             refreshStatus()
             return
