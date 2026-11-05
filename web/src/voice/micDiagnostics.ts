@@ -9,7 +9,7 @@ import { authedFetch } from '../store/auth'
 
 const MIC_TIMEOUT_MS = 20_000
 const RECOGNITION_WATCH_MS = 8_000
-const LEVEL_WATCH_MS = 1_000
+const LEVEL_WATCH_MS = 3_000
 
 type RecognitionEvents = {
   lang: string
@@ -48,6 +48,12 @@ async function peakLevel(stream: MediaStream): Promise<number> {
     await ctx.resume()
     const analyser = ctx.createAnalyser()
     ctx.createMediaStreamSource(stream).connect(analyser)
+    // Silent, but connected: an analyser with no path to the output may not be
+    // processed at all, which would read as a false zero.
+    const silent = ctx.createGain()
+    silent.gain.value = 0
+    analyser.connect(silent)
+    silent.connect(ctx.destination)
     const samples = new Float32Array(analyser.fftSize)
     let peak = 0
     const until = Date.now() + LEVEL_WATCH_MS
@@ -68,19 +74,37 @@ async function testCapture(add: (line: string) => void) {
     add('getUserMedia: not available in this web view')
     return
   }
-  add('getUserMedia: asking…')
-  try {
-    const stream = await timeout(devices.getUserMedia({ audio: true }), MIC_TIMEOUT_MS)
-    const track = stream.getAudioTracks()[0]
-    add(`getUserMedia: OK, "${track?.label ?? '?'}", ${track?.readyState}, muted=${track?.muted}`)
+  // Voice processing (echo cancellation) is one code path in macOS and plain
+  // capture another, so a difference between these two names the culprit.
+  for (const [label, echoCancellation] of [
+    ['echo cancellation on', true],
+    ['echo cancellation off', false],
+  ] as const) {
+    add(`getUserMedia (${label}): asking…`)
     try {
-      add(`mic level: peak ${(await peakLevel(stream)).toFixed(4)} over 1 s`)
+      const stream = await timeout(
+        devices.getUserMedia({
+          audio: {
+            echoCancellation,
+            noiseSuppression: echoCancellation,
+            autoGainControl: echoCancellation,
+          },
+        }),
+        MIC_TIMEOUT_MS,
+      )
+      const track = stream.getAudioTracks()[0]
+      add(`getUserMedia: OK, "${track?.label ?? '?'}", ${track?.readyState}, muted=${track?.muted}`)
+      try {
+        const peak = await peakLevel(stream)
+        add(`mic level (${label}): peak ${peak.toFixed(4)} over ${LEVEL_WATCH_MS / 1000} s`)
+      } catch (e) {
+        add(`mic level (${label}): ${describe(e)}`)
+      }
+      for (const t of stream.getTracks()) t.stop()
     } catch (e) {
-      add(`mic level: ${describe(e)}`)
+      add(`getUserMedia (${label}): FAILED, ${describe(e)}`)
     }
-    for (const t of stream.getTracks()) t.stop()
-  } catch (e) {
-    add(`getUserMedia: FAILED, ${describe(e)}`)
+    await sleep(500)
   }
   try {
     const inputs = (await devices.enumerateDevices()).filter((d) => d.kind === 'audioinput')

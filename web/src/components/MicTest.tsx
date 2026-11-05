@@ -33,7 +33,7 @@ export default function MicTest() {
           disabled={running}
           onClick={() => void run()}
         >
-          {running ? 'Testing… say something' : 'Test microphone'}
+          {running ? 'Testing… keep talking' : 'Test microphone'}
         </button>
         {lines.length > 0 && (
           <pre className="mic-test-output" data-testid="mic-test-output">
