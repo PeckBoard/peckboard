@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { reloadServerVoices } from '../voice/kokoro'
+import MicrophoneSelect from './MicrophoneSelect'
 import {
   setRecognitionSource,
   setSpeechServerConfigured,
@@ -224,6 +225,7 @@ export default function SpeechServerSection() {
               )}
             </span>
           </label>
+          <MicrophoneSelect serverRecognition={!recognitionLocked && recognition === 'server'} />
           <div className="voice-settings-actions">
             <button
               type="submit"

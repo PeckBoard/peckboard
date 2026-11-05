@@ -125,6 +125,17 @@ jobs:
         if: runner.os == 'macOS'
         run: shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
 
+      # WebKit denies the --desktop window the mic, silently, without these
+      # strings; nothing else would catch losing them (build.rs embeds them).
+      - name: Check embedded Info.plist (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          otool -l ${{ matrix.asset }} | grep -q __info_plist
+          for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+            grep -aq "$key" ${{ matrix.asset }} || { echo "::error::missing $key"; exit 1; }
+          done
+
       - name: Checksum (Windows)
         if: runner.os == 'Windows'
         run: "(Get-FileHash ${{ matrix.asset }} -Algorithm SHA256).Hash.ToLower() + '  ${{ matrix.asset }}' | Out-File -Encoding ascii -NoNewline ${{ matrix.asset }}.sha256"

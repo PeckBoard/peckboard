@@ -39,6 +39,7 @@ import {
 export type RecognitionSource = 'browser' | 'server'
 
 const RECOGNITION_KEY = 'peckboard.voice.recognition'
+const MICROPHONE_KEY = 'peckboard.voice.microphone'
 const STT_PATH = '/api/voice/stt'
 const WORKLET_URL = '/pcm16-worklet.js'
 const STT_RATE = 16_000
@@ -74,12 +75,22 @@ function loadSource(): RecognitionSource {
   }
 }
 
+function loadMicrophone(): string {
+  try {
+    return localStorage.getItem(MICROPHONE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 /** Per-browser recognition choice, plus whether a speech server is saved
- *  (`null` = not known yet — assume it is until the server says not). */
+ *  (`null` = not known yet — assume it is until the server says not).
+ *  `microphoneId` is the input to capture from; empty = the system default. */
 export const useSpeechRecognitionPrefs = create<{
   source: RecognitionSource
   serverConfigured: boolean | null
-}>(() => ({ source: loadSource(), serverConfigured: null }))
+  microphoneId: string
+}>(() => ({ source: loadSource(), serverConfigured: null, microphoneId: loadMicrophone() }))
 
 export function setRecognitionSource(source: RecognitionSource): void {
   try {
@@ -88,6 +99,20 @@ export function setRecognitionSource(source: RecognitionSource): void {
     /* storage unavailable */
   }
   useSpeechRecognitionPrefs.setState({ source })
+}
+
+/** Choose the input to capture from. A running session reconnects on it. */
+export function setMicrophone(id: string): void {
+  try {
+    if (id) localStorage.setItem(MICROPHONE_KEY, id)
+    else localStorage.removeItem(MICROPHONE_KEY)
+  } catch {
+    /* storage unavailable */
+  }
+  useSpeechRecognitionPrefs.setState({ microphoneId: id })
+  releaseCapture()
+  // Benign, like the stall watchdog: the voice store reopens recognition.
+  current?.finish(STALLED)
 }
 
 export function setSpeechServerConfigured(configured: boolean): void {
@@ -193,8 +218,16 @@ interface Capture {
 }
 
 async function openCapture(): Promise<Capture> {
+  const { microphoneId } = useSpeechRecognitionPrefs.getState()
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      // `ideal`, not `exact`: an unplugged mic falls back to the default
+      // instead of failing the capture.
+      ...(microphoneId ? { deviceId: { ideal: microphoneId } } : {}),
+    },
   })
   const Ctor = audioContextCtor()
   let ctx: AudioContext | null = null

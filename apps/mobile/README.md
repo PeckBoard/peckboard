@@ -370,7 +370,10 @@ old app only when signed with the same key.
 `PeckBoard-X.Y.Z-macos-universal.dmg` + `.sha256` on the same release.
 Signed with the Developer ID cert under the hardened runtime
 (`Entitlements.macos.plist`: microphone only — outgoing network needs no
-entitlement outside the App Sandbox), then notarized and stapled with the
+entitlement outside the App Sandbox; `Info.macos.plist` must carry both
+`NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription`, or
+WebKit refuses voice input without prompting — the release job checks), then
+notarized and stapled with the
 App Store Connect API key. Without the Developer ID secrets the job warns
 and ships an ad-hoc signed DMG that users must allow in System Settings →
 Privacy & Security; without the API key it ships signed but un-notarized.

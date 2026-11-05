@@ -111,7 +111,16 @@ async function primePage(page: Page, token: string) {
     })
 
     // The microphone: a quiet tone from a separate audio graph.
-    navigator.mediaDevices.getUserMedia = async () => {
+    w.__micRequests = []
+    navigator.mediaDevices.enumerateDevices = async () =>
+      [
+        { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: 'g' },
+        { kind: 'audioinput', deviceId: 'built-in', label: 'Built-in Mic', groupId: 'g' },
+        { kind: 'audioinput', deviceId: 'usb-mic', label: 'USB Mic', groupId: 'u' },
+        { kind: 'audiooutput', deviceId: 'speakers', label: 'Speakers', groupId: 'g' },
+      ] as MediaDeviceInfo[]
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      ;(w.__micRequests as unknown[]).push((constraints as { audio: unknown }).audio)
       const ctx = new AudioContext()
       if (ctx.state !== 'running') await ctx.resume()
       const osc = ctx.createOscillator()
@@ -324,6 +333,74 @@ test('a speech server that cannot recognize speech stops the mic with its reason
     // No reconnect loop: the mic stays off, one socket only.
     await page.waitForTimeout(3000)
     expect(await stub(page, '__sttSockets')).toBe(1)
+  } finally {
+    await setSpeechServer(request, token, '')
+  }
+})
+
+test('the microphone picker lists inputs, only works with server recognition, and switches live', async ({
+  request,
+  page,
+}, testInfo) => {
+  const token = await authenticate(request)
+  const voice = await request.post('/api/voice/session', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { model: 'mock:echo' },
+  })
+  expect(voice.ok(), `voice session failed: ${await voice.text()}`).toBeTruthy()
+  await setSpeechServer(request, token, 'http://127.0.0.1:9')
+  const requests = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __micRequests: { deviceId?: { ideal: string } }[] }).__micRequests,
+    )
+  try {
+    await primePage(page, token)
+    await page.goto('/')
+    await page.locator('.rail-avatar').click()
+    await page.locator('.user-menu-dropdown').getByRole('menuitem', { name: 'Settings' }).click()
+    const settings = page.getByTestId('settings-page')
+    await settings.getByTestId('settings-nav-assistant').click()
+
+    const source = settings.getByTestId('speech-recognition-select')
+    const picker = settings.getByTestId('microphone-select')
+    await expect(source).toBeEnabled({ timeout: 10_000 })
+    await source.selectOption('browser')
+    // Browser recognition can't choose a device: say so, offer no choice.
+    await expect(picker).toBeDisabled()
+    await expect(settings.getByTestId('microphone-reason')).toContainText('default input')
+    await picker.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: testInfo.outputPath('picker-browser.png') })
+
+    await source.selectOption('server')
+    await expect(picker).toBeEnabled()
+    await expect(settings.getByTestId('microphone-reason')).toHaveCount(0)
+    // Real inputs only: no alias of the default, and no speakers.
+    await expect(picker.locator('option')).toHaveText(['System default', 'Built-in Mic', 'USB Mic'])
+
+    await picker.selectOption('usb-mic')
+    await page.screenshot({ path: testInfo.outputPath('picker-server.png') })
+    await page.reload()
+    await page.locator('.rail-avatar').click()
+    await page.locator('.user-menu-dropdown').getByRole('menuitem', { name: 'Settings' }).click()
+    await page.getByTestId('settings-page').getByTestId('settings-nav-assistant').click()
+    await expect(page.getByTestId('microphone-select')).toHaveValue('usb-mic')
+
+    // Capture asks for the chosen input, softly, so an unplugged one falls back.
+    await openVoicePanel(page)
+    await expect.poll(async () => (await requests()).length, { timeout: 15_000 }).toBeGreaterThan(0)
+    expect((await requests())[0].deviceId).toEqual({ ideal: 'usb-mic' })
+
+    // Changing it with the mic running reopens capture on the new one.
+    const before = (await requests()).length
+    await page.locator('.rail-avatar').click()
+    await page.locator('.user-menu-dropdown').getByRole('menuitem', { name: 'Settings' }).click()
+    await page.getByTestId('settings-page').getByTestId('settings-nav-assistant').click()
+    await page.getByTestId('microphone-select').selectOption('built-in')
+    await expect
+      .poll(async () => (await requests()).length, { timeout: 15_000 })
+      .toBeGreaterThan(before)
+    expect((await requests()).at(-1)?.deviceId).toEqual({ ideal: 'built-in' })
   } finally {
     await setSpeechServer(request, token, '')
   }

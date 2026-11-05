@@ -390,6 +390,20 @@ mod tests {
         }
     }
 
+    /// Both strings are required before WebKit will even ask: see
+    /// `SpeechRecognitionPermissionManager`. Losing one fails silently, and
+    /// only on a Mac, so no other test here would notice.
+    #[test]
+    fn macos_plists_declare_microphone_and_speech_recognition() {
+        for plist in [
+            include_str!("../packaging/macos/Info.plist"),
+            include_str!("../apps/mobile/src-tauri/Info.macos.plist"),
+        ] {
+            assert!(plist.contains("<key>NSMicrophoneUsageDescription</key>"));
+            assert!(plist.contains("<key>NSSpeechRecognitionUsageDescription</key>"));
+        }
+    }
+
     #[test]
     fn escape_desktop_exec_quotes_inner_quotes() {
         assert_eq!(escape_desktop_exec(r#"C:\foo"bar"#), r#"C:\\foo\"bar"#);

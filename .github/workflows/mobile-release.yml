@@ -589,6 +589,14 @@ jobs:
           [[ $archs == *x86_64* && $archs == *arm64* ]] || { echo "::error::not a universal binary"; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dv "$app" 2>&1 | awk '/^(Authority|TeamIdentifier|Runtime)/'
+          # WebKit refuses the mic without showing a prompt if any of these is
+          # missing, so check the built app rather than the source plists.
+          for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+            plutil -extract "$key" raw "$app/Contents/Info.plist" >/dev/null || { echo "::error::Info.plist is missing $key"; exit 1; }
+          done
+          if [ "$SIGNED" = true ]; then
+            codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input || { echo "::error::audio-input entitlement missing"; exit 1; }
+          fi
           if [ "$NOTARIZED" = true ]; then
             xcrun stapler validate "$app"
             spctl --assess --type execute --verbose=2 "$app"

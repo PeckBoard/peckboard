@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Linked into the macOS `peckboard` binary as its __TEXT,__info_plist section
+     (build.rs). It ships as a bare executable with no .app bundle, and WebKit
+     refuses the desktop window the microphone without showing a prompt
+     unless these strings are in the main bundle's Info.plist. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.peckboard.server</string>
+	<key>CFBundleName</key>
+	<string>Peckboard</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Peckboard uses the microphone for voice conversations with your agents.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Peckboard turns what you say into text for your agents.</string>
+</dict>
+</plist>

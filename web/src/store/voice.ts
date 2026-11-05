@@ -924,7 +924,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
                     ? 'No microphone was found. Connect one and turn the mic back on.'
                     : code === 'unsupported'
                       ? 'Speech recognition is not available in this browser.'
-                      : 'Microphone access was denied. Allow the microphone for this site and try again.',
+                      : code === 'service-not-allowed'
+                        ? 'Speech recognition is blocked or off. On a Mac, check Speech Recognition and Microphone in System Settings → Privacy & Security, and that Dictation is on. Then turn the mic back on.'
+                        : 'Microphone access was denied. Allow the microphone for this site and try again.',
             })
             refreshStatus()
             return

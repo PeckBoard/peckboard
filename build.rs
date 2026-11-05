@@ -82,8 +82,24 @@ fn git_described_version() -> Option<String> {
     (!v.is_empty()).then(|| v.to_string())
 }
 
+/// Give the bare macOS binary an Info.plist. It has no .app bundle, so the
+/// plist goes in the executable's `__TEXT,__info_plist` section, which is what
+/// `NSBundle.mainBundle` reads then. WebKit denies the `--desktop` window the
+/// microphone, with no prompt, when the usage strings are missing.
+fn embed_macos_info_plist() {
+    println!("cargo:rerun-if-changed=packaging/macos/Info.plist");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    println!(
+        "cargo:rustc-link-arg-bins=-Wl,-sectcreate,__TEXT,__info_plist,{dir}/packaging/macos/Info.plist"
+    );
+}
+
 fn main() {
     stamp_version();
+    embed_macos_info_plist();
 
     println!("cargo:rerun-if-changed=migrations");
     println!("cargo:rerun-if-changed=web/dist");
