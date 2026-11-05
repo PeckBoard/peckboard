@@ -3,7 +3,8 @@
 //! session/card custom prompt is layered on.
 //!
 //! Default = the provider crate's own prompt text (Claude's `ask_user` /
-//! directory rules; empty for everyone else) followed by the shared
+//! directory rules, Cursor's `ask_user` rules, openai-compat's local-model
+//! rules; empty for everyone else) followed by the shared
 //! [`crate::provider::WORKING_STYLE`]. The user can replace it wholesale per
 //! provider from Settings → Providers & Accounts; overrides live in the
 //! plugin store under `core.settings`/`app`/[`PROVIDER_PROMPTS_KEY`] as
@@ -89,6 +90,15 @@ mod tests {
         assert!(p.contains("`update` REPLACES lines start_line..end_line"));
         assert!(p.contains("Act, don't announce."));
         assert!(rules < p.find("# Working style").unwrap());
+        assert!(p.ends_with(crate::provider::WORKING_STYLE));
+    }
+
+    /// Cursor's rules are part of the default Settings shows, so overriding
+    /// the base prompt visibly replaces them.
+    #[test]
+    fn cursor_default_leads_with_ask_user_rules() {
+        let p = default_base_prompt("cursor");
+        assert!(p.contains("NEVER use Cursor's built-in AskQuestion"));
         assert!(p.ends_with(crate::provider::WORKING_STYLE));
     }
 }

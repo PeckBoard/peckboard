@@ -156,6 +156,14 @@ pub fn refresh_models() -> Option<serde_json::Value> {
     v.get("payload")?.get("models").cloned()
 }
 
+/// Cursor's provider-specific default base-prompt text (`ask_user` instead of
+/// the built-in question tool). The host shows it ahead of the shared
+/// working-style rules, and the send path omits it when the user overrides the
+/// base prompt (`base_prompt_overridden` in the send payload).
+pub fn base_prompt() -> &'static str {
+    argv::ASK_USER_PROMPT
+}
+
 pub fn manifest_json() -> String {
     manifest::manifest_json()
 }

@@ -357,7 +357,7 @@ const CURSOR: CrateHooks = CrateHooks {
     registration: peckboard_cursor_plugin::registration,
     manifest_json: peckboard_cursor_plugin::manifest_json,
     interrupt_frame: None,
-    base_prompt: None,
+    base_prompt: Some(peckboard_cursor_plugin::base_prompt),
 };
 const KIMI: CrateHooks = CrateHooks {
     send: peckboard_kimi_plugin::send_turn,

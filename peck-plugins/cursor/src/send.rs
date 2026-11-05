@@ -41,6 +41,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let base_prompt_overridden = payload
+        .get("base_prompt_overridden")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let working_dir = cfg
         .get("working_dir")
         .and_then(|v| v.as_str())
@@ -111,6 +115,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
         &prompt,
         conversation_id.as_deref(),
         &system_prompt,
+        base_prompt_overridden,
         crate::settings::bool("auto_approve", true),
         &image_paths,
     );
