@@ -156,6 +156,7 @@ pub async fn run_server(
 
     let broadcaster = Broadcaster::new();
     let provider_registry = Arc::new(ProviderRegistry::new());
+    provider_registry.set_all_tier_assignments(crate::provider::tiers::load(&db).await);
     let builtin_plugins = Arc::new(BuiltinPluginRegistry::new());
     // Crate plugins are compiled in but only ACTIVE when installed. Fresh
     // installs seed empty (install from the registry); upgrades seed all;

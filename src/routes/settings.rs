@@ -13,6 +13,8 @@
 //! - Provider base prompts: per-provider replacement for the standing
 //!   system prompt (see `provider::base_prompt`). Admin-only — the text
 //!   steers every user's agents on this host.
+//! - Provider model tiers: which models fill each tier on a provider (see
+//!   `provider::tiers`). Admin-only, like the base prompts.
 //!   read per turn by the `session.message.before` dispatch path.
 //!
 //! The surface is split in two: [`admin_router`] holds everything that reads
@@ -34,6 +36,8 @@ use std::sync::Arc;
 use crate::auth::middleware::{require_admin, require_auth};
 use crate::db::Db;
 use crate::provider::base_prompt;
+use crate::provider::registry::split_model_account;
+use crate::provider::tiers::{self, TIER_LEVELS, TierAssignments};
 use crate::service::acme;
 use crate::service::mcp_server::user_servers;
 use crate::service::tls::{self, TlsSource};
@@ -170,6 +174,10 @@ fn admin_router() -> Router<Arc<AppState>> {
         .route(
             "/api/settings/provider-prompts/{provider}",
             put(set_provider_prompt),
+        )
+        .route(
+            "/api/settings/provider-tiers/{provider}",
+            get(get_provider_tiers).put(set_provider_tiers),
         )
         .route("/api/settings/setup/complete", post(complete_setup))
         // Loosening the agent sandbox is a host-wide security change.
@@ -971,6 +979,113 @@ async fn set_provider_prompt(
         &info.display_name,
         &overrides,
     )))
+}
+
+/// One tier row, in both directions of `/api/settings/provider-tiers/{id}`.
+#[derive(serde::Deserialize)]
+struct ProviderTierRow {
+    tier: i32,
+    #[serde(default)]
+    models: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderTiersBody {
+    tiers: Vec<ProviderTierRow>,
+}
+
+/// Account-scoped catalogs label entries `[Account] Model`; a tier row names
+/// the model on every account, so the prefix would mislead.
+fn strip_account_label<'a>(display_name: &'a str, id: &str) -> &'a str {
+    if split_model_account(id).1.is_none() {
+        return display_name;
+    }
+    display_name
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .map_or(display_name, |(_, name)| name)
+}
+
+/// The settings view of one provider's tiers: every level with its assigned
+/// models, plus the catalog deduped to base models with each one's own tier.
+/// `None` for an unknown provider.
+async fn provider_tiers_json(state: &AppState, id: &str) -> Option<serde_json::Value> {
+    let info = state.provider_registry.get_info(id).await?;
+    let models = state.provider_registry.catalog_models(id).await?;
+    let assignments = state.provider_registry.tier_assignments(id);
+    let mut seen = HashSet::new();
+    let catalog: Vec<serde_json::Value> = models
+        .iter()
+        .filter(|m| seen.insert(split_model_account(&m.id).0))
+        .map(|m| {
+            serde_json::json!({
+                "id": split_model_account(&m.id).0,
+                "display_name": strip_account_label(&m.display_name, &m.id),
+                "default_tier": m.tier,
+            })
+        })
+        .collect();
+    let tiers: Vec<serde_json::Value> = TIER_LEVELS
+        .iter()
+        .map(|(tier, label)| {
+            serde_json::json!({
+                "tier": tier,
+                "label": label,
+                "models": assignments.models_in(*tier),
+            })
+        })
+        .collect();
+    Some(serde_json::json!({
+        "provider": id,
+        "display_name": info.display_name,
+        "tiers": tiers,
+        "catalog": catalog,
+    }))
+}
+
+/// GET /api/settings/provider-tiers/{provider} → the provider's tier view.
+/// Probes the provider's catalog, so it can take as long as a model refresh.
+async fn get_provider_tiers(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match provider_tiers_json(&state, &id).await {
+        Some(body) => Ok(Json(body)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown provider" })),
+        )),
+    }
+}
+
+/// PUT /api/settings/provider-tiers/{provider} `{"tiers":[{"tier","models"}]}`
+/// → the updated view. Replaces the provider's assignments; no models at all
+/// resets to the catalog's own tiers. 400 for an unknown tier or a model
+/// assigned twice. Models aren't checked against the catalog: one that is
+/// missing may only be gone temporarily, and resolution skips it meanwhile.
+async fn set_provider_tiers(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ProviderTiersBody>,
+) -> impl IntoResponse {
+    let error = |status: StatusCode, message: String| {
+        (status, Json(serde_json::json!({ "error": message })))
+    };
+    if state.provider_registry.get_info(&id).await.is_none() {
+        return Err(error(StatusCode::NOT_FOUND, "unknown provider".to_string()));
+    }
+    let mut raw: std::collections::BTreeMap<i32, Vec<String>> = Default::default();
+    for row in body.tiers {
+        raw.entry(row.tier).or_default().extend(row.models);
+    }
+    let assignments = TierAssignments::new(raw).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    tiers::save(&state.db, &state.provider_registry, &id, assignments)
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    provider_tiers_json(&state, &id)
+        .await
+        .map(Json)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "unknown provider".to_string()))
 }
 
 /// GET /api/settings/mcp-servers → the user-defined MCP server list plus

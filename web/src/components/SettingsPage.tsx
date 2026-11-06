@@ -63,6 +63,7 @@ import AssistantMirrorSection from './AssistantMirrorSection'
 import PushNotificationsSection from './PushNotificationsSection'
 import ConfirmDialog from './ConfirmDialog'
 import ProviderBasePrompt, { type ProviderPrompt } from './ProviderBasePrompt'
+import ProviderModelTiers from './ProviderModelTiers'
 import VoiceSettingsSection from './VoiceSettingsSection'
 
 interface KeepAliveRun {
@@ -1564,6 +1565,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                           }
                         />
                       )}
+                      {isAdmin && <ProviderModelTiers providerId={p.id} onSaved={fetchModels} />}
                     </section>
                   )}
                 </div>

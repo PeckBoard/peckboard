@@ -15,6 +15,7 @@ pub mod resume;
 pub mod resume_recovery;
 pub mod stream;
 pub mod test_double;
+pub mod tiers;
 pub mod turn;
 
 /// Shared "working style" rules appended to (or, for full-replace providers,
@@ -100,6 +101,8 @@ pub struct AutoCandidate {
     pub provider_id: String,
     pub auth: Option<bool>,
     pub models: Vec<stream::ModelInfo>,
+    /// The user's tier assignments for this provider (empty when none).
+    pub assignments: tiers::TierAssignments,
 }
 
 /// Maps effort (plus worker/chat role, mirroring `auto_model`'s own
@@ -123,6 +126,20 @@ fn auto_effort_rank(effort: Option<&str>, is_worker: bool) -> i32 {
     }
 }
 
+/// The user-assigned model Auto should use on this provider, if the tier for
+/// this effort has one the catalog still offers. Effort ranks 0..=3 map onto
+/// tier levels 1..=4 (Low..Max).
+fn assigned_auto_model<'a>(
+    candidate: &'a AutoCandidate,
+    effort: Option<&str>,
+    is_worker: bool,
+) -> Option<&'a stream::ModelInfo> {
+    let level = auto_effort_rank(effort, is_worker) + 1;
+    candidate
+        .assignments
+        .first_available(level, &candidate.models)
+}
+
 /// Provider-aware auto-model resolution over the LIVE catalogs in
 /// `candidates`, so the result is always a real, selectable catalog id —
 /// account-scoped (`model@acct`) for account providers, never a bare alias
@@ -136,7 +153,9 @@ fn auto_effort_rank(effort: Option<&str>, is_worker: bool) -> i32 {
 /// providers known to lack auth (`auth == Some(false)`, excluded entirely).
 /// Ties between equally-ranked providers break on provider id for
 /// determinism. Returns an error naming Settings → Providers & Accounts
-/// when nothing usable exists, rather than defaulting silently.
+/// when nothing usable exists, rather than defaulting silently. Within the
+/// chosen provider, a model the user assigned to the wanted tier level beats
+/// the alias and catalog-tier logic above (see `assigned_auto_model`).
 pub fn resolve_auto_model(
     candidates: &[AutoCandidate],
     effort: Option<&str>,
@@ -148,6 +167,9 @@ pub fn resolve_auto_model(
         .iter()
         .find(|c| c.provider_id == "claude" && usable(c))
     {
+        if let Some(m) = assigned_auto_model(claude, effort, is_worker) {
+            return Ok(format!("claude:{}", m.id));
+        }
         let alias = auto_model(effort, is_worker);
         let base = |m: &stream::ModelInfo| registry::split_model_account(&m.id).0 == alias;
         let family = |m: &stream::ModelInfo| registry::split_model_account(&m.id).0.contains(alias);
@@ -176,6 +198,9 @@ pub fn resolve_auto_model(
              Settings \u{2192} Providers & Accounts."
         )
     })?;
+    if let Some(m) = assigned_auto_model(chosen, effort, is_worker) {
+        return Ok(format!("{}:{}", chosen.provider_id, m.id));
+    }
 
     let target_rank = auto_effort_rank(effort, is_worker);
     let mut tiers: Vec<i32> = chosen.models.iter().map(|m| m.tier).collect();
@@ -274,11 +299,13 @@ mod auto_tests {
             AutoCandidate {
                 provider_id: "claude".into(),
                 auth: Some(true),
+                assignments: Default::default(),
                 models: scoped,
             },
             AutoCandidate {
                 provider_id: "ollama".into(),
                 auth: None,
+                assignments: Default::default(),
                 models: vec![model("llama3", 0)],
             },
         ];
@@ -310,11 +337,13 @@ mod auto_tests {
             AutoCandidate {
                 provider_id: "claude".into(),
                 auth: Some(false),
+                assignments: Default::default(),
                 models: claude_models(),
             },
             AutoCandidate {
                 provider_id: "ollama".into(),
                 auth: None,
+                assignments: Default::default(),
                 models: vec![model("llama3", 0)],
             },
         ];
@@ -330,11 +359,13 @@ mod auto_tests {
             AutoCandidate {
                 provider_id: "ollama".into(),
                 auth: None,
+                assignments: Default::default(),
                 models: vec![model("llama3", 0)],
             },
             AutoCandidate {
                 provider_id: "grok".into(),
                 auth: Some(true),
+                assignments: Default::default(),
                 models: vec![model("grok-4", 0)],
             },
         ];
@@ -349,6 +380,7 @@ mod auto_tests {
         let candidates = vec![AutoCandidate {
             provider_id: "grok".into(),
             auth: Some(true),
+            assignments: Default::default(),
             models: vec![
                 model("grok-mini", 0),
                 model("grok-4", 1),
@@ -376,17 +408,81 @@ mod auto_tests {
             AutoCandidate {
                 provider_id: "claude".into(),
                 auth: Some(false),
+                assignments: Default::default(),
                 models: claude_models(),
             },
             AutoCandidate {
                 provider_id: "ollama".into(),
                 auth: Some(false),
+                assignments: Default::default(),
                 models: vec![],
             },
         ];
         let err = resolve_auto_model(&candidates, None, false).unwrap_err();
         assert!(err.to_string().contains("Settings"));
         assert!(err.to_string().contains("Providers & Accounts"));
+    }
+
+    fn assignments(rows: &[(i32, &[&str])]) -> tiers::TierAssignments {
+        tiers::TierAssignments::new(
+            rows.iter()
+                .map(|(t, ms)| (*t, ms.iter().map(|m| m.to_string()).collect()))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolve_auto_model_prefers_assigned_tier_on_claude_and_scopes_to_catalog() {
+        let scoped: Vec<_> = claude_models()
+            .into_iter()
+            .map(|m| model(&format!("{}@acc_a", m.id), m.tier))
+            .collect();
+        let candidates = vec![AutoCandidate {
+            provider_id: "claude".into(),
+            auth: Some(true),
+            models: scoped,
+            // High skips a model the catalog no longer offers.
+            assignments: assignments(&[(3, &["gone", "claude-sonnet-4-6"]), (1, &["gone-too"])]),
+        }];
+        // Assigned tier wins over the `opus` alias, on the catalog's real id.
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("high"), false).unwrap(),
+            "claude:claude-sonnet-4-6@acc_a"
+        );
+        // Nothing assigned for Max: today's alias routing.
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("max"), false).unwrap(),
+            "claude:claude-fable-5@acc_a"
+        );
+        // Low's only assigned model is gone: falls back to the alias too.
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("low"), false).unwrap(),
+            "claude:claude-haiku-4-5@acc_a"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_model_prefers_assigned_tier_on_other_providers() {
+        let candidates = vec![AutoCandidate {
+            provider_id: "grok".into(),
+            auth: Some(true),
+            models: vec![model("grok-mini", 0), model("grok-max", 2)],
+            assignments: assignments(&[(2, &["grok-mini"])]),
+        }];
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("medium"), false).unwrap(),
+            "grok:grok-mini"
+        );
+        // A worker with no effort wants Medium, like `auto_model`'s sonnet.
+        assert_eq!(
+            resolve_auto_model(&candidates, None, true).unwrap(),
+            "grok:grok-mini"
+        );
+        assert_eq!(
+            resolve_auto_model(&candidates, Some("high"), false).unwrap(),
+            "grok:grok-max"
+        );
     }
 }
 

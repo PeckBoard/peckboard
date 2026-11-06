@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 
 use super::agent::AgentProvider;
 use super::stream::ModelInfo;
+use super::tiers::TierAssignments;
 
 /// One selectable reasoning-effort level a provider exposes.
 ///
@@ -191,6 +192,9 @@ pub struct ProviderRegistry {
     /// providers list only `model@acct` ids, and their bare seed must never
     /// come back just because one refresh failed.
     last_good: std::sync::Mutex<HashMap<String, Vec<ModelInfo>>>,
+    /// User-chosen tiers by provider id (Settings → Providers & Accounts),
+    /// overlaid on every effective catalog. Loaded at boot, replaced on save.
+    tier_overrides: std::sync::Mutex<HashMap<String, TierAssignments>>,
     /// Provider accounts out of quota; review picks skip them.
     pub rate_limits: crate::provider::rate_limits::RateLimits,
 }
@@ -200,6 +204,7 @@ impl ProviderRegistry {
         ProviderRegistry {
             providers: Mutex::new(HashMap::new()),
             last_good: std::sync::Mutex::new(HashMap::new()),
+            tier_overrides: std::sync::Mutex::new(HashMap::new()),
             rate_limits: Default::default(),
         }
     }
@@ -232,13 +237,64 @@ impl ProviderRegistry {
         removed
     }
 
-    /// A provider's effective catalog: a fresh `dynamic_models()` refresh
-    /// (remembered as last-good), else the last-good refresh, else the
-    /// registration seed `info.models`. The seed is only served until the
-    /// first refresh succeeds, so a failed refresh can't resurrect bare ids
-    /// an account-scoped catalog no longer offers. Call with the registry
-    /// lock released — `dynamic_models()` can be slow.
+    /// Replace every provider's tier assignments (boot).
+    pub fn set_all_tier_assignments(&self, all: HashMap<String, TierAssignments>) {
+        *self.tier_overrides.lock().unwrap() = all;
+    }
+
+    /// Replace one provider's tier assignments; empty clears them. Persist
+    /// through [`tiers::save`](super::tiers::save), which calls this.
+    pub(crate) fn set_tier_assignments(&self, provider_id: &str, assignments: TierAssignments) {
+        let mut overrides = self.tier_overrides.lock().unwrap();
+        if assignments.is_empty() {
+            overrides.remove(provider_id);
+        } else {
+            overrides.insert(provider_id.to_string(), assignments);
+        }
+    }
+
+    /// One provider's tier assignments (empty when it has none).
+    pub fn tier_assignments(&self, provider_id: &str) -> TierAssignments {
+        self.tier_overrides
+            .lock()
+            .unwrap()
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// A provider's catalog with its own tiers, before user assignments —
+    /// what the tier settings show as each model's default. `None` for an
+    /// unknown provider.
+    pub async fn catalog_models(&self, provider_id: &str) -> Option<Vec<ModelInfo>> {
+        let (info, provider) = {
+            let providers = self.providers.lock().await;
+            let r = providers.get(provider_id)?;
+            (r.info.clone(), r.provider.clone())
+        };
+        Some(self.raw_catalog(&info, &provider).await)
+    }
+
+    /// A provider's effective catalog ([`Self::raw_catalog`]) with the user's
+    /// tier assignments applied. Every tier consumer reads through here. Call
+    /// with the registry lock released — `dynamic_models()` can be slow.
     async fn effective_models(
+        &self,
+        info: &ProviderInfo,
+        provider: &Arc<dyn AgentProvider>,
+    ) -> Vec<ModelInfo> {
+        let mut models = self.raw_catalog(info, provider).await;
+        self.tier_assignments(&info.id).apply(&mut models);
+        models
+    }
+
+    /// A fresh `dynamic_models()` refresh (remembered as last-good), else the
+    /// last-good refresh, else the registration seed `info.models`. The seed
+    /// is only served until the first refresh succeeds, so a failed refresh
+    /// can't resurrect bare ids an account-scoped catalog no longer offers.
+    /// `last_good` holds these raw tiers, so clearing an assignment restores
+    /// the provider's own.
+    async fn raw_catalog(
         &self,
         info: &ProviderInfo,
         provider: &Arc<dyn AgentProvider>,
@@ -360,6 +416,8 @@ impl ProviderRegistry {
                     }
                 }
             }
+            // Seed entries skip `effective_models`, so overlay them too.
+            self.tier_assignments(&info.id).apply(&mut models);
             out.push(ProviderInfo { models, ..info });
         }
         out
@@ -410,15 +468,16 @@ impl ProviderRegistry {
         for (info, provider) in entries {
             let auth = provider.auth_configured().await;
             let models = self.effective_models(&info, &provider).await;
+            let assignments = self.tier_assignments(&info.id);
             out.push(crate::provider::AutoCandidate {
                 provider_id: info.id,
                 auth,
                 models,
+                assignments,
             });
         }
         out
     }
-
     /// List all models across all providers, with provider:model format
     /// IDs. Resolves each provider's effective (dynamic-or-static) model
     /// list, so settings-derived models are included.
@@ -1113,6 +1172,63 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn tier_assignments_reach_every_catalog_view_and_clear_cleanly() {
+        let registry = ProviderRegistry::new();
+        let model = |id: &str, tier: i32| ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            capabilities: vec![],
+            tier,
+        };
+        registry
+            .register(
+                Arc::new(NoopProvider::new()),
+                ProviderInfo {
+                    id: "grok".into(),
+                    display_name: "Grok".into(),
+                    models: vec![model("a", 1), model("b", 2)],
+                    effort_levels: vec![],
+                    capabilities: ProviderCapabilities::default(),
+                },
+            )
+            .await;
+        let tier_of =
+            |models: &[ModelInfo], id: &str| models.iter().find(|m| m.id == id).unwrap().tier;
+        let none = std::collections::HashSet::new();
+
+        registry.set_tier_assignments(
+            "grok",
+            TierAssignments::new(std::collections::BTreeMap::from([(
+                4,
+                vec!["a".to_string()],
+            )]))
+            .unwrap(),
+        );
+        let listed = registry.list_providers_with_models_except(&none).await;
+        assert_eq!(tier_of(&listed[0].models, "a"), 4);
+        assert_eq!(
+            tier_of(&listed[0].models, "b"),
+            2,
+            "unassigned keeps its own"
+        );
+        let union = registry
+            .list_providers_with_models_union_except(&none)
+            .await;
+        assert_eq!(tier_of(&union[0].models, "a"), 4);
+        let all = registry.list_all_models().await;
+        assert!(all.iter().any(|(id, m)| id == "grok:a" && m.tier == 4));
+        let candidates = registry.auto_model_candidates(&none).await;
+        assert_eq!(tier_of(&candidates[0].models, "a"), 4);
+        assert_eq!(candidates[0].assignments.models_in(4), ["a".to_string()]);
+        // The settings view still reports the provider's own tier.
+        let raw = registry.catalog_models("grok").await.unwrap();
+        assert_eq!(tier_of(&raw, "a"), 1);
+
+        registry.set_tier_assignments("grok", TierAssignments::default());
+        let listed = registry.list_providers_with_models_except(&none).await;
+        assert_eq!(tier_of(&listed[0].models, "a"), 1);
+    }
     #[tokio::test]
     async fn auto_model_candidates_excludes_hidden_providers() {
         let registry = ProviderRegistry::new();

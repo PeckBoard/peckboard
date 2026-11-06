@@ -274,3 +274,58 @@ async fn hidden_provider_filtered_from_models_not_from_registry() {
         "registry.list_providers() must still contain mock regardless of hidden flag"
     );
 }
+
+#[tokio::test]
+async fn provider_tiers_round_trip_validate_and_reach_the_catalog() {
+    let (state, token) = build_state().await;
+    let uri = "/api/settings/provider-tiers/mock";
+    let body = |tier: i32, models: &[&str]| serde_json::json!({ "tiers": [{ "tier": tier, "models": models }] });
+
+    let (status, view) = get_json(state.clone(), &token, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(view["tiers"].as_array().unwrap().len(), 4);
+    assert_eq!(view["catalog"][0]["id"], "happy-path");
+    assert_eq!(view["catalog"][0]["default_tier"], 0);
+
+    // Bad input is refused and changes nothing.
+    let st = put_json(state.clone(), &token, uri, body(9, &["happy-path"])).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let st = put_json(
+        state.clone(),
+        &token,
+        "/api/settings/provider-tiers/nonexistent",
+        body(1, &["happy-path"]),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let st = put_json(state.clone(), &token, uri, body(3, &["happy-path"])).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, models) = get_json(state.clone(), &token, "/api/models").await;
+    assert_eq!(models["models"][0]["tier"], 3);
+    // Survives a restart: what boot would load matches what was saved.
+    let loaded = peckboard::provider::tiers::load(&state.db).await;
+    assert_eq!(loaded["mock"].models_in(3), ["happy-path".to_string()]);
+    // The settings view keeps the provider's own tier as the default.
+    let (_, view) = get_json(state.clone(), &token, uri).await;
+    assert_eq!(view["catalog"][0]["default_tier"], 0);
+    assert_eq!(view["tiers"][2]["models"][0], "happy-path");
+
+    // No models at all resets to the catalog's own tiers.
+    let st = put_json(
+        state.clone(),
+        &token,
+        uri,
+        serde_json::json!({ "tiers": [] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, models) = get_json(state.clone(), &token, "/api/models").await;
+    assert_eq!(models["models"][0]["tier"], 0);
+    assert!(
+        peckboard::provider::tiers::load(&state.db)
+            .await
+            .get("mock")
+            .is_none()
+    );
+}
