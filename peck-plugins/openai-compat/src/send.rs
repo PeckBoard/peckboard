@@ -319,6 +319,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
     {
         history.remove(0);
     }
+    trim_repeated_replies(&mut history);
     history.push(user_message(prompt, &message));
     // Persist the user turn now, so an interrupt or crash mid-turn doesn't
     // forget the user said anything. Any trim happens here, before the
@@ -778,6 +779,35 @@ pub fn run(payload: &Value) -> Result<(), String> {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
         if calls.is_empty() {
+            // The reply degenerated into one block over and over until it ran
+            // out of room. Keep one copy (the rest would sit in history for
+            // good) and let the model carry on instead of ending on it.
+            if let Some(cut) = repeated_tail(&text) {
+                let kept = json!(text[..cut].trim_end());
+                for m in [messages.last_mut(), new_messages.last_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    m["content"] = kept.clone();
+                }
+                if tools.is_some() && nudges < MAX_CONTINUE_NUDGES {
+                    nudges += 1;
+                    emit(
+                        session_id,
+                        &ProviderEvent::System {
+                            text: "The reply started repeating itself; the repeats were cut \
+                                   and the model was asked to continue."
+                                .into(),
+                            subtype: "warning".into(),
+                            detail: Value::Null,
+                        },
+                    )?;
+                    let nudge = json!({ "role": "user", "content": REPEATED_TEXT_NUDGE });
+                    messages.push(nudge.clone());
+                    new_messages.push(nudge);
+                    continue;
+                }
+            }
             // The reply ended inside a tool call: have it re-sent (bounded,
             // like the continue nudge) instead of ending the turn on it.
             if tools.is_some() && nudges < MAX_CONTINUE_NUDGES && has_cut_tool_call(&text) {
@@ -1092,6 +1122,41 @@ fn has_garbled_tool_call(content: &str) -> bool {
     answer.contains("<tool_call>")
         && (end.ends_with("</tool_call>") || end.ends_with("</function>"))
 }
+
+/// Where to cut a reply whose end is one block repeating: the byte index just
+/// after its first copy, or `None`. Needs at least 4 copies and 500 repeated
+/// bytes, so tables, rules and short lists stay as they are. Seen: 30k tokens
+/// of the same few sentences, the turn then ending "complete" on them.
+fn repeated_tail(text: &str) -> Option<usize> {
+    let b = text.as_bytes();
+    for period in 20..=(b.len() / 4).min(8_000) {
+        let run = (0..b.len() - period)
+            .take_while(|k| b[b.len() - 1 - k] == b[b.len() - 1 - k - period])
+            .count();
+        if run >= 3 * period && run >= 500 {
+            return (b.len() - run..b.len()).find(|&i| text.is_char_boundary(i));
+        }
+    }
+    None
+}
+
+/// Cut repeating blocks out of stored assistant replies. One left in history
+/// poisons the session: asked to "keep going", the model carried straight on
+/// repeating it.
+fn trim_repeated_replies(history: &mut [Value]) {
+    for m in history.iter_mut().filter(|m| m["role"] == "assistant") {
+        let kept = m["content"]
+            .as_str()
+            .and_then(|t| repeated_tail(t).map(|cut| t[..cut].trim_end().to_string()));
+        if let Some(kept) = kept {
+            m["content"] = json!(kept);
+        }
+    }
+}
+
+/// Sent when a reply was cut for repeating itself.
+const REPEATED_TEXT_NUDGE: &str = "Your last reply started repeating itself, so the repeats were \
+     cut. Do the next step now with a tool call, or finish with your report.";
 
 /// Sent when the reply ended in an unreadable tool call.
 const GARBLED_CALL_NUDGE: &str = "Your last tool call was garbled (its tags were malformed), so it \
@@ -4970,6 +5035,37 @@ mod tests {
         let second = bodies[1]["messages"].as_array().unwrap();
         assert_eq!(second.last().unwrap()["content"], CUT_CALL_NUDGE);
         assert!(has_cut_tool_call(cut) && !has_cut_tool_call("plain answer"));
+    }
+
+    /// A reply that degenerates into one repeating block is cut to one copy
+    /// and the model carries on; repetitive but legitimate text is left alone.
+    #[test]
+    fn repeating_reply_is_cut_and_the_turn_continues() {
+        let block = "Let me write the file.\nActually, let me check the page first.\n";
+        let spiral = format!("Found it.\n{}", block.repeat(50));
+        let mut host = FakeHost::new(vec![answer(&spiral), answer("done")]);
+        host.tool_defs = Some(json!([{ "name": "t", "input_schema": { "type": "object" } }]));
+        host.settings.insert("thinking".into(), json!("off"));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+        let bodies = host.chat_bodies.lock().unwrap();
+        let second = bodies[1]["messages"].as_array().unwrap();
+        assert_eq!(second.last().unwrap()["content"], REPEATED_TEXT_NUDGE);
+        let kept = second[second.len() - 2]["content"].as_str().unwrap();
+        assert!(kept.len() < 200, "{kept}");
+        assert!(kept.starts_with("Found it."), "{kept}");
+
+        assert_eq!(repeated_tail("All done. Here is the report."), None);
+        let table = "| a | b |\n".repeat(20);
+        assert_eq!(repeated_tail(&table), None);
+
+        // One already stored is cut when the next turn starts.
+        let mut history = vec![
+            json!({ "role": "user", "content": block.repeat(50) }),
+            json!({ "role": "assistant", "content": spiral }),
+        ];
+        trim_repeated_replies(&mut history);
+        assert_eq!(history[0]["content"], block.repeat(50));
+        assert!(history[1]["content"].as_str().unwrap().len() < 200);
     }
 
     /// Probe T's last reply was a tool call with its tags mangled, and the
