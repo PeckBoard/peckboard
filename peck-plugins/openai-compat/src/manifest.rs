@@ -167,6 +167,13 @@ pub fn manifest_json() -> String {
                 "default": true
             },
             {
+                "key": "keep_going",
+                "title": "Keep Going Until Done",
+                "description": "When a reply has no tool call, ask the model whether the whole task is done, and keep asking until it says DONE or you stop the turn. There is no limit: a stuck model, or a server that never says DONE, keeps running (and on a paid API, keeps costing) until you press Stop.",
+                "type": "boolean",
+                "default": false
+            },
+            {
                 "key": "max_history_tokens",
                 "title": "Max History Tokens",
                 "description": "Estimated-token budget for the conversation history sent each turn (tool definitions and the base prompt come on top). Past it, the oldest turns are dropped down to 60% of the budget in one go, so the prompt prefix stays cacheable. Local models get noticeably worse at long contexts; raise this for models that handle them well. 0 = no budget.",
@@ -178,7 +185,7 @@ pub fn manifest_json() -> String {
             {
                 "key": "compact_turn_tokens",
                 "title": "Compact Long Turns At (Tokens)",
-                "description": "Estimated-token size of the conversation (base prompt, history and the current turn; tool definitions come on top) past which a long turn is compacted: in all but its last 4 tool rounds, file contents the model already wrote, long tool results and old reasoning are replaced with short notes. Keeps multi-hour builds from filling the context window. 0 = never compact.",
+                "description": "Estimated-token size of the current turn past which it is compacted: older tool rounds become short notes, keeping about 24,000 tokens of recent rounds (at least 4) in full. Keeps multi-hour builds from filling the context window. 0 = never compact.",
                 "type": "integer",
                 "default": 48000,
                 "min": 0,

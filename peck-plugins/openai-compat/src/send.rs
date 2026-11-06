@@ -248,6 +248,34 @@ fn is_bare_ok(text: &str) -> bool {
         .eq_ignore_ascii_case("ok")
 }
 
+/// Asked at the end of every reply without a tool call, until the model says
+/// it is done or the user stops the turn (Keep Going Until Done). Without it, a
+/// long job sat idle whenever the model stopped mid-way.
+const KEEP_GOING_PROMPT: &str = "Is the whole task done? If everything you were asked for is \
+     finished and you have checked that it works, reply with exactly DONE. If not, do the next \
+     step now with a tool call.";
+
+/// Whether a reply says the task is done: "DONE", alone or leading a report.
+fn says_done(text: &str) -> bool {
+    text.trim_start()
+        .strip_prefix("DONE")
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()))
+}
+
+/// Whether a reply is "DONE" and nothing else.
+fn is_bare_done(text: &str) -> bool {
+    text.trim()
+        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        == "DONE"
+}
+
+/// Add `KEEP_GOING_PROMPT` to the turn.
+fn push_keep_going(messages: &mut Vec<Value>, new_messages: &mut Vec<Value>) {
+    let prompt = json!({ "role": "user", "content": KEEP_GOING_PROMPT });
+    messages.push(prompt.clone());
+    new_messages.push(prompt);
+}
+
 pub fn run(payload: &Value) -> Result<(), String> {
     let session_id = payload
         .get("session_id")
@@ -378,6 +406,8 @@ pub fn run(payload: &Value) -> Result<(), String> {
     };
     let mut failure_checked = false;
     let mut awaiting_check_reply = false;
+    let keep_going = settings::bool("keep_going", false);
+    let mut awaiting_done_reply = false;
     let mut compacted = false;
     loop {
         if should_stop(session_id) {
@@ -705,6 +735,12 @@ pub fn run(payload: &Value) -> Result<(), String> {
             .get("tool_calls")
             .and_then(Value::as_array)
             .is_none_or(|a| a.is_empty());
+        // Asked if it is done and it is: the answer already shown stands.
+        let done_reply = std::mem::take(&mut awaiting_done_reply);
+        if done_reply && no_calls && is_bare_done(&text) {
+            new_messages.pop();
+            break;
+        }
         if check_reply && no_calls && is_bare_ok(&text) {
             new_messages.pop();
             break;
@@ -880,7 +916,20 @@ pub fn run(payload: &Value) -> Result<(), String> {
                 new_messages.push(check);
                 continue;
             }
-            break;
+            if tools.is_none() || !keep_going || says_done(&text) {
+                break;
+            }
+            // Still not done, and no tool call. Forget this exchange, so a
+            // turn that keeps idling stays the same size and a bad reply can't
+            // be imitated; it has already been shown to the user.
+            if done_reply {
+                for list in [&mut messages, &mut new_messages] {
+                    list.truncate(list.len().saturating_sub(2));
+                }
+            }
+            push_keep_going(&mut messages, &mut new_messages);
+            awaiting_done_reply = true;
+            continue;
         }
         // How many times the latest rounds repeat back to back, as one round
         // or a short cycle (`repeat_run`). Probe P alternated a read_file and a
@@ -912,21 +961,36 @@ pub fn run(payload: &Value) -> Result<(), String> {
             // Stuck, not busy: end the turn normally without running the
             // repeat. Its calls are dropped from the stored assistant
             // message so the history has no dangling tool references.
-            if let Some(obj) = new_messages.last_mut().and_then(Value::as_object_mut) {
-                obj.remove("tool_calls");
+            for list in [&mut messages, &mut new_messages] {
+                if let Some(obj) = list.last_mut().and_then(Value::as_object_mut) {
+                    obj.remove("tool_calls");
+                }
             }
             emit(
                 session_id,
                 &ProviderEvent::System {
-                    text: format!(
-                        "Turn stopped: the model made the same tool call \
-                         {MAX_IDENTICAL_TOOL_ROUNDS} times in a row. Send a message to continue."
-                    ),
+                    text: if keep_going {
+                        format!(
+                            "The model made the same tool call {MAX_IDENTICAL_TOOL_ROUNDS} times \
+                             in a row; it was not run and the model was asked to carry on."
+                        )
+                    } else {
+                        format!(
+                            "Turn stopped: the model made the same tool call \
+                             {MAX_IDENTICAL_TOOL_ROUNDS} times in a row. Send a message to continue."
+                        )
+                    },
                     subtype: "warning".into(),
                     detail: Value::Null,
                 },
             )?;
-            break;
+            if !keep_going {
+                break;
+            }
+            signatures.clear();
+            push_keep_going(&mut messages, &mut new_messages);
+            awaiting_done_reply = true;
+            continue;
         }
         let mut round_images = Vec::new();
         if run_tool_calls(
@@ -947,14 +1011,28 @@ pub fn run(payload: &Value) -> Result<(), String> {
             emit(
                 session_id,
                 &ProviderEvent::System {
-                    text: "Turn stopped: the model kept re-reading files that had not changed. \
-                           Send a message to continue."
-                        .into(),
+                    text: if keep_going {
+                        "The model kept re-reading files that had not changed; it was asked to \
+                         carry on."
+                            .into()
+                    } else {
+                        "Turn stopped: the model kept re-reading files that had not changed. \
+                         Send a message to continue."
+                            .into()
+                    },
                     subtype: "warning".into(),
                     detail: Value::Null,
                 },
             )?;
-            break;
+            if !keep_going {
+                break;
+            }
+            record.read_refusals = 0;
+            record.reads.clear();
+            signatures.clear();
+            push_keep_going(&mut messages, &mut new_messages);
+            awaiting_done_reply = true;
+            continue;
         }
         // The model sees this round's image now; history keeps a stub.
         // Earlier images of this turn go back to their stubs first: vLLM
@@ -5035,6 +5113,36 @@ mod tests {
         let second = bodies[1]["messages"].as_array().unwrap();
         assert_eq!(second.last().unwrap()["content"], CUT_CALL_NUDGE);
         assert!(has_cut_tool_call(cut) && !has_cut_tool_call("plain answer"));
+    }
+
+    /// Keep Going Until Done: a reply without a tool call is asked whether the
+    /// task is done, again and again; idle exchanges are forgotten so the
+    /// request stays the same size; a bare DONE ends the turn on the last
+    /// real answer.
+    #[test]
+    fn turn_keeps_asking_until_the_model_says_done() {
+        let mut replies = vec![answer("Here is the site.")];
+        replies.extend((0..25).map(|_| answer("Thinking about it some more.")));
+        replies.push(answer("DONE"));
+        let mut host = FakeHost::new(replies);
+        host.tool_defs = Some(json!([{ "name": "t", "input_schema": { "type": "object" } }]));
+        host.settings.insert("thinking".into(), json!("off"));
+        host.settings.insert("keep_going".into(), json!(true));
+        peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
+
+        let bodies = host.chat_bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 27);
+        let size = |i: usize| bodies[i]["messages"].as_array().unwrap().len();
+        assert_eq!(size(1), size(26));
+        let last = bodies[26]["messages"].as_array().unwrap();
+        assert_eq!(last.last().unwrap()["content"], KEEP_GOING_PROMPT);
+        let saved = host.saved_history();
+        assert_eq!(saved.last().unwrap()["content"], "Here is the site.");
+
+        assert!(says_done("DONE\nVerified the home page."));
+        assert!(says_done("  DONE."));
+        assert!(!says_done("Done, let me check one more thing."));
+        assert!(!says_done("DONEISH"));
     }
 
     /// A reply that degenerates into one repeating block is cut to one copy

@@ -81,7 +81,7 @@ test('OpenAI-Compatible section renders and round-trips base URL + API key', asy
     'presence_penalty',
     'send_tool_images',
     'send_tool_images',
-    'max_history_tokens',
+    'keep_going',
     'max_tool_result_chars',
     'additional_models',
     'additional_headers',
