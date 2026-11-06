@@ -41,8 +41,8 @@ const MAX_IDENTICAL_TOOL_ROUNDS: usize = 5;
 const MAX_UNCHANGED_READS: usize = 3;
 const MAX_READ_REFUSALS: usize = 12;
 const REREAD_REFUSED: &str = "Not run: you have read this several times this turn and no file has \
-     changed since. Reading it again won't show anything new. Make a specific fix, or finish now \
-     with your report, including what you could not verify.";
+     changed since. Stop reading and act on what you know: make a specific fix, or finish now with \
+     your report, including what you could not verify.";
 /// Cap on the response body quoted in an HTTP-error crash reason.
 const MAX_ERROR_CHARS: usize = 2_000;
 /// Tool images shown to the model: only the newest one, within about 5 MB
@@ -383,7 +383,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
             return interrupted_exit(session_id, &model_label, history, new_messages, &usage);
         }
         if let Some(budget) = settings::compact_turn_tokens()
-            && estimate_tokens(&messages) > budget
+            // This turn's size only. Measuring the whole conversation made a
+            // session with long history compact every round from the start, so
+            // the model remembered just its last few steps and re-read in circles.
+            && estimate_tokens(&new_messages) > budget
             && compact_turn(&mut messages, &mut new_messages) > 0
             && !compacted
         {
@@ -849,10 +852,10 @@ pub fn run(payload: &Value) -> Result<(), String> {
             }
             break;
         }
-        // How many times the latest round (or the latest pair of rounds)
-        // repeats back to back. Pairs too: Probe P alternated a read_file
-        // and a no-op edit_file eleven times, which the one-round count never
-        // saw. A re-read after each *different* edit is no cycle.
+        // How many times the latest rounds repeat back to back, as one round
+        // or a short cycle (`repeat_run`). Probe P alternated a read_file and a
+        // no-op edit_file eleven times, which a one-round count never saw. A
+        // re-read after each *different* edit is no cycle.
         signatures.push(tool_call_signature(&calls));
         let identical_rounds = repeat_run(&signatures);
         // Stuck-ish: the repeat isn't run, and the model is told why and to
@@ -1366,25 +1369,24 @@ fn tool_call_signature(calls: &[ToolCall]) -> String {
         .join("\u{1}")
 }
 
-/// How many times the tail of `history` repeats back to back: the last round
-/// alone (`… A A A` → 3) or the last two rounds as a block (`A B A B A B`
-/// → 3), whichever is longer.
+/// How many times the tail of `history` repeats back to back, for any block
+/// of up to `MAX_REPEAT_PERIOD` rounds: `… A A A` → 3, `A B C A B C A B C` → 3
+/// (seen: find, cat and ls of one config, round and round).
 fn repeat_run(history: &[String]) -> usize {
-    let run = |period: usize| {
-        if history.len() < period {
-            return 0;
-        }
-        let block = &history[history.len() - period..];
-        if period == 2 && block[0] == block[1] {
-            return 0; // that's a period-1 run, counted there
-        }
-        history
-            .rchunks_exact(period)
-            .take_while(|c| *c == block)
-            .count()
-    };
-    run(1).max(run(2))
+    (1..=MAX_REPEAT_PERIOD)
+        .filter(|&period| history.len() >= period)
+        .map(|period| {
+            let block = &history[history.len() - period..];
+            history
+                .rchunks_exact(period)
+                .take_while(|c| *c == block)
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
 }
+/// Longest cycle of rounds `repeat_run` looks for.
+const MAX_REPEAT_PERIOD: usize = 8;
 
 /// The `parameters` schema the server was offered for tool `name`.
 fn tool_schema<'a>(tools: Option<&'a Value>, name: &str) -> Option<&'a Value> {
@@ -2845,6 +2847,9 @@ fn message_chars(m: &Value) -> usize {
 
 /// Tool rounds at the end of a turn that compaction leaves verbatim.
 const KEEP_RECENT_ROUNDS: usize = 4;
+/// Compaction keeps recent rounds verbatim up to about this size, however many
+/// rounds that is (at least `KEEP_RECENT_ROUNDS`): the model's working memory.
+const KEEP_RECENT_TOKENS: usize = 24_000;
 /// Longest tool result kept in a compacted round (its start is kept).
 const COMPACT_RESULT_CHARS: usize = 600;
 const ELIDED_MARK: &str = "elided to save context";
@@ -2891,7 +2896,15 @@ fn compact_turn(messages: &mut [Value], new_messages: &mut [Value]) -> usize {
     if assistants.len() <= KEEP_RECENT_ROUNDS {
         return 0;
     }
-    let keep_from = assistants[assistants.len() - KEEP_RECENT_ROUNDS];
+    let mut keep_from = new_messages.len();
+    for (rounds, &at) in assistants.iter().rev().enumerate() {
+        keep_from = at;
+        if rounds + 1 >= KEEP_RECENT_ROUNDS
+            && estimate_tokens(&new_messages[at..]) >= KEEP_RECENT_TOKENS
+        {
+            break;
+        }
+    }
     let mut names: Vec<(String, String)> = Vec::new();
     let mut changed = 0;
     for k in 0..keep_from {
@@ -4637,7 +4650,22 @@ mod tests {
     /// its full text.
     #[test]
     fn compact_turn_turns_old_rounds_into_text() {
-        let page = "<div>card</div>\n".repeat(100);
+        // Small rounds stay verbatim: memory goes by size, not a fixed count.
+        let mut small: Vec<Value> = (0..8)
+            .flat_map(|i| {
+                vec![
+                    json!({ "role": "assistant", "content": "", "tool_calls": [{
+                        "id": format!("s{i}"), "type": "function",
+                        "function": { "name": "read_file", "arguments": "{}" },
+                    }] }),
+                    json!({ "role": "tool", "tool_call_id": format!("s{i}"), "content": "x" }),
+                ]
+            })
+            .collect();
+        let mut request = small.clone();
+        assert_eq!(compact_turn(&mut request, &mut small), 0);
+
+        let page = "<div>card</div>\n".repeat(1000);
         let round = |i: usize| {
             let args = json!({ "path": format!("p{i}.html"), "content": page }).to_string();
             vec![
@@ -4684,7 +4712,7 @@ mod tests {
                 if compacted {
                     assert!(
                         text.contains(&format!(
-                            "You ran write_file (path=p{}.html, 100 lines of content)",
+                            "You ran write_file (path=p{}.html, 1000 lines of content)",
                             k / 2
                         )),
                         "{text}"
@@ -5007,9 +5035,9 @@ mod tests {
         assert!(!search_rate_limited("dns resolution failed"));
     }
 
-    /// Probe U's review loop: three reads per file window, then refusals,
-    /// and the turn stops after `MAX_READ_REFUSALS`; a cycle over several
-    /// files never trips `repeat_run`. A file change resets the count.
+    /// A review loop too long for `repeat_run`: three reads per file window,
+    /// then refusals, and the turn stops after `MAX_READ_REFUSALS`. A file
+    /// change resets the count.
     #[test]
     fn unchanged_rereads_are_refused_then_end_the_turn() {
         let read = |p: &str| {
@@ -5019,8 +5047,8 @@ mod tests {
         };
         let mut replies = Vec::new();
         for _ in 0..20 {
-            for p in ["a.txt", "/b.txt", "c.txt"] {
-                replies.push(read(p));
+            for i in 0..=MAX_REPEAT_PERIOD {
+                replies.push(read(&format!("f{i}.txt")));
             }
         }
         let mut host = FakeHost::new(replies);
@@ -5028,9 +5056,14 @@ mod tests {
             Some(json!([{ "name": "read_file", "input_schema": { "type": "object" } }]));
         host.settings.insert("thinking".into(), json!("off"));
         peck_plugin_native_host::with_host(host.host_fn(), || run(&payload())).unwrap();
-        assert_eq!(host.invoked.lock().unwrap().len(), 9);
-        // 9 reads, then 12 refusals ending the turn: no further requests.
-        assert_eq!(host.chat_bodies.lock().unwrap().len(), 21);
+        let files = MAX_REPEAT_PERIOD + 1;
+        assert_eq!(host.invoked.lock().unwrap().len(), files * 3);
+        // Three reads of each file, then the refusals end the turn: no further
+        // requests.
+        assert_eq!(
+            host.chat_bodies.lock().unwrap().len(),
+            files * 3 + MAX_READ_REFUSALS
+        );
 
         let mut record = TurnRecord::default();
         let args = json!({ "path": "a.txt" });
@@ -5052,6 +5085,10 @@ mod tests {
         assert_eq!(repeat_run(&s(&["x", "A", "B", "A", "B", "A", "B"])), 3);
         assert_eq!(repeat_run(&s(&["A", "B1", "A", "B2", "A", "B3"])), 1);
         assert_eq!(repeat_run(&s(&["A", "B"])), 1);
+        assert_eq!(
+            repeat_run(&s(&["x", "A", "B", "C", "A", "B", "C", "A", "B", "C"])),
+            3
+        );
 
         let noop = json!({ "path": "a.css", "edits": [
             { "op": "insert", "line": 91, "text": "", "column": 1, "edits": [] },
