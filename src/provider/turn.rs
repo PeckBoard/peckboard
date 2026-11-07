@@ -895,6 +895,9 @@ pub const COMMON_CLI_FALLBACK_DIRS: &[&str] = &[
     "~/.local/bin",
     "~/.npm-global/bin",
     "~/.bun/bin",
+    // Where the official Grok and Kimi installers put their binaries.
+    "~/.grok/bin",
+    "~/.kimi-code/bin",
     "/usr/local/bin",
 ];
 /// Resolve the executable to spawn. A configured path containing a `/` is

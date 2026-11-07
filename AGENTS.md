@@ -422,6 +422,13 @@ expected to use:
   `GET /api/link-preview`). Drop `<LinkPreviews text={…} />` under any
   message body that can carry links.
 
+- **`ProviderSetupPanel`** (`web/src/components/ProviderSetupPanel.tsx`,
+  state in `store/providerSetup.ts`) — takes a CLI provider from nothing to
+  usable: install (`/api/provider-setup`, a fixed server-side command table,
+  never a client-supplied command), sign in, turn on. Used by the setup wizard
+  and Settings → Providers. It needs no working agent, which is why the wizard
+  must not fall back to `startInstallSession`.
+
 **Naming and ordering of menu items must match across surfaces.** If a
 session's chat-toolbar 3-dot menu says "Clear session", the tab
 right-click menu and the sessions-list row menu must say the same.

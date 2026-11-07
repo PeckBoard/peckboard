@@ -198,7 +198,7 @@ impl CodexLoginManager {
     }
 }
 
-fn spawn_line_forwarder<R>(reader: R, tx: tokio::sync::mpsc::UnboundedSender<String>)
+pub(crate) fn spawn_line_forwarder<R>(reader: R, tx: tokio::sync::mpsc::UnboundedSender<String>)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -214,7 +214,7 @@ where
 
 /// Strip CSI SGR sequences (`ESC[…m`) so URL/code matching isn't thrown by
 /// the CLI's colour codes.
-fn strip_ansi(s: &str) -> String {
+pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {

@@ -7,6 +7,9 @@ import Modal from './Modal'
 interface Props {
   /** Editing an existing account, or `null` to add a new one. */
   account: ClaudeAccount | null
+  /** First-run sign-in: just the credential, with the account name and
+   *  budget left to their defaults (both editable later in Settings). */
+  quickSetup?: boolean
   onClose: () => void
 }
 
@@ -38,13 +41,13 @@ const KIND_OPTIONS: { value: ClaudeAccountKind; label: string; hint: string }[] 
  * keeps the stored credential when the field is left blank, so a rename or
  * rebudget never has to re-enter the secret.
  */
-export default function ClaudeAccountModal({ account, onClose }: Props) {
+export default function ClaudeAccountModal({ account, quickSetup = false, onClose }: Props) {
   const createAccount = useClaudeAccountsStore((s) => s.createAccount)
   const updateAccount = useClaudeAccountsStore((s) => s.updateAccount)
   const startLogin = useClaudeAccountsStore((s) => s.startLogin)
   const editing = account !== null
 
-  const [name, setName] = useState(account?.name ?? '')
+  const [name, setName] = useState(account?.name ?? (quickSetup ? 'Claude' : ''))
   const [kind, setKind] = useState<ClaudeAccountKind>(account?.kind ?? 'oauth_token')
   const [credential, setCredential] = useState('')
 
@@ -181,24 +184,28 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
       closeOnBackdropClick={!confirmDiscard}
       data-testid="claude-account-modal"
     >
-      <h2>{editing ? `Edit ${account.name}` : 'Add Claude Account'}</h2>
+      <h2>
+        {editing ? `Edit ${account.name}` : quickSetup ? 'Sign in to Claude' : 'Add Claude Account'}
+      </h2>
       <form onSubmit={handleSubmit}>
-        <div className="form-field">
-          <label className="form-label" htmlFor="acct-name">
-            Account name
-          </label>
-          <input
-            id="acct-name"
-            className="form-input"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Work, Personal"
-            autoFocus
-            required
-            data-testid="acct-name"
-          />
-        </div>
+        {!quickSetup && (
+          <div className="form-field">
+            <label className="form-label" htmlFor="acct-name">
+              Account name
+            </label>
+            <input
+              id="acct-name"
+              className="form-input"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Work, Personal"
+              autoFocus
+              required
+              data-testid="acct-name"
+            />
+          </div>
+        )}
 
         <div className="form-field">
           <span className="form-label">Credential type</span>
@@ -253,7 +260,9 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
                   ? 'Generating…'
                   : editing
                     ? 'Re-authenticate with Claude'
-                    : 'Generate login URL'}
+                    : quickSetup
+                      ? 'Sign in with Claude'
+                      : 'Generate login URL'}
               </button>
             ) : (
               <>
@@ -291,25 +300,29 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
           </div>
         )}
 
-        <div className="form-field">
-          <label className="form-label" htmlFor="acct-window">
-            Usage budget
-          </label>
-          <select
-            id="acct-window"
-            className="form-input"
-            value={windowHours === null ? '' : String(windowHours)}
-            onChange={(e) => setWindowHours(e.target.value === '' ? null : Number(e.target.value))}
-            data-testid="acct-window"
-          >
-            {WINDOW_OPTIONS.map((w) => (
-              <option key={w.label} value={w.hours === null ? '' : String(w.hours)}>
-                {w.label}
-              </option>
-            ))}
-          </select>
-          <span className="form-hint">Warn as spend in this rolling window nears the cap.</span>
-        </div>
+        {!quickSetup && (
+          <div className="form-field">
+            <label className="form-label" htmlFor="acct-window">
+              Usage budget
+            </label>
+            <select
+              id="acct-window"
+              className="form-input"
+              value={windowHours === null ? '' : String(windowHours)}
+              onChange={(e) =>
+                setWindowHours(e.target.value === '' ? null : Number(e.target.value))
+              }
+              data-testid="acct-window"
+            >
+              {WINDOW_OPTIONS.map((w) => (
+                <option key={w.label} value={w.hours === null ? '' : String(w.hours)}>
+                  {w.label}
+                </option>
+              ))}
+            </select>
+            <span className="form-hint">Warn as spend in this rolling window nears the cap.</span>
+          </div>
+        )}
 
         {hasBudget && (
           <>
@@ -388,7 +401,7 @@ export default function ClaudeAccountModal({ account, onClose }: Props) {
             Cancel
           </button>
           <button className="btn-primary" type="submit" disabled={loading} data-testid="acct-save">
-            {loading ? 'Saving…' : editing ? 'Save' : 'Add Account'}
+            {loading ? 'Saving…' : editing ? 'Save' : quickSetup ? 'Finish sign-in' : 'Add Account'}
           </button>
         </div>
       </form>

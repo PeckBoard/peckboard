@@ -221,12 +221,7 @@ async fn login_cli_path(state: &AppState) -> String {
     };
     crate::provider::turn::resolve_cli_path(
         &configured,
-        &[
-            "~/.local/bin",
-            "~/.npm-global/bin",
-            "~/.bun/bin",
-            "/usr/local/bin",
-        ],
+        crate::provider::turn::COMMON_CLI_FALLBACK_DIRS,
     )
 }
 

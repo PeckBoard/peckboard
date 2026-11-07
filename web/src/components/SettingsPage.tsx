@@ -34,6 +34,7 @@ import {
   type SoundPrefs,
 } from '../util/sounds'
 import ClaudeAccountsSection from './ClaudeAccountsSection'
+import ProviderSetupPanel from './ProviderSetupPanel'
 import GrokAccountsSection from './GrokAccountsSection'
 import KimiAccountsSection from './KimiAccountsSection'
 import AgentSandboxSection from './AgentSandboxSection'
@@ -909,12 +910,18 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   }, [])
 
   useEffect(() => {
-    authedFetch('/api/settings/providers')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { providers?: ProviderInfo[] } | null) => {
-        if (data?.providers) setProviderVisibility(data.providers)
-      })
-      .catch(() => {})
+    const load = () => {
+      authedFetch('/api/settings/providers')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { providers?: ProviderInfo[] } | null) => {
+          if (data?.providers) setProviderVisibility(data.providers)
+        })
+        .catch(() => {})
+    }
+    load()
+    // A provider turned on from the setup panel adds its sections below.
+    window.addEventListener('peckboard:plugin-approval', load)
+    return () => window.removeEventListener('peckboard:plugin-approval', load)
   }, [])
 
   useEffect(() => {
@@ -1479,6 +1486,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
         {activeSubPage === 'providers' && (
           <>
+            {isAdmin && (
+              <section className="settings-section" data-settings-anchor="provider-setup">
+                <h3>Connect Your AI</h3>
+                <p className="form-hint">
+                  Install a provider&apos;s CLI and sign in on your own subscription.
+                </p>
+                <ProviderSetupPanel />
+              </section>
+            )}
             <section className="settings-section" data-settings-anchor="provider-visibility">
               <h3>Providers</h3>
               <p className="form-hint">
@@ -1486,7 +1502,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
                 account settings.
               </p>
               {providerVisibility.length === 0 ? (
-                <p className="settings-loading">Loading providers...</p>
+                <p className="form-hint" data-testid="settings-no-providers">
+                  No providers are turned on yet.
+                </p>
               ) : (
                 <div className="settings-info-grid">
                   {providerVisibility.map((p) => (

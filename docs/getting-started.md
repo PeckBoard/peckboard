@@ -23,7 +23,7 @@ chmod +x peckboard-macos-arm64
 ./peckboard-macos-arm64
 ```
 
-The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install to run it as a server. Linux `--desktop` needs the WebKitGTK shared library (`libwebkit2gtk-4.1-0` on Debian/Ubuntu). Running agents on Claude models needs the Claude Code CLI — `claude` installed and signed in on the same machine; the Codex, Grok, Kimi, and Cursor providers drive their own CLIs, Ollama connects to an Ollama server you point it at, and the built-in mock models work with nothing installed at all. The [Providers]({{ "/providers.html" | relative_url }}) page lists every supported CLI and its sign-in flow.
+The web interface, database, and TLS certificate generator are all inside the binary, so there is nothing else to install to run it as a server. Linux `--desktop` needs the WebKitGTK shared library (`libwebkit2gtk-4.1-0` on Debian/Ubuntu). Running agents needs a provider. The setup wizard installs and signs in to the Claude Code, Codex, Cursor, Grok, and Kimi CLIs for you, on your own subscription; Ollama connects to an Ollama server you point it at. The [Providers]({{ "/providers.html" | relative_url }}) page lists every supported CLI and its sign-in flow.
 
 ## Download the Remote Agent
 
@@ -65,7 +65,7 @@ On its first start the server creates an admin account and prints the username a
 
 Open `http://localhost:3344` in a browser and sign in with the printed credentials. `peckboard --desktop` opens a native window on that same URL instead; a first-run desktop launch signs in automatically so the setup wizard appears without a terminal. Linux users who want a launcher icon can run `peckboard --install-desktop-entry`. The server also listens for HTTPS on port `3345` with a self-signed certificate covering `localhost`, the loopback addresses, and every address this machine answers on — browsers still warn on the first HTTPS visit for a self-signed cert (only uploading your own certificate under Settings → Administration → TLS / HTTPS removes that warning); plain HTTP is fine for a first look.
 
-Signing in for the first time opens a short setup wizard: set a new password (the printed one is one-time), pick which model providers are visible, choose a default model, register a workspace folder, and review the TLS certificate. It only appears once, on a fresh install, and every step it covers can be redone later from Settings.
+Signing in for the first time opens a short setup wizard: set a new password (the printed one is one-time), connect your AI by installing a provider's CLI and signing in with one click each, choose a default model, register a workspace folder, and review the TLS certificate. It only appears once, on a fresh install, and every step it covers can be redone later from Settings.
 
 The last step is to create a project. A _project_ pairs a folder on your machine with a board of _cards_ — tasks that PeckBoard's agents pick up and complete. Press **+ New project**, give it a name, the folder it should work in, and a workflow for its cards, and the board appears:
 

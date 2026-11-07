@@ -495,7 +495,8 @@ async fn start_login(
     let Some(config_dir) = account.config_dir.as_deref() else {
         return Err(server_error("account has no config_dir"));
     };
-    match GROK_LOGIN.start(&id, config_dir).await {
+    let cli_path = super::provider_setup::configured_cli_path(&state, "grok", "grok").await;
+    match GROK_LOGIN.start(&id, config_dir, &cli_path).await {
         Ok(url) => Ok(Json(LoginStartResponse { url })),
         Err(e) => Err(bad_request(&format!("Grok login failed: {e}"))),
     }

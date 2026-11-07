@@ -279,6 +279,7 @@ const HOME_RW_DIRS: &[&str] = &[
     ".codex",
     ".grok",
     ".kimi",
+    ".kimi-code",
     ".cursor",
     ".gemini",
     ".ollama",

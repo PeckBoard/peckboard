@@ -7,7 +7,9 @@
 pub mod claude_oauth;
 pub mod claude_plan_usage;
 pub mod claude_token_refresh;
+pub mod cli_install;
 pub mod codex_login;
+pub mod cursor_login;
 pub mod grok_login;
 pub mod kimi_login;
 pub mod login_stash;

@@ -10,8 +10,9 @@ import path from 'node:path'
  * data dir is a "fresh install", and an incomplete setup would overlay
  * every other spec), so these tests stub `GET /api/settings/setup` to
  * open the wizard, then drive the five steps against the real backend:
- * the password change, provider toggles, default model, and folder all
- * hit the live API and are asserted through it.
+ * the password change, default model, and folder all hit the live API and
+ * are asserted through it. Installing and signing in to providers is covered
+ * on a genuinely fresh install in provider-setup.spec.ts.
  */
 
 const ADMIN_USER = 'e2e-user'
@@ -83,53 +84,23 @@ test.describe('first-run setup wizard', () => {
       passwordChanged = true
 
       // Advanced to providers; the change really landed (old password dead).
-      await expect(page.getByTestId('setup-provider-toggle-claude')).toBeVisible({
-        timeout: 10_000,
-      })
+      await expect(page.getByTestId('provider-setup')).toBeVisible({ timeout: 15_000 })
       const oldLogin = await request.post('/api/auth/login', {
         data: { username: ADMIN_USER, password: ADMIN_PASS },
       })
       expect(oldLogin.status()).toBe(401)
 
-      // ── Step 2: hide a provider, verify it persisted ───────────────
-      const claudeToggle = page.getByTestId('setup-provider-toggle-claude')
-      await expect(claudeToggle).toBeChecked()
-      await claudeToggle.uncheck()
-
+      // ── Step 2: connecting a provider is optional ───────────────────
       const freshToken = await loginToken(request, ADMIN_USER, WIZARD_PASS)
       const auth = { Authorization: `Bearer ${freshToken}` }
-      await expect
-        .poll(async () => {
-          const res = await request.get('/api/settings/providers', { headers: auth })
-          const data = (await res.json()) as { providers: { id: string; hidden: boolean }[] }
-          return data.providers.find((p) => p.id === 'claude')?.hidden
-        })
-        .toBe(true)
-
+      await expect(page.getByTestId('provider-setup-claude')).toBeVisible()
       await page.getByTestId('setup-next').click()
 
-      // Codex is enabled by default; a missing CLI asks whether to install.
-      // Decline so the rest of the walk continues (Yes is covered in
-      // codex-cli-install.spec.ts).
-      const installAsk = page.getByTestId('codex-install-dialog')
-      await expect(installAsk.or(page.getByTestId('setup-default-model'))).toBeVisible({
-        timeout: 10_000,
-      })
-      if (await installAsk.isVisible()) {
-        await expect(installAsk).toContainText('Codex CLI is not installed')
-        await page.getByTestId('confirm-dialog-cancel').click()
-      }
-
-      // ── Step 3: searchable model picker, filtered to enabled providers ─
+      // ── Step 3: searchable model picker ──────────────────────────────
       await page.getByTestId('setup-default-model').click()
       const search = page.getByTestId('setup-default-model-search')
       await expect(search).toBeVisible()
-
-      // Claude is hidden, so no claude-prefixed options may be offered.
       await expect(page.getByTestId('setup-default-model-option-mock:echo')).toBeVisible()
-      await expect(page.locator('[data-testid^="setup-default-model-option-claude:"]')).toHaveCount(
-        0,
-      )
 
       // Typing narrows the list (combobox, not a plain dropdown).
       await search.fill('happy')
@@ -187,7 +158,7 @@ test.describe('first-run setup wizard', () => {
       await expect(page.getByTestId('setup-wizard')).toHaveCount(0)
     } finally {
       // Restore shared state for the rest of the suite: bootstrap
-      // password, provider visibility, and the app default model.
+      // password and the app default model.
       if (passwordChanged) {
         const res = await request.post('/api/auth/login', {
           data: { username: ADMIN_USER, password: WIZARD_PASS },
@@ -203,10 +174,6 @@ test.describe('first-run setup wizard', () => {
       }
       const restored = await loginToken(request, ADMIN_USER, ADMIN_PASS)
       const auth = { Authorization: `Bearer ${restored}` }
-      await request.put('/api/settings/providers/claude', {
-        headers: auth,
-        data: { hidden: false },
-      })
       await request.put('/api/settings/default-model', { headers: auth, data: { model: '' } })
     }
   })

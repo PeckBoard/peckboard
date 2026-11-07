@@ -586,6 +586,26 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     })))
 }
 
+/// Turn on a compiled-in plugin, persisting the choice. A no-op when it is
+/// already on.
+pub(crate) async fn activate_crate_plugin(state: &AppState, id: &str) {
+    let mut set = crate::plugin::crates::installed_set(&state.db)
+        .await
+        .unwrap_or_default();
+    if set.insert(id.to_string()) {
+        crate::plugin::crates::write_installed(&state.db, &set).await;
+        crate::plugin::crates::activate(id, &state.provider_registry, &state.db, &state.plugins)
+            .await;
+        state
+            .broadcaster
+            .broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "plugin-approval".into(),
+                session_id: String::new(),
+                data: serde_json::json!({ "plugin": id, "status": "approved" }),
+            });
+    }
+}
+
 /// POST /api/plugins/registry/install — install a registry plugin. Body:
 /// `{"id": "api", "repository": "<resolved url>"}`. Core fetches that
 /// repository's index (or searches all repositories when `repository` is
@@ -608,26 +628,7 @@ async fn install_registry(
     };
     if crate::plugin::crates::is_crate_plugin_id(&id) {
         // Compiled in — "install" activates the bundled code, no download.
-        let mut set = crate::plugin::crates::installed_set(&state.db)
-            .await
-            .unwrap_or_default();
-        if set.insert(id.clone()) {
-            crate::plugin::crates::write_installed(&state.db, &set).await;
-            crate::plugin::crates::activate(
-                &id,
-                &state.provider_registry,
-                &state.db,
-                &state.plugins,
-            )
-            .await;
-            state
-                .broadcaster
-                .broadcast(crate::ws::broadcaster::WsEvent {
-                    event_type: "plugin-approval".into(),
-                    session_id: String::new(),
-                    data: serde_json::json!({ "plugin": id, "status": "approved" }),
-                });
-        }
+        activate_crate_plugin(&state, &id).await;
         return Ok(Json(serde_json::json!({
             "installed": id,
             "kind": "crate",

@@ -1,23 +1,16 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import PathAutocomplete from './PathAutocomplete'
+import ProviderSetupPanel from './ProviderSetupPanel'
 import TlsSettingsSection from './TlsSettingsSection'
 import FieldError from './FieldError'
-import ConfirmDialog from './ConfirmDialog'
-import { startInstallSession } from '../utils/installSession'
-import { checkHostCommand, type CommandCheckResult } from '../utils/mcpServers'
 import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
+import { isProviderReady, pickDefaultModel, useProviderSetupStore } from '../store/providerSetup'
 import { useResourcesStore } from '../store/resources'
 import { MIN_PASSWORD_LEN } from '../utils/password'
 import type { Folder } from '../types/api'
-
-interface ProviderVisibility {
-  id: string
-  display_name: string
-  hidden: boolean
-}
 
 const STEPS = ['Password', 'Providers', 'Default model', 'Folder', 'HTTPS'] as const
 
@@ -29,11 +22,11 @@ interface Props {
 /**
  * First-run setup wizard, shown to the bootstrap admin exactly once (the
  * server seeds `setup_state` as incomplete only on a brand-new install).
- * Five steps: change the printed bootstrap password (mandatory), pick
- * visible providers, choose a default model, register a workspace folder,
- * and review TLS. Every step writes through the same settings endpoints
- * the Settings page uses, so each one stays re-runnable there later —
- * the wizard is convenience, not the only path.
+ * Five steps: change the printed bootstrap password (mandatory), install and
+ * sign in to providers, choose a default model, register a workspace folder,
+ * and review TLS. Every step writes through the same endpoints the Settings
+ * page uses, so each one stays re-runnable there later — the wizard is
+ * convenience, not the only path.
  *
  * The modal is deliberately non-dismissible: steps 2–5 are one click to
  * pass, and only the explicit Finish marks setup complete, so closing the
@@ -76,49 +69,8 @@ export default function SetupWizard({ onDone }: Props) {
   }
 
   // ── Step 2: providers ────────────────────────────────────────────
-  const [providers, setProviders] = useState<ProviderVisibility[] | null>(null)
-  const [codexInstallAsk, setCodexInstallAsk] = useState(false)
-  const [codexCheck, setCodexCheck] = useState<CommandCheckResult | null>(null)
-  const [codexInstallBusy, setCodexInstallBusy] = useState(false)
-  const [codexInstallError, setCodexInstallError] = useState<string | null>(null)
-  const [providersBusy, setProvidersBusy] = useState(false)
-  const [providersError, setProvidersError] = useState('')
-
-  useEffect(() => {
-    let cancelled = false
-    authedFetch('/api/settings/providers')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { providers?: ProviderVisibility[] } | null) => {
-        if (!cancelled && data?.providers) setProviders(data.providers)
-      })
-      .catch(() => {
-        if (!cancelled) setProvidersError('Could not load the provider list.')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  const toggleProvider = (id: string, hidden: boolean) => {
-    setProvidersError('')
-    // Optimistic; a refused save reverts so the checkboxes never lie.
-    setProviders((prev) => prev?.map((p) => (p.id === id ? { ...p, hidden } : p)) ?? prev)
-    void authedFetch(`/api/settings/providers/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hidden }),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        fetchModels()
-      })
-      .catch((e: Error) => {
-        setProviders(
-          (prev) => prev?.map((p) => (p.id === id ? { ...p, hidden: !hidden } : p)) ?? prev,
-        )
-        setProvidersError(`Could not update provider: ${e.message}`)
-      })
-  }
+  const providerStatuses = useProviderSetupStore((s) => s.providers)
+  const anyProviderReady = providerStatuses?.some(isProviderReady) ?? false
 
   // ── Step 3: default model ────────────────────────────────────────
   const models = useResourcesStore((s) => s.models)
@@ -132,17 +84,6 @@ export default function SetupWizard({ onDone }: Props) {
     fetchModels()
     fetchDefaultModel()
   }, [fetchModels, fetchDefaultModel])
-
-  // `/api/models` already omits hidden providers, but the catalogue may
-  // predate a toggle made on step 2 — drop models whose provider was just
-  // hidden there. Filter by the hidden set (not the enabled set) so
-  // providers absent from the settings list (e.g. mock) keep their models.
-  // Bare ids default to `claude` (backend convention).
-  const visibleModels = useMemo(() => {
-    if (!providers) return models
-    const hidden = new Set(providers.filter((p) => p.hidden).map((p) => p.id))
-    return models.filter((m) => !hidden.has(m.id.includes(':') ? m.id.split(':')[0] : 'claude'))
-  }, [models, providers])
 
   const changeDefaultModel = (model: string) => {
     const prev = defaultModel
@@ -160,6 +101,20 @@ export default function SetupWizard({ onDone }: Props) {
         setDefaultModelLocal(prev)
         setModelError(`Could not save the default model: ${e.message}`)
       })
+  }
+
+  // Preselect a model from whatever just got connected, never over a choice
+  // the user already made. Re-pulls first: a sign-in may have just added models.
+  const preselectDefaultModel = async () => {
+    await fetchModels()
+    const { defaultModel: current, models: latest } = useResourcesStore.getState()
+    const statuses = useProviderSetupStore.getState().providers
+    if (current || !statuses) return
+    const pick = pickDefaultModel(
+      statuses,
+      latest.map((m) => m.id),
+    )
+    if (pick) changeDefaultModel(pick)
   }
 
   // ── Step 4: workspace folder ─────────────────────────────────────
@@ -208,73 +163,11 @@ export default function SetupWizard({ onDone }: Props) {
     }
   }
 
-  const nextLabel =
-    step === STEPS.length - 1
-      ? finishBusy
-        ? 'Finishing…'
-        : 'Finish'
-      : providersBusy
-        ? 'Checking…'
-        : 'Next'
-  const nextDisabled =
-    step === 0
-      ? pwBusy || (!pwDone && !pwValid)
-      : step === 1
-        ? providersBusy || codexInstallBusy
-        : step === 4 && finishBusy
-
-  const advanceFromProviders = () => {
-    setCodexInstallAsk(false)
-    setCodexInstallError(null)
-    setStep(2)
-  }
-
-  const confirmCodexInstall = async () => {
-    if (!codexCheck) {
-      advanceFromProviders()
-      return
-    }
-    setCodexInstallBusy(true)
-    setCodexInstallError(null)
-    try {
-      await startInstallSession({
-        command: 'codex',
-        requiredBy: 'the Codex provider',
-        steps: codexCheck.hints,
-        suggestedFolderPath: codexCheck.suggested_folder_path,
-        doneHint: 'go back to Settings → Providers and confirm the Codex CLI warning is gone',
-      })
-      advanceFromProviders()
-    } catch (e) {
-      setCodexInstallError(e instanceof Error ? e.message : 'Could not start install session.')
-    } finally {
-      setCodexInstallBusy(false)
-    }
-  }
+  const nextLabel = step === STEPS.length - 1 ? (finishBusy ? 'Finishing…' : 'Finish') : 'Next'
+  const nextDisabled = step === 0 ? pwBusy || (!pwDone && !pwValid) : step === 4 && finishBusy
 
   const onNext = () => {
-    if (step === 1) {
-      void (async () => {
-        const codexOn = providers?.some((p) => p.id === 'codex' && !p.hidden) ?? false
-        if (!codexOn) {
-          setStep(2)
-          return
-        }
-        setProvidersBusy(true)
-        try {
-          const check = await checkHostCommand('codex')
-          if (check && !check.found) {
-            setCodexCheck(check)
-            setCodexInstallAsk(true)
-            return
-          }
-        } finally {
-          setProvidersBusy(false)
-        }
-        setStep(2)
-      })()
-      return
-    }
+    if (step === 1) void preselectDefaultModel()
     if (step === STEPS.length - 1) {
       void finish()
     } else {
@@ -378,30 +271,12 @@ export default function SetupWizard({ onDone }: Props) {
 
         {step === 1 && (
           <div>
-            <h3>Enable providers</h3>
+            <h3>Connect your AI</h3>
             <p className="form-hint">
-              Pick which agent providers show up across PeckBoard. Hidden providers simply disappear
-              from model pickers — nothing is uninstalled, and you can re-enable them any time in
-              Settings → Providers.
+              PeckBoard runs agents through these tools, on your own subscription. Set up at least
+              one to start working. You can add more any time in Settings → Providers.
             </p>
-            {providers === null ? (
-              <p className="settings-loading">Loading providers…</p>
-            ) : (
-              <div className="settings-info-grid">
-                {providers.map((p) => (
-                  <label className="settings-row" key={p.id}>
-                    <span className="settings-label">{p.display_name}</span>
-                    <input
-                      type="checkbox"
-                      checked={!p.hidden}
-                      data-testid={`setup-provider-toggle-${p.id}`}
-                      onChange={(e) => toggleProvider(p.id, !e.target.checked)}
-                    />
-                  </label>
-                ))}
-              </div>
-            )}
-            <FieldError message={providersError || undefined} testId="setup-providers-error" />
+            <ProviderSetupPanel />
           </div>
         )}
 
@@ -410,15 +285,15 @@ export default function SetupWizard({ onDone }: Props) {
             <h3>Default model</h3>
             <p className="form-hint">
               Preselected for new sessions, cards, and reviews. Only models from the providers you
-              left enabled are offered — type to search.
+              turned on are offered — type to search.
             </p>
             <ModelPicker
               value={defaultModel}
               onChange={changeDefaultModel}
-              models={visibleModels}
+              models={models}
               ariaLabel="Default model"
               testId="setup-default-model"
-              emptyHint="No models available — enable a provider on the previous step."
+              emptyHint="No models yet — connect a provider on the previous step."
               onOpen={fetchModels}
             />
             <FieldError message={modelError || undefined} testId="setup-model-error" />
@@ -534,20 +409,12 @@ export default function SetupWizard({ onDone }: Props) {
         {step === 0 && !pwDone && !pwValid && (
           <span className="form-actions-reason">Set a new admin password to continue.</span>
         )}
+        {step === 1 && providerStatuses && !anyProviderReady && (
+          <span className="form-actions-reason" data-testid="setup-no-provider-hint">
+            You can skip this, but agents can&apos;t run until a provider is connected.
+          </span>
+        )}
       </div>
-      {codexInstallAsk && (
-        <ConfirmDialog
-          title="Codex CLI is not installed"
-          message="Codex CLI is not installed. Install it now?"
-          confirmLabel="Yes"
-          cancelLabel="No"
-          testId="codex-install-dialog"
-          busy={codexInstallBusy}
-          error={codexInstallError}
-          onConfirm={() => void confirmCodexInstall()}
-          onCancel={advanceFromProviders}
-        />
-      )}
     </Modal>
   )
 }

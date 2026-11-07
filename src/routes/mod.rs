@@ -32,6 +32,7 @@ pub mod plugin_ui;
 pub mod plugin_ws;
 pub mod plugins;
 pub mod projects;
+pub mod provider_setup;
 pub mod remote_access;
 pub mod repeating_tasks;
 pub mod reports;
@@ -100,6 +101,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(grok_accounts::router(state.clone()))
         .merge(codex_accounts::router(state.clone()))
         .merge(kimi_accounts::router(state.clone()))
+        .merge(provider_setup::router(state.clone()))
         .merge(folders::router(state.clone()))
         .merge(sessions::router(state.clone()))
         .merge(projects::router(state.clone()))

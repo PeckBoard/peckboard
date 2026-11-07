@@ -47,7 +47,7 @@ impl GrokLoginManager {
         }
     }
 
-    /// Begin a device login for `account_id`, spawning `grok login
+    /// Begin a device login for `account_id`, spawning `<cli_path> login
     /// --device-auth` with `GROK_HOME=config_dir`. Returns the device-login
     /// URL to send the user to once grok prints it. Any prior in-flight login
     /// for the same account is cancelled first. The spawned process keeps
@@ -60,7 +60,12 @@ impl GrokLoginManager {
     /// broken credentials can neither short-circuit the CLI nor keep the
     /// account reading as signed in. An attempt that produces nothing
     /// puts them back.
-    pub async fn start(&self, account_id: &str, config_dir: &str) -> anyhow::Result<String> {
+    pub async fn start(
+        &self,
+        account_id: &str,
+        config_dir: &str,
+        cli_path: &str,
+    ) -> anyhow::Result<String> {
         // Cancel any prior attempt for this account so we never leak a
         // polling process or hand back a stale URL.
         if let Some(prev) = self.inner.lock().await.remove(account_id) {
@@ -75,7 +80,7 @@ impl GrokLoginManager {
         // Sandboxed like an agent spawn: only the account dir is writable
         // inside the data dir. Also resets SIGINT/SIGQUIT.
         let mut cmd = crate::sandbox::SandboxedTokioCommand::new(
-            "grok",
+            cli_path,
             &crate::sandbox::SpawnScope::none().account_dir(config_dir),
         );
         cmd.args(["login", "--device-auth"])
@@ -91,7 +96,7 @@ impl GrokLoginManager {
             Ok(child) => child,
             Err(e) => {
                 stash.settle();
-                anyhow::bail!("failed to spawn `grok login`: {e}");
+                anyhow::bail!("failed to spawn `{cli_path} login`: {e}");
             }
         };
 

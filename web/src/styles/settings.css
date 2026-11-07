@@ -2488,6 +2488,61 @@ a.wasm-plugin-repo:hover {
   align-items: center;
 }
 
+/* ── Provider setup: setup wizard + Settings → Providers ────────────── */
+.provider-setup-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.provider-setup-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+.provider-setup-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.provider-setup-status {
+  font-size: var(--text-xs);
+  color: var(--text3);
+  overflow-wrap: anywhere;
+}
+.provider-setup-status.ready {
+  color: var(--success);
+}
+.provider-setup-summary button {
+  flex-shrink: 0;
+}
+.provider-setup-command {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+.provider-setup-log {
+  margin: 8px 0 0;
+  padding: 8px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface2);
+  border-radius: 6px;
+}
+.provider-setup-more {
+  padding-top: 10px;
+}
+.provider-setup-more summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.provider-setup-more .provider-setup-summary {
+  padding: 6px 0;
+}
+
 /* ── Settings → Assistant → Conversation Mirror ─────────────────────── */
 .mirror-test-row {
   display: flex;

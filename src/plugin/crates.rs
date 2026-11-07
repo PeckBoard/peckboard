@@ -140,6 +140,11 @@ pub fn provider_ids() -> impl Iterator<Item = &'static str> {
     SPECS.iter().filter(|s| s.hooks.is_some()).map(|s| s.id)
 }
 
+/// A crate plugin's display name.
+pub fn display_name(id: &str) -> Option<&'static str> {
+    SPECS.iter().find(|s| s.id == id).map(|s| s.display_name)
+}
+
 /// Live-activate one crate plugin after an install: providers register their
 /// native [`AgentProvider`]; session-control approves its embedded wasm.
 pub async fn activate(
