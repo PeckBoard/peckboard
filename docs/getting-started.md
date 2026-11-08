@@ -65,9 +65,16 @@ On its first start the server creates an admin account and prints the username a
 
 Open `http://localhost:3344` in a browser and sign in with the printed credentials. `peckboard --desktop` opens a native window on that same URL instead; a first-run desktop launch signs in automatically so the setup wizard appears without a terminal. Linux users who want a launcher icon can run `peckboard --install-desktop-entry`. The server also listens for HTTPS on port `3345` with a self-signed certificate covering `localhost`, the loopback addresses, and every address this machine answers on — browsers still warn on the first HTTPS visit for a self-signed cert (only uploading your own certificate under Settings → Administration → TLS / HTTPS removes that warning); plain HTTP is fine for a first look.
 
-Signing in for the first time opens a short setup wizard: set a new password (the printed one is one-time), connect your AI by installing a provider's CLI and signing in with one click each, choose a default model, register a workspace folder, and review the TLS certificate. It only appears once, on a fresh install, and every step it covers can be redone later from Settings.
+Signing in for the first time opens a short setup wizard with four steps:
 
-The last step is to create a project. A _project_ pairs a folder on your machine with a board of _cards_ — tasks that PeckBoard's agents pick up and complete. Press **+ New project**, give it a name, the folder it should work in, and a workflow for its cards, and the board appears:
+1. **Welcome**: replace the printed one-time password with your own.
+2. **Connect your AI**: install the AI tool you have a plan for (Claude Code, Codex, Cursor, Grok or Kimi Code) and sign in, one click each. A default model is picked for you.
+3. **Where files live**: accept the ready-made `PeckBoard` folder in your home directory, or choose another. The AI can read and change files there.
+4. **You're ready**: start a chat, create a project, or open a short getting-started checklist.
+
+The wizard only appears once, on a fresh install, and everything it sets can be changed later in Settings. The checklist stays on the Sessions page until you finish or hide it, and can be reopened from the menu under your avatar. Using PeckBoard from a phone or another computer is set up separately, under Settings → Secure connection (HTTPS).
+
+A good next step is a project. A _project_ pairs a folder on your machine with a board of _cards_: tasks that PeckBoard's agents pick up and complete. Press **+ New project**, give it a name and the folder it should work in. The simple Task workflow is already selected. Then add a card and press **Add and start**, and the board appears:
 
 ![A project board with cards in Backlog, In Progress, Review, and Done columns]({{ "/assets/screenshots/board.png" | relative_url }})
 
