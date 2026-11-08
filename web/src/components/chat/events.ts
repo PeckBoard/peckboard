@@ -496,8 +496,6 @@ interface FoldState {
    *  an async launch: the subagent keeps running after the tool-end until a
    *  `background-task-settled` system event names it. */
   backgroundTools: Map<string, number>
-  /** Dedupe tool starts from streaming + snapshot. */
-  seenToolIds: Set<string>
   pendingInterrupt: boolean
   /** Consecutive turns that ended in a failure (crash or error result) —
    *  the next agent-start renders as "retry N". */
@@ -528,7 +526,6 @@ function newFoldState(): FoldState {
     thinkingTs: 0,
     openTools: new Map(),
     backgroundTools: new Map(),
-    seenToolIds: new Set(),
     pendingInterrupt: false,
     errorStreak: 0,
     turnAnchorTs: 0,
@@ -720,9 +717,12 @@ function foldEvent(st: FoldState, ev: Event): void {
       const toolName = (ev.data.name as string) ?? (ev.data.tool_name as string) ?? 'tool'
       const input = (ev.data.input as Record<string, unknown>) ?? undefined
       const toolUseId = (ev.data.toolUseId as string) ?? (ev.data.tool_use_id as string) ?? ev.id
-      // Skip duplicate tool starts (CLI emits both streaming + snapshot events)
-      if (st.seenToolIds.has(toolUseId)) break
-      st.seenToolIds.add(toolUseId)
+      // Skip the second start for a tool that is still running: Claude emits
+      // both a streaming and a snapshot start. Only while it is open, though:
+      // Codex numbers items per turn (`item_0`, `item_1`, ...), so a later
+      // turn reuses ids, and treating those as duplicates dropped the start
+      // and left the end as an unnamed "Tool" row.
+      if (st.openTools.has(toolUseId)) break
       const idx = items.length
       items.push({
         type: 'tool',
