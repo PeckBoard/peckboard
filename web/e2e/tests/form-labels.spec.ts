@@ -104,6 +104,10 @@ test('card form labels name their controls and focus them on click', async ({ re
   const form = page.locator('.modal').filter({ hasText: 'New Card' }).locator('form')
   await expect(form).toBeVisible({ timeout: 10_000 })
 
+  // Workflow / model / effort / etc. only mount once "More options" opens.
+  await form.getByTestId('card-form-more-options').click()
+  await expect(form.locator('#card-effort')).toBeVisible()
+
   expect(await unnamedControls(form)).toEqual([])
   expect(await danglingLabelTargets(form)).toEqual([])
 
@@ -148,7 +152,7 @@ test('new project form labels name their controls, advanced section included', a
   await expect(page.locator('#new-project-context')).toBeFocused()
 })
 
-test('provider visibility rows announce the provider and toggle from their text', async ({
+test('provider hide switches announce the provider and toggle from their text', async ({
   request,
   page,
 }) => {
@@ -164,13 +168,13 @@ test('provider visibility rows announce the provider and toggle from their text'
 
   const toggle = page.getByTestId('provider-toggle-ollama')
   await expect(toggle).toBeVisible()
-  await expect(toggle).toHaveAccessibleName('Ollama')
+  await expect(toggle).toHaveAccessibleName('Hide Ollama from pickers')
 
-  // The row is a <label> now, so its text is a click target — not just
+  // The switch sits in a <label>, so its text is a click target — not just
   // the 15px checkbox.
-  const row = settings.locator('label.settings-row').filter({ has: toggle })
+  const row = settings.locator('label.provider-setup-hide').filter({ has: toggle })
   await expect(row).toHaveCount(1)
-  const rowText = row.locator('.settings-label')
+  const rowText = row.getByText('Hide from pickers')
 
   const before = await toggle.isChecked()
   await rowText.click()

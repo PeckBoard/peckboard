@@ -61,9 +61,15 @@ export const PRESET_PROMPTS: PresetPrompt[] = [
   },
 ]
 
-/** Auto session name when the Name field is hidden (temp) or left empty. */
-export function presetSessionName(preset: PresetPrompt | undefined, topic: string): string {
-  if (!preset) return 'Temp session'
+/** Auto session name when the Name field is hidden (temp) or left empty.
+ *  A plain chat with no preset is "Temp session" when temporary, otherwise
+ *  "New session" (rename it any time). */
+export function presetSessionName(
+  preset: PresetPrompt | undefined,
+  topic: string,
+  isTemp = true,
+): string {
+  if (!preset) return isTemp ? 'Temp session' : 'New session'
   if (preset.needsTopic && topic.trim()) return `${preset.label}: ${topic.trim()}`
   return preset.label
 }

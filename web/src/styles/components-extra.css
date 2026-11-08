@@ -998,3 +998,80 @@ select.form-input {
   padding: 2px 10px;
   font-size: var(--text-xs);
 }
+
+/* ── HelpTip: "What's this?" (?) button + popover ───────────────────── */
+.help-tip-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 6px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+  cursor: pointer;
+  /* Uppercase form labels must not shout the "?". */
+  text-transform: none;
+  letter-spacing: 0;
+}
+.help-tip-button:hover,
+.help-tip-button[aria-expanded='true'] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+/* Above modals (100) and dropdowns, below toasts (1200). */
+.help-tip-popover {
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-overlay);
+  font-size: var(--text-sm);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.help-tip-title {
+  font-size: var(--text-sm);
+}
+.help-tip-body {
+  margin: 0;
+  color: var(--text2, inherit);
+  line-height: 1.45;
+}
+
+/* A titled group inside a form's advanced section (e.g. New Project's
+   "Running several tasks at once"). */
+.form-subheading {
+  margin: 16px 0 2px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.form-advanced-section > .form-subheading:first-child {
+  margin-top: 0;
+}
+
+/* A modal heading with a HelpTip beside it. The tip stays outside the
+   heading so the dialog's accessible name is just the title. */
+.modal-title-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.modal-title-row h2 {
+  margin-bottom: 0;
+}
+.modal-title-row + * {
+  margin-top: 12px;
+}

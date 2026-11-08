@@ -2405,16 +2405,17 @@ a.wasm-plugin-repo:hover {
 }
 
 /* ─── First-run setup wizard ──────────────────────── */
-/* Five-step onboarding modal for the bootstrap admin. The step strip is
+/* Four-step onboarding modal for the bootstrap admin. The step strip is
    the wizard's spine: numbered dots, the current one filled with the
    accent, finished ones swapped for a check. */
-.setup-wizard-intro {
-  margin-top: -4px;
+.setup-wizard-title {
+  margin-bottom: 0;
 }
 .setup-wizard-steps {
   display: flex;
   gap: 4px;
-  margin: 16px 0 20px;
+  margin: 12px 0 14px;
+  padding: 0;
   padding: 0;
   list-style: none;
   flex-wrap: wrap;
@@ -2467,19 +2468,108 @@ a.wasm-plugin-repo:hover {
   }
 }
 .setup-wizard-body {
-  min-height: 220px;
+  min-height: 200px;
 }
 .setup-wizard-body h3 {
   margin-top: 0;
 }
-/* The TLS section reuses `.settings-section`, which assumes the settings
-   page's spacing — tighten it inside the modal. */
-.setup-wizard-body .settings-section {
-  margin-bottom: 16px;
+.setup-wizard-lead {
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+/* New password + confirm side by side, so step 1 fits a laptop screen. */
+.setup-wizard-pw-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 560px) {
+  .setup-wizard-pw-pair {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
 }
 .setup-wizard-done {
   color: var(--success);
   font-size: var(--text-sm);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.setup-wizard-path {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text2);
+  overflow-wrap: anywhere;
+}
+/* The ready-made folder: its path and the one primary action. */
+.setup-wizard-choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface2);
+}
+.setup-wizard-other {
+  margin-top: 10px;
+}
+.setup-wizard-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.setup-wizard-inline-actions .btn-link {
+  align-self: center;
+}
+/* Last step: three large next actions. */
+.setup-wizard-final {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+@media (max-width: 560px) {
+  .setup-wizard-final {
+    grid-template-columns: 1fr;
+  }
+  .setup-wizard-final .setup-wizard-final-action {
+    min-height: 0;
+    padding: 10px 14px;
+  }
+}
+.setup-wizard-final-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px;
+  min-height: 88px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface2);
+  color: var(--text);
+  cursor: pointer;
+}
+.setup-wizard-final-action:hover:not(:disabled),
+.setup-wizard-final-action:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.setup-wizard-final-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.setup-wizard-final-title {
+  font-weight: 600;
+}
+.setup-wizard-final-hint {
+  font-size: var(--text-xs);
+  color: var(--text2);
 }
 .setup-wizard-outro {
   margin-top: 16px;
@@ -2490,7 +2580,7 @@ a.wasm-plugin-repo:hover {
 
 /* ── Provider setup: setup wizard + Settings → Providers ────────────── */
 .provider-setup-row {
-  padding: 10px 0;
+  padding: 8px 0;
   border-bottom: 1px solid var(--border);
 }
 .provider-setup-summary {
@@ -2534,6 +2624,50 @@ a.wasm-plugin-repo:hover {
 }
 .provider-setup-more {
   padding-top: 10px;
+}
+/* Provider name with the plan it signs in with beside it, wrapping under
+   it on narrow screens. */
+.provider-setup-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+}
+.provider-setup-plan {
+  font-size: var(--text-xs);
+  color: var(--text2);
+}
+.provider-setup-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.provider-setup-details-toggle {
+  align-self: center;
+  font-size: var(--text-xs);
+}
+.provider-setup-hide {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text2);
+  cursor: pointer;
+}
+.provider-setup-advice {
+  margin: 0 0 4px;
+}
+.provider-setup-default {
+  margin-top: 12px;
+  font-size: var(--text-sm);
+}
+.provider-setup-default .help-tip-button {
+  margin-left: 4px;
+}
+.provider-setup-default-picker {
+  margin-top: 8px;
 }
 .provider-setup-more summary {
   cursor: pointer;

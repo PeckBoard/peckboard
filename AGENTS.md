@@ -428,6 +428,19 @@ expected to use:
   never a client-supplied command), sign in, turn on. Used by the setup wizard
   and Settings → Providers. It needs no working agent, which is why the wizard
   must not fall back to `startInstallSession`.
+- **`HelpTip`** (`web/src/components/HelpTip.tsx`) — the (?) "What's
+  this?" button next to a label or heading whose word a new user may not
+  know: `<HelpTip term="project" />`. Text comes from the shared
+  `HELP_TERMS` glossary in `web/src/utils/helpTerms.ts` (session, folder, project, card, workflow, worker,
+  model, effort, systemPrompt), each with a "Learn more" link under
+  `DOCS_BASE`. Add a term there rather than writing one-off copy, so a word
+  reads the same everywhere it is explained.
+- **`EmptyState`** (`web/src/components/EmptyState.tsx`) — what a page
+  shows when it has nothing: a title, one plain sentence on what the page is
+  for, the main action, and a `HelpTip` (`term`) and/or "Learn more" link
+  (`docs`). Pass it to `List`'s `emptyState` slot; don't hand-roll
+  `.list-view-empty` markup for a top-level page. Filter-no-match, loading
+  and error states stay one-liners.
 
 **Naming and ordering of menu items must match across surfaces.** If a
 session's chat-toolbar 3-dot menu says "Clear session", the tab

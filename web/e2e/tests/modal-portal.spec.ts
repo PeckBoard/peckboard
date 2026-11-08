@@ -116,6 +116,9 @@ test('Long modal scrolls the backdrop (page), not the modal panel itself', async
   await expect(backdrop).toBeVisible({ timeout: 5_000 })
   const panel = backdrop.locator('.modal').first()
   await expect(panel).toBeVisible()
+  // Open "More options" so the full field set renders.
+  await panel.getByTestId('card-form-more-options').click()
+  await expect(panel.locator('#card-effort')).toBeVisible()
 
   const { backdropScrollable, panelScrollable } = await page.evaluate(() => {
     const bd = document.querySelector('.modal-backdrop') as HTMLElement | null

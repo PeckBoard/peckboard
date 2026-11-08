@@ -139,13 +139,14 @@ test('create custom workflow, assign to a card, orchestrator resolves its custom
   await expect(modal).toBeVisible({ timeout: 10_000 })
   await modal.locator('input.form-input').first().fill('Uses custom workflow')
 
+  await modal.getByTestId('card-form-more-options').click()
   await modal.locator('#card-workflow').click()
   const wfOption = page.locator('.dropdown-item').filter({ hasText: workflowName })
   await expect(wfOption).toBeVisible({ timeout: 5_000 })
   await expect(wfOption.locator('.dropdown-item-hint')).toHaveText('custom')
   await wfOption.click()
 
-  await modal.getByRole('button', { name: 'Create Card' }).click()
+  await modal.getByTestId('card-form-add-backlog').click()
   await expect(modal).toBeHidden({ timeout: 10_000 })
 
   const cardsRes = await request.get(`/api/projects/${project.id}/cards`, { headers: auth })

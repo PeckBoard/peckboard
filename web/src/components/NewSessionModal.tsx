@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import HelpTip from './HelpTip'
 import { useSessionsStore } from '../store/sessions'
 import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
@@ -40,9 +41,19 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
 
   const [name, setName] = useState('')
-  // Same derived-default pattern as NewProjectModal — see comment there.
+  const sessions = useSessionsStore((s) => s.sessions)
+  // Until the user picks, default to the folder of the most recently active
+  // chat (when it still exists), else the first — usually only — folder.
   const [chosenFolderId, setChosenFolderId] = useState<string | null>(null)
-  const folderId = chosenFolderId ?? folders[0]?.id ?? ''
+  const recentFolderId = useMemo(() => {
+    let best: { folderId: string; at: string } | null = null
+    for (const s of sessions) {
+      if (s.is_worker || !folders.some((f) => f.id === s.folder_id)) continue
+      if (!best || s.last_activity > best.at) best = { folderId: s.folder_id, at: s.last_activity }
+    }
+    return best?.folderId ?? null
+  }, [sessions, folders])
+  const folderId = chosenFolderId ?? recentFolderId ?? folders[0]?.id ?? ''
   // Same derived-default pattern as the folder above: the app-wide default
   // model (Settings → Default Model) preselects until the user picks one.
   const [chosenModel, setChosenModel] = useState<string | null>(null)
@@ -66,17 +77,54 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   // gates the browser bug-hunt preset on its replay UI existing.
   const [playwrightVideoActive, setPlaywrightVideoActive] = useState(false)
   const [showNewFolder, setShowNewFolder] = useState(false)
+  // Rarely-needed settings sit behind "More options". A fresh form starts
+  // with every one of them at its default, so it starts closed.
+  const [showMore, setShowMore] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     fetchFolders()
   }, [fetchFolders])
-
+  // With no folders, an admin gets a one-click ready-made folder: the same
+  // `~/PeckBoard` default the setup wizard offers (GET /api/folders/home).
+  const createFolder = useFoldersStore((s) => s.createFolder)
+  const [homeSuggested, setHomeSuggested] = useState<string | null>(null)
+  const [homeBusy, setHomeBusy] = useState(false)
+  const noFolders = folders.length === 0
   useEffect(() => {
-    fetchModels()
-  }, [fetchModels])
+    if (!isAdmin || !noFolders) return
+    let cancelled = false
+    authedFetch('/api/folders/home')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { suggested?: string | null } | null) => {
+        if (!cancelled) setHomeSuggested(body?.suggested ?? null)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [isAdmin, noFolders])
+  const createHomeFolder = async (path: string) => {
+    setHomeBusy(true)
+    setError('')
+    try {
+      const folder = await createFolder('My work', path, true)
+      setChosenFolderId(folder.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create folder')
+    } finally {
+      setHomeBusy(false)
+    }
+  }
 
+  // Local "the catalogue has answered" flag, so an empty list mid-fetch
+  // isn't mistaken for "no AI connected".
+  const [modelsChecked, setModelsChecked] = useState(false)
+  useEffect(() => {
+    fetchModels().finally(() => setModelsChecked(true))
+  }, [fetchModels])
+  const noModels = modelsChecked && !modelsLoadError && models.length === 0
   useEffect(() => {
     fetchDefaultModel()
   }, [fetchDefaultModel])
@@ -114,21 +162,32 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   )
   const preset = availablePresets.find((p) => p.id === presetId)
 
+  // Why Create is disabled, shown next to the button — a disabled control
+  // with no stated reason reads as broken.
+  const disabledReason = !folderId
+    ? folders.length === 0
+      ? isAdmin
+        ? 'Add a folder first'
+        : 'Ask an admin to add a folder'
+      : 'Choose a folder'
+    : noModels
+      ? 'Connect an AI first (Settings → Providers)'
+      : preset?.needsTopic && !topic.trim()
+        ? `Enter a ${(preset.topicLabel ?? 'topic').toLowerCase()}`
+        : ''
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!folderId || (!isTemp && !preset && !name.trim())) {
-      setError('Name and folder are required')
-      return
-    }
-    if (preset?.needsTopic && !topic.trim()) {
-      setError(`${preset.topicLabel ?? 'Topic'} is required`)
+    if (disabledReason) {
+      setError(disabledReason)
       return
     }
     setLoading(true)
     setError('')
     try {
-      // Name field is hidden for temp sessions; presets auto-name either way.
-      const finalName = (isTemp ? '' : name.trim()) || presetSessionName(preset, topic)
+      // Name field is hidden for temp sessions; an empty name auto-names
+      // from the preset, or "New session" / "Temp session" without one.
+      const finalName = (isTemp ? '' : name.trim()) || presetSessionName(preset, topic, isTemp)
       const session = await createSession(
         finalName,
         folderId,
@@ -172,22 +231,21 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
         {!isTemp && (
           <div className="form-field">
             <label className="form-label" htmlFor="new-session-name">
-              Name
+              Name <span className="optional">(optional)</span>
             </label>
             <input
               id="new-session-name"
               className="form-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={preset ? presetSessionName(preset, topic) : 'My session'}
+              placeholder={presetSessionName(preset, topic, false)}
               autoFocus
-              required={!preset}
             />
           </div>
         )}
         <div className="form-field">
           <label className="form-label" htmlFor="new-session-folder">
-            Folder
+            Folder <HelpTip term="folder" />
           </label>
           {folders.length > 0 ? (
             <select
@@ -203,9 +261,22 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
               ))}
             </select>
           ) : (
-            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text3)' }}>
-              {isAdmin ? 'No folders yet.' : 'No folders yet. Ask an admin to add one.'}
+            <p className="form-hint" data-testid="new-session-no-folders">
+              {isAdmin
+                ? 'No folders yet. A session works inside a folder on this computer — add one to start.'
+                : 'No folders yet. Ask an admin to add one.'}
             </p>
+          )}
+          {folders.length === 0 && isAdmin && homeSuggested && (
+            <button
+              type="button"
+              className="btn-secondary btn-small"
+              onClick={() => void createHomeFolder(homeSuggested)}
+              disabled={homeBusy}
+              data-testid="new-session-home-folder"
+            >
+              {homeBusy ? 'Creating…' : `Create a PeckBoard folder in your home (${homeSuggested})`}
+            </button>
           )}
           {isAdmin && (
             <button
@@ -220,7 +291,7 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
         </div>
         <div className="form-field">
           <label className="form-label" htmlFor="new-session-model">
-            Model
+            Model <HelpTip term="model" />
           </label>
           <ModelPicker
             id="new-session-model"
@@ -235,53 +306,8 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
           )}
           {chosenModel === null && defaultModelGone && <ModelGoneNotice modelId={defaultModel} />}
         </div>
-        <div className="form-field">
-          <label className="form-label" htmlFor="new-session-effort">
-            Effort
-          </label>
-          <select
-            id="new-session-effort"
-            className="form-input"
-            value={effort}
-            onChange={(e) => setEffort(e.target.value)}
-          >
-            {effortOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-field">
-          <label className="form-label" htmlFor="new-session-system-prompt">
-            System prompt
-          </label>
-          <SystemPromptPicker
-            id="new-session-system-prompt"
-            value={systemPromptName}
-            onChange={setSystemPromptName}
-            testId="new-session-system-prompt"
-          />
-        </div>
-        <div className="form-field">
-          <label className="form-label" htmlFor="new-session-preset">
-            Preset prompt
-          </label>
-          <select
-            id="new-session-preset"
-            className="form-input"
-            value={presetId}
-            onChange={(e) => setPresetId(e.target.value)}
-            data-testid="new-session-preset"
-          >
-            <option value="">None — start empty</option>
-            {availablePresets.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* Outside the disclosure: a preset that needs a topic blocks Create
+            until it's filled, so the field must stay visible. */}
         {preset?.needsTopic && (
           <div className="form-field">
             <label className="form-label" htmlFor="new-session-preset-topic">
@@ -298,42 +324,106 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
             />
           </div>
         )}
-        <div className="form-field">
-          <label className="form-checkbox-label">
-            <input
-              type="checkbox"
-              checked={modelAutoswitch}
-              onChange={(e) => setModelAutoswitch(e.target.checked)}
-              data-testid="new-session-autoswitch"
-            />
-            <span>Allow auto-switching to a cheaper model</span>
-          </label>
-        </div>
-        <div className="form-field">
-          <label className="form-checkbox-label">
-            <input
-              type="checkbox"
-              checked={isTemp}
-              onChange={(e) => setIsTemp(e.target.checked)}
-              data-testid="new-session-temp"
-            />
-            <span>Temporary — delete this session when its tab is closed</span>
-          </label>
-        </div>
+
+        <button
+          type="button"
+          className="form-toggle-advanced"
+          aria-expanded={showMore}
+          onClick={() => setShowMore(!showMore)}
+          data-testid="new-session-more-options"
+        >
+          {showMore ? 'Fewer options' : 'More options'}
+        </button>
+
+        {showMore && (
+          <div className="form-advanced-section">
+            <div className="form-field">
+              <label className="form-label" htmlFor="new-session-effort">
+                Effort <HelpTip term="effort" />
+              </label>
+              <select
+                id="new-session-effort"
+                className="form-input"
+                value={effort}
+                onChange={(e) => setEffort(e.target.value)}
+              >
+                {effortOptions.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="form-field">
+              <label className="form-label" htmlFor="new-session-system-prompt">
+                Role and instructions <HelpTip term="systemPrompt" />
+              </label>
+              <SystemPromptPicker
+                id="new-session-system-prompt"
+                value={systemPromptName}
+                onChange={setSystemPromptName}
+                testId="new-session-system-prompt"
+              />
+            </div>
+            <div className="form-field">
+              <label className="form-label" htmlFor="new-session-preset">
+                Preset prompt
+              </label>
+              <select
+                id="new-session-preset"
+                className="form-input"
+                value={presetId}
+                onChange={(e) => setPresetId(e.target.value)}
+                data-testid="new-session-preset"
+              >
+                <option value="">None — start empty</option>
+                {availablePresets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+              <p className="form-hint">Sends a ready-made first message as soon as it opens.</p>
+            </div>
+            <div className="form-field">
+              <label className="form-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={modelAutoswitch}
+                  onChange={(e) => setModelAutoswitch(e.target.checked)}
+                  data-testid="new-session-autoswitch"
+                />
+                <span>Let PeckBoard use a cheaper model for simple replies</span>
+              </label>
+            </div>
+            <div className="form-field">
+              <label className="form-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={isTemp}
+                  onChange={(e) => setIsTemp(e.target.checked)}
+                  data-testid="new-session-temp"
+                />
+                <span>Temporary — delete this session when its tab is closed</span>
+              </label>
+            </div>
+          </div>
+        )}
         {error && <p className="form-error">{error}</p>}
         <div className="form-actions">
+          {!loading && disabledReason && (
+            <span className="form-actions-reason" data-testid="new-session-disabled-reason">
+              {disabledReason}
+            </span>
+          )}
           <button type="button" className="btn-secondary" onClick={onClose}>
             Cancel
           </button>
           <button
             type="submit"
             className="btn-primary"
-            disabled={
-              loading ||
-              !folderId ||
-              (!isTemp && !preset && !name.trim()) ||
-              (!!preset?.needsTopic && !topic.trim())
-            }
+            disabled={loading || !!disabledReason}
+            data-testid="new-session-create"
           >
             {loading ? 'Creating...' : 'Create Session'}
           </button>

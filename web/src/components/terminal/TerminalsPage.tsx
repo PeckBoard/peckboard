@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import ConfirmDialog from '../ConfirmDialog'
+import EmptyState from '../EmptyState'
 import List from '../List'
 import ListViewHeader from '../ListViewHeader'
 import RenameModal from '../RenameModal'
@@ -91,12 +92,14 @@ export default function TerminalsPage({ activeId, onOpen, onNew, onClosed, onAdd
             </>
           )}
           emptyState={
-            <div className="list-view-empty">
-              <p>No terminals open</p>
-              <button className="list-view-empty-action" onClick={onNew}>
-                Open a terminal
-              </button>
-            </div>
+            <EmptyState
+              testId="terminals-empty"
+              title="No terminals open"
+              body="A terminal is a command line on this computer or a server you reach over SSH, right in the browser."
+              actionLabel="Open a terminal"
+              onAction={onNew}
+              docs="/features.html"
+            />
           }
         />
       )}

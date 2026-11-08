@@ -1,41 +1,48 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import Modal from './Modal'
-import ModelPicker from './ModelPicker'
+import HelpTip from './HelpTip'
 import PathAutocomplete from './PathAutocomplete'
 import ProviderSetupPanel from './ProviderSetupPanel'
-import TlsSettingsSection from './TlsSettingsSection'
 import FieldError from './FieldError'
 import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
-import { isProviderReady, pickDefaultModel, useProviderSetupStore } from '../store/providerSetup'
-import { useResourcesStore } from '../store/resources'
+import { isProviderReady, useProviderSetupStore } from '../store/providerSetup'
 import { MIN_PASSWORD_LEN } from '../utils/password'
 import type { Folder } from '../types/api'
 
-const STEPS = ['Password', 'Providers', 'Default model', 'Folder', 'HTTPS'] as const
+const STEPS = ['Welcome', 'Connect your AI', 'Where files live', 'Ready'] as const
+const FOLDER_STEP = 2
+const LAST_STEP = STEPS.length - 1
+
+/** Name given to the ready-made workspace folder. */
+const DEFAULT_FOLDER_NAME = 'My work'
+
+/** Where to go once the wizard closes. */
+export type SetupNext = 'chat' | 'project' | 'tour'
 
 interface Props {
-  /** Called after `POST /api/settings/setup/complete` succeeds. */
-  onDone: () => void
+  /** Called after `POST /api/settings/setup/complete` succeeds, with the
+   *  action the user picked on the last step (none for a plain Finish). */
+  onDone: (next?: SetupNext) => void
 }
 
 /**
  * First-run setup wizard, shown to the bootstrap admin exactly once (the
  * server seeds `setup_state` as incomplete only on a brand-new install).
- * Five steps: change the printed bootstrap password (mandatory), install and
- * sign in to providers, choose a default model, register a workspace folder,
- * and review TLS. Every step writes through the same endpoints the Settings
- * page uses, so each one stays re-runnable there later — the wizard is
- * convenience, not the only path.
+ * Four steps: say what PeckBoard is and replace the temporary password
+ * (mandatory), connect an AI tool and pick the default model, choose where
+ * files live, then hand off to a first chat, project, or tour. Every step
+ * writes through the same endpoints Settings uses, so each stays re-runnable
+ * there — the wizard is convenience, not the only path.
  *
- * The modal is deliberately non-dismissible: steps 2–5 are one click to
- * pass, and only the explicit Finish marks setup complete, so closing the
+ * The modal is deliberately non-dismissible: steps 2–4 are one click to
+ * pass, and only an explicit finish marks setup complete, so closing the
  * browser mid-wizard brings it back on the next login.
  */
 export default function SetupWizard({ onDone }: Props) {
   const [step, setStep] = useState(0)
 
-  // ── Step 1: password (mandatory) ─────────────────────────────────
+  // ── Step 1: welcome + password (mandatory) ───────────────────────
   const changePassword = useAuthStore((s) => s.changePassword)
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -72,82 +79,92 @@ export default function SetupWizard({ onDone }: Props) {
   const providerStatuses = useProviderSetupStore((s) => s.providers)
   const anyProviderReady = providerStatuses?.some(isProviderReady) ?? false
 
-  // ── Step 3: default model ────────────────────────────────────────
-  const models = useResourcesStore((s) => s.models)
-  const fetchModels = useResourcesStore((s) => s.fetchModels)
-  const defaultModel = useResourcesStore((s) => s.defaultModel)
-  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
-  const setDefaultModelLocal = useResourcesStore((s) => s.setDefaultModelLocal)
-  const [modelError, setModelError] = useState('')
-
-  useEffect(() => {
-    fetchModels()
-    fetchDefaultModel()
-  }, [fetchModels, fetchDefaultModel])
-
-  const changeDefaultModel = (model: string) => {
-    const prev = defaultModel
-    setModelError('')
-    setDefaultModelLocal(model)
-    void authedFetch('/api/settings/default-model', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model }),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      })
-      .catch((e: Error) => {
-        setDefaultModelLocal(prev)
-        setModelError(`Could not save the default model: ${e.message}`)
-      })
-  }
-
-  // Preselect a model from whatever just got connected, never over a choice
-  // the user already made. Re-pulls first: a sign-in may have just added models.
-  const preselectDefaultModel = async () => {
-    await fetchModels()
-    const { defaultModel: current, models: latest } = useResourcesStore.getState()
-    const statuses = useProviderSetupStore.getState().providers
-    if (current || !statuses) return
-    const pick = pickDefaultModel(
-      statuses,
-      latest.map((m) => m.id),
-    )
-    if (pick) changeDefaultModel(pick)
-  }
-
-  // ── Step 4: workspace folder ─────────────────────────────────────
+  // ── Step 3: where files live ─────────────────────────────────────
+  const folders = useFoldersStore((s) => s.folders)
+  const fetchFolders = useFoldersStore((s) => s.fetchFolders)
   const createFolder = useFoldersStore((s) => s.createFolder)
+  const [suggestedPath, setSuggestedPath] = useState<string | null>(null)
+  const [homeLoaded, setHomeLoaded] = useState(false)
+  const [customOpen, setCustomOpen] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [folderPath, setFolderPath] = useState('')
-  const [folderCreateDir, setFolderCreateDir] = useState(false)
+  const [folderCreateDir, setFolderCreateDir] = useState(true)
   const [folderPathExists, setFolderPathExists] = useState<boolean | null>(null)
   const [folderBusy, setFolderBusy] = useState(false)
   const [folderError, setFolderError] = useState('')
   const [createdFolder, setCreatedFolder] = useState<Folder | null>(null)
 
-  const addFolder = async () => {
-    if (folderBusy || !folderName.trim() || !folderPath.trim()) return
+  useEffect(() => {
+    void fetchFolders()
+    let cancelled = false
+    authedFetch('/api/folders/home')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { suggested?: string | null } | null) => {
+        if (cancelled) return
+        setSuggestedPath(data?.suggested ?? null)
+        setHomeLoaded(true)
+      })
+      .catch(() => {
+        if (!cancelled) setHomeLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [fetchFolders])
+
+  // A folder made here, or one that already exists on a re-run.
+  const doneFolder = createdFolder ?? folders[0] ?? null
+  // With nothing to offer (no home dir), the fields are the only way in.
+  const showCustom = customOpen || (homeLoaded && !suggestedPath && !doneFolder)
+  const customFilled = folderName.trim() !== '' || folderPath.trim() !== ''
+
+  const saveFolder = async (name: string, path: string, create: boolean): Promise<boolean> => {
     setFolderError('')
     setFolderBusy(true)
     try {
-      const folder = await createFolder(folderName.trim(), folderPath.trim(), folderCreateDir)
+      const folder = await createFolder(name, path, create)
       setCreatedFolder(folder)
+      setCustomOpen(false)
       setFolderName('')
       setFolderPath('')
+      return true
     } catch (err) {
-      setFolderError(err instanceof Error ? err.message : 'Failed to create folder')
+      setFolderError(err instanceof Error ? err.message : 'Could not add the folder.')
+      return false
     } finally {
       setFolderBusy(false)
     }
   }
 
-  // ── Step 5: finish ───────────────────────────────────────────────
+  const takeSuggested = () => {
+    if (folderBusy || !suggestedPath) return
+    void saveFolder(DEFAULT_FOLDER_NAME, suggestedPath, true)
+  }
+
+  /** What blocks the typed folder from saving, in plain words. */
+  const customProblem = (): string | null => {
+    if (!folderName.trim()) return 'Give the folder a name.'
+    if (!folderPath.trim()) return 'Enter where the folder is on this computer.'
+    return null
+  }
+
+  /** Save the typed folder, or say why it can't be saved. Never drops it. */
+  const saveCustom = async (): Promise<boolean> => {
+    if (folderBusy) return false
+    const problem = customProblem()
+    if (problem) {
+      setFolderError(problem)
+      return false
+    }
+    return saveFolder(folderName.trim(), folderPath.trim(), folderCreateDir)
+  }
+
+  // ── Step 4: ready ────────────────────────────────────────────────
   const [finishBusy, setFinishBusy] = useState(false)
   const [finishError, setFinishError] = useState('')
 
-  const finish = async () => {
+  const finish = async (next?: SetupNext) => {
+    if (finishBusy) return
     setFinishError('')
     setFinishBusy(true)
     try {
@@ -156,32 +173,31 @@ export default function SetupWizard({ onDone }: Props) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null
         throw new Error(data?.error || `HTTP ${res.status}`)
       }
-      onDone()
+      onDone(next)
     } catch (err) {
       setFinishError(err instanceof Error ? err.message : 'Failed to finish setup')
       setFinishBusy(false)
     }
   }
 
-  const nextLabel = step === STEPS.length - 1 ? (finishBusy ? 'Finishing…' : 'Finish') : 'Next'
-  const nextDisabled = step === 0 ? pwBusy || (!pwDone && !pwValid) : step === 4 && finishBusy
-
-  const onNext = () => {
-    if (step === 1) void preselectDefaultModel()
-    if (step === STEPS.length - 1) {
+  const onNext = async () => {
+    if (step === LAST_STEP) {
       void finish()
-    } else {
-      setStep(step + 1)
+      return
     }
+    // Typed folder fields are saved, or block with the reason — never lost.
+    if (step === FOLDER_STEP && showCustom && customFilled) {
+      if (!(await saveCustom())) return
+    }
+    setStep(step + 1)
   }
+
+  const nextDisabled =
+    step === 0 ? pwBusy || (!pwDone && !pwValid) : step === LAST_STEP ? finishBusy : folderBusy
 
   return (
     <Modal maxWidth={640} className="setup-wizard-modal" data-testid="setup-wizard">
-      <h2>Welcome to PeckBoard 🐣</h2>
-      <p className="form-hint setup-wizard-intro">
-        A few one-time choices to get your install ready. Everything here can be changed again later
-        in Settings.
-      </p>
+      <h2 className="setup-wizard-title">Welcome to PeckBoard 🐣</h2>
 
       <ol className="setup-wizard-steps" data-testid="setup-progress">
         {STEPS.map((label, i) => (
@@ -202,11 +218,12 @@ export default function SetupWizard({ onDone }: Props) {
       <div className="setup-wizard-body">
         {step === 0 && (
           <form id="setup-pw-form" onSubmit={(e) => void submitPassword(e)}>
-            <h3>Change the admin password</h3>
+            <p className="setup-wizard-lead" data-testid="setup-what-is">
+              PeckBoard gives you AI helpers that do real work on this computer — chat with one, or
+              hand a board of tasks to several. They run on an AI plan you already pay for.
+            </p>
             <p className="form-hint">
-              PeckBoard created this admin account on first start and printed its password to the
-              server&apos;s console (stdout). Replace it with a password of your own — this step is
-              required.
+              First, swap the temporary password for one of your own. This step is required.
             </p>
             {pwDone ? (
               <p className="setup-wizard-done" role="status" data-testid="setup-pw-done">
@@ -216,7 +233,7 @@ export default function SetupWizard({ onDone }: Props) {
               <>
                 <div className="form-field">
                   <label className="form-label" htmlFor="setup-pw-current">
-                    Current password
+                    Password you just signed in with
                   </label>
                   <input
                     id="setup-pw-current"
@@ -229,39 +246,43 @@ export default function SetupWizard({ onDone }: Props) {
                     autoFocus
                     required
                   />
-                  <span className="form-hint">The password printed to the server console.</span>
+                  <span className="form-hint">
+                    The temporary one shown when PeckBoard first started.
+                  </span>
                 </div>
-                <div className="form-field">
-                  <label className="form-label" htmlFor="setup-pw-new">
-                    New password
-                  </label>
-                  <input
-                    id="setup-pw-new"
-                    data-testid="setup-pw-new"
-                    className="form-input"
-                    type="password"
-                    autoComplete="new-password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    minLength={MIN_PASSWORD_LEN}
-                    required
-                  />
-                  <span className="form-hint">At least {MIN_PASSWORD_LEN} characters</span>
-                </div>
-                <div className="form-field">
-                  <label className="form-label" htmlFor="setup-pw-confirm">
-                    Confirm new password
-                  </label>
-                  <input
-                    id="setup-pw-confirm"
-                    data-testid="setup-pw-confirm"
-                    className="form-input"
-                    type="password"
-                    autoComplete="new-password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    required
-                  />
+                <div className="setup-wizard-pw-pair">
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="setup-pw-new">
+                      New password
+                    </label>
+                    <input
+                      id="setup-pw-new"
+                      data-testid="setup-pw-new"
+                      className="form-input"
+                      type="password"
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      minLength={MIN_PASSWORD_LEN}
+                      required
+                    />
+                    <span className="form-hint">At least {MIN_PASSWORD_LEN} characters</span>
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="setup-pw-confirm">
+                      Type it again
+                    </label>
+                    <input
+                      id="setup-pw-confirm"
+                      data-testid="setup-pw-confirm"
+                      className="form-input"
+                      type="password"
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      required
+                    />
+                  </div>
                 </div>
                 <FieldError message={pwError || undefined} testId="setup-pw-error" />
               </>
@@ -273,101 +294,172 @@ export default function SetupWizard({ onDone }: Props) {
           <div>
             <h3>Connect your AI</h3>
             <p className="form-hint">
-              PeckBoard runs agents through these tools, on your own subscription. Set up at least
-              one to start working. You can add more any time in Settings → Providers.
+              PeckBoard works through one of these AI tools, signed in with your own plan. Set up at
+              least one; you can add more later in Settings.
             </p>
-            <ProviderSetupPanel />
+            <ProviderSetupPanel showDefaultModel />
           </div>
         )}
 
-        {step === 2 && (
+        {step === FOLDER_STEP && (
           <div>
-            <h3>Default model</h3>
+            <h3>
+              Where files live <HelpTip term="folder" />
+            </h3>
             <p className="form-hint">
-              Preselected for new sessions, cards, and reviews. Only models from the providers you
-              turned on are offered — type to search.
+              The AI can read and change files in this folder. You can add more later.
             </p>
-            <ModelPicker
-              value={defaultModel}
-              onChange={changeDefaultModel}
-              models={models}
-              ariaLabel="Default model"
-              testId="setup-default-model"
-              emptyHint="No models yet — connect a provider on the previous step."
-              onOpen={fetchModels}
-            />
-            <FieldError message={modelError || undefined} testId="setup-model-error" />
-          </div>
-        )}
 
-        {step === 3 && (
-          <div>
-            <h3>Register a workspace folder</h3>
-            <p className="form-hint">
-              Folders map to directories on disk; sessions and projects live inside them. You can
-              skip this and add folders later in the Folders page.
-            </p>
-            {createdFolder && (
+            {doneFolder ? (
               <p className="setup-wizard-done" role="status" data-testid="setup-folder-done">
-                Added <strong>{createdFolder.name}</strong> ({createdFolder.path}). You can add more
-                later.
+                ✓ Using <strong>{doneFolder.name}</strong>
+                <span className="setup-wizard-path">{doneFolder.path}</span>
               </p>
+            ) : (
+              suggestedPath &&
+              !customOpen && (
+                <div className="setup-wizard-choice" data-testid="setup-folder-default">
+                  <span className="setup-wizard-path" data-testid="setup-folder-default-path">
+                    {suggestedPath}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={takeSuggested}
+                    disabled={folderBusy}
+                    data-testid="setup-folder-use-default"
+                  >
+                    {folderBusy ? 'Setting up…' : 'Use this folder'}
+                  </button>
+                </div>
+              )
             )}
-            <div className="folder-create-fields">
-              <input
-                className="form-input"
-                placeholder="Name (e.g. My Workspace)"
-                value={folderName}
-                data-testid="setup-folder-name"
-                onChange={(e) => setFolderName(e.target.value)}
-              />
-              <PathAutocomplete
-                value={folderPath}
-                onChange={setFolderPath}
-                onSubmit={() => void addFolder()}
-                onExistsChange={setFolderPathExists}
-                placeholder="Path (e.g. /home/me/projects)"
-                testId="setup-folder-path"
-              />
-              {folderPath.trim().startsWith('/') && folderPathExists !== null && (
-                <p className="form-hint" role="status" style={{ margin: 0 }}>
-                  {folderPathExists
-                    ? 'Directory exists on the server.'
-                    : folderCreateDir
-                      ? "Directory doesn't exist yet — it will be created."
-                      : "Directory doesn't exist — check 'Create directory' below or fix the path."}
-                </p>
-              )}
-              <label className="form-checkbox-label" style={{ fontSize: 'var(--text-sm)' }}>
-                <input
-                  type="checkbox"
-                  checked={folderCreateDir}
-                  onChange={(e) => setFolderCreateDir(e.target.checked)}
-                />
-                <span>Create directory if it doesn&apos;t exist</span>
-              </label>
+
+            {!showCustom && (
               <button
                 type="button"
-                className="btn-secondary"
-                onClick={() => void addFolder()}
-                disabled={folderBusy || !folderName.trim() || !folderPath.trim()}
-                data-testid="setup-folder-add"
-                style={{ alignSelf: 'flex-start' }}
+                className="btn-link setup-wizard-other"
+                onClick={() => {
+                  setFolderError('')
+                  setCustomOpen(true)
+                }}
+                data-testid="setup-folder-choose-other"
               >
-                {folderBusy ? 'Adding…' : 'Add Folder'}
+                {doneFolder ? 'Add another folder…' : 'Choose another folder…'}
               </button>
-            </div>
+            )}
+
+            {showCustom && (
+              <div className="folder-create-fields">
+                <input
+                  className="form-input"
+                  placeholder="Name (e.g. My work)"
+                  aria-label="Folder name"
+                  value={folderName}
+                  data-testid="setup-folder-name"
+                  onChange={(e) => setFolderName(e.target.value)}
+                />
+                <PathAutocomplete
+                  value={folderPath}
+                  onChange={setFolderPath}
+                  onSubmit={() => void saveCustom()}
+                  onExistsChange={setFolderPathExists}
+                  placeholder="Where it is (e.g. /home/me/projects)"
+                  testId="setup-folder-path"
+                />
+                {folderPath.trim().startsWith('/') && folderPathExists !== null && (
+                  <p className="form-hint" role="status" style={{ margin: 0 }}>
+                    {folderPathExists
+                      ? 'This folder exists.'
+                      : folderCreateDir
+                        ? "This folder doesn't exist yet — it will be created."
+                        : "This folder doesn't exist — tick the box below or fix the path."}
+                  </p>
+                )}
+                <label className="form-checkbox-label" style={{ fontSize: 'var(--text-sm)' }}>
+                  <input
+                    type="checkbox"
+                    checked={folderCreateDir}
+                    onChange={(e) => setFolderCreateDir(e.target.checked)}
+                    data-testid="setup-folder-create-dir"
+                  />
+                  <span>Create it if it doesn&apos;t exist</span>
+                </label>
+                <div className="setup-wizard-inline-actions">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void saveCustom()}
+                    disabled={folderBusy}
+                    data-testid="setup-folder-add"
+                  >
+                    {folderBusy ? 'Adding…' : 'Add folder'}
+                  </button>
+                  {(suggestedPath || doneFolder) && (
+                    <button
+                      type="button"
+                      className="btn-link"
+                      onClick={() => {
+                        setCustomOpen(false)
+                        setFolderName('')
+                        setFolderPath('')
+                        setFolderError('')
+                      }}
+                      data-testid="setup-folder-cancel-custom"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             <FieldError message={folderError || undefined} testId="setup-folder-error" />
           </div>
         )}
 
-        {step === 4 && (
+        {step === LAST_STEP && (
           <div>
-            <h3>TLS / HTTPS review</h3>
-            <TlsSettingsSection />
-            <p className="form-hint setup-wizard-outro">
-              That&apos;s everything. Each of these steps can be re-run any time from Settings —
-              Finish just puts this wizard to bed.
+            <h3>You&apos;re ready</h3>
+            <p className="form-hint">What would you like to do first?</p>
+            <div className="setup-wizard-final">
+              <button
+                type="button"
+                className="setup-wizard-final-action"
+                onClick={() => void finish('chat')}
+                disabled={finishBusy}
+                data-testid="setup-final-chat"
+              >
+                <span className="setup-wizard-final-title">Start a chat</span>
+                <span className="setup-wizard-final-hint">
+                  Ask an AI helper to do something now.
+                </span>
+              </button>
+              <button
+                type="button"
+                className="setup-wizard-final-action"
+                onClick={() => void finish('project')}
+                disabled={finishBusy}
+                data-testid="setup-final-project"
+              >
+                <span className="setup-wizard-final-title">Create a project</span>
+                <span className="setup-wizard-final-hint">
+                  A board of tasks the AI works through.
+                </span>
+              </button>
+              <button
+                type="button"
+                className="setup-wizard-final-action"
+                onClick={() => void finish('tour')}
+                disabled={finishBusy}
+                data-testid="setup-final-tour"
+              >
+                <span className="setup-wizard-final-title">Show me around</span>
+                <span className="setup-wizard-final-hint">A short checklist to get started.</span>
+              </button>
+            </div>
+            <p className="form-hint setup-wizard-outro" data-testid="setup-remote-note">
+              Using PeckBoard from your phone or another computer? See Settings → Secure connection
+              (HTTPS).
             </p>
             <FieldError message={finishError || undefined} testId="setup-finish-error" />
           </div>
@@ -398,20 +490,30 @@ export default function SetupWizard({ onDone }: Props) {
         ) : (
           <button
             type="button"
-            className="btn-primary"
-            onClick={onNext}
+            className={step === LAST_STEP ? 'btn-secondary' : 'btn-primary'}
+            onClick={() => void onNext()}
             disabled={nextDisabled}
-            data-testid={step === STEPS.length - 1 ? 'setup-finish' : 'setup-next'}
+            data-testid={step === LAST_STEP ? 'setup-finish' : 'setup-next'}
           >
-            {nextLabel}
+            {step === LAST_STEP ? (finishBusy ? 'Finishing…' : 'Finish') : 'Next'}
           </button>
         )}
         {step === 0 && !pwDone && !pwValid && (
-          <span className="form-actions-reason">Set a new admin password to continue.</span>
+          <span className="form-actions-reason">Set a new password to continue.</span>
         )}
         {step === 1 && providerStatuses && !anyProviderReady && (
           <span className="form-actions-reason" data-testid="setup-no-provider-hint">
-            You can skip this, but agents can&apos;t run until a provider is connected.
+            You can skip this, but the AI can&apos;t work until one tool is connected.
+          </span>
+        )}
+        {step === FOLDER_STEP && !doneFolder && !(showCustom && customFilled) && (
+          <span className="form-actions-reason" data-testid="setup-no-folder-hint">
+            You can skip this and add a folder later.
+          </span>
+        )}
+        {step === FOLDER_STEP && showCustom && customFilled && (
+          <span className="form-actions-reason" data-testid="setup-folder-next-hint">
+            Next adds the folder above.
           </span>
         )}
       </div>

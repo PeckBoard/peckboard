@@ -8,6 +8,7 @@ import RenameModal from './RenameModal'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
 import NewFolderModal from './NewFolderModal'
+import EmptyState from './EmptyState'
 import type { MenuItem } from './Dropdown'
 
 /** A plugin-contributed Folders-page entry (manifest `folder_items`). */
@@ -215,16 +216,18 @@ export default function FoldersPage({
           </span>
         )}
         emptyState={
-          <div className="list-view-empty" data-testid="folders-empty">
-            <p>No folders yet.</p>
-            {openNew ? (
-              <button type="button" className="list-view-empty-action" onClick={openNew}>
-                New Folder
-              </button>
-            ) : (
-              <p>Ask an admin to add one.</p>
-            )}
-          </div>
+          <EmptyState
+            testId="folders-empty"
+            title="No folders yet"
+            body={
+              openNew
+                ? 'A folder is a place on this computer where PeckBoard keeps work. Sessions and projects live inside one, and the AI only touches files there.'
+                : 'A folder is a place on this computer where PeckBoard keeps work. Only an admin can add one, so ask yours.'
+            }
+            term="folder"
+            actionLabel={openNew ? 'Add your first folder' : undefined}
+            onAction={openNew}
+          />
         }
         footer={folders.length > 0 ? hint : undefined}
       />

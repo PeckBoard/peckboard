@@ -62,6 +62,7 @@ fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/folders", post(create_folder))
         .route("/api/folders/browse", get(browse_folder_path))
+        .route("/api/folders/home", get(home_folder_path))
         .route(
             "/api/folders/{id}",
             delete(delete_folder).patch(rename_folder),
@@ -333,6 +334,25 @@ async fn browse_folder_path(Query(q): Query<BrowseQuery>) -> impl IntoResponse {
         "dirs": dirs,
         "truncated": truncated,
     })))
+}
+
+/// Name of the ready-made workspace the first-run wizard offers.
+const DEFAULT_WORKSPACE_DIR: &str = "PeckBoard";
+
+/// GET /api/folders/home → `{"home": str|null, "suggested": str|null}`.
+/// The server user's home directory and the default workspace inside it
+/// (`~/PeckBoard`), so the setup wizard can offer a folder without the user
+/// typing a server path. Admin-only, like `browse`. `null` when `$HOME` is
+/// unset.
+async fn home_folder_path() -> impl IntoResponse {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(std::path::PathBuf::from);
+    let suggested = home.as_ref().map(|h| h.join(DEFAULT_WORKSPACE_DIR));
+    Json(serde_json::json!({
+        "home": home.map(|h| h.to_string_lossy().into_owned()),
+        "suggested": suggested.map(|s| s.to_string_lossy().into_owned()),
+    }))
 }
 
 /// GET /api/folders
@@ -1348,6 +1368,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn home_suggests_a_workspace_under_home_for_admins_only() {
+        let user_dir = tempfile::tempdir().unwrap();
+        let user_state = test_state(user_dir.path());
+        let get_home = |token: &str| {
+            Request::builder()
+                .uri("/api/folders/home")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let user = seed_authenticated_user(&user_state, "user").await;
+        let response = app(user_state).oneshot(get_home(&user)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let admin = seed_authenticated_user(&state, "admin").await;
+        let response = app(state).oneshot(get_home(&admin)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            Some(home) => {
+                let home = std::path::PathBuf::from(home);
+                assert_eq!(json["home"], home.to_str().unwrap());
+                assert_eq!(json["suggested"], home.join("PeckBoard").to_str().unwrap());
+            }
+            None => assert!(json["suggested"].is_null()),
+        }
     }
 
     /// Seed a folder `f1` rooted at `workspace` and return a user token.

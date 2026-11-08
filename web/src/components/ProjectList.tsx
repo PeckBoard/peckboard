@@ -5,6 +5,7 @@ import ConfirmDialog from './ConfirmDialog'
 import EditProjectModal from './EditProjectModal'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
+import EmptyState from './EmptyState'
 import type { MenuItem } from './Dropdown'
 import type { Project } from '../types/api'
 
@@ -146,14 +147,14 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
                 </button>
               </div>
             ) : (
-              <div className="list-view-empty">
-                <p>No projects yet</p>
-                {onNewProject && (
-                  <button className="list-view-empty-action" onClick={onNewProject}>
-                    Create your first project
-                  </button>
-                )}
-              </div>
+              <EmptyState
+                testId="projects-empty"
+                title="No projects yet"
+                body="Give AI helpers a list of tasks, as cards on a board, and let them work through it on their own."
+                term="project"
+                actionLabel={onNewProject ? 'Create your first project' : undefined}
+                onAction={onNewProject}
+              />
             )
           }
         />

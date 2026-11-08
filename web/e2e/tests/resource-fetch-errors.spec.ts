@@ -66,7 +66,7 @@ test('failed /api/models fetch shows a Retry in the New Session modal, and Retry
 
   await loadAt(page, token, '/')
   await page.locator('.tab-new').click()
-  await expect(page.getByTestId('new-session-preset')).toBeVisible()
+  await expect(page.locator('#new-session-name')).toBeVisible()
 
   const errorNotice = page.locator('.picker-load-error', { hasText: "Couldn't load models" })
   await expect(errorNotice).toBeVisible({ timeout: 10_000 })
@@ -89,6 +89,8 @@ test('failed /api/workflows fetch shows a Retry in the card form', async ({ requ
   await loadAt(page, token, `/projects/${projectId}`)
   await page.getByRole('button', { name: 'Add Card' }).click()
   await expect(page.locator('#card-title')).toBeVisible({ timeout: 10_000 })
+  // The workflow picker sits behind "More options".
+  await page.getByTestId('card-form-more-options').click()
 
   const errorNotice = page.locator('.picker-load-error', { hasText: "Couldn't load workflows" })
   await expect(errorNotice).toBeVisible({ timeout: 10_000 })

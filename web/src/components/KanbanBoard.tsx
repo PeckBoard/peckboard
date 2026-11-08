@@ -686,7 +686,9 @@ export default function KanbanBoard({
   // affordance — the drop handler and the "Move to" submenu — goes
   // through here, so the warning can't be dodged by using the other one.
   const requestMoveCardToStep = async (cardId: string, targetStep: string) => {
-    const card = cards.find((c) => c.id === cardId)
+    // Read the store, not this render's `cards`: "Add and start" calls in
+    // right after creating the card, before the board has re-rendered.
+    const card = useProjectsStore.getState().cards.find((c) => c.id === cardId)
     const leavingBacklog =
       card != null && normalizeStep(card.step) === 'backlog' && targetStep !== 'backlog'
     if (!leavingBacklog || skipBacklogConfirm) {
@@ -718,6 +720,14 @@ export default function KanbanBoard({
       .map((s) => normalizeStep(typeof s === 'string' ? s : s.step))
       .filter((s) => moveTargetKeys.includes(s))
     return steps.length > 0 ? steps : moveTargetKeys
+  }
+
+  // The new-card form's "Add and start": send the just-created Backlog card
+  // to its workflow's first work step through the same gate as a drag, so
+  // it gets the same cost confirmation (or skips it per the user's choice).
+  const startNewCard = (card: Card) => {
+    const firstWorkStep = moveTargetsFor(card).find((s) => s !== 'backlog')
+    if (firstWorkStep) void requestMoveCardToStep(card.id, firstWorkStep)
   }
 
   // Step the currently-dragged card originates from, or null when no drag
@@ -1120,6 +1130,7 @@ export default function KanbanBoard({
             mode="create"
             projectId={projectId}
             onClose={() => setShowAddForm(false)}
+            onStart={startNewCard}
           />
         )}
 
@@ -1139,7 +1150,8 @@ export default function KanbanBoard({
           <div className="kanban-empty" data-testid="kanban-empty">
             <p className="kanban-empty-title">No cards yet</p>
             <p className="kanban-empty-hint">
-              A card is one unit of work. Add one and a worker picks it up from the first step.
+              A card is one task. New cards wait in Backlog until you start them — then an AI worker
+              picks them up and moves them across the board.
             </p>
             <button
               type="button"

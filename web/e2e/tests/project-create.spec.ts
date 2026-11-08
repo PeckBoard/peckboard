@@ -53,11 +53,14 @@ test('New Project modal creates a project end-to-end', async ({ request, page })
 
   await page.getByPlaceholder('My project').fill('e2e ui project')
 
-  // Submit stays disabled until a workflow is picked.
+  // The simple Task workflow is preselected, so nothing blocks Create;
+  // picking another workflow still works.
   const submit = page.getByRole('button', { name: 'Create Project' })
-  await expect(submit).toBeDisabled()
+  await expect(page.locator('.workflow-select-trigger')).toContainText('Task')
+  await expect(submit).toBeEnabled()
   await page.locator('.workflow-select-trigger').click()
   await page.getByRole('menuitem', { name: /Fast Develop Software/ }).click()
+  await expect(page.locator('.workflow-select-trigger')).toContainText('Fast Develop Software')
   await expect(submit).toBeEnabled()
   await submit.click()
 

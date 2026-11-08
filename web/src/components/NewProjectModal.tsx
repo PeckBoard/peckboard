@@ -13,6 +13,7 @@ import WorkflowInstructionsModal, {
 import FolderManager from './ManageFoldersModal'
 import NewFolderModal from './NewFolderModal'
 import FieldError from './FieldError'
+import HelpTip from './HelpTip'
 
 interface Props {
   onClose: () => void
@@ -37,7 +38,9 @@ export default function NewProjectModal({ onClose }: Props) {
   const folderId = chosenFolderId ?? folders[0]?.id ?? ''
   const [context, setContext] = useState('')
   const [workerCount, setWorkerCount] = useState(1)
-  const [workflow, setWorkflow] = useState('')
+  // Preselect the built-in "task" workflow (src/workflow.rs
+  // DEFAULT_WORKFLOW_ID) so a first project needs no workflow decision.
+  const [workflow, setWorkflow] = useState('task')
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
   const [parallelInstructions, setParallelInstructions] = useState(false)
@@ -174,7 +177,12 @@ export default function NewProjectModal({ onClose }: Props) {
   return (
     <>
       <Modal onClose={onClose} maxWidth={520}>
-        <h2>New Project</h2>
+        {/* The tip sits beside the heading, not in it: Modal names the
+            dialog from the heading's text, which must stay "New Project". */}
+        <div className="modal-title-row">
+          <h2>New Project</h2>
+          <HelpTip term="project" />
+        </div>
         <form onSubmit={handleSubmit}>
           <div className="form-field">
             <label className="form-label" htmlFor="new-project-name">
@@ -238,12 +246,11 @@ export default function NewProjectModal({ onClose }: Props) {
           </div>
           <div className="form-field">
             <label className="form-label" htmlFor="new-project-workflow">
-              Default card workflow
+              Default card workflow <HelpTip term="workflow" />
             </label>
             <WorkflowSelect id="new-project-workflow" value={workflow} onChange={setWorkflow} />
             <p className="form-hint">
-              Cards default to this workflow when created here. Each card can still override it
-              individually.
+              The steps each card goes through. Task suits most jobs; each card can pick another.
             </p>
             <div className="form-workflow-extras">
               <button
@@ -285,26 +292,6 @@ export default function NewProjectModal({ onClose }: Props) {
 
           {showAdvanced && (
             <div className="form-advanced-section">
-              <div className="form-field">
-                <label className="form-label" htmlFor="new-project-worker-count">
-                  Worker count
-                </label>
-                <input
-                  id="new-project-worker-count"
-                  className="form-input"
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={Number.isFinite(workerCount) ? workerCount : ''}
-                  aria-invalid={workerCountProblem ? true : undefined}
-                  onChange={(e) => setWorkerCount(parseInt(e.target.value, 10))}
-                />
-                <FieldError message={workerCountProblem} testId="new-project-worker-count-error" />
-                <p className="form-hint">
-                  Number of parallel workers. Keep at 1 unless the repo is set up for parallel work
-                  (git worktrees).
-                </p>
-              </div>
               <div className="form-field">
                 <label className="form-label" htmlFor="new-project-budget">
                   Spend budget
@@ -377,6 +364,31 @@ export default function NewProjectModal({ onClose }: Props) {
                 </select>
                 <p className="form-hint">
                   Controls reasoning budget. Higher effort = slower but more thorough.
+                </p>
+              </div>
+              <h3 className="form-subheading">Running several tasks at once</h3>
+              <p className="form-hint">
+                PeckBoard can work on more than one card at the same time. Leave these alone unless
+                you want that.
+              </p>
+              <div className="form-field">
+                <label className="form-label" htmlFor="new-project-worker-count">
+                  How many tasks can run at once <HelpTip term="worker" />
+                </label>
+                <input
+                  id="new-project-worker-count"
+                  className="form-input"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={Number.isFinite(workerCount) ? workerCount : ''}
+                  aria-invalid={workerCountProblem ? true : undefined}
+                  onChange={(e) => setWorkerCount(parseInt(e.target.value, 10))}
+                />
+                <FieldError message={workerCountProblem} testId="new-project-worker-count-error" />
+                <p className="form-hint">
+                  The number of workers that run side by side. Keep at 1 unless the folder is set up
+                  for parallel work (git worktrees).
                 </p>
               </div>
               <div className="form-field">

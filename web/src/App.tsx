@@ -44,6 +44,9 @@ const NewTerminalModal = lazy(() => import('./components/terminal/NewTerminalMod
 const AddToViewModal = lazy(() => import('./components/terminal/AddToViewModal'))
 const AssistantPage = lazy(() => import('./components/assistant/AssistantPage'))
 import RepeatingTasksView from './components/RepeatingTasksView'
+import EmptyState from './components/EmptyState'
+import GettingStarted from './components/GettingStarted'
+import { useGettingStartedStore } from './store/gettingStarted'
 import AgentsView from './components/AgentsView'
 import UsageDashboard from './components/UsageDashboard'
 import ChangePasswordModal from './components/ChangePasswordModal'
@@ -1738,8 +1741,8 @@ function App() {
             onClick={() => {
               navigate('agents', null)
             }}
-            title="Agents"
-            aria-label="Agents"
+            title="Machines: computers you control remotely"
+            aria-label="Machines"
             data-testid="rail-agents"
           >
             <svg
@@ -1969,6 +1972,30 @@ function App() {
                   <button
                     type="button"
                     role="menuitem"
+                    data-testid="user-menu-getting-started"
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      useGettingStartedStore.getState().show()
+                      setActiveSession(null)
+                      navigate('sessions', null)
+                    }}
+                  >
+                    Getting started
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="user-menu-shortcuts"
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      setShowShortcuts(true)
+                    }}
+                  >
+                    Keyboard shortcuts <kbd className="user-menu-kbd">?</kbd>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
                     onClick={() => {
                       setUserMenuOpen(false)
                       setShowChangePassword(true)
@@ -2074,6 +2101,20 @@ function App() {
                       ) : undefined
                     }
                   />
+                  {!sessionSearchActive && (
+                    <GettingStarted
+                      onConnectAi={() => {
+                        setSettingsSub('providers')
+                        navigate('settings', 'providers')
+                      }}
+                      onNewSession={() => setShowNewSession(true)}
+                      onNewProject={() => setShowNewProject(true)}
+                      onOpenProjects={() => {
+                        setActiveProject(null)
+                        navigate('projects', null)
+                      }}
+                    />
+                  )}
                   <List
                     items={sessionSearchActive ? chatSessionSearchResults : chatSessions}
                     getKey={(s) => s.id}
@@ -2147,15 +2188,14 @@ function App() {
                           <p>No sessions match “{sessionFilterInput.trim()}”</p>
                         </div>
                       ) : (
-                        <div className="list-view-empty">
-                          <p>No sessions yet</p>
-                          <button
-                            className="list-view-empty-action"
-                            onClick={() => setShowNewSession(true)}
-                          >
-                            Create your first session
-                          </button>
-                        </div>
+                        <EmptyState
+                          title="No sessions yet"
+                          body="Chat with an AI helper here. Ask for what you need in plain words, and it can work on the files in your folder."
+                          term="session"
+                          actionLabel="Start your first chat"
+                          onAction={() => setShowNewSession(true)}
+                          testId="sessions-empty"
+                        />
                       )
                     }
                     footer={
@@ -2483,7 +2523,16 @@ function App() {
         />
       )}
       {setupCompleted === false && user?.role === 'admin' && (
-        <SetupWizard onDone={() => setSetupCompleted(true)} />
+        <SetupWizard
+          onDone={(next) => {
+            setSetupCompleted(true)
+            // "Show me around" lands on Sessions, where the getting-started
+            // checklist lives; the other two open their create dialogs there.
+            navigate('sessions', null)
+            if (next === 'chat') setShowNewSession(true)
+            else if (next === 'project') setShowNewProject(true)
+          }}
+        />
       )}
       {showNewTerminal && (
         <Suspense fallback={null}>

@@ -43,6 +43,8 @@ async function openNewSessionModal(page: Page, token: string) {
   await page.goto('/')
   await expect(page.locator('.rail-avatar')).toBeVisible({ timeout: 10_000 })
   await page.locator('.tab-new').click()
+  // Presets and Temporary live behind "More options".
+  await page.getByTestId('new-session-more-options').click()
   await expect(page.getByTestId('new-session-preset')).toBeVisible()
 }
 
@@ -171,7 +173,7 @@ test('temporary checkbox hides the Name field and auto-names the session', async
   await createFolder(request, authHeader)
   await openNewSessionModal(page, token)
 
-  const nameInput = page.getByPlaceholder('My session')
+  const nameInput = page.locator('#new-session-name')
   await expect(nameInput).toBeVisible()
 
   await page.getByTestId('new-session-temp').check()
@@ -180,7 +182,7 @@ test('temporary checkbox hides the Name field and auto-names the session', async
 
   // Toggling back restores the field…
   await page.getByTestId('new-session-temp').uncheck()
-  await expect(page.getByPlaceholder('My session')).toBeVisible()
+  await expect(nameInput).toBeVisible()
   await page.getByTestId('new-session-temp').check()
 
   // …and a temp session needs no name at all (no preset → no dispatch).

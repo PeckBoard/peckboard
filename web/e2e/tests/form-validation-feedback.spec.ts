@@ -129,13 +129,8 @@ test('New Project states why Create is blocked', async ({ request, page }) => {
   await expect(reason).toHaveText('Enter a name')
   await page.getByPlaceholder('My project').fill('e2e blocked reason')
 
-  // Name + folder filled, workflow missing: the form looks complete, so the
-  // reason has to say what's left.
-  await expect(submit).toBeDisabled()
-  await expect(reason).toHaveText('Pick a workflow')
-
-  await page.locator('.workflow-select-trigger').click()
-  await page.getByRole('menuitem', { name: /Fast Develop Software/ }).click()
+  // Name + folder filled and the Task workflow preselected: nothing left.
+  await expect(page.locator('.workflow-select-trigger')).toContainText('Task')
   await expect(submit).toBeEnabled()
   await expect(reason).toHaveCount(0)
 

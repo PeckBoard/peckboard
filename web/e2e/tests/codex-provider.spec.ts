@@ -65,7 +65,7 @@ test('codex provider is registered with seed models and settings surface', async
     expect(keys, `codex settings schema missing ${key}`).toContain(key)
   }
 
-  // Settings → Providers: visibility toggle rendered and on by default.
+  // Settings → Providers: "Hide from pickers" rendered and off by default.
   await loadAppAt(page, token, '/')
   await expect(page.locator('.rail-brand')).toBeVisible({ timeout: 10_000 })
   await page.locator('.rail-avatar').click()
@@ -77,5 +77,5 @@ test('codex provider is registered with seed models and settings surface', async
   await settingsPage.getByTestId('settings-nav-providers').click()
   const toggle = settingsPage.getByTestId('provider-toggle-codex')
   await expect(toggle).toBeVisible()
-  await expect(toggle).toBeChecked()
+  await expect(toggle).not.toBeChecked()
 })

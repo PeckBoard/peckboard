@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '../harness'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { SERVER_BIN, freePort, login } from './ssh-harness'
@@ -208,7 +208,25 @@ test('fresh install: install and sign in every CLI from the wizard, no agent or 
   // Nothing connected yet: the step says so, but doesn't trap anyone.
   await expect(page.getByTestId('setup-no-provider-hint')).toBeVisible()
   await expect(page.getByTestId('setup-next')).toBeEnabled()
-  await expect(page.getByTestId('provider-setup')).toContainText('https://x.ai/cli/install.sh')
+  await expect(page.getByTestId('provider-setup-plan-claude')).toHaveText('Uses Claude Pro or Max')
+  await expect(page.getByTestId('provider-setup-plan-grok')).toHaveText(
+    'Uses SuperGrok or X Premium+',
+  )
+  // The install command waits behind Details (Install runs it for the user).
+  await expect(page.getByTestId('provider-setup-command-grok')).toHaveCount(0)
+  await expect(page.getByTestId('provider-setup')).not.toContainText('https://x.ai/cli/install.sh')
+  await page.getByTestId('provider-setup-details-grok').click()
+  await expect(page.getByTestId('provider-setup-details-grok')).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  )
+  await expect(page.getByTestId('provider-setup-command-grok')).toContainText(
+    'https://x.ai/cli/install.sh',
+  )
+  await page.getByTestId('provider-setup-details-grok').click()
+  await expect(page.getByTestId('provider-setup-command-grok')).toHaveCount(0)
+  // No default AI line until there are models to pick from.
+  await expect(page.getByTestId('setup-default-ai')).toHaveCount(0)
 
   // ── Cursor: the new host login ───────────────────────────────────
   await install(page, 'cursor', '2026.01.01-fake')
@@ -223,6 +241,22 @@ test('fresh install: install and sign in every CLI from the wizard, no agent or 
   await expect(page.getByTestId('provider-setup-status-cursor')).toContainText('✓ Ready')
   // The first connected provider clears the "nothing connected" hint.
   await expect(page.getByTestId('setup-no-provider-hint')).toHaveCount(0)
+
+  // The first ready provider fills in the default AI by itself.
+  await expect(page.getByTestId('setup-default-ai-name')).not.toHaveText('none yet', {
+    timeout: 15_000,
+  })
+  const pickToken = await login(request, base, ADMIN, NEW_PASS)
+  let autoPicked = ''
+  await expect
+    .poll(async () => {
+      const res = await request.get(`${base}/api/settings/default-model`, {
+        headers: { Authorization: `Bearer ${pickToken}` },
+      })
+      autoPicked = ((await res.json()) as { model?: string }).model ?? ''
+      return autoPicked
+    })
+    .toMatch(/^cursor:/)
 
   // ── Codex: device code, on an account created for the user ───────
   await install(page, 'codex', 'codex-cli 9.9.9')
@@ -274,25 +308,39 @@ test('fresh install: install and sign in every CLI from the wizard, no agent or 
   await expect(dialog).toBeHidden()
   await expect(page.getByTestId('provider-setup-status-claude')).toContainText('✓ Ready as Claude')
 
-  // ── More providers just turn on ──────────────────────────────────
+  // ── Self-hosted models just turn on ─────────────────────────────────
+  await expect(page.getByTestId('provider-setup-more')).toHaveText('Self-hosted models (advanced)')
   await page.getByTestId('provider-setup-more').click()
   await page.getByTestId('provider-setup-enable-ollama').click()
   await expect(page.getByTestId('provider-setup')).toContainText('✓ On')
 
-  // ── The default model comes from what was connected, on its account ─
-  await page.getByTestId('setup-next').click()
-  await expect(page.getByTestId('setup-default-model')).toBeVisible()
+  // ── The auto-picked default AI stuck: later sign-ins didn't move it ──
   const freshToken = await login(request, base, ADMIN, NEW_PASS)
   const auth = { Authorization: `Bearer ${freshToken}` }
-  await expect
-    .poll(async () => {
-      const res = await request.get(`${base}/api/settings/default-model`, { headers: auth })
-      return ((await res.json()) as { model?: string }).model
-    })
-    .toMatch(/^claude:.+@acc_/)
+  expect(
+    (
+      (await (
+        await request.get(`${base}/api/settings/default-model`, { headers: auth })
+      ).json()) as { model?: string }
+    ).model,
+  ).toBe(autoPicked)
+
+  // ── Where files live: the ready-made folder in the server user's home ──
+  await page.getByTestId('setup-next').click()
+  const suggested = path.join(root, 'home', 'PeckBoard')
+  await expect(page.getByTestId('setup-folder-default-path')).toHaveText(suggested)
+  await expect(page.getByTestId('setup-no-folder-hint')).toBeVisible()
+  await page.getByTestId('setup-folder-use-default').click()
+  await expect(page.getByTestId('setup-folder-done')).toContainText('My work')
+  await expect(page.getByTestId('setup-folder-done')).toContainText(suggested)
+  expect(existsSync(suggested), 'Use this folder must create the directory').toBe(true)
+  const folders = (await (await request.get(`${base}/api/folders`, { headers: auth })).json()) as {
+    name: string
+    path: string
+  }[]
+  expect(folders.map((f) => f.path)).toContain(suggested)
 
   // ── Finish, then the same panel is in Settings ───────────────────
-  await page.getByTestId('setup-next').click()
   await page.getByTestId('setup-next').click()
   await page.getByTestId('setup-finish').click()
   await expect(page.getByTestId('setup-wizard')).toBeHidden({ timeout: 10_000 })
@@ -302,9 +350,13 @@ test('fresh install: install and sign in every CLI from the wizard, no agent or 
   await expect(page.getByTestId('provider-setup-status-cursor')).toContainText('✓ Ready', {
     timeout: 15_000,
   })
+  await expect(page.getByTestId('provider-setup-plan-cursor')).toHaveText('Uses a Cursor plan')
+  // Settings carries the hide switch on each turned-on provider, not the
+  // wizard's default-AI line.
+  await expect(page.getByTestId('provider-toggle-cursor')).not.toBeChecked()
+  await expect(page.getByTestId('setup-default-ai')).toHaveCount(0)
   await expect(page.getByTestId('claude-settings-section')).toBeVisible()
 })
-
 test('provider setup is admin-only and only ever runs its own table', async ({ request }) => {
   const adminToken = await login(request, base, ADMIN, NEW_PASS)
   const admin = { Authorization: `Bearer ${adminToken}` }

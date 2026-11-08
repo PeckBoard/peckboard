@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useAuthStore, authedFetch } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
+import { useProviderSetupStore } from '../store/providerSetup'
 import { useUiStore } from '../store/ui'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import type { Theme } from '../util/themeColor'
@@ -267,7 +268,7 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
       },
       {
         id: 'tls',
-        title: 'TLS / HTTPS',
+        title: 'Secure connection (HTTPS)',
         blurb: 'Certificate, hostnames, upload or regenerate',
         adminOnly: true,
       },
@@ -407,9 +408,9 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
   },
   {
     page: 'providers',
-    section: 'Providers',
-    anchor: 'provider-visibility',
-    keywords: 'hide toggle visibility model pickers',
+    section: 'Connect your AI',
+    anchor: 'provider-setup',
+    keywords: 'install sign in plan subscription hide toggle visibility model pickers providers',
   },
   {
     page: 'providers',
@@ -1059,6 +1060,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
             if (data?.providers) setProviderVisibility(data.providers)
           })
           .catch(() => {})
+        void useProviderSetupStore.getState().load()
         fetchModels()
       })
       .catch((e: Error) => setSaveError({ scope: 'providers', message: e.message }))
@@ -1488,44 +1490,26 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
           <>
             {isAdmin && (
               <section className="settings-section" data-settings-anchor="provider-setup">
-                <h3>Connect Your AI</h3>
+                <h3>Connect your AI</h3>
                 <p className="form-hint">
-                  Install a provider&apos;s CLI and sign in on your own subscription.
+                  Set up the AI tools PeckBoard works through and sign in with a plan you already
+                  have. Hidden ones stay connected but leave the model pickers.
                 </p>
-                <ProviderSetupPanel />
+                <ProviderSetupPanel
+                  visibility={{
+                    hidden: Object.fromEntries(
+                      providerVisibility.map((p) => [p.id, p.hidden === true]),
+                    ),
+                    onToggle: toggleProvider,
+                  }}
+                />
+                {saveError?.scope === 'providers' && (
+                  <p className="form-error" role="alert" data-testid="settings-error-providers">
+                    {saveError.message}
+                  </p>
+                )}
               </section>
             )}
-            <section className="settings-section" data-settings-anchor="provider-visibility">
-              <h3>Providers</h3>
-              <p className="form-hint">
-                Toggle providers on or off. Hidden providers are removed from model pickers and
-                account settings.
-              </p>
-              {providerVisibility.length === 0 ? (
-                <p className="form-hint" data-testid="settings-no-providers">
-                  No providers are turned on yet.
-                </p>
-              ) : (
-                <div className="settings-info-grid">
-                  {providerVisibility.map((p) => (
-                    <label className="settings-row" key={p.id}>
-                      <span className="settings-label">{p.display_name}</span>
-                      <input
-                        type="checkbox"
-                        checked={!p.hidden}
-                        data-testid={`provider-toggle-${p.id}`}
-                        onChange={(e) => toggleProvider(p.id, !e.target.checked)}
-                      />
-                    </label>
-                  ))}
-                </div>
-              )}
-              {saveError?.scope === 'providers' && (
-                <p className="form-error" role="alert" data-testid="settings-error-providers">
-                  {saveError.message}
-                </p>
-              )}
-            </section>
 
             {providerVisibility
               .filter((p) => p.hidden !== true)

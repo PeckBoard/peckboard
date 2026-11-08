@@ -6,6 +6,7 @@ import Modal from './Modal'
 import ConfirmDialog from './ConfirmDialog'
 import RenameModal from './RenameModal'
 import FieldError from './FieldError'
+import EmptyState from './EmptyState'
 import type { MenuItem } from './Dropdown'
 
 /** Mirrors the backend's `DeviceView` (`src/routes/devices.rs`). `online` /
@@ -50,7 +51,8 @@ function formatRelative(dateStr: string | null): string {
 }
 
 /**
- * The Agents panel — remote-control devices enrolled with this Peckboard.
+ * The Machines page (view id `agents`) — remote-control devices enrolled with
+ * this Peckboard.
  * Lists each device with its live online/in-flight state, offers enrolment
  * (the one-time token reveal), rename, the disable kill-switch, and delete
  * (revoke). Live updates arrive as `peckboard:device-update` CustomEvents
@@ -155,8 +157,8 @@ export default function AgentsView() {
   return (
     <div className="list-view" data-testid="agents-view">
       <ListViewHeader
-        title="Agents"
-        actionLabel="+ Enroll agent"
+        title="Machines"
+        actionLabel="+ Add machine"
         onAction={() => setShowEnroll(true)}
         actionTestId="agents-enroll"
       />
@@ -200,24 +202,27 @@ export default function AgentsView() {
             </>
           )}
           emptyState={
-            <div className="list-view-empty" data-testid="agents-empty">
-              <p>No remote agents enrolled yet</p>
-              <p>
-                Enroll a machine to control it from Peckboard — run commands, manage servers, and
-                drive its screen from your sessions. Download{' '}
-                <a
-                  href="https://github.com/PeckBoard/peckboard/releases"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  peckboard-agent
-                </a>{' '}
-                for your platform first.
-              </p>
-              <button className="list-view-empty-action" onClick={() => setShowEnroll(true)}>
-                Enroll your first agent
-              </button>
-            </div>
+            <EmptyState
+              testId="agents-empty"
+              title="No machines yet"
+              body={
+                <>
+                  Add another computer so your AI helpers can run commands and use its screen from
+                  here. First install{' '}
+                  <a
+                    href="https://github.com/PeckBoard/peckboard/releases"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    peckboard-agent
+                  </a>{' '}
+                  on that computer.
+                </>
+              }
+              actionLabel="Add your first machine"
+              onAction={() => setShowEnroll(true)}
+              docs="/remote-agent.html"
+            />
           }
         />
       )}
@@ -383,7 +388,7 @@ function EnrollModal({
 
   return (
     <Modal onClose={onClose} maxWidth={420} data-testid="enroll-modal">
-      <h2>Enroll agent</h2>
+      <h2>Add a machine</h2>
       <form onSubmit={handleSubmit}>
         <div className="form-field">
           <label className="form-label" htmlFor="enroll-name">

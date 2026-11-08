@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useProjectsStore } from '../store/projects'
 import {
   effortOptionsForModel,
@@ -9,12 +9,14 @@ import {
 import { authedFetch } from '../store/auth'
 import type { Card } from '../types/api'
 import DependencyPickerModal from './DependencyPickerModal'
+import HelpTip from './HelpTip'
 import Modal from './Modal'
 import ModelPicker from './ModelPicker'
 import ModelGoneNotice from './ModelGoneNotice'
 import PickerLoadError from './PickerLoadError'
 import SystemPromptPicker from './SystemPromptPicker'
 import WorkflowSelect from './WorkflowSelect'
+import { STEPS } from './kanban/utils'
 
 interface CardFormBaseProps {
   projectId: string
@@ -22,7 +24,14 @@ interface CardFormBaseProps {
 }
 
 type CardFormProps =
-  | (CardFormBaseProps & { mode: 'create'; card?: undefined })
+  | (CardFormBaseProps & {
+      mode: 'create'
+      card?: undefined
+      /** Offers "Add and start": called with the new card after the form
+       *  closes. The board passes its own backlog → work move, so starting
+       *  goes through the same cost confirmation as a drag. */
+      onStart?: (card: Card) => void
+    })
   | (CardFormBaseProps & { mode: 'edit'; card: Card })
 
 interface ModelInfo {
@@ -64,6 +73,21 @@ export default function CardFormModal(props: CardFormProps) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
+  // Rarely-needed fields sit behind "More options". It starts open when any
+  // of them already holds a non-default value, so editing a card never hides
+  // a setting that is in effect.
+  const [showMore, setShowMore] = useState(
+    () =>
+      !!card &&
+      ((!!card.workflow && card.workflow !== project?.workflow) ||
+        !!card.model ||
+        !!card.effort ||
+        !!card.system_prompt_name ||
+        card.model_autoswitch === false ||
+        card.blocked ||
+        (card.depends_on?.length ?? 0) > 0),
+  )
+  const onStart = mode === 'create' ? props.onStart : undefined
 
   const dependencyCandidates = cards.filter((c) => c.id !== card?.id)
   const selectedDependencies = useMemo(() => {
@@ -133,7 +157,10 @@ export default function CardFormModal(props: CardFormProps) {
   const projectWorkflowId = project?.workflow
   const projectWorkflowName = workflows.find((w) => w.id === projectWorkflowId)?.name ?? null
 
-  const handleSubmit = async (e: FormEvent) => {
+  // `start` = the create form's "Add and start": create in Backlog, close,
+  // then hand the card to the board's own start path (`onStart`), which runs
+  // the same cost confirmation as dragging it out of Backlog.
+  const handleSubmit = async (e: { preventDefault: () => void }, start: boolean) => {
     e.preventDefault()
     if (!title.trim()) {
       setError('Title is required')
@@ -143,7 +170,7 @@ export default function CardFormModal(props: CardFormProps) {
     setError('')
     try {
       if (mode === 'create') {
-        await createCard(projectId, {
+        const created = await createCard(projectId, {
           title: title.trim(),
           description: description.trim(),
           step: 'backlog',
@@ -157,6 +184,9 @@ export default function CardFormModal(props: CardFormProps) {
           model_autoswitch: modelAutoswitch,
           system_prompt_name: systemPromptName || null,
         } as Partial<Card>)
+        onClose()
+        if (start) props.onStart?.(created)
+        return
       } else {
         const updates: Partial<Card> = {
           title: title.trim(),
@@ -192,6 +222,10 @@ export default function CardFormModal(props: CardFormProps) {
   }
 
   if (mode === 'edit' && isTerminal) {
+    // Display names, not raw ids (`in_progress`, `task`). Unknown ids — a
+    // custom step or a deleted workflow — fall back to the id itself.
+    const stepLabel = STEPS.find((s) => s.key === card!.step)?.label ?? card!.step
+    const workflowLabel = workflows.find((w) => w.id === card!.workflow)?.name ?? card!.workflow
     return (
       <Modal onClose={onClose} maxWidth={440}>
         <h2>Card Details</h2>
@@ -205,7 +239,7 @@ export default function CardFormModal(props: CardFormProps) {
           </div>
           <div className="card-detail-row">
             <span className="card-detail-label">Step</span>
-            <span>{card!.step}</span>
+            <span data-testid="card-detail-step">{stepLabel}</span>
           </div>
           {card!.description && (
             <div className="card-detail-row">
@@ -216,7 +250,7 @@ export default function CardFormModal(props: CardFormProps) {
           {card!.workflow && (
             <div className="card-detail-row">
               <span className="card-detail-label">Workflow</span>
-              <span>{card!.workflow}</span>
+              <span data-testid="card-detail-workflow">{workflowLabel}</span>
             </div>
           )}
         </div>
@@ -232,8 +266,12 @@ export default function CardFormModal(props: CardFormProps) {
   return (
     <>
       <Modal onClose={onClose} maxWidth={520}>
-        <h2>{mode === 'create' ? 'New Card' : 'Edit Card'}</h2>
-        <form onSubmit={handleSubmit}>
+        {/* Beside the heading, not in it: Modal names the dialog from it. */}
+        <div className="modal-title-row">
+          <h2>{mode === 'create' ? 'New Card' : 'Edit Card'}</h2>
+          <HelpTip term="card" />
+        </div>
+        <form onSubmit={(e) => handleSubmit(e, false)}>
           <div className="form-field">
             <label className="form-label" htmlFor="card-title">
               Title
@@ -249,7 +287,8 @@ export default function CardFormModal(props: CardFormProps) {
           </div>
           <div className="form-field">
             <label className="form-label" htmlFor="card-description">
-              Description {!isBacklog && <span className="optional">(locked)</span>}
+              Description{' '}
+              {!isBacklog && <span className="optional">(can't be changed once work starts)</span>}
             </label>
             <textarea
               id="card-description"
@@ -277,136 +316,163 @@ export default function CardFormModal(props: CardFormProps) {
               ))}
             </select>
           </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="card-workflow">
-              Workflow {!isBacklog && <span className="optional">(locked)</span>}
-            </label>
-            <WorkflowSelect
-              id="card-workflow"
-              value={workflow}
-              onChange={setWorkflow}
-              projectWorkflowId={projectWorkflowId ?? undefined}
-              projectWorkflowName={projectWorkflowName}
-              disabled={!isBacklog}
-            />
-          </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="card-model">
-              Model
-            </label>
-            <ModelPicker
-              id="card-model"
-              value={model}
-              onChange={handleModelChange}
-              models={models as ModelInfo[]}
-              defaultLabel={inheritLabel}
-              testId="card-model"
-            />
-            {modelsLoadError && models.length === 0 && (
-              <PickerLoadError label="models" onRetry={fetchModels} />
-            )}
-            {mode === 'create' && chosenModel === null && defaultModelGone && (
-              <ModelGoneNotice modelId={defaultModel} />
-            )}
-          </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="card-system-prompt">
-              System prompt
-            </label>
-            <SystemPromptPicker
-              id="card-system-prompt"
-              value={systemPromptName}
-              onChange={setSystemPromptName}
-              testId="card-system-prompt"
-            />
-          </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="card-effort">
-              Effort
-            </label>
-            <select
-              id="card-effort"
-              className="form-input"
-              value={effort}
-              onChange={(e) => setEffort(e.target.value)}
-            >
-              {effortOptions.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="form-field">
-            <label className="form-checkbox-label">
-              <input
-                type="checkbox"
-                checked={modelAutoswitch}
-                onChange={(e) => setModelAutoswitch(e.target.checked)}
-                data-testid="card-autoswitch"
-              />
-              <span>Auto-switch to a cheaper model when the plan allows</span>
-            </label>
-            <p className="form-hint" style={{ marginTop: 4 }}>
-              The worker plans first on the configured model, then may downgrade itself for simple
-              work.
-            </p>
-          </div>
-          <div className="form-field">
-            <label className="form-checkbox-label">
-              <input
-                type="checkbox"
-                checked={blocked}
-                onChange={(e) => setBlocked(e.target.checked)}
-              />
-              <span>Blocked</span>
-            </label>
-            {blocked && (
-              <input
-                className="form-input"
-                style={{ marginTop: 6 }}
-                aria-label="Block reason"
-                placeholder="Block reason..."
-                value={blockReason}
-                onChange={(e) => setBlockReason(e.target.value)}
-              />
-            )}
-          </div>
-          {dependencyCandidates.length > 0 && (
-            <div className="form-field">
-              <span className="form-label">Depends On</span>
-              <p className="form-hint" style={{ marginTop: 0, marginBottom: 6 }}>
-                A worker only starts this card once every selected card is done.
-              </p>
-              {selectedDependencies.length > 0 && (
-                <ul className="dependency-chip-list">
-                  {selectedDependencies.map((c) => (
-                    <li key={c.id} className="dependency-chip">
-                      <span className="dependency-chip-title">{c.title}</span>
-                      <button
-                        type="button"
-                        className="dependency-chip-remove"
-                        aria-label={`Remove dependency on ${c.title}`}
-                        onClick={() => setDependsOn((prev) => prev.filter((id) => id !== c.id))}
-                      >
-                        ×
-                      </button>
-                    </li>
+
+          <button
+            type="button"
+            className="form-toggle-advanced"
+            aria-expanded={showMore}
+            onClick={() => setShowMore(!showMore)}
+            data-testid="card-form-more-options"
+          >
+            {showMore ? 'Fewer options' : 'More options'}
+          </button>
+
+          {showMore && (
+            <div className="form-advanced-section">
+              <div className="form-field">
+                <label className="form-label" htmlFor="card-workflow">
+                  Workflow <HelpTip term="workflow" />{' '}
+                  {!isBacklog && (
+                    <span className="optional">(can't be changed once work starts)</span>
+                  )}
+                </label>
+                <WorkflowSelect
+                  id="card-workflow"
+                  value={workflow}
+                  onChange={setWorkflow}
+                  projectWorkflowId={projectWorkflowId ?? undefined}
+                  projectWorkflowName={projectWorkflowName}
+                  disabled={!isBacklog}
+                />
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="card-model">
+                  Model <HelpTip term="model" />
+                </label>
+                <ModelPicker
+                  id="card-model"
+                  value={model}
+                  onChange={handleModelChange}
+                  models={models as ModelInfo[]}
+                  defaultLabel={inheritLabel}
+                  testId="card-model"
+                />
+                {modelsLoadError && models.length === 0 && (
+                  <PickerLoadError label="models" onRetry={fetchModels} />
+                )}
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="card-system-prompt">
+                  Role and instructions <HelpTip term="systemPrompt" />
+                </label>
+                <SystemPromptPicker
+                  id="card-system-prompt"
+                  value={systemPromptName}
+                  onChange={setSystemPromptName}
+                  testId="card-system-prompt"
+                />
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="card-effort">
+                  Effort <HelpTip term="effort" />
+                </label>
+                <select
+                  id="card-effort"
+                  className="form-input"
+                  value={effort}
+                  onChange={(e) => setEffort(e.target.value)}
+                >
+                  {effortOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
                   ))}
-                </ul>
+                </select>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={modelAutoswitch}
+                    onChange={(e) => setModelAutoswitch(e.target.checked)}
+                    data-testid="card-autoswitch"
+                  />
+                  <span>Let PeckBoard use a cheaper model for simple work</span>
+                </label>
+                <p className="form-hint" style={{ marginTop: 4 }}>
+                  The worker plans first on the chosen model, then may switch itself to a cheaper
+                  one for simple work.
+                </p>
+              </div>
+              <div className="form-field">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={blocked}
+                    onChange={(e) => setBlocked(e.target.checked)}
+                  />
+                  <span>Blocked</span>
+                </label>
+                {blocked && (
+                  <input
+                    className="form-input"
+                    style={{ marginTop: 6 }}
+                    aria-label="Block reason"
+                    placeholder="Block reason..."
+                    value={blockReason}
+                    onChange={(e) => setBlockReason(e.target.value)}
+                  />
+                )}
+              </div>
+              {dependencyCandidates.length > 0 && (
+                <div className="form-field">
+                  <span className="form-label">Depends On</span>
+                  <p className="form-hint" style={{ marginTop: 0, marginBottom: 6 }}>
+                    A worker only starts this card once every selected card is done.
+                  </p>
+                  {selectedDependencies.length > 0 && (
+                    <ul className="dependency-chip-list">
+                      {selectedDependencies.map((c) => (
+                        <li key={c.id} className="dependency-chip">
+                          <span className="dependency-chip-title">{c.title}</span>
+                          <button
+                            type="button"
+                            className="dependency-chip-remove"
+                            aria-label={`Remove dependency on ${c.title}`}
+                            onClick={() => setDependsOn((prev) => prev.filter((id) => id !== c.id))}
+                          >
+                            ×
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-secondary dependency-picker-trigger"
+                    onClick={() => setPickerOpen(true)}
+                  >
+                    {selectedDependencies.length === 0
+                      ? 'Select Dependencies...'
+                      : `Edit Dependencies (${selectedDependencies.length})`}
+                  </button>
+                </div>
               )}
-              <button
-                type="button"
-                className="btn-secondary dependency-picker-trigger"
-                onClick={() => setPickerOpen(true)}
-              >
-                {selectedDependencies.length === 0
-                  ? 'Select Dependencies...'
-                  : `Edit Dependencies (${selectedDependencies.length})`}
-              </button>
             </div>
           )}
+          {/* The gone-default warning sits outside the disclosure: it
+              explains why the visible form would otherwise create a card on
+              no model at all. */}
+          {mode === 'create' && chosenModel === null && defaultModelGone && (
+            <ModelGoneNotice modelId={defaultModel} />
+          )}
           {error && <p className="form-error">{error}</p>}
+          {mode === 'create' && (
+            <p className="form-hint" data-testid="card-form-start-hint">
+              A card waits in Backlog until you start it. Starting runs an AI worker, which uses
+              your plan.
+            </p>
+          )}
           <div className="form-actions">
             {!loading && !title.trim() && (
               <span className="form-actions-reason" data-testid="card-form-disabled-reason">
@@ -416,15 +482,35 @@ export default function CardFormModal(props: CardFormProps) {
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="btn-primary" disabled={loading || !title.trim()}>
-              {loading
-                ? mode === 'create'
-                  ? 'Creating...'
-                  : 'Saving...'
-                : mode === 'create'
-                  ? 'Create Card'
-                  : 'Save'}
-            </button>
+            {mode === 'create' ? (
+              <>
+                {/* Enter submits the free option; starting costs money, so it
+                    is never the implicit default. */}
+                <button
+                  type="submit"
+                  className={onStart ? 'btn-secondary' : 'btn-primary'}
+                  disabled={loading || !title.trim()}
+                  data-testid="card-form-add-backlog"
+                >
+                  {loading ? 'Creating...' : 'Add to backlog'}
+                </button>
+                {onStart && (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={loading || !title.trim()}
+                    onClick={(e) => handleSubmit(e, true)}
+                    data-testid="card-form-add-start"
+                  >
+                    Add and start
+                  </button>
+                )}
+              </>
+            ) : (
+              <button type="submit" className="btn-primary" disabled={loading || !title.trim()}>
+                {loading ? 'Saving...' : 'Save'}
+              </button>
+            )}
           </div>
         </form>
       </Modal>

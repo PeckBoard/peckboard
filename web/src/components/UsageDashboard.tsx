@@ -11,6 +11,7 @@ import TrendsSection from './usage/TrendsSection'
 import SessionsPanelBody from './usage/SessionsPanel'
 import { CardsPanelBody, ExpertsPanelBody, ProjectsPanelBody } from './usage/EntityRollups'
 import RangeBar from './usage/RangeBar'
+import EmptyState from './EmptyState'
 
 /** The header's overall-totals cards. Each is a labelled figure summed across
  *  every session. When the sessions request failed the figures are unknown, so
@@ -214,6 +215,14 @@ export default function UsageDashboard() {
         <h2 className="usage-title">Usage</h2>
         <RangeBar />
       </div>
+      {loaded && failedPanels.length === 0 && sessions.length === 0 && projects.length === 0 && (
+        <EmptyState
+          testId="usage-empty"
+          title="Nothing used in this period"
+          body="This page shows how much your AI helpers have used, in tokens and estimated cost, per chat, project and card. Figures appear once a session has run."
+          docs="/features.html"
+        />
+      )}
 
       {failedPanels.length > 0 && (
         <div className="fetch-error-banner" role="alert" data-testid="usage-fetch-error">

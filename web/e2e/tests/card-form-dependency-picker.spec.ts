@@ -91,6 +91,8 @@ test('card form opens a dependency picker that filters by step and supports sear
 
   await formModal.locator('input.form-input').first().fill('Needs Prereqs')
 
+  // Depends On lives behind "More options".
+  await formModal.getByTestId('card-form-more-options').click()
   // Open the picker. The trigger replaces the old inline checkbox list.
   await formModal.getByRole('button', { name: /Select Dependencies/i }).click()
   const picker = page.locator('.dependency-picker-modal')
@@ -138,7 +140,7 @@ test('card form opens a dependency picker that filters by step and supports sear
 
   // Submit the form. The created card should record the remaining
   // dependency on the backlog card.
-  await formModal.getByRole('button', { name: 'Create Card' }).click()
+  await formModal.getByTestId('card-form-add-backlog').click()
   await expect(formModal).toBeHidden({ timeout: 10_000 })
 
   const listRes = await request.get(`/api/projects/${project.id}/cards`, { headers: auth })

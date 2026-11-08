@@ -63,9 +63,10 @@ test('temp session: hourglass chip, and closing the tab deletes the session', as
   const before = new Set((await listSessions()).map((s) => s.id))
 
   await page.locator('.tab-new').click()
-  await expect(page.getByPlaceholder('My session')).toBeVisible()
+  await expect(page.locator('#new-session-name')).toBeVisible()
+  await page.getByTestId('new-session-more-options').click()
   await page.getByTestId('new-session-temp').check()
-  await expect(page.getByPlaceholder('My session')).toHaveCount(0)
+  await expect(page.locator('#new-session-name')).toHaveCount(0)
   await page.screenshot({ path: 'test-results/temp-session-modal.png' })
   await page.getByRole('button', { name: 'Create Session' }).click()
 

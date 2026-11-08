@@ -52,7 +52,7 @@ const PAGE_LABELS: Record<UiPage, string> = {
   terminals: 'Terminals',
   review: 'Document Review',
   usage: 'Usage',
-  agents: 'Agents',
+  agents: 'Machines',
 }
 
 const SLUG = /^[A-Za-z0-9._-]{1,100}$/

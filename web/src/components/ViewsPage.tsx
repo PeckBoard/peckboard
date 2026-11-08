@@ -17,6 +17,7 @@ import {
   type WidgetPatch,
   type WidgetKind,
 } from '../store/views'
+import EmptyState from './EmptyState'
 import { authedFetch } from '../store/auth'
 import {
   popOutTerminal,
@@ -163,12 +164,14 @@ function ViewsList({ onOpen }: { onOpen: (id: string) => void }) {
         )}
         emptyState={
           loaded ? (
-            <div className="list-view-empty" data-testid="views-empty">
-              <p>No views yet</p>
-              <button className="list-view-empty-action" onClick={() => setShowNew(true)}>
-                Create a view to watch several sessions side by side
-              </button>
-            </div>
+            <EmptyState
+              testId="views-empty"
+              title="No views yet"
+              body="A view puts several sessions and terminals on one screen, so you can watch them side by side."
+              actionLabel="Create a view"
+              onAction={() => setShowNew(true)}
+              docs="/features.html"
+            />
           ) : (
             <div className="list-view-empty">
               <p>Loading views…</p>

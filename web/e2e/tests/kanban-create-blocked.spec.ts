@@ -79,11 +79,12 @@ test('Add Card modal can file a card already blocked with a reason', async ({
   // when the checkbox is checked, so this exercises the conditional
   // render too. The label wraps the input + a <span>Blocked</span>,
   // which is enough for a click on the label to flip the input.
+  await modal.getByTestId('card-form-more-options').click()
   const blockedLabel = modal.locator('label.form-checkbox-label').filter({ hasText: 'Blocked' })
   await blockedLabel.click()
   await modal.getByPlaceholder('Block reason...').fill('waiting on product review')
 
-  await modal.getByRole('button', { name: 'Create Card' }).click()
+  await modal.getByTestId('card-form-add-backlog').click()
   await expect(modal).toBeHidden({ timeout: 10_000 })
 
   // Verify the persisted state via the HTTP list — this confirms the

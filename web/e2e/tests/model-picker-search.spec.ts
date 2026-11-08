@@ -90,7 +90,7 @@ test('model picker filters the catalogue as you type', async ({ request, page, b
   await expect(trigger).toContainText('Mock: happy path')
 
   // And the choice actually drives session creation.
-  await page.getByPlaceholder('My session').fill('picker-test')
+  await page.locator('#new-session-name').fill('picker-test')
   await page.getByRole('button', { name: 'Create Session' }).click()
 
   await expect

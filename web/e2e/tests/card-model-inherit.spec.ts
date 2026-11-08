@@ -90,6 +90,10 @@ test('editing a card without touching the model keeps it inheriting', async ({
     await p.getByTestId('card-quick-edit').first().click()
     const modal = p.locator('.modal').filter({ hasText: 'Edit Card' })
     await expect(modal).toBeVisible({ timeout: 10_000 })
+    // Model sits behind "More options", which opens on its own once the
+    // card pins one — open it only when it's still closed.
+    const more = modal.getByTestId('card-form-more-options')
+    if ((await more.getAttribute('aria-expanded')) !== 'true') await more.click()
     return modal
   }
 

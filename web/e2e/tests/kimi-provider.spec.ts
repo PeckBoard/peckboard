@@ -62,7 +62,7 @@ test('kimi provider is registered with its config-default model and settings sur
     expect(keys, `kimi settings schema missing ${key}`).toContain(key)
   }
 
-  // Settings → Providers: visibility toggle rendered and on by default.
+  // Settings → Providers: "Hide from pickers" rendered and off by default.
   await loadAppAt(page, token, '/')
   await expect(page.locator('.rail-brand')).toBeVisible({ timeout: 10_000 })
   await page.locator('.rail-avatar').click()
@@ -74,5 +74,5 @@ test('kimi provider is registered with its config-default model and settings sur
   await settingsPage.getByTestId('settings-nav-providers').click()
   const toggle = settingsPage.getByTestId('provider-toggle-kimi')
   await expect(toggle).toBeVisible()
-  await expect(toggle).toBeChecked()
+  await expect(toggle).not.toBeChecked()
 })

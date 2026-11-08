@@ -1,9 +1,10 @@
 import { test, expect, type APIRequestContext, type Page } from '../harness'
 
 /**
- * Provider visibility toggles on Settings → Providers.
+ * Provider visibility on Settings → Providers: the "Hide from pickers"
+ * switch on each turned-on provider in the Connect your AI panel.
  *
- * Providers are visible by default. Toggling one off hides its settings
+ * Providers are visible by default. Hiding one hides its settings
  * section, removes its models from /api/models (and thus all model
  * pickers including the pre-hatcher dropdown), and persists across
  * reload. Uses ollama — always registered, has a dedicated settings
@@ -66,15 +67,15 @@ test('toggling a provider off hides its section and models; toggle on restores; 
 
   const settingsPage = await navigateToProviders(page)
 
-  // All toggles checked (visible) by default.
+  // "Hide from pickers" is unticked (visible) by default.
   const toggle = settingsPage.getByTestId('provider-toggle-ollama')
   await expect(toggle).toBeVisible()
-  await expect(toggle).toBeChecked()
+  await expect(toggle).not.toBeChecked()
   await expect(settingsPage.getByTestId('ollama-settings-section')).toBeVisible()
 
-  // --- Toggle OFF ---
+  // --- Hide ---
   await toggle.click()
-  await expect(toggle).not.toBeChecked({ timeout: 5_000 })
+  await expect(toggle).toBeChecked({ timeout: 5_000 })
   await expect(settingsPage.getByTestId('ollama-settings-section')).toBeHidden()
 
   // /api/models should exclude ollama.
@@ -92,11 +93,11 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   await expect(page.locator('[data-testid^="prehatch-model-option-ollama:"]')).toHaveCount(0)
   await page.keyboard.press('Escape')
 
-  // --- Toggle back ON ---
+  // --- Untick "Hide from pickers" ---
   await settingsPage.getByTestId('settings-nav-providers').click()
   const toggleOn = settingsPage.getByTestId('provider-toggle-ollama')
   await toggleOn.click()
-  await expect(toggleOn).toBeChecked({ timeout: 5_000 })
+  await expect(toggleOn).not.toBeChecked({ timeout: 5_000 })
   await expect(settingsPage.getByTestId('ollama-settings-section')).toBeVisible()
 
   // /api/models should include ollama again.
@@ -115,18 +116,18 @@ test('toggling a provider off hides its section and models; toggle on restores; 
   await settingsPage.getByTestId('settings-nav-providers').click()
   const togglePersist = settingsPage.getByTestId('provider-toggle-ollama')
   await togglePersist.click()
-  await expect(togglePersist).not.toBeChecked({ timeout: 5_000 })
+  await expect(togglePersist).toBeChecked({ timeout: 5_000 })
   await expect(settingsPage.getByTestId('ollama-settings-section')).toBeHidden()
 
   await page.reload()
   const sp2 = await navigateToProviders(page)
   const toggleAfterReload = sp2.getByTestId('provider-toggle-ollama')
-  await expect(toggleAfterReload).not.toBeChecked()
+  await expect(toggleAfterReload).toBeChecked()
   await expect(sp2.getByTestId('ollama-settings-section')).toBeHidden()
 
   // Restore for other tests.
   await toggleAfterReload.click()
-  await expect(toggleAfterReload).toBeChecked({ timeout: 5_000 })
+  await expect(toggleAfterReload).not.toBeChecked({ timeout: 5_000 })
 })
 
 test('hiding a provider via API removes its models from /api/models', async ({ request }) => {

@@ -6,6 +6,7 @@ import {
   type ReportEntry,
   type ReportSortOrder,
 } from '../store/reports'
+import EmptyState from './EmptyState'
 import { MenuButton, type MenuItem } from './Dropdown'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
@@ -227,9 +228,12 @@ export default function ReportBrowser({ onOpenReport }: ReportBrowserProps) {
           </p>
         )}
         {!loading && reports.length === 0 && !error && (
-          <div className="list-view-empty">
-            <p>No reports found</p>
-          </div>
+          <EmptyState
+            testId="reports-empty"
+            title="No reports yet"
+            body="When an AI helper finishes a piece of work it can write up what it did. Those write-ups collect here, grouped by folder."
+            docs="/features.html"
+          />
         )}
 
         {!loading && reports.length > 0 && visible.length === 0 && (

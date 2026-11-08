@@ -64,18 +64,20 @@ test('Add Card modal defaults auto-switch ON and persists the choice', async ({
   await page.getByRole('button', { name: 'Add Card' }).click()
   let modal = page.locator('.modal').filter({ hasText: 'New Card' })
   await expect(modal).toBeVisible({ timeout: 10_000 })
+  await modal.getByTestId('card-form-more-options').click()
   await expect(modal.getByTestId('card-autoswitch')).toBeChecked()
   await modal.locator('input.form-input').first().fill('Autoswitch default card')
-  await modal.getByRole('button', { name: 'Create Card' }).click()
+  await modal.getByTestId('card-form-add-backlog').click()
   await expect(modal).toBeHidden({ timeout: 10_000 })
 
   // Card 2: uncheck the toggle before creating.
   await page.getByRole('button', { name: 'Add Card' }).click()
   modal = page.locator('.modal').filter({ hasText: 'New Card' })
   await expect(modal).toBeVisible({ timeout: 10_000 })
+  await modal.getByTestId('card-form-more-options').click()
   await modal.getByTestId('card-autoswitch').uncheck()
   await modal.locator('input.form-input').first().fill('Autoswitch off card')
-  await modal.getByRole('button', { name: 'Create Card' }).click()
+  await modal.getByTestId('card-form-add-backlog').click()
   await expect(modal).toBeHidden({ timeout: 10_000 })
 
   const listRes = await request.get(`/api/projects/${project.id}/cards`, { headers: auth })

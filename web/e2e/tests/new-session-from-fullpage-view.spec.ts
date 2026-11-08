@@ -51,7 +51,7 @@ async function loadAt(page: Page, token: string, route: string) {
  *  provider, from whatever view is currently open. */
 async function createSessionViaModal(page: Page, name: string) {
   await page.locator('.tab-new').click()
-  await expect(page.getByTestId('new-session-preset')).toBeVisible()
+  await expect(page.locator('#new-session-name')).toBeVisible()
   await page.locator('#new-session-name').fill(name)
   await page.getByTestId('new-session-model').click()
   await page.getByTestId('new-session-model-search').fill('happy')

@@ -59,7 +59,7 @@ test('a dead default model warns in New Session and creates without a pin', asyn
     await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
 
     await page.locator('.tab-new').click()
-    await expect(page.getByTestId('new-session-preset')).toBeVisible()
+    await expect(page.locator('#new-session-name')).toBeVisible()
 
     // The dead default must not preselect; the form warns and shows an
     // empty picker instead of the raw dead id.

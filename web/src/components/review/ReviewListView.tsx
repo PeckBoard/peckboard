@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import ConfirmDialog from '../ConfirmDialog'
+import EmptyState from '../EmptyState'
 import List from '../List'
 import ListViewHeader from '../ListViewHeader'
 import type { MenuItem } from '../Dropdown'
@@ -177,13 +178,15 @@ export default function ReviewListView() {
             </>
           )}
           emptyState={
-            <div className="list-view-empty">
-              <ReviewEmptyArt />
-              <p>No documents under review yet</p>
-              <button className="list-view-empty-action" onClick={() => setShowWizard(true)}>
-                Review a document
-              </button>
-            </div>
+            <EmptyState
+              testId="review-empty"
+              title="No documents under review yet"
+              body="Go through a document, such as a plan or a spec, with an AI reviewer that comments on it and suggests changes."
+              actionLabel="Review a document"
+              onAction={() => setShowWizard(true)}
+              docs="/features.html"
+              art={<ReviewEmptyArt />}
+            />
           }
         />
       )}

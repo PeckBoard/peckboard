@@ -64,7 +64,7 @@ test('New Session → + New Folder creates a missing dir, selects it, and the se
 
   await page.locator('.tab-new').click()
   const sessionModal = page.locator('.modal', { hasText: 'New Session' })
-  await expect(page.getByTestId('new-session-preset')).toBeVisible()
+  await expect(page.locator('#new-session-name')).toBeVisible()
   const sessionName = `new-folder-session-${Date.now()}`
   await page.locator('#new-session-name').fill(sessionName)
 
