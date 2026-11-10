@@ -46,6 +46,10 @@ pub struct CliProvider {
     pub install_script: &'static str,
     /// Shown for the user to run by hand on Windows, where there is no `bash`.
     pub windows_install: &'static str,
+    /// Dirs under `$HOME` the installer writes into. The server creates them
+    /// before the run: `$HOME` holds the data dir, so the sandbox makes it
+    /// list-only and a sandboxed installer can't create new entries in it.
+    pub home_dirs: &'static [&'static str],
     pub sign_in: SignIn,
 }
 
@@ -56,6 +60,7 @@ pub const CLI_PROVIDERS: &[CliProvider] = &[
         binary: "claude",
         install_script: "curl -fsSL https://claude.ai/install.sh | bash",
         windows_install: "irm https://claude.ai/install.ps1 | iex",
+        home_dirs: &[".claude", ".local/bin", ".local/share"],
         sign_in: SignIn::Claude,
     },
     CliProvider {
@@ -64,6 +69,7 @@ pub const CLI_PROVIDERS: &[CliProvider] = &[
         binary: "codex",
         install_script: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
         windows_install: "npm install -g @openai/codex",
+        home_dirs: &[".codex", ".local/bin"],
         sign_in: SignIn::DeviceAccount,
     },
     CliProvider {
@@ -72,6 +78,7 @@ pub const CLI_PROVIDERS: &[CliProvider] = &[
         binary: "cursor-agent",
         install_script: "curl -fsS https://cursor.com/install | bash",
         windows_install: "irm 'https://cursor.com/install?win32=true' | iex",
+        home_dirs: &[".cursor", ".local/bin", ".local/share"],
         sign_in: SignIn::HostCursor,
     },
     CliProvider {
@@ -80,6 +87,7 @@ pub const CLI_PROVIDERS: &[CliProvider] = &[
         binary: "grok",
         install_script: "curl -fsSL https://x.ai/cli/install.sh | bash",
         windows_install: "irm https://x.ai/cli/install.ps1 | iex",
+        home_dirs: &[".grok", ".local/bin"],
         sign_in: SignIn::DeviceAccount,
     },
     CliProvider {
@@ -88,6 +96,7 @@ pub const CLI_PROVIDERS: &[CliProvider] = &[
         binary: "kimi",
         install_script: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
         windows_install: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
+        home_dirs: &[".kimi-code", ".kimi", ".local/bin"],
         sign_in: SignIn::DeviceAccount,
     },
 ];
@@ -172,8 +181,17 @@ fn finish(id: &str, result: Result<(), String>) {
 /// means the script exited 0 AND `binary_present` now holds: installers can
 /// exit 0 without producing anything usable, and a login that then can't find
 /// the CLI would be a much more confusing failure. Returns whether it worked.
-pub async fn run(id: &str, script: &str, binary_present: impl Fn() -> bool) -> bool {
-    let result = execute(id, script).await.and_then(|()| {
+pub async fn run(
+    id: &str,
+    script: &str,
+    home_dirs: &[&str],
+    binary_present: impl Fn() -> bool,
+) -> bool {
+    let result = match prepare_home(home_dirs) {
+        Ok(()) => execute(id, script).await,
+        Err(e) => Err(e),
+    };
+    let result = result.and_then(|()| {
         if binary_present() {
             Ok(())
         } else {
@@ -185,15 +203,33 @@ pub async fn run(id: &str, script: &str, binary_present: impl Fn() -> bool) -> b
     ok
 }
 
+/// Create the installer's dirs under `$HOME`, outside the sandbox. They must
+/// exist before the spawn: the sandbox grants writes only to entries of
+/// `$HOME` that already exist.
+fn prepare_home(dirs: &[&str]) -> Result<(), String> {
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        return Ok(());
+    };
+    let home = std::path::PathBuf::from(home);
+    for d in dirs {
+        let path = home.join(d);
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("Could not create {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 async fn execute(id: &str, script: &str) -> Result<(), String> {
     // `pipefail` is what makes a failed download an error: without it,
     // `curl … | bash` reports the status of the empty `bash`, which is 0.
     let wrapped = format!("exec 2>&1\nset -o pipefail\n{script}");
 
-    // Sandboxed so the data dir stays out of reach, with all of `$HOME`
-    // writable because vendors choose their own install locations there.
+    // Sandboxed so the data dir stays out of reach. `$HOME` is passed as
+    // writable, but because it contains the data dir the sandbox only opens
+    // its existing entries, so `prepare_home` creates the vendor dirs first.
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
     let mut scope = crate::sandbox::SpawnScope::none();
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = &home {
         scope = scope.rw(home);
     }
     let mut cmd = crate::sandbox::SandboxedTokioCommand::new("bash", &scope);
@@ -204,6 +240,28 @@ async fn execute(id: &str, script: &str) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    // Keep the installers out of the user's shell startup files. Peckboard
+    // finds each CLI in its install dir without them, and the sandbox can't
+    // create a missing `~/.bashrc` anyway, which failed the whole install.
+    // Each vendor skips its PATH edit on a different signal: Codex when
+    // `~/.local/bin` is already on PATH, Grok when `$SHELL` isn't bash, zsh
+    // or fish, Kimi on `KIMI_NO_MODIFY_PATH`. (Unsetting `SHELL` is not
+    // enough: bash refills it from the passwd entry.) `~/.grok/bin` on PATH
+    // also stops Grok from symlinking `agent` over the Cursor CLI's.
+    cmd.env("SHELL", "/bin/sh")
+        .env("KIMI_NO_MODIFY_PATH", "1")
+        .env("CODEX_NON_INTERACTIVE", "1");
+    if let Some(home) = &home {
+        let home = std::path::Path::new(home);
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = [".local/bin", ".grok/bin", ".kimi-code/bin"]
+            .iter()
+            .map(|d| home.join(d))
+            .chain(std::env::split_paths(&path));
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            cmd.env("PATH", joined);
+        }
+    }
 
     let mut child = cmd
         .spawn()
@@ -246,7 +304,7 @@ mod tests {
         let id = "test-pipefail";
         assert!(try_begin(id));
         // Without pipefail this pipeline exits 0, the status of `cat`.
-        let ok = run(id, "echo fetching; false | cat", || true).await;
+        let ok = run(id, "echo fetching; false | cat", &[], || true).await;
         assert!(!ok);
         let job = job_snapshot(id).unwrap();
         assert!(!job.running);
@@ -258,7 +316,7 @@ mod tests {
     async fn success_needs_the_binary_as_well_as_exit_zero() {
         let id = "test-binary";
         assert!(try_begin(id));
-        assert!(!run(id, "true", || false).await);
+        assert!(!run(id, "true", &[], || false).await);
         assert!(
             job_snapshot(id)
                 .unwrap()
@@ -268,7 +326,7 @@ mod tests {
         );
 
         assert!(try_begin(id));
-        assert!(run(id, "echo done >&2", || true).await);
+        assert!(run(id, "echo done >&2", &[], || true).await);
         let job = job_snapshot(id).unwrap();
         assert_eq!(job.succeeded, Some(true));
         // stderr is captured too, and a retry starts from a clean log.

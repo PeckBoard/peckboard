@@ -324,12 +324,18 @@ async fn start_install(
     let task_state = state.clone();
     tokio::spawn(async move {
         let cli_path = configured_cli_path(&task_state, provider.id, provider.binary).await;
-        let ok = cli_install::run(provider.id, provider.install_script, || {
+        let check = || {
             // Re-resolved on each check: a bare name has to be looked up again
             // now that the installer has run.
             command_check::check_command(&cli_path).found
                 || command_check::check_command(provider.binary).found
-        })
+        };
+        let ok = cli_install::run(
+            provider.id,
+            provider.install_script,
+            provider.home_dirs,
+            check,
+        )
         .await;
         if ok {
             super::plugins::activate_crate_plugin(&task_state, provider.id).await;
