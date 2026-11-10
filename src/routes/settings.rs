@@ -180,6 +180,7 @@ fn admin_router() -> Router<Arc<AppState>> {
             get(get_provider_tiers).put(set_provider_tiers),
         )
         .route("/api/settings/setup/complete", post(complete_setup))
+        .route("/api/settings/setup/progress", put(set_setup_progress))
         // Loosening the agent sandbox is a host-wide security change.
         .route(
             "/api/settings/agent-sandbox/config",
@@ -504,49 +505,131 @@ pub(crate) async fn set_default_model_value(
     }
 }
 
-/// Whether first-run setup is complete. Missing/unparsable key ⇒ `true`
-/// (fail safe — never trap an existing install behind a wizard).
-async fn setup_completed(db: &Db) -> bool {
+/// The stored first-run setup state. Every field is optional on disk, so
+/// older blobs (`{"completed": false}`) keep parsing; a missing key or an
+/// unparsable blob reads as completed (fail safe — never trap an existing
+/// install behind a wizard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SetupState {
+    #[serde(default = "default_true")]
+    completed: bool,
+    /// The bootstrap admin replaced the temporary password (wizard step 1).
+    #[serde(default)]
+    password_changed: bool,
+    /// Furthest wizard step reached (0-based), so a reload resumes there even
+    /// for steps that can be skipped without being done.
+    #[serde(default)]
+    step: u8,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for SetupState {
+    fn default() -> Self {
+        Self {
+            completed: true,
+            password_changed: false,
+            step: 0,
+        }
+    }
+}
+
+/// Highest step index the wizard has (Welcome, Connect, Folder, Ready).
+const SETUP_LAST_STEP: u8 = 3;
+
+async fn read_setup_state(db: &Db) -> SetupState {
     let db = db.clone();
     let raw = tokio::task::spawn_blocking(move || {
         db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY)
     })
     .await;
     match raw {
-        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
-            .and_then(|v| v.get("completed").and_then(|c| c.as_bool()))
-            .unwrap_or(true),
-        _ => true,
+        Ok(Ok(Some(json))) => serde_json::from_str(&json).unwrap_or_default(),
+        _ => SetupState::default(),
     }
 }
 
-/// GET /api/settings/setup → `{"completed": bool}`. Any authenticated user
-/// may read it — the UI needs it to decide whether to render the wizard.
+async fn write_setup_state(db: &Db, value: SetupState) -> Result<(), String> {
+    let db = db.clone();
+    let json = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+    match tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY, &json)
+    })
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn setup_write_error(e: String) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": e })),
+    )
+}
+
+/// Whether first-run setup is complete.
+async fn setup_completed(db: &Db) -> bool {
+    read_setup_state(db).await.completed
+}
+
+/// GET /api/settings/setup → `{"completed", "password_changed", "step"}`.
+/// Any authenticated user may read it — the UI needs it to decide whether
+/// to render the wizard, and where to resume it.
 async fn get_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let completed = setup_completed(&state.db).await;
-    Json(serde_json::json!({ "completed": completed }))
+    Json(read_setup_state(&state.db).await)
 }
 
 /// POST /api/settings/setup/complete → 204. Marks first-run setup done;
 /// only an admin (the one running the wizard) may finish it.
 async fn complete_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let db = state.db.clone();
-    let value = serde_json::json!({ "completed": true }).to_string();
-    let res = tokio::task::spawn_blocking(move || {
-        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY, &value)
-    })
-    .await;
-    match res {
-        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
-        Ok(Err(e)) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )),
+    let mut value = read_setup_state(&state.db).await;
+    value.completed = true;
+    write_setup_state(&state.db, value)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(setup_write_error)
+}
+
+#[derive(serde::Deserialize)]
+struct SetupProgressBody {
+    step: u8,
+}
+
+/// PUT /api/settings/setup/progress `{step}` → 204. Records the furthest
+/// wizard step reached. Only ever moves forward, so a stale tab or a Back
+/// click can't rewind where the wizard resumes.
+async fn set_setup_progress(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetupProgressBody>,
+) -> impl IntoResponse {
+    let mut value = read_setup_state(&state.db).await;
+    let step = body.step.min(SETUP_LAST_STEP);
+    if value.completed || step <= value.step {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    value.step = step;
+    write_setup_state(&state.db, value)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(setup_write_error)
+}
+
+/// Called after an admin changes their password: while first-run setup is
+/// still open, that finishes the wizard's mandatory first step, however it
+/// was done (the wizard or Settings).
+pub async fn note_admin_password_changed(db: &Db) {
+    let mut value = read_setup_state(db).await;
+    if value.completed || value.password_changed {
+        return;
+    }
+    value.password_changed = true;
+    if let Err(e) = write_setup_state(db, value).await {
+        tracing::warn!("Failed to record the setup password step: {e}");
     }
 }
 
@@ -2108,5 +2191,43 @@ mod tests {
             setup_completed(&state2.db).await,
             "an existing install must never see the wizard"
         );
+    }
+
+    /// The wizard resumes from stored progress: the step reached only moves
+    /// forward, and an admin's password change marks step 1 done — both
+    /// without disturbing `completed`.
+    #[tokio::test]
+    async fn setup_progress_moves_forward_and_records_the_password_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        ensure_setup_state(&state.db, true).await;
+
+        let (_, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(body["password_changed"], false);
+        assert_eq!(body["step"], 0);
+
+        note_admin_password_changed(&state.db).await;
+        let put = |step: u8| {
+            let (state, token) = (state.clone(), token.clone());
+            async move {
+                call(
+                    &state,
+                    &token,
+                    "PUT",
+                    "/api/settings/setup/progress",
+                    Some(serde_json::json!({ "step": step })),
+                )
+                .await
+            }
+        };
+        assert_eq!(put(2).await.0, StatusCode::NO_CONTENT);
+        // Going back never rewinds the resume point.
+        assert_eq!(put(1).await.0, StatusCode::NO_CONTENT);
+
+        let (_, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(body["completed"], false);
+        assert_eq!(body["password_changed"], true);
+        assert_eq!(body["step"], 2);
     }
 }

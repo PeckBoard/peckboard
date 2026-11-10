@@ -304,3 +304,69 @@ test.describe('first-run setup wizard', () => {
     await expect(page.getByTestId('setup-wizard')).toHaveCount(0)
   })
 })
+
+/**
+ * Resume: the wizard reads the stored progress (`password_changed`, the
+ * furthest `step`) and opens on the first step that is neither done nor
+ * already passed, instead of asking for the temporary password again.
+ * The server side (recording both) is covered in `routes/settings.rs`.
+ */
+test.describe('setup wizard resumes', () => {
+  async function openWithProgress(
+    page: Page,
+    request: APIRequestContext,
+    progress: { password_changed: boolean; step: number },
+  ) {
+    await page.route('**/api/settings/setup', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ completed: false, ...progress }),
+      }),
+    )
+    // No AI tool ready, whatever CLIs this host happens to have, so only the
+    // stored progress decides where the wizard opens.
+    await page.route('**/api/provider-setup', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ providers: [], other_providers: [] }),
+      }),
+    )
+    await loadAs(page, await loginToken(request, ADMIN_USER, ADMIN_PASS))
+    await expect(page.getByTestId('setup-wizard')).toBeVisible({ timeout: 10_000 })
+  }
+
+  test('a changed password skips step 1, and Next records the step reached', async ({
+    request,
+    page,
+  }) => {
+    await openWithProgress(page, request, { password_changed: true, step: 0 })
+
+    await expect(page.getByTestId('provider-setup')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('setup-pw-current')).toHaveCount(0)
+    await expect(page.getByTestId('setup-progress-step-2')).toHaveAttribute('aria-current', 'step')
+    await expect(page.getByTestId('setup-progress-step-1')).toContainText('✓')
+
+    // Back shows step 1 as done, with no password fields to fill again.
+    await page.getByTestId('setup-back').click()
+    await expect(page.getByTestId('setup-pw-done')).toBeVisible()
+    await page.getByTestId('setup-next').click()
+
+    const saved = page.waitForRequest(
+      (r) =>
+        r.url().endsWith('/api/settings/setup/progress') &&
+        r.method() === 'PUT' &&
+        r.postDataJSON()?.step === 2,
+    )
+    await page.getByTestId('setup-next').click()
+    expect((await saved).postDataJSON()).toEqual({ step: 2 })
+    await expect(page.getByRole('heading', { name: /Where files live/ })).toBeVisible()
+  })
+
+  test('a stored step reopens there, past steps that were skipped', async ({ request, page }) => {
+    await openWithProgress(page, request, { password_changed: true, step: 3 })
+    await expect(page.getByTestId('setup-final-chat')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('setup-progress-step-4')).toHaveAttribute('aria-current', 'step')
+  })
+})

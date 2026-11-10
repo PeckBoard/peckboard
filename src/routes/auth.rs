@@ -560,6 +560,11 @@ async fn change_password(
         }
     }
 
+    // The setup wizard's first step is "replace the temporary password";
+    // record it so a reload resumes past it instead of asking again.
+    if user.role == "admin" {
+        crate::routes::settings::note_admin_password_changed(&state.db).await;
+    }
     // Revoke all existing auth sessions for this user
     state
         .db

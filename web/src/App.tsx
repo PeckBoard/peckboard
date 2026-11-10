@@ -50,7 +50,7 @@ import { useGettingStartedStore } from './store/gettingStarted'
 import AgentsView from './components/AgentsView'
 import UsageDashboard from './components/UsageDashboard'
 import ChangePasswordModal from './components/ChangePasswordModal'
-import SetupWizard from './components/SetupWizard'
+import SetupWizard, { type SetupProgress } from './components/SetupWizard'
 import TabBar from './components/TabBar'
 import { useMediaQuery } from './hooks/useMediaQuery'
 import {
@@ -315,13 +315,24 @@ function App() {
   // flashes before the fetch resolves; only the wizard's explicit Finish
   // (POST /api/settings/setup/complete) flips it for good.
   const [setupCompleted, setSetupCompleted] = useState<boolean | null>(null)
+  // Where the wizard resumes: the password step's state and the furthest
+  // step reached, both stored server-side so a reload never starts over.
+  const [setupProgress, setSetupProgress] = useState<SetupProgress>({
+    passwordChanged: false,
+    step: 0,
+  })
   useEffect(() => {
     if (!authenticated || user?.role !== 'admin') return
     let cancelled = false
     authedFetch('/api/settings/setup')
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { completed?: boolean } | null) => {
-        if (!cancelled && typeof data?.completed === 'boolean') setSetupCompleted(data.completed)
+      .then((data: { completed?: boolean; password_changed?: boolean; step?: number } | null) => {
+        if (cancelled || typeof data?.completed !== 'boolean') return
+        setSetupProgress({
+          passwordChanged: data.password_changed === true,
+          step: typeof data.step === 'number' ? data.step : 0,
+        })
+        setSetupCompleted(data.completed)
       })
       .catch(() => {})
     return () => {
@@ -2524,6 +2535,7 @@ function App() {
       )}
       {setupCompleted === false && user?.role === 'admin' && (
         <SetupWizard
+          progress={setupProgress}
           onDone={(next) => {
             setSetupCompleted(true)
             // "Show me around" lands on Sessions, where the getting-started

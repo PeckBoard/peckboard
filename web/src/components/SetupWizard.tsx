@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import Modal from './Modal'
 import HelpTip from './HelpTip'
 import PathAutocomplete from './PathAutocomplete'
@@ -20,10 +20,20 @@ const DEFAULT_FOLDER_NAME = 'My work'
 /** Where to go once the wizard closes. */
 export type SetupNext = 'chat' | 'project' | 'tour'
 
+/** Stored wizard progress (`GET /api/settings/setup`). */
+export interface SetupProgress {
+  /** The temporary password was already replaced. */
+  passwordChanged: boolean
+  /** Furthest step reached (0-based). */
+  step: number
+}
+
 interface Props {
   /** Called after `POST /api/settings/setup/complete` succeeds, with the
    *  action the user picked on the last step (none for a plain Finish). */
   onDone: (next?: SetupNext) => void
+  /** Where to resume; read once when the wizard opens. */
+  progress: SetupProgress
 }
 
 /**
@@ -38,9 +48,33 @@ interface Props {
  * The modal is deliberately non-dismissible: steps 2–4 are one click to
  * pass, and only an explicit finish marks setup complete, so closing the
  * browser mid-wizard brings it back on the next login.
+ *
+ * It resumes rather than starting over: on open it skips every step that is
+ * already done (password replaced, an AI tool ready, a folder added) or was
+ * passed before (the server stores the furthest step reached), and lands on
+ * the first one left.
  */
-export default function SetupWizard({ onDone }: Props) {
+export default function SetupWizard({ onDone, progress }: Props) {
   const [step, setStep] = useState(0)
+  // False until the resume point is known, so step 1 never flashes first.
+  const [resumed, setResumed] = useState(false)
+  // Read once: the parent refetches after a password change, and the
+  // wizard must not jump around underneath the user when it does.
+  const initialProgress = useRef(progress)
+  const reached = useRef(progress.step)
+
+  /** Move forward, remembering the furthest step on the server. */
+  const goTo = (next: number) => {
+    setStep(next)
+    if (next <= reached.current) return
+    reached.current = next
+    // Best effort: a lost write just resumes one step earlier.
+    void authedFetch('/api/settings/setup/progress', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ step: next }),
+    }).catch(() => {})
+  }
 
   // ── Step 1: welcome + password (mandatory) ───────────────────────
   const changePassword = useAuthStore((s) => s.changePassword)
@@ -49,7 +83,7 @@ export default function SetupWizard({ onDone }: Props) {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [pwBusy, setPwBusy] = useState(false)
   const [pwError, setPwError] = useState('')
-  const [pwDone, setPwDone] = useState(false)
+  const [pwDone, setPwDone] = useState(progress.passwordChanged)
 
   const pwValid =
     newPassword.length >= MIN_PASSWORD_LEN &&
@@ -67,7 +101,7 @@ export default function SetupWizard({ onDone }: Props) {
       setCurrentPassword('')
       setNewPassword('')
       setConfirmPassword('')
-      setStep(1)
+      goTo(1)
     } catch (err) {
       setPwError(err instanceof Error ? err.message : 'Failed to change password')
     } finally {
@@ -95,7 +129,6 @@ export default function SetupWizard({ onDone }: Props) {
   const [createdFolder, setCreatedFolder] = useState<Folder | null>(null)
 
   useEffect(() => {
-    void fetchFolders()
     let cancelled = false
     authedFetch('/api/folders/home')
       .then((r) => (r.ok ? r.json() : null))
@@ -110,7 +143,33 @@ export default function SetupWizard({ onDone }: Props) {
     return () => {
       cancelled = true
     }
-  }, [fetchFolders])
+  }, [])
+
+  // Resume: load what decides "done" for each step, then open on the first
+  // step that is neither done nor already passed. The password step is
+  // mandatory, so only a recorded password change gets past it.
+  const loadProviders = useProviderSetupStore((s) => s.load)
+  useEffect(() => {
+    let cancelled = false
+    void Promise.allSettled([fetchFolders(), loadProviders()]).then(() => {
+      if (cancelled) return
+      const saved = initialProgress.current
+      const done = [
+        saved.passwordChanged,
+        useProviderSetupStore.getState().providers?.some(isProviderReady) ?? false,
+        useFoldersStore.getState().folders.length > 0,
+      ]
+      let first = 0
+      while (first < LAST_STEP && (first === 0 ? done[0] : done[first] || first < saved.step)) {
+        first++
+      }
+      setStep(first)
+      setResumed(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [fetchFolders, loadProviders])
 
   // A folder made here, or one that already exists on a re-run.
   const doneFolder = createdFolder ?? folders[0] ?? null
@@ -189,12 +248,25 @@ export default function SetupWizard({ onDone }: Props) {
     if (step === FOLDER_STEP && showCustom && customFilled) {
       if (!(await saveCustom())) return
     }
-    setStep(step + 1)
+    goTo(step + 1)
   }
 
   const nextDisabled =
     step === 0 ? pwBusy || (!pwDone && !pwValid) : step === LAST_STEP ? finishBusy : folderBusy
 
+  // Ticked in the progress bar even when ahead of the current step.
+  const stepDone = [pwDone, anyProviderReady, doneFolder !== null, false]
+
+  if (!resumed) {
+    return (
+      <Modal maxWidth={640} className="setup-wizard-modal" data-testid="setup-wizard">
+        <h2 className="setup-wizard-title">Welcome to PeckBoard 🐣</h2>
+        <p className="form-hint" role="status" data-testid="setup-loading">
+          Picking up where you left off…
+        </p>
+      </Modal>
+    )
+  }
   return (
     <Modal maxWidth={640} className="setup-wizard-modal" data-testid="setup-wizard">
       <h2 className="setup-wizard-title">Welcome to PeckBoard 🐣</h2>
@@ -203,12 +275,12 @@ export default function SetupWizard({ onDone }: Props) {
         {STEPS.map((label, i) => (
           <li
             key={label}
-            className={`setup-wizard-step ${i === step ? 'current' : ''} ${i < step ? 'done' : ''}`}
+            className={`setup-wizard-step ${i === step ? 'current' : ''} ${i !== step && (i < step || stepDone[i]) ? 'done' : ''}`}
             aria-current={i === step ? 'step' : undefined}
             data-testid={`setup-progress-step-${i + 1}`}
           >
             <span className="setup-wizard-step-dot" aria-hidden="true">
-              {i < step ? '✓' : i + 1}
+              {i !== step && (i < step || stepDone[i]) ? '✓' : i + 1}
             </span>
             <span className="setup-wizard-step-label">{label}</span>
           </li>
