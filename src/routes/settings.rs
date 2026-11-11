@@ -514,8 +514,10 @@ struct SetupState {
     #[serde(default = "default_true")]
     completed: bool,
     /// The bootstrap admin replaced the temporary password (wizard step 1).
+    /// `None` only in blobs written before 0.1.150 tracked it: those are
+    /// filled in from the admin row on first read (see `read_setup_state`).
     #[serde(default)]
-    password_changed: bool,
+    password_changed: Option<bool>,
     /// Furthest wizard step reached (0-based), so a reload resumes there even
     /// for steps that can be skipped without being done.
     #[serde(default)]
@@ -530,7 +532,7 @@ impl Default for SetupState {
     fn default() -> Self {
         Self {
             completed: true,
-            password_changed: false,
+            password_changed: Some(false),
             step: 0,
         }
     }
@@ -540,15 +542,31 @@ impl Default for SetupState {
 const SETUP_LAST_STEP: u8 = 3;
 
 async fn read_setup_state(db: &Db) -> SetupState {
-    let db = db.clone();
+    let read_db = db.clone();
     let raw = tokio::task::spawn_blocking(move || {
-        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY)
+        read_db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY)
     })
     .await;
-    match raw {
+    let mut value: SetupState = match raw {
         Ok(Ok(Some(json))) => serde_json::from_str(&json).unwrap_or_default(),
         _ => SetupState::default(),
+    };
+    if !value.completed && value.password_changed.is_none() {
+        // A pre-0.1.150 install that is mid-wizard: the password change was
+        // never recorded. The bootstrap admin row is written once with
+        // `updated_at == created_at`; a password change bumps `updated_at`.
+        let changed = match db.list_users().await {
+            Ok(users) => users
+                .iter()
+                .any(|u| u.role == "admin" && u.updated_at != u.created_at),
+            Err(_) => false,
+        };
+        value.password_changed = Some(changed);
+        if let Err(e) = write_setup_state(db, value).await {
+            tracing::warn!("Failed to record the inferred setup password step: {e}");
+        }
     }
+    value
 }
 
 async fn write_setup_state(db: &Db, value: SetupState) -> Result<(), String> {
@@ -581,7 +599,12 @@ async fn setup_completed(db: &Db) -> bool {
 /// Any authenticated user may read it — the UI needs it to decide whether
 /// to render the wizard, and where to resume it.
 async fn get_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(read_setup_state(&state.db).await)
+    let value = read_setup_state(&state.db).await;
+    Json(serde_json::json!({
+        "completed": value.completed,
+        "password_changed": value.password_changed.unwrap_or(false),
+        "step": value.step,
+    }))
 }
 
 /// POST /api/settings/setup/complete → 204. Marks first-run setup done;
@@ -624,10 +647,10 @@ async fn set_setup_progress(
 /// was done (the wizard or Settings).
 pub async fn note_admin_password_changed(db: &Db) {
     let mut value = read_setup_state(db).await;
-    if value.completed || value.password_changed {
+    if value.completed || value.password_changed == Some(true) {
         return;
     }
-    value.password_changed = true;
+    value.password_changed = Some(true);
     if let Err(e) = write_setup_state(db, value).await {
         tracing::warn!("Failed to record the setup password step: {e}");
     }
@@ -650,7 +673,8 @@ pub async fn ensure_setup_state(db: &Db, fresh_install: bool) {
         return;
     }
     let db = db.clone();
-    let value = serde_json::json!({ "completed": !fresh_install }).to_string();
+    let value =
+        serde_json::json!({ "completed": !fresh_install, "password_changed": false }).to_string();
     let res = tokio::task::spawn_blocking(move || {
         db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, SETUP_STATE_KEY, &value)
     })
@@ -2229,5 +2253,48 @@ mod tests {
         assert_eq!(body["completed"], false);
         assert_eq!(body["password_changed"], true);
         assert_eq!(body["step"], 2);
+    }
+
+    /// A pre-0.1.150 blob (`{"completed": false}`, no password flag) infers
+    /// the password step from the admin row: untouched reads as not done, a
+    /// bumped `updated_at` reads as done.
+    #[tokio::test]
+    async fn legacy_setup_blob_infers_the_password_step_from_the_admin_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token = seed_authenticated_user(&state, "admin").await;
+        let legacy = |db: Db| async move {
+            tokio::task::spawn_blocking(move || {
+                db.plugin_store_put_blocking(
+                    SETTINGS_NS,
+                    SETTINGS_COLLECTION,
+                    SETUP_STATE_KEY,
+                    r#"{"completed":false}"#,
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        };
+
+        legacy(state.db.clone()).await;
+        let (_, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(body["password_changed"], false);
+
+        legacy(state.db.clone()).await;
+        state
+            .db
+            .update_user(
+                "u1",
+                crate::db::models::UpdateUser {
+                    updated_at: Some("2099-01-01T00:00:00+00:00".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (_, body) = call(&state, &token, "GET", "/api/settings/setup", None).await;
+        assert_eq!(body["completed"], false);
+        assert_eq!(body["password_changed"], true);
     }
 }

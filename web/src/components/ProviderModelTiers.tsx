@@ -94,15 +94,6 @@ export default function ProviderModelTiers({ providerId, onSaved }: Props) {
   )
 
   const assigned = useMemo(() => new Set(data?.tiers.flatMap((t) => t.models)), [data])
-  // Each row offers only models no tier holds yet: a model can be in one tier.
-  const unassigned = useMemo(
-    () =>
-      (data?.catalog ?? [])
-        .filter((m) => !assigned.has(m.id))
-        .map((m) => ({ id: m.id, display_name: m.display_name })),
-    [data, assigned],
-  )
-
   if (loadFailed) {
     return (
       <div className="provider-model-tiers">
@@ -137,6 +128,12 @@ export default function ProviderModelTiers({ providerId, onSaved }: Props) {
   const nameOf = (id: string) => data.catalog.find((m) => m.id === id)?.display_name
   const withModels = (tier: number, models: string[]) =>
     data.tiers.map((row) => (row.tier === tier ? { ...row, models } : row))
+  // A model may serve several tiers, so each row offers every model it
+  // doesn't already hold.
+  const addable = (row: TierRow) =>
+    data.catalog
+      .filter((m) => !row.models.includes(m.id))
+      .map((m) => ({ id: m.id, display_name: m.display_name }))
   const move = (row: TierRow, index: number, by: number) => {
     const models = [...row.models]
     const [id] = models.splice(index, 1)
@@ -239,7 +236,7 @@ export default function ProviderModelTiers({ providerId, onSaved }: Props) {
                       value=""
                       valueLabel="Add model…"
                       onChange={(id) => void save(withModels(row.tier, [...row.models, id]))}
-                      models={unassigned}
+                      models={addable(row)}
                       ariaLabel={`Add a model to ${row.label}`}
                       disabled={busy}
                       emptyHint="No models left to add"

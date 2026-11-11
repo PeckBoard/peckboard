@@ -65,24 +65,21 @@ impl McpToolRegistry {
         } else if let Some(fp) = args.get("folder_path").and_then(|v| v.as_str()) {
             if fp == caller.path {
                 caller.id.clone()
+            } else if ctx.project_id.is_none() && ctx.is_voice().await {
+                // The global voice assistant may work in any folder, and
+                // registers one that isn't known yet (same refusal of
+                // unsafe paths as `POST /api/folders`).
+                let name = args.get("folder_name").and_then(|v| v.as_str());
+                let create = args
+                    .get("create_folder_if_missing")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                super::folders::register_folder(ctx, fp, name, create).await?
             } else {
-                // Only the global voice assistant may name another
-                // (existing) folder; `scope_folder_target` enforces that.
-                let other = ctx
-                    .db
-                    .list_folders()
-                    .await?
-                    .into_iter()
-                    .find(|f| f.path == fp)
-                    .map(|f| f.id);
-                match other {
-                    Some(id) if ctx.scope_folder_target(&id).await.is_ok() => id,
-                    _ => anyhow::bail!(
-                        "create_project is restricted to the caller's own folder \
-                         (path: {})",
-                        caller.path
-                    ),
-                }
+                anyhow::bail!(
+                    "create_project is restricted to the caller's own folder (path: {})",
+                    caller.path
+                );
             }
         } else {
             // Default to the caller's own folder rather than failing —

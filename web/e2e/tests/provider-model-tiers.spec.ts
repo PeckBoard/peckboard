@@ -104,11 +104,15 @@ test('assigning models to tiers changes the catalog, persists, and resets', asyn
   await expect(page.getByTestId(`provider-tiers-customized-${PROVIDER}`)).toBeVisible()
   await expect.poll(() => modelTier(request, token, MODEL_A)).toBe(4)
 
-  // An assigned model is no longer offered in any other tier.
-  await page.getByTestId(`provider-tier-add-${PROVIDER}-1`).click()
-  await expect(page.getByTestId(`provider-tier-add-${PROVIDER}-1-option-${MODEL_A}`)).toHaveCount(0)
-  await expect(page.getByTestId(`provider-tier-add-${PROVIDER}-1-option-${MODEL_B}`)).toBeVisible()
+  // The same model can also serve another tier; its catalog tier stays the highest.
+  await page.getByTestId(`provider-tier-add-${PROVIDER}-4`).click()
+  await expect(page.getByTestId(`provider-tier-add-${PROVIDER}-4-option-${MODEL_A}`)).toHaveCount(0)
   await page.keyboard.press('Escape')
+  await assign(page, 1, MODEL_A)
+  await expect(
+    page.getByTestId(`provider-tier-${PROVIDER}-4`).getByTestId(`provider-tier-chip-${MODEL_A}`),
+  ).toBeVisible()
+  await expect.poll(() => modelTier(request, token, MODEL_A)).toBe(4)
 
   // Several models in one tier keep the order the user sets.
   await assign(page, 4, MODEL_B)
@@ -138,19 +142,14 @@ test('assigning models to tiers changes the catalog, persists, and resets', asyn
   await expect.poll(() => modelTier(request, token, MODEL_A)).toBe(0)
 })
 
-test('the tiers API refuses a model in two tiers and keeps the saved state', async ({
+test('the tiers API refuses a model twice in one tier and keeps the saved state', async ({
   request,
 }) => {
   const token = await authenticate(request)
   const headers = { Authorization: `Bearer ${token}` }
   const res = await request.put(`/api/settings/provider-tiers/${PROVIDER}`, {
     headers,
-    data: {
-      tiers: [
-        { tier: 1, models: [MODEL_A] },
-        { tier: 2, models: [MODEL_A] },
-      ],
-    },
+    data: { tiers: [{ tier: 1, models: [MODEL_A, MODEL_A] }] },
   })
   expect(res.status()).toBe(400)
   expect(((await res.json()) as { error: string }).error).toContain('more than once')

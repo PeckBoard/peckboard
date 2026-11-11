@@ -31,8 +31,9 @@ static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// One provider's tier assignments.
 ///
 /// Proof token: bearer holds known tier levels, normalised base model ids,
-/// and no model in two tiers — otherwise a model's tier would depend on
-/// lookup order. [`TierAssignments::new`] is the only way to build a
+/// and no model twice within one tier. A model may sit in several tiers
+/// (Auto picks per tier); its catalog tier is then the highest of them.
+/// [`TierAssignments::new`] is the only way to build a
 /// non-empty one; see `routes::settings::set_provider_tiers` for an example.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TierAssignments {
@@ -43,12 +44,12 @@ impl TierAssignments {
     /// Validate raw assignments. Errors are user-readable (the settings
     /// route returns them as a 400). Tiers with no models are dropped.
     pub fn new(raw: BTreeMap<i32, Vec<String>>) -> Result<Self, String> {
-        let mut seen = HashSet::new();
         let mut tiers = BTreeMap::new();
         for (tier, models) in raw {
             if !TIER_LEVELS.iter().any(|(level, _)| *level == tier) {
                 return Err(format!("unknown tier {tier}"));
             }
+            let mut seen = HashSet::new();
             let mut bases = Vec::with_capacity(models.len());
             for model in &models {
                 let base = split_model_account(model.trim()).0.trim();
@@ -56,7 +57,7 @@ impl TierAssignments {
                     return Err("model id cannot be empty".to_string());
                 }
                 if !seen.insert(base.to_string()) {
-                    return Err(format!("{base} is assigned more than once"));
+                    return Err(format!("{base} is in this tier more than once"));
                 }
                 bases.push(base.to_string());
             }
@@ -82,11 +83,15 @@ impl TierAssignments {
         if self.is_empty() {
             return;
         }
-        let tier_by_base: HashMap<&str, i32> = self
-            .tiers
-            .iter()
-            .flat_map(|(tier, bases)| bases.iter().map(move |b| (b.as_str(), *tier)))
-            .collect();
+        // A model in several tiers takes the highest one in the catalog, so
+        // cost guidance never treats it as cheaper than its priciest role.
+        let mut tier_by_base: HashMap<&str, i32> = HashMap::new();
+        for (tier, bases) in &self.tiers {
+            for base in bases {
+                let entry = tier_by_base.entry(base.as_str()).or_insert(*tier);
+                *entry = (*entry).max(*tier);
+            }
+        }
         for model in models {
             if let Some(tier) = tier_by_base.get(split_model_account(&model.id).0) {
                 model.tier = *tier;
@@ -204,17 +209,19 @@ mod tests {
         let raw = |t: i32, ms: &[&str]| {
             BTreeMap::from([(t, ms.iter().map(|m| m.to_string()).collect::<Vec<_>>())])
         };
-        assert!(TierAssignments::new(raw(9, &["a"])).is_err());
-        assert!(TierAssignments::new(raw(1, &["  "])).is_err());
-        // The same model twice is a duplicate even across accounts or tiers.
+        // The same model twice in one tier is a duplicate, even across accounts.
         assert!(TierAssignments::new(raw(1, &["a@x", "a@y"])).is_err());
-        assert!(
-            TierAssignments::new(BTreeMap::from([
-                (1, vec!["a".to_string()]),
-                (2, vec!["a".to_string()]),
-            ]))
-            .is_err()
-        );
+        // One model may serve several tiers; its catalog tier is the highest.
+        let multi = TierAssignments::new(BTreeMap::from([
+            (1, vec!["a".to_string()]),
+            (3, vec!["a".to_string()]),
+        ]))
+        .unwrap();
+        assert_eq!(multi.models_in(1), ["a".to_string()]);
+        assert_eq!(multi.models_in(3), ["a".to_string()]);
+        let mut models = vec![model("a@x", 0)];
+        multi.apply(&mut models);
+        assert_eq!(models[0].tier, 3);
         let ok = TierAssignments::new(raw(2, &["a@acct"])).unwrap();
         assert_eq!(ok.models_in(2), ["a".to_string()]);
         assert!(TierAssignments::new(raw(1, &[])).unwrap().is_empty());

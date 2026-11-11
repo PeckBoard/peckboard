@@ -879,7 +879,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "list_folders".into(),
-                description: "List all folders (working directories) available for projects.".into(),
+                description: "List folders (working directories) available for projects: every folder for the voice assistant, your own folder otherwise.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {},
@@ -888,7 +888,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "create_folder".into(),
-                description: "Register a folder (working directory) for projects. create_if_missing=true also creates the directory on disk.".into(),
+                description: "Register a folder (working directory) for projects. The voice assistant may register any path; other sessions only get their own folder back. create_if_missing=true also creates the directory on disk.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

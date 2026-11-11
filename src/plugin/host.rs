@@ -1098,14 +1098,19 @@ struct CreateSessionRequest {
     /// the server-side twin of the core UI's install-folder flow
     /// (`web/src/utils/installSession.ts`). A leading `~/` expands to the
     /// server user's home directory. Honored only when the caller holds
-    /// full user authority (an authenticated plugin-UI request); a plugin
-    /// MCP tool call stays pinned to its caller's folder (DESIGN §7.4).
+    /// full user authority (an authenticated plugin-UI request) or is the
+    /// global voice assistant; any other plugin MCP tool call stays pinned
+    /// to its caller's folder (DESIGN §7.4).
     #[serde(default)]
     folder_path: Option<String>,
     /// Display name used if `folder_path` has to register the folder;
     /// defaults to the path's last segment.
     #[serde(default)]
     folder_name: Option<String>,
+    /// Land the session in this existing folder. Same authority rule as
+    /// `folder_path`; `folder_path` wins when both are given.
+    #[serde(default)]
+    folder_id: Option<String>,
 }
 #[derive(Deserialize)]
 struct GetSessionRequest {
@@ -1209,9 +1214,15 @@ fn resolve_home() -> Option<std::path::PathBuf> {
 
 /// Find-or-register the folder row for `folder_path`: the server-side twin
 /// of the core UI's install-folder flow (`startInstallSession`). Applies the
-/// same unsafe-path refusal as `POST /api/folders`, creates the directory,
-/// and reuses any folder already registered at the exact expanded path.
-fn folder_id_for_path(db: &Db, raw: &str, name: Option<&str>) -> Result<String, String> {
+/// same unsafe-path refusal as `POST /api/folders`, creates the directory
+/// when `create_dir` (else a missing directory is an error), and reuses any
+/// folder already registered at the exact expanded path.
+pub(crate) fn folder_id_for_path(
+    db: &Db,
+    raw: &str,
+    name: Option<&str>,
+    create_dir: bool,
+) -> Result<String, String> {
     let path = expand_home_path(raw, resolve_home())?;
     // An in-memory DB (tests) has no data dir; the system-path refusals
     // still apply via a placeholder no real path can live under.
@@ -1219,12 +1230,19 @@ fn folder_id_for_path(db: &Db, raw: &str, name: Option<&str>) -> Result<String, 
         .data_dir()
         .unwrap_or_else(|| std::path::Path::new("/nonexistent-peckboard-data-dir"));
     crate::routes::folders::reject_unsafe_path(&path, data_dir)?;
-    std::fs::create_dir_all(&path).map_err(|e| {
-        format!(
-            "failed to create the folder directory {}: {e}",
+    if create_dir {
+        std::fs::create_dir_all(&path).map_err(|e| {
+            format!(
+                "failed to create the folder directory {}: {e}",
+                path.display()
+            )
+        })?;
+    } else if !path.is_dir() {
+        return Err(format!(
+            "path does not exist: {}. Set create_if_missing: true to create it.",
             path.display()
-        )
-    })?;
+        ));
+    }
     let path_str = path.to_string_lossy().to_string();
     if let Some(existing) = db
         .find_folder_by_path_blocking(&path_str)
@@ -1252,6 +1270,20 @@ fn folder_id_for_path(db: &Db, raw: &str, name: Option<&str>) -> Result<String, 
         .map_err(|e| e.to_string())?;
     Ok(folder.id)
 }
+
+/// Whether a tool call comes from the global voice assistant (unscoped,
+/// admin-only). It is exempt from the folder boundary, like
+/// `ToolCallContext::is_voice` on the core MCP side.
+fn caller_is_voice_blocking(db: &Db, inv: &InvocationContext) -> bool {
+    inv.project_id.is_none()
+        && inv
+            .session_id
+            .as_deref()
+            .and_then(|id| db.get_session_blocking(id).ok().flatten())
+            .is_some_and(|s| {
+                s.expert_kind.as_deref() == Some(crate::service::voice_relay::VOICE_EXPERT_KIND)
+            })
+}
 /// `peckboard_create_session` — create a generic session in the *caller's*
 /// folder and project. Expert *knowledge* state is the plugin's own metadata
 /// (`peckboard_session_meta_set`); the optional `is_expert`/`expert_kind`
@@ -1277,19 +1309,40 @@ pub(crate) fn create_session_impl(db: &Db, input: &str, caller: &TrustedCaller) 
         .filter(|p| !p.is_empty())
     {
         Some(path) => {
-            if !inv.authority {
+            if !inv.authority && !caller_is_voice_blocking(db, inv) {
                 return error_json(
                     "folder_path requires an authenticated user request; a tool invocation creates sessions in its caller's folder",
                 );
             }
-            match folder_id_for_path(db, path, req.folder_name.as_deref()) {
+            match folder_id_for_path(db, path, req.folder_name.as_deref(), true) {
                 Ok(id) => id,
                 Err(e) => return error_json(e),
             }
         }
-        None => match inv.folder_id.clone() {
-            Some(id) => id,
-            None => return error_json("caller has no folder scope; cannot create a session"),
+        None => match req
+            .folder_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+        {
+            Some(fid) if Some(fid) != inv.folder_id.as_deref() => {
+                if !inv.authority && !caller_is_voice_blocking(db, inv) {
+                    return error_json(
+                        "folder_id requires an authenticated user request; a tool invocation creates sessions in its caller's folder",
+                    );
+                }
+                match db.get_folder_blocking(fid) {
+                    Ok(Some(f)) => f.id,
+                    Ok(None) => return error_json(format!("folder not found: {fid}")),
+                    Err(e) => return error_json(e.to_string()),
+                }
+            }
+            _ => match inv.folder_id.clone() {
+                Some(id) => id,
+                None => {
+                    return error_json("caller has no folder scope; cannot create a session");
+                }
+            },
         },
     };
     if let Some(id) = req.id.as_deref()
@@ -5695,6 +5748,59 @@ mod tests {
             &caller,
         );
         assert!(bad.contains("absolute"), "{bad}");
+
+        // The global voice assistant's tool call may pick any folder too.
+        let now = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f-voice".into(),
+            name: "Voice".into(),
+            path: tmp.path().join("voice").to_string_lossy().into(),
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+        db.create_session(crate::db::models::NewSession {
+            id: "voice-1".into(),
+            name: "Assistant".into(),
+            folder_id: "f-voice".into(),
+            is_expert: true,
+            expert_kind: Some("voice".into()),
+            created_at: now.clone(),
+            last_activity: now,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let voice = TrustedCaller(InvocationContext {
+            session_id: Some("voice-1".into()),
+            ..inv(None, Some("f-voice"))
+        });
+        let pcb = tmp.path().join("preflight-pcb");
+        let out3 = create_session_impl(
+            &db,
+            &serde_json::json!({ "name": "PCB", "folder_path": pcb.to_string_lossy() }).to_string(),
+            &voice,
+        );
+        let v3: serde_json::Value = serde_json::from_str(&out3).unwrap();
+        let sid3 = v3["session"]["id"]
+            .as_str()
+            .expect("voice may pick a folder");
+        let s3 = db.get_session(sid3).await.unwrap().unwrap();
+        let f3 = db.get_folder(&s3.folder_id).await.unwrap().unwrap();
+        assert_eq!(f3.path, pcb.to_string_lossy());
+
+        // ...or an existing folder by id; a plain tool caller may not.
+        let by_id =
+            serde_json::json!({ "name": "Install", "folder_id": session.folder_id }).to_string();
+        let out4 = create_session_impl(&db, &by_id, &voice);
+        let v4: serde_json::Value = serde_json::from_str(&out4).unwrap();
+        let sid4 = v4["session"]["id"]
+            .as_str()
+            .expect("voice may pick a folder id");
+        let s4 = db.get_session(sid4).await.unwrap().unwrap();
+        assert_eq!(s4.folder_id, session.folder_id);
+        let refused = create_session_impl(&db, &by_id, &TrustedCaller(inv(None, Some("f-voice"))));
+        assert!(refused.contains("authenticated user request"), "{refused}");
     }
 
     fn inv(project: Option<&str>, folder: Option<&str>) -> InvocationContext {
