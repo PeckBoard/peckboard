@@ -109,6 +109,11 @@ impl ToolGate {
         if self.pre_hatcher {
             return pre_hatcher_allowed_tool_names().contains(&name);
         }
+        // The voice assistant asks out loud; an on-screen dialog would send
+        // a user who is talking to it off to the text chat.
+        if name == "ask_user" && self.voice {
+            return false;
+        }
         if matches!(name, "get_model_guidance" | "switch_session_model") {
             return self.autoswitch_on;
         }
@@ -170,6 +175,9 @@ impl ToolGate {
             ));
         }
 
+        if name == "ask_user" && self.voice {
+            return Some("tool 'ask_user' is blocked for the voice assistant: the user is talking to you by voice. Ask the question out loud in your spoken reply and wait for the spoken answer.".to_string());
+        }
         if name == "show_view" && !self.voice {
             return Some("tool 'show_view' is blocked: only the voice assistant session drives the user's screen.".to_string());
         }
@@ -439,6 +447,7 @@ mod tests {
             "interrupt_session",
             "clear_session",
             "terminate_agent",
+            "set_session_model",
         ];
         fn tool_names(text: &str) -> Vec<&str> {
             text.split(|c: char| !(c.is_ascii_lowercase() || c == '_'))
@@ -524,5 +533,17 @@ mod tests {
         }
         let chat = ToolGate::from_session(&session(false, None, None));
         assert!(chat.blocked("spawn_subagent").is_none());
+    }
+
+    /// The voice assistant asks out loud: it never sees or runs the
+    /// on-screen `ask_user` dialog, while chat sessions keep it.
+    #[test]
+    fn voice_assistant_has_no_on_screen_ask_user() {
+        let voice = ToolGate::from_session(&session(false, Some("voice"), None));
+        assert!(!voice.advertised("ask_user"));
+        assert!(voice.blocked("ask_user").unwrap().contains("out loud"));
+        let chat = ToolGate::from_session(&session(false, None, None));
+        assert!(chat.advertised("ask_user"));
+        assert!(chat.blocked("ask_user").is_none());
     }
 }

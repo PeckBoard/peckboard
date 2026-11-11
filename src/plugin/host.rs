@@ -2216,6 +2216,101 @@ pub(crate) fn clear_session_impl(
     })
 }
 
+#[derive(Deserialize)]
+struct SetSessionModelRequest {
+    session_id: String,
+    model: String,
+}
+
+/// `peckboard_set_session_model` — switch an existing session to another
+/// model, effective from its next turn (a running turn finishes on the old
+/// one). Same authorization as the other control calls: same folder free,
+/// cross-folder needs an Always / Once grant (`session_control_auth`).
+///
+/// Only a plain switch — same provider and account, or a session with no
+/// conversation yet — where `--resume` carries the context. Crossing a
+/// provider / account boundary needs the handover the session's Model menu
+/// runs (`PATCH /api/sessions/:id`), so it is refused here rather than
+/// silently starting the session cold.
+pub(crate) fn set_session_model_impl(
+    db: &Db,
+    plugin_id: &str,
+    inv: &InvocationContext,
+    input: &str,
+    live: Option<Arc<dyn LiveHost>>,
+) -> String {
+    let req: SetSessionModelRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return error_json(format!("invalid request: {e}")),
+    };
+    let model = req.model.trim().to_string();
+    if model.is_empty() {
+        return error_json("model is required");
+    }
+    if let Err(e) = crate::provider::registry::check_model(Some(&model)) {
+        return error_json(e);
+    }
+    let target = match require_session(db, &req.session_id) {
+        Ok(s) => s,
+        Err(e) => return error_json(e),
+    };
+    if let Err(e) = crate::plugin::session_control_auth::authorize(db, plugin_id, inv, &target) {
+        return error_json(e);
+    }
+    if target.sealed_at.is_some() {
+        return error_json("that session is sealed and runs no agent again");
+    }
+    if target.handover_to_model.is_some() {
+        return error_json(
+            "that session is in the middle of a model handover; try again when it finishes",
+        );
+    }
+    let app_default = db
+        .plugin_store_get_blocking(
+            crate::routes::settings::SETTINGS_NS,
+            crate::routes::settings::SETTINGS_COLLECTION,
+            crate::routes::settings::DEFAULT_MODEL_KEY,
+        )
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
+        .filter(|m| !crate::provider::is_auto_model(m));
+    let current = target
+        .model
+        .clone()
+        .or(app_default)
+        .unwrap_or_else(|| "default".to_string());
+    if target.conversation_id.is_some() && crate::handover::needs_handover(&current, &model) {
+        return error_json(format!(
+            "switching from {current} to {model} crosses a provider or account, which needs a \
+             context handover; switch it from that session's Model menu instead"
+        ));
+    }
+    let update = crate::db::models::UpdateSession {
+        model: Some(Some(model.clone())),
+        ..Default::default()
+    };
+    match db.update_session_blocking(&target.id, update) {
+        Ok(Some(_)) => {}
+        Ok(None) => return error_json("session not found"),
+        Err(e) => return error_json(e),
+    }
+    // The live child was spawned with the old --model: recycle it once its
+    // current turn ends so the next turn runs on the new one.
+    if let Some(live) = live {
+        live.recycle_agent_after_turn(target.id.clone());
+    }
+    serde_json::json!({
+        "ok": true,
+        "session_id": target.id,
+        "from": current,
+        "model": model,
+        "takes_effect": "next turn",
+    })
+    .to_string()
+}
+
 /// `peckboard_send_message` — deliver a message (with optional base64 image /
 /// file attachments) to a session and resume it (same-folder free; cross-
 /// folder needs Always/Once — see `session_control_auth`).
@@ -4166,6 +4261,13 @@ host_fn!(peckboard_clear_session(user_data: HostState; input: String) -> String 
     Ok(clear_session_impl(&db, &plugin_id, &inv, &input, live))
 });
 
+host_fn!(peckboard_set_session_model(user_data: HostState; input: String) -> String {
+    let (db, plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
+    if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
+    let Some(inv) = inv else { return Ok(error_json("no caller context; peckboard_set_session_model is only callable during a tool invocation")); };
+    Ok(set_session_model_impl(&db, &plugin_id, &inv, &input, live))
+});
+
 host_fn!(peckboard_send_message(user_data: HostState; input: String) -> String {
     let (db, plugin_id, ok, inv, live) = state_permission_invocation_and_live(&user_data, "session_control")?;
     if !ok { return Ok(error_json("plugin lacks the 'session_control' permission")); }
@@ -5063,6 +5165,13 @@ pub(crate) fn host_functions(
             peckboard_clear_session,
         ),
         Function::new(
+            "peckboard_set_session_model",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            peckboard_set_session_model,
+        ),
+        Function::new(
             "peckboard_read_session_events",
             [PTR],
             [PTR],
@@ -5426,6 +5535,78 @@ mod tests {
 
         // Malformed JSON is an error, not a panic.
         assert!(session_events_impl(&db, "not json").contains("invalid request"));
+    }
+
+    /// `set_session_model` writes a plain (same provider + account) switch,
+    /// refuses one that would need a handover once a conversation exists,
+    /// and holds cross-folder targets to the same grant as the other tools.
+    #[tokio::test]
+    async fn set_session_model_switches_plainly_and_refuses_cross_provider() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        for f in ["f1", "f2"] {
+            db.create_folder(NewFolder {
+                id: f.into(),
+                name: f.into(),
+                path: format!("/tmp/{f}"),
+                created_at: ts.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        for (id, folder, conv) in [
+            ("caller", "f1", None),
+            ("pcb", "f1", Some("conv-1")),
+            ("other", "f2", None),
+        ] {
+            db.create_session(crate::db::models::NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: folder.into(),
+                model: Some("claude:claude-opus-5-5@acc1".into()),
+                conversation_id: conv.map(str::to_string),
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        let inv = InvocationContext {
+            session_id: Some("caller".into()),
+            project_id: None,
+            folder_id: Some("f1".into()),
+            authority: false,
+        };
+        let pid = "session-control";
+        let call = |sid: &str, model: &str| {
+            set_session_model_impl(
+                &db,
+                pid,
+                &inv,
+                &serde_json::json!({ "session_id": sid, "model": model }).to_string(),
+                None,
+            )
+        };
+
+        let ok = call("pcb", "claude:claude-fable-5-2@acc1");
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+        let row = db.get_session("pcb").await.unwrap().unwrap();
+        assert_eq!(row.model.as_deref(), Some("claude:claude-fable-5-2@acc1"));
+        assert_eq!(
+            row.conversation_id.as_deref(),
+            Some("conv-1"),
+            "resume kept"
+        );
+
+        let cross = call("pcb", "codex:gpt-5@acc2");
+        assert!(cross.contains("Model menu"), "{cross}");
+        let row = db.get_session("pcb").await.unwrap().unwrap();
+        assert_eq!(row.model.as_deref(), Some("claude:claude-fable-5-2@acc1"));
+
+        let xf = call("other", "claude:claude-fable-5-2@acc1");
+        assert!(xf.contains("user approval"), "{xf}");
+        assert!(call("nope", "claude:claude-fable-5-2@acc1").contains("not found"));
     }
 
     #[tokio::test]

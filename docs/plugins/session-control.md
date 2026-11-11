@@ -14,17 +14,19 @@ Session Control lets one session act on _other_ sessions — interrupt a stuck t
 
 Same-folder targets run immediately. Cross-folder mutating actions ask the user first (_Approve once_ / _Approve always_ / _Deny_); an _Always_ grant is remembered for that controlling session. `find_session` stays folder-blind so agents can discover targets without a prompt. Worker sessions cannot call these tools at all — the `session_control` permission is denied to workers by default.
 
-| Tool                | What it does                                                                      |
-| ------------------- | --------------------------------------------------------------------------------- |
-| `find_session`      | Lists sessions across every folder and project, with an optional substring query  |
-| `read_session`      | Reads another session's recent event tail (default 50 events, max 200)            |
-| `interrupt_session` | Stops another session's in-flight turn without touching its history               |
-| `terminate_agent`   | Kills a session's agent process; the next message starts a fresh one              |
-| `clear_session`     | Wipes a session's history, todos, and attachments — irreversible                  |
-| `send_message`      | Delivers text into another session as if the user had typed it, and resumes it    |
-| `send_image`        | Delivers an image into another session as an attachment, with an optional caption |
-| `create_session`    | Creates a session in the caller's folder, optionally with a hat                   |
-| `assign_hat`        | Writes a named scope of responsibility into a session's system prompt             |
+| Tool                | What it does                                                                                        |
+| ------------------- | --------------------------------------------------------------------------------------------------- |
+| `find_session`      | Lists sessions across every folder and project, with an optional substring query                    |
+| `read_session`      | Reads another session's recent event tail (default 50 events, max 200)                              |
+| `interrupt_session` | Stops another session's in-flight turn without touching its history                                 |
+| `terminate_agent`   | Kills a session's agent process; the next message starts a fresh one                                |
+| `clear_session`     | Wipes a session's history, todos, and attachments — irreversible                                    |
+| `send_message`      | Delivers text into another session as if the user had typed it, and resumes it                      |
+| `send_image`        | Delivers an image into another session as an attachment, with an optional caption                   |
+| `create_session`    | Creates a session in the caller's folder, optionally with a hat                                     |
+| `create_session`    | Creates a session in the caller's folder, optionally with a hat (the Assistant may name any folder) |
+| `set_session_model` | Switches an existing session's model from its next turn (same provider and account)                 |
+| `assign_hat`        | Writes a named scope of responsibility into a session's system prompt                               |
 
 ## Orchestrators
 

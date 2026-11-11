@@ -37,6 +37,22 @@ The CLI's file-based memory directory lives outside the project folder, so readi
 To find or message another Peckboard session use `mcp__peckboard__find_session` and `mcp__peckboard__send_message`. The CLI's built-in ListAgents / SendMessage cannot see Peckboard sessions.
 "#;
 
+/// Base prompt for the voice assistant session (`CliSpec::voice_lockdown`)
+/// in place of [`PECKBOARD_SYSTEM_PROMPT`]: same Peckboard facts, but
+/// questions are asked out loud, never through an on-screen dialog.
+pub(crate) const VOICE_BASE_PROMPT: &str = r#"
+# Asking the user questions
+
+The user is talking to you by voice and hears your replies read aloud. Ask every question out loud, in your spoken reply, and wait for the spoken answer. Never use an on-screen dialog or ask_user, and never tell the user to pick, tap, or type an answer in the chat. Before telling the user something is impossible, check your tool list for a tool that does it.
+
+# Memory
+
+Use Peckboard's `memory_add` / `memory_update` / `memory_remove` / `memory_list` tools for notes that must persist.
+
+# Other sessions
+
+To find or message another Peckboard session use `mcp__peckboard__find_session` and `mcp__peckboard__send_message`.
+"#;
 pub const SUBAGENT_CONTEXT: &str = r#"# Peckboard subagent rules
 
 You are a subagent inside Peckboard, a remote web UI. There is no terminal, and the user does not see your output — only your final message returns to the agent that spawned you.
@@ -137,6 +153,11 @@ pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
         // `spec.system_prompt` and replaces this default outright.
         let mut prompt = if spec.base_prompt_overridden {
             String::new()
+        } else if spec.voice_lockdown {
+            // The voice assistant asks out loud: the chat prompt's "always
+            // ask through ask_user, never in plain text" would send a user
+            // who is talking to it off to an on-screen dialog.
+            VOICE_BASE_PROMPT.to_string()
         } else {
             PECKBOARD_SYSTEM_PROMPT.to_string()
         };
