@@ -206,6 +206,12 @@ export const useWsStore = create<WsState>((set, get) => ({
         window.dispatchEvent(new CustomEvent('peckboard:queue', { detail: msg }))
         return
       }
+      if (msg.type === 'focus-held') {
+        // Focus mode: the messages other sessions sent this chat while the
+        // user was talking to it changed (held or released). `{count}`.
+        window.dispatchEvent(new CustomEvent('peckboard:focus-held', { detail: msg }))
+        return
+      }
 
       if (msg.type === 'card-update') {
         window.dispatchEvent(new CustomEvent('peckboard:card-update', { detail: msg }))

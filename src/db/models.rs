@@ -1439,6 +1439,21 @@ pub struct VoiceRelayItem {
     pub summary: String,
     pub created_at: String,
 }
+
+/// A message from another session held for a chat session while the user
+/// is actively talking to it (focus mode, `service::chat_focus`).
+/// `source_session_id` goes NULL if the sender is deleted; `source_name`
+/// keeps who sent it. Deleted on delivery.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = chat_focus_queue)]
+pub struct ChatFocusItem {
+    pub id: String,
+    pub session_id: String,
+    pub source_session_id: Option<String>,
+    pub source_name: String,
+    pub text: String,
+    pub created_at: String,
+}
 // ── TTS Lexicon ──────────────────────────────────
 
 /// A custom TTS pronunciation (`service::tts::lexicon`). `word` is the

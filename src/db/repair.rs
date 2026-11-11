@@ -74,6 +74,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_devices_table(conn)?;
     ensure_device_activity_table(conn)?;
     ensure_voice_relay_queue_table(conn)?;
+    ensure_chat_focus_queue_table(conn)?;
     ensure_tts_lexicon_tables(conn)?;
     ensure_voice_prompt_versions_table(conn)?;
     ensure_pending_actions_table(conn)?;
@@ -407,6 +408,28 @@ fn ensure_voice_relay_queue_table(conn: &mut SqliteConnection) -> anyhow::Result
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_voice_relay_queue_voice \
          ON voice_relay_queue (voice_session_id, created_at)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+/// Heal DBs that predate `1793600000_chat_focus_queue`. `CREATE TABLE IF
+/// NOT EXISTS` is idempotent; DDL mirrors the migration.
+fn ensure_chat_focus_queue_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "chat_focus_queue")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS chat_focus_queue (
+            id                 TEXT PRIMARY KEY NOT NULL,
+            session_id         TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            source_session_id  TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+            source_name        TEXT NOT NULL,
+            text               TEXT NOT NULL,
+            created_at         TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_chat_focus_queue_session \
+         ON chat_focus_queue (session_id, created_at)",
     )
     .execute(conn)?;
     Ok(())

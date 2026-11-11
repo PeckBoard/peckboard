@@ -2334,10 +2334,26 @@ pub(crate) fn send_message_impl(
     if let Err(e) = crate::plugin::session_control_auth::authorize(db, plugin_id, inv, &target) {
         return error_json(e);
     }
-    let sid = target.id;
     if req.text.trim().is_empty() && req.attachments.is_empty() {
         return error_json("send_message requires non-empty text or at least one attachment");
     }
+    // Focus mode: the user is talking to that chat right now, so hold the
+    // message instead of dropping it into their conversation. Not for the
+    // user's own requests (the voice Assistant acting on what they said, or
+    // an authenticated user request).
+    if !inv.authority
+        && !caller_is_voice_blocking(db, inv)
+        && let Some(held) = crate::service::chat_focus::maybe_hold_blocking(
+            db,
+            &target,
+            inv.session_id.as_deref(),
+            &req.text,
+            !req.attachments.is_empty(),
+        )
+    {
+        return held.to_string();
+    }
+    let sid = target.id;
 
     let mut attachments = Vec::with_capacity(req.attachments.len());
     for a in req.attachments {
@@ -5607,6 +5623,78 @@ mod tests {
         let xf = call("other", "claude:claude-fable-5-2@acc1");
         assert!(xf.contains("user approval"), "{xf}");
         assert!(call("nope", "claude:claude-fable-5-2@acc1").contains("not found"));
+    }
+    /// Focus mode: another session's message to a chat the user is talking
+    /// to is held (and listed, not delivered); the voice Assistant acting
+    /// for the user is not held; once the user is idle it goes straight
+    /// through to the live host.
+    #[tokio::test]
+    async fn send_message_is_held_while_the_user_talks_to_the_target() {
+        let db = Db::in_memory().unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(NewFolder {
+            id: "f1".into(),
+            name: "f1".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        for (id, kind) in [
+            ("cf-pcb", None),
+            ("cf-mochi", None),
+            ("cf-voice", Some("voice")),
+        ] {
+            db.create_session(crate::db::models::NewSession {
+                id: id.into(),
+                name: id.into(),
+                folder_id: "f1".into(),
+                is_expert: kind.is_some(),
+                expert_kind: kind.map(str::to_string),
+                created_at: ts.clone(),
+                last_activity: ts.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        let inv = |caller: &str| InvocationContext {
+            session_id: Some(caller.into()),
+            project_id: None,
+            folder_id: Some("f1".into()),
+            authority: false,
+        };
+        let send = |caller: &str, text: &str| {
+            send_message_impl(
+                &db,
+                "session-control",
+                &inv(caller),
+                &serde_json::json!({ "session_id": "cf-pcb", "text": text }).to_string(),
+                None,
+            )
+        };
+
+        crate::service::chat_focus::note_user_message("cf-pcb");
+        let held = send("cf-mochi", "board check done");
+        assert!(held.contains("\"held\":true"), "{held}");
+        let items = db.list_chat_focus_items("cf-pcb").await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source_name, "cf-mochi");
+
+        // The Assistant relaying the user's own request is not held.
+        let voice = send("cf-voice", "the user asked for this");
+        assert!(voice.contains("live control unavailable"), "{voice}");
+
+        // User idle (turn over, window passed): delivered straight away.
+        crate::service::chat_focus::note_turn_end("cf-pcb");
+        crate::service::chat_focus::note_user_message_at(
+            "cf-pcb",
+            std::time::Instant::now() - crate::service::chat_focus::CHAT_FOCUS_WINDOW,
+        );
+        crate::service::chat_focus::note_turn_end("cf-pcb");
+        let idle = send("cf-mochi", "another update");
+        assert!(idle.contains("live control unavailable"), "{idle}");
+        assert_eq!(db.list_chat_focus_items("cf-pcb").await.unwrap().len(), 1);
     }
 
     #[tokio::test]

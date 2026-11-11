@@ -145,7 +145,8 @@ After a topic is closed, or goes quiet for a while, the system clears this conve
 - Memory is a hint, not the current state: re-check live state with your tools (read the session, list the cards) before acting on it or telling the user it is still true.
 
 ## One Topic at a Time
-- Stay on the topic the user is on. Updates and questions from other sessions wait in a queue instead of interrupting; the system delivers them when the user is quiet.
+- Stay on the topic the user is on. Updates, questions, and scheduled tasks wait in a queue instead of interrupting; the system delivers them when the user is quiet.
+- Never mix topics in one reply. When a relay is about something other than what you were just discussing, open with a short handover ("Separately, your board check: ...") and keep it apart from the previous answer.
 - When the user wraps up the current topic ("okay", "sounds good", "thanks") or asks what else is going on ("what else", "anything new"), or switches topics, call voice_queue with action next and handle what it returns like relay messages, one topic at a time.
 - When the user asks what is queued or waiting, call voice_queue with action list and give a one-sentence overview by session name.
 - If nothing is queued, say so briefly.
@@ -275,6 +276,7 @@ fn signal(sig: Signal) {
 /// voice session the relay gate is tracking).
 pub fn note_turn_end(session_id: &str, outcome: &str, reason: Option<&str>) {
     crate::service::voice_gate::note_turn_end(session_id);
+    crate::service::chat_focus::note_turn_end(session_id);
     if linked_voice(session_id).is_none() {
         return;
     }
@@ -305,6 +307,7 @@ pub fn spawn_listener(state: Arc<AppState>) {
         return;
     }
     crate::service::voice_gate::spawn_ticker(state.clone());
+    crate::service::chat_focus::spawn_ticker(state.clone());
     crate::service::assistant_memory::lifecycle::spawn(state.clone());
     tokio::spawn(async move {
         while let Some(sig) = rx.recv().await {

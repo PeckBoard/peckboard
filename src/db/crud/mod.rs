@@ -9,6 +9,7 @@ mod auth_sessions;
 mod card_sessions;
 mod cards;
 mod cascades;
+mod chat_focus_queue;
 mod claude_accounts;
 mod codex_accounts;
 mod custom_workflows;

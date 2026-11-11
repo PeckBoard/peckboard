@@ -7,6 +7,7 @@ pub mod backup;
 pub mod browser;
 pub mod browser_runs;
 pub mod card_deps;
+pub mod chat_focus;
 pub mod doc_review_sources;
 pub mod doc_reviews;
 pub mod env_vars;

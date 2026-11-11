@@ -372,6 +372,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
   { page: 'chat', section: 'Caveman Mode', anchor: 'caveman', keywords: 'terse output tokens' },
   {
     page: 'chat',
+    section: 'Focus Mode',
+    anchor: 'focus-mode',
+    keywords: 'interrupt hold held messages other sessions relays quiet',
+  },
+  {
+    page: 'chat',
     section: 'Pre-hatcher Model',
     anchor: 'prehatch',
     keywords: 'research cheapest before message',
@@ -844,6 +850,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
   const setSkipBacklogConfirm = useUiStore((s) => s.setSkipBacklogConfirm)
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
   const [caveman, setCaveman] = useState<string>('off')
+  const [focusMode, setFocusMode] = useState<boolean>(true)
   const [bypassPermissions, setBypassPermissions] = useState<boolean>(false)
   // Enforced → Bypass is a host-wide loosening of the permission gate, so it
   // goes through a confirm. The other direction (back to Enforced) is safe
@@ -876,6 +883,15 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { level?: string } | null) => {
         if (data?.level) setCaveman(data.level)
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    authedFetch('/api/settings/focus-mode')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { enabled?: boolean } | null) => {
+        if (typeof data?.enabled === 'boolean') setFocusMode(data.enabled)
       })
       .catch(() => {})
   }, [])
@@ -982,6 +998,17 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
     )
   }
 
+  const changeFocusMode = (enabled: boolean) => {
+    const prev = focusMode
+    setFocusMode(enabled)
+    setSaveError(null)
+    void putSetting('/api/settings/focus-mode', { enabled }, 'Could not save focus mode').catch(
+      (e: Error) => {
+        setFocusMode(prev)
+        setSaveError({ scope: 'focus-mode', message: e.message })
+      },
+    )
+  }
   const changeBypassPermissions = (bypass: boolean) => {
     const prev = bypassPermissions
     setBypassPermissions(bypass)
@@ -1442,6 +1469,39 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               </div>
               {saveError?.scope === 'caveman' && (
                 <p className="form-error" role="alert" data-testid="settings-error-caveman">
+                  {saveError.message}
+                </p>
+              )}
+            </section>
+            <section
+              className="settings-section"
+              data-testid="focus-mode-section"
+              data-settings-anchor="focus-mode"
+            >
+              <h3>Focus Mode</h3>
+              <p className="form-hint">
+                While you are talking to a chat, messages other sessions send it wait instead of
+                interrupting. They arrive when you pause, as their own message, or right away with
+                Show now. The Assistant always keeps to one topic at a time.
+              </p>
+              <div className="theme-toggle">
+                {[
+                  { on: true, label: 'On' },
+                  { on: false, label: 'Off' },
+                ].map(({ on, label }) => (
+                  <button
+                    key={label}
+                    className={`theme-btn ${focusMode === on ? 'active' : ''}`}
+                    data-testid={`focus-mode-${on ? 'on' : 'off'}`}
+                    aria-pressed={focusMode === on}
+                    onClick={() => changeFocusMode(on)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {saveError?.scope === 'focus-mode' && (
+                <p className="form-error" role="alert" data-testid="settings-error-focus-mode">
                   {saveError.message}
                 </p>
               )}

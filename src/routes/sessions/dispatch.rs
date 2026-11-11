@@ -194,6 +194,9 @@ pub(super) async fn send_message(
     if session.sealed_at.is_some() {
         return Err(sealed_conflict());
     }
+    // Focus mode: the user is talking to this chat, so messages other
+    // sessions send it are held until they go quiet (`service::chat_focus`).
+    crate::service::chat_focus::note_user_message(&id);
     // A user turn to the Assistant: cancels a pending automatic context
     // clear and re-arms its idle topic boundary. Relays never come this way.
     if session.expert_kind.as_deref() == Some(crate::service::voice_relay::VOICE_EXPERT_KIND) {

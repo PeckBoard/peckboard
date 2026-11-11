@@ -132,6 +132,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/recovery-preview", get(recovery_preview))
         .route("/api/sessions/{id}/recover", post(recover_session))
         .route("/api/sessions/{id}/message", post(dispatch::send_message))
+        .route("/api/sessions/{id}/held", get(list_held))
+        .route("/api/sessions/{id}/held/release", post(release_held))
         .route("/api/sessions/{id}/cancel", post(dispatch::cancel_session))
         .route(
             "/api/sessions/{id}/interrupt",
@@ -659,6 +661,40 @@ async fn update_session(
     }
 
     Ok(Json(serde_json::json!(session)))
+}
+
+/// GET /api/sessions/:id/held → `{count, items}`: messages other sessions
+/// sent this chat while the user was talking to it (focus mode).
+async fn list_held(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let items = state.db.list_chat_focus_items(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(
+        serde_json::json!({ "count": items.len(), "items": items }),
+    ))
+}
+
+/// POST /api/sessions/:id/held/release → `{released}`: "Show now" —
+/// deliver the held messages at once, as one turn.
+async fn release_held(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let released = crate::service::chat_focus::release(&state, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "released": released })))
 }
 
 /// Resolve the model a session actually dispatches on: its pinned model,

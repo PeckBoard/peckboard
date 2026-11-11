@@ -19,9 +19,11 @@
 //! topic (source session) at a time, questions first.
 //!
 //! A due Assistant-target repeating task ([`enqueue_scheduled`]) is held
-//! here too, as a source-less `scheduled` relay: it waits for the same
-//! quiet gap, but counts as on-topic whatever the focus, so it is spoken
-//! at the first quiet moment rather than after the idle window.
+//! here too, as a source-less `scheduled` relay, and is always its own
+//! topic (focus mode): with no conversation going on (the user hasn't
+//! spoken for [`IDLE_RELEASE`]) it goes out at the first quiet gap;
+//! mid-conversation it waits like any off-topic relay. Either way it gets a
+//! turn to itself, never batched with another topic's relays.
 //!
 //! Durability: every held relay is a row in `voice_relay_queue` (deleted on
 //! delivery) and [`spawn_ticker`] reloads the table at boot, so nothing is
@@ -150,11 +152,11 @@ impl Focus {
     }
 
     /// The focused session itself, its parent, its subagents, or anything
-    /// in the focused project. A scheduled relay is always due: the user
-    /// asked for it at this time.
+    /// in the focused project. A scheduled relay is never part of a focus:
+    /// it is its own topic (see `decide`).
     fn covers(&self, h: &Held) -> bool {
         if h.kind == RelayKind::Scheduled {
-            return true;
+            return false;
         }
         if let Some(f) = &self.session_id
             && (h.source_session_id.as_ref() == Some(f) || h.source_parent_id.as_ref() == Some(f))
@@ -175,6 +177,9 @@ struct Gate {
     /// A user utterance or relay turn is being answered since then.
     busy_since: Option<Instant>,
     tts_until: Option<Instant>,
+    /// When the user last spoke or sent something: "in a conversation"
+    /// while that is within [`IDLE_RELEASE`] (focus mode for scheduled tasks).
+    user_spoke_at: Option<Instant>,
     last_activity: Instant,
     /// Last logged hold reason, so a steady hold logs once, not every tick.
     last_reason: Option<&'static str>,
@@ -190,6 +195,7 @@ impl Gate {
             user_active_until: None,
             busy_since: None,
             tts_until: None,
+            user_spoke_at: None,
             // A fresh gate (first use, or after a restart) counts as recent
             // activity: off-topic relays still wait out the idle window.
             last_activity: now,
@@ -226,11 +232,15 @@ pub fn note_activity_at(voice_id: &str, activity: Activity, now: Instant) {
     with_gate(voice_id, now, |g| {
         g.last_activity = now;
         match activity {
-            Activity::Speaking => g.user_active_until = Some(now + SPEAKING_TTL),
+            Activity::Speaking => {
+                g.user_active_until = Some(now + SPEAKING_TTL);
+                g.user_spoke_at = Some(now);
+            }
             Activity::Idle => g.user_active_until = None,
             Activity::Sent => {
                 g.user_active_until = None;
                 g.busy_since = Some(now);
+                g.user_spoke_at = Some(now);
             }
             Activity::TtsStart => g.tts_until = Some(now + TTS_TTL),
             Activity::TtsEnd => g.tts_until = None,
@@ -589,6 +599,21 @@ fn decide(g: &mut Gate, now: Instant) -> Decision {
             why: "on-topic",
         };
     }
+    // Focus mode: a due scheduled task is its own topic. It goes out at the
+    // first quiet gap only when the user isn't in a conversation (no speech
+    // for IDLE_RELEASE); mid-conversation it waits like any other off-topic
+    // relay, and it is never folded into another topic's turn.
+    let conversing = g
+        .user_spoke_at
+        .is_some_and(|t| now.saturating_duration_since(t) < IDLE_RELEASE);
+    if !conversing && let Some(i) = g.queue.iter().position(|h| h.kind == RelayKind::Scheduled) {
+        let one = g.queue.remove(i);
+        return Decision::Deliver {
+            items: vec![one],
+            topic: None,
+            why: "scheduled, no conversation going on",
+        };
+    }
     if quiet < IDLE_RELEASE {
         return Decision::Hold("off-topic: waiting for idle or voice_queue next");
     }
@@ -602,16 +627,22 @@ fn decide(g: &mut Gate, now: Instant) -> Decision {
     }
 }
 
-/// Remove the next topic group (one source session) from `queue`.
+/// Remove the next topic group (one source session) from `queue`. Scheduled
+/// relays have no source session; each is its own topic, one per turn.
 fn take_topic(queue: &mut Vec<Held>) -> Option<(Vec<Held>, Focus)> {
     let source = topic_order(queue).into_iter().next()?;
+    if source.is_none() {
+        let i = queue.iter().position(|h| h.source_session_id.is_none())?;
+        let one = queue.remove(i);
+        let topic = Focus::of_held(&one);
+        return Some((vec![one], topic));
+    }
     let (group, rest): (Vec<Held>, Vec<Held>) =
         queue.drain(..).partition(|h| h.source_session_id == source);
     *queue = rest;
     let topic = Focus::of_held(&group[0]);
     Some((questions_first(group), topic))
 }
-
 /// Drop questions answered some other way while held. Deletes their rows.
 async fn still_relevant(db: &Db, items: Vec<Held>) -> Vec<Held> {
     let mut out = Vec::with_capacity(items.len());
@@ -896,6 +927,48 @@ mod tests {
             vec!["[relay] update from dev: done"]
         );
         assert!(db.list_voice_relays().await.unwrap().is_empty());
+    }
+
+    /// Focus mode: mid-conversation a due scheduled task does not ride along
+    /// with the on-topic relay (the MochiMask-check-in-the-PCB-talk bug); it
+    /// waits for the idle window and then gets a turn to itself.
+    #[tokio::test]
+    async fn scheduled_task_waits_out_a_conversation_and_goes_alone() {
+        let _serial = GATE_TEST_LOCK.lock().await;
+        let (db, bc) = setup().await;
+        let voice = seed(&db, "Voice", true).await;
+        let pcb = seed(&db, "pcb", false).await;
+        focus_session(&db, &voice.id, &pcb.id).await;
+        let t0 = Instant::now();
+        note_activity_at(&voice.id, Activity::Sent, t0);
+        note_turn_end_at(&voice.id, t0 + Duration::from_secs(2));
+        enqueue_scheduled(
+            &db,
+            &voice.id,
+            "[relay] scheduled task \"board check\": check the boards",
+            "board check",
+        )
+        .await;
+        update(&db, &voice, &pcb, "[relay] update from pcb: plan ready").await;
+
+        // Quiet gap: only the on-topic update, on its own.
+        tick_at(&db, &bc, None, t0 + Duration::from_secs(5)).await;
+        assert_eq!(
+            delivered(&db, &voice.id).await,
+            vec!["[relay] update from pcb: plan ready"]
+        );
+        // Still within the conversation window: the scheduled task waits.
+        note_turn_end_at(&voice.id, t0 + Duration::from_secs(8));
+        tick_at(&db, &bc, None, t0 + Duration::from_secs(20)).await;
+        assert_eq!(delivered(&db, &voice.id).await.len(), 1);
+        // Idle long enough: it goes out alone.
+        tick_at(&db, &bc, None, t0 + Duration::from_secs(60)).await;
+        let all = delivered(&db, &voice.id).await;
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[1],
+            "[relay] scheduled task \"board check\": check the boards"
+        );
     }
 
     #[tokio::test]

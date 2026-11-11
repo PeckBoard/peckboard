@@ -131,6 +131,18 @@ test('an Assistant-target task runs in the Assistant and its reply shows on the 
     // The Assistant performs it; its reply is on the Assistant page.
     await page.goto('/assistant')
     await expect(page.getByTestId('assistant-page')).toBeVisible()
+    // Focus mode holds a scheduled task while the (shared) voice session was
+    // just in a conversation, e.g. a voice spec that ran before this one.
+    // Tapping "updates waiting" is the user asking for it.
+    const waiting = page.getByTestId('assistant-queue-badge')
+    if (
+      await waiting
+        .waitFor({ state: 'visible', timeout: 3_000 })
+        .then(() => true)
+        .catch(() => false)
+    ) {
+      await waiting.click()
+    }
     await page.getByTestId('assistant-transcript-toggle').click()
     const transcript = page.getByTestId('assistant-transcript')
     await expect(transcript.getByTestId('voice-line-assistant').last()).toContainText('PANGOLIN', {

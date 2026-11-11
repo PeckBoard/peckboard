@@ -11,7 +11,14 @@ import {
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { highlightPlugins } from './markdownHighlight'
 import SafeMarkdown from './SafeMarkdown'
-import type { CostTable, Event, QueuedMessage, RecoveryPreview, Session } from '../types/api'
+import type {
+  CostTable,
+  Event,
+  HeldMessage,
+  QueuedMessage,
+  RecoveryPreview,
+  Session,
+} from '../types/api'
 import { authedFetch } from '../store/auth'
 import { useWsStore } from '../store/ws'
 import { useSessionsStore, type PendingUserMessage } from '../store/sessions'
@@ -1561,6 +1568,42 @@ export default function ChatView({
   )
   const queuedTexts = useMemo(() => new Set(queuedMessages.map((m) => m.text)), [queuedMessages])
 
+  // Focus mode: messages other sessions sent this chat while the user was
+  // talking to it are held server-side (`service::chat_focus`) and released
+  // when the user pauses. `focus-held` WS frames trigger a refetch; "Show
+  // now" delivers them at once, as their own turn.
+  const [heldItems, setHeldItems] = useState<HeldMessage[]>([])
+  useEffect(() => {
+    let cancelled = false
+    setHeldItems([])
+    const refresh = () => {
+      authedFetch(`/api/sessions/${sessionId}/held`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { items?: HeldMessage[] } | null) => {
+          if (!cancelled) setHeldItems(Array.isArray(data?.items) ? data.items : [])
+        })
+        .catch(() => {})
+    }
+    refresh()
+    const onHeld = (e: CustomEvent<{ session_id?: string }>) => {
+      if (e.detail?.session_id !== sessionId) return
+      refresh()
+    }
+    window.addEventListener('peckboard:focus-held', onHeld as EventListener)
+    return () => {
+      cancelled = true
+      window.removeEventListener('peckboard:focus-held', onHeld as EventListener)
+    }
+  }, [sessionId])
+  const releaseHeld = useCallback(() => {
+    setHeldItems([])
+    void authedFetch(`/api/sessions/${sessionId}/held/release`, { method: 'POST' }).catch(() => {})
+  }, [sessionId])
+  const heldSources = useMemo(
+    () => Array.from(new Set(heldItems.map((h) => h.source_name))).join(', '),
+    [heldItems],
+  )
+
   // Live `todo` events are authoritative once any arrive; before then, fall
   // back to the snapshot fetched at load time. After a clear (events loaded
   // but empty) the snapshot must also go away — without the explicit empty
@@ -2633,6 +2676,35 @@ export default function ChatView({
             </div>
           </div>
         ))}
+        {heldItems.length > 0 && (
+          <div className="chat-row chat-row-system">
+            <div
+              className="chat-queued-chip chat-held-chip"
+              data-testid="chat-held-chip"
+              title={heldItems.map((h) => `${h.source_name}: ${h.text}`).join('\n\n')}
+            >
+              <span className="chat-queued-dot" aria-hidden="true" />
+              <span className="chat-queued-text">
+                {heldItems.length === 1
+                  ? `1 message held from ${heldItems[0].source_name}`
+                  : `${heldItems.length} messages held from ${heldSources}`}
+              </span>
+              <span className="chat-queued-hint">
+                Focus mode — delivered when you pause, so they don&apos;t interrupt this
+                conversation
+              </span>
+              <button
+                type="button"
+                className="chat-queued-send"
+                data-testid="chat-held-release"
+                title="Deliver the held messages now, as their own turn"
+                onClick={releaseHeld}
+              >
+                Show now
+              </button>
+            </div>
+          </div>
+        )}
         {/* Thinking indicator + inline Interrupt — shown at the end of the
             message log when the agent is working. Combining them keeps the
             "stop the agent" affordance attached to the activity it's

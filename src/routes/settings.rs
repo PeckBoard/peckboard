@@ -197,6 +197,10 @@ fn user_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/settings/caveman", get(get_caveman).put(set_caveman))
         .route(
+            "/api/settings/focus-mode",
+            get(get_focus_mode).put(set_focus_mode),
+        )
+        .route(
             "/api/settings/pre-hatcher",
             get(get_pre_hatcher).put(set_pre_hatcher),
         )
@@ -268,6 +272,45 @@ async fn set_caveman(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )),
+    }
+}
+/// GET /api/settings/focus-mode → `{"enabled": bool}` (default true). While
+/// on, messages other sessions send a chat the user is talking to are held
+/// (`service::chat_focus`).
+async fn get_focus_mode(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db = state.db.clone();
+    let enabled =
+        tokio::task::spawn_blocking(move || crate::service::chat_focus::enabled_blocking(&db))
+            .await
+            .unwrap_or(true);
+    Json(serde_json::json!({ "enabled": enabled }))
+}
+
+#[derive(serde::Deserialize)]
+struct FocusModeBody {
+    enabled: bool,
+}
+
+/// PUT /api/settings/focus-mode `{"enabled": bool}` → 204.
+async fn set_focus_mode(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<FocusModeBody>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let value = serde_json::json!({ "enabled": body.enabled }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(
+            SETTINGS_NS,
+            SETTINGS_COLLECTION,
+            crate::service::chat_focus::FOCUS_MODE_KEY,
+            &value,
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err(setup_write_error(e.to_string())),
+        Err(e) => Err(setup_write_error(e.to_string())),
     }
 }
 

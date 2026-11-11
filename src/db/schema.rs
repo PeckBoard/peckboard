@@ -922,6 +922,16 @@ diesel::table! {
 }
 
 diesel::joinable!(tls_certificates -> dns_credentials (dns_credential_id));
+diesel::table! {
+    chat_focus_queue (id) {
+        id -> Text,
+        session_id -> Text,
+        source_session_id -> Nullable<Text>,
+        source_name -> Text,
+        text -> Text,
+        created_at -> Text,
+    }
+}
 
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
@@ -987,4 +997,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     oauth_access_tokens,
     dns_credentials,
     tls_certificates,
+    chat_focus_queue,
 );

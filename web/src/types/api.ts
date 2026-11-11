@@ -583,6 +583,17 @@ export interface QueuedMessage {
   effort?: string | null
 }
 
+/** A message another session sent a chat while the user was talking to it,
+ *  held by focus mode (`GET /api/sessions/:id/held`). */
+export interface HeldMessage {
+  id: string
+  session_id: string
+  source_session_id: string | null
+  source_name: string
+  text: string
+  created_at: string
+}
+
 export interface Announcement {
   id: string
   kind: string
