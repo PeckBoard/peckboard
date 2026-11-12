@@ -139,7 +139,13 @@ pub fn run(payload: &Value) -> Result<(), String> {
         }),
     )?;
 
-    let frame = argv::build_user_message_frame(&message);
+    // A session with its own system prompt gets a per-turn nudge that the
+    // prompt outranks CLAUDE.md (see `argv::SESSION_PROMPT_REMINDER`).
+    let session_prompt = cfg
+        .get("system_prompt_override")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    let frame = argv::build_user_message_frame(&message, session_prompt);
     write_stdin(session_id, &frame)?;
 
     let mut parser = ParserState::new();
@@ -190,7 +196,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
         }
 
         if let Some(msg) = take_message(session_id)? {
-            let frame = argv::build_user_message_frame(&msg);
+            let frame = argv::build_user_message_frame(&msg, session_prompt);
             let _ = write_stdin(session_id, &frame);
             last_result_error = None;
             parser.reset_turn();
@@ -380,7 +386,7 @@ pub fn run(payload: &Value) -> Result<(), String> {
             // otherwise die with the child. Deliver it as the next turn of
             // the same child instead.
             if !winding_down && let Some(msg) = take_message(session_id)? {
-                let frame = argv::build_user_message_frame(&msg);
+                let frame = argv::build_user_message_frame(&msg, session_prompt);
                 let _ = write_stdin(session_id, &frame);
                 last_result_error = None;
                 watchdog.rearm();

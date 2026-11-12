@@ -138,6 +138,7 @@ impl McpToolRegistry {
                 match approval {
                     cli::Approval::Approved(via) => {
                         let prepared = prepared.expect("prepared when approved");
+                        let notice = prepared.locked_secrets_notice();
                         let attached = registry
                             .spawn_attached(
                                 &ctx.session_id,
@@ -148,7 +149,11 @@ impl McpToolRegistry {
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!(e))?;
-                        return Ok(attached_result(&command, &argv, via, attached));
+                        let mut result = attached_result(&command, &argv, via, attached);
+                        if let Some(note) = notice {
+                            result["secret_env_notice"] = serde_json::json!(note);
+                        }
+                        return Ok(result);
                     }
                     cli::Approval::Denied(m) => cli::Decision::Denied(m),
                     cli::Approval::StillWaiting(d) => cli::Decision::StillWaiting(d),

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { useResourcesStore } from '../store/resources'
+import { uuid } from '../lib/uuid'
 import Modal from './Modal'
 import {
   checkMcpCommand,
@@ -47,7 +48,7 @@ const TRANSPORT_LABELS: Record<McpTransport, string> = {
 
 function emptyServer(): McpServer {
   return {
-    id: crypto.randomUUID(),
+    id: uuid(),
     name: '',
     transport: 'stdio',
     command: '',
@@ -130,7 +131,7 @@ function parseImport(text: string): { servers: McpServer[]; error: string | null
         : []
     const transport: McpTransport = command ? 'stdio' : entry.type === 'sse' ? 'sse' : 'http'
     servers.push({
-      id: crypto.randomUUID(),
+      id: uuid(),
       name,
       transport,
       command,

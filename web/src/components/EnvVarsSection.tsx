@@ -57,6 +57,10 @@ export default function EnvVarsSection() {
   const [value, setValue] = useState('')
   const [encrypt, setEncrypt] = useState(false)
   const [password, setPassword] = useState('')
+  // How long saving a secret (which verifies the password) keeps ALL the
+  // caller's secrets unlocked. Shares the remembered choice with the unlock
+  // panel and dialog.
+  const [saveDuration, setSaveDuration] = useState<UnlockDuration>(loadUnlockDuration)
   const [folderId, setFolderId] = useState<string>('')
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -134,7 +138,10 @@ export default function EnvVarsSection() {
         encrypt,
         folder_id: folderId === '' ? null : folderId,
       }
-      if (encrypt) body.password = password
+      if (encrypt) {
+        body.password = password
+        body.unlock_duration = saveDuration
+      }
       const res = await authedFetch('/api/env-vars', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -151,6 +158,12 @@ export default function EnvVarsSection() {
       }
       clearForm()
       await load()
+      if (encrypt) {
+        // The save also unlocked all of the caller's secrets for the chosen
+        // window — remember the choice and show the new status.
+        saveUnlockDuration(saveDuration)
+        await loadStatus()
+      }
     } catch {
       setFormError('Failed — server unreachable.')
     } finally {
@@ -436,20 +449,44 @@ export default function EnvVarsSection() {
             </label>
           </div>
           {encrypt && (
-            <div className="form-field">
-              <label className="form-label" htmlFor="env-var-password">
-                Your password
-              </label>
-              <input
-                id="env-var-password"
-                className="form-input"
-                type="password"
-                value={password}
-                autoComplete="off"
-                onChange={(e) => setPassword(e.target.value)}
-                data-testid="env-var-password-input"
-              />
-            </div>
+            <>
+              <div className="form-field">
+                <label className="form-label" htmlFor="env-var-password">
+                  Your password
+                </label>
+                <input
+                  id="env-var-password"
+                  className="form-input"
+                  type="password"
+                  value={password}
+                  autoComplete="off"
+                  onChange={(e) => setPassword(e.target.value)}
+                  data-testid="env-var-password-input"
+                />
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="env-var-unlock-duration">
+                  Keep secrets unlocked for
+                </label>
+                <select
+                  id="env-var-unlock-duration"
+                  className="form-input"
+                  value={saveDuration}
+                  onChange={(e) => setSaveDuration(e.target.value as UnlockDuration)}
+                  data-testid="env-var-unlock-duration-select"
+                >
+                  {UNLOCK_DURATIONS.map((d) => (
+                    <option key={d.value} value={d.value}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="form-hint">
+                  Saving with your password also unlocks all your encrypted variables for this long,
+                  so sessions won&rsquo;t prompt for it.
+                </p>
+              </div>
+            </>
           )}
           {formError && <p className="form-error">{formError}</p>}
           <div className="form-actions">

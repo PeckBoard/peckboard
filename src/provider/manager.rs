@@ -809,18 +809,18 @@ impl SessionManager {
             }
         };
 
-        // Encrypted vars, grouped by the owner who can unlock them.
-        let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+        // Encrypted vars, grouped by the owner who can unlock them:
+        // (names for the prompt, ids for the cache-hit check).
+        let mut owners: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
         for row in &rows {
             let visible = row.folder_id.is_none() || row.folder_id.as_deref() == Some(folder_id);
             if row.encrypted
                 && visible
                 && let Some(owner) = &row.encrypted_by
             {
-                owners
-                    .entry(owner.clone())
-                    .or_default()
-                    .push(row.name.clone());
+                let (names, ids) = owners.entry(owner.clone()).or_default();
+                names.push(row.name.clone());
+                ids.push(row.id.clone());
             }
         }
         if owners.is_empty() {
@@ -828,10 +828,17 @@ impl SessionManager {
         }
 
         let interactive = !final_config.is_worker && !final_config.is_pre_hatcher && !is_repeating;
-        for (owner, var_names) in owners {
-            // Cache hit: the owner unlocked recently — commands can already
-            // draw the values from the cache; nothing to prompt.
-            if registry.cache_get(&owner).await.is_some() {
+        for (owner, (var_names, var_ids)) in owners {
+            // Cache hit: the owner's live window holds EVERY visible var —
+            // commands can already draw the values from the cache. A window
+            // missing one (a var sealed by another path since the unlock)
+            // is a miss, so the owner is prompted rather than the command
+            // silently running without it.
+            if registry
+                .cache_get(&owner)
+                .await
+                .is_some_and(|cached| var_ids.iter().all(|id| cached.contains_key(id)))
+            {
                 continue;
             }
             // Headless sessions never prompt and never block.
@@ -2427,5 +2434,72 @@ mod tests {
                 .map(|h| h.id().to_string()),
             Some("conv-1".into())
         );
+    }
+
+    /// A live unlock window counts as a hit only when it holds EVERY visible
+    /// encrypted var: one opened before a var was sealed must still prompt,
+    /// not let commands silently run without that var.
+    #[tokio::test]
+    async fn warm_env_unlock_prompts_when_cache_lacks_a_visible_var() {
+        let reg = Arc::new(crate::service::env_vars::EnvUnlockRegistry::new());
+        let m = manager().with_env_unlock(Some(reg.clone()));
+        let db = Db::in_memory().unwrap();
+        let broadcaster = Broadcaster::new();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_folder(crate::db::models::NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f1".into(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+        let mut ids = Vec::new();
+        for (name, folder) in [("PB_G", None), ("PB_F", Some("f1"))] {
+            let row = db
+                .upsert_env_var(crate::db::models::NewEnvVar {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: name.into(),
+                    value: None,
+                    ciphertext: Some("irrelevant".into()),
+                    nonce: Some("irrelevant".into()),
+                    kdf_salt: Some("irrelevant".into()),
+                    encrypted: true,
+                    encrypted_by: Some("u1".into()),
+                    folder_id: folder.map(str::to_string),
+                    created_at: ts.clone(),
+                    updated_at: ts.clone(),
+                })
+                .await
+                .unwrap();
+            ids.push(row.id);
+        }
+        let config = SpawnConfig {
+            model: "mock:echo".into(),
+            ..Default::default()
+        };
+        let mut rx = broadcaster.subscribe_all();
+
+        // Every visible var cached: a hit, no prompt.
+        let all: HashMap<String, String> = ids.iter().map(|id| (id.clone(), "v".into())).collect();
+        reg.cache_put("u1", all).await;
+        m.warm_env_unlock_cache(&config, &db, &broadcaster, "s1", "f1", false)
+            .await;
+        assert!(rx.try_recv().is_err(), "full cache must not prompt");
+
+        // Window predates the folder var: a miss, so the owner is prompted.
+        let partial: HashMap<String, String> = [(ids[0].clone(), "v".to_string())].into();
+        reg.cache_put("u1", partial).await;
+        let warm = m.warm_env_unlock_cache(&config, &db, &broadcaster, "s1", "f1", false);
+        let answer = async {
+            let ev = rx.recv().await.unwrap();
+            assert_eq!(ev.event_type, "env-unlock-request");
+            reg.resolve_all_for_user("u1", &HashMap::new()).await;
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(warm, answer)
+        })
+        .await
+        .expect("partial cache must prompt the owner");
     }
 }

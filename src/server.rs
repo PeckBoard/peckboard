@@ -205,6 +205,9 @@ pub async fn run_server(
     // Late-bind the process-global handle so the blocking command-exec path
     // can snapshot unlocked values (`service::env_vars::unlocked_values_blocking`).
     crate::service::env_vars::set_global_registry(env_unlock.clone());
+    // …and the broadcaster, so a command that needs a locked secret can raise
+    // the unlock prompt itself (`service::env_vars::prompt_unlock_blocking`).
+    crate::service::env_vars::set_global_broadcaster(broadcaster.clone());
     let session_manager = SessionManager::new(provider_registry.clone())
         .with_plugins(plugins.clone())
         .with_askpass(askpass_env)

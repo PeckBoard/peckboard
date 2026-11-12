@@ -79,11 +79,12 @@ impl McpToolRegistry {
         match approval {
             cli::Approval::Approved(via) => {
                 let display = report::display_command(&command, &argv);
+                let notice = prepared.locked_secrets_notice();
                 let info = registry
                     .spawn(&ctx.session_id, prepared, argv, label, timeout)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                Ok(serde_json::json!({
+                let mut result = serde_json::json!({
                     "task_id": info.id,
                     "pid": info.pid,
                     "log_path": info.log_path,
@@ -97,7 +98,11 @@ impl McpToolRegistry {
                                 lines \u{2014} do NOT poll or sleep-wait for it; continue with other \
                                 work or end your turn. Use background_status to peek at output \
                                 or stop_background to stop it.",
-                }))
+                });
+                if let Some(note) = notice {
+                    result["secret_env_notice"] = serde_json::json!(note);
+                }
+                Ok(result)
             }
             cli::Approval::Denied(m) => Err(anyhow::anyhow!(m)),
             cli::Approval::StillWaiting(display) => Ok(still_waiting(&display)),

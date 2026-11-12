@@ -203,6 +203,11 @@ struct UpsertBody {
     /// scoped to.
     #[serde(default)]
     folder_id: Option<String>,
+    /// Encrypted saves only: how long the password, which the save just
+    /// verified, keeps ALL the caller's secrets unlocked. Omitted = keep a
+    /// live window's expiry, or open the default 1-hour window.
+    #[serde(default)]
+    unlock_duration: Option<UnlockDuration>,
 }
 
 /// POST /api/env-vars — upsert (by name + scope) a plaintext or encrypted var.
@@ -232,6 +237,10 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
     }
 
     let now = chrono::Utc::now().to_rfc3339();
+    // The plaintext + password of a var being sealed, kept to unlock with.
+    let mut sealed_plaintext: Option<String> = None;
+    let mut sealed_password: Option<String> = None;
+    let unlock_duration = body.unlock_duration;
     let new = if body.encrypt {
         let password = body.password.unwrap_or_default();
         if password.is_empty() {
@@ -255,6 +264,8 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
             Ok(e) => e,
             Err(e) => return internal_err(e),
         };
+        sealed_plaintext = Some(body.value.clone());
+        sealed_password = Some(password.clone());
         NewEnvVar {
             id: uuid::Uuid::new_v4().to_string(),
             name: body.name.clone(),
@@ -283,9 +294,62 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
             updated_at: now,
         }
     };
-
     match state.db.upsert_env_var(new).await {
-        Ok(_) => ok(),
+        Ok(row) => {
+            // Keep the unlock cache in step with the row: an edit replaces the
+            // old plaintext (and drops it from a previous sealer's cache), and
+            // a secret added while its owner is unlocked becomes usable at
+            // once instead of being silently omitted until the next unlock.
+            state.env_unlock.cache_forget_var(&row.id).await;
+            if row.encrypted
+                && let Some(pt) = sealed_plaintext
+            {
+                // Save = unlock: the password just checked out, so open (or
+                // refresh) the owner's unlock window with ALL their secrets.
+                // A secret saved while locked is then usable at once instead
+                // of prompting on first use, and anything already blocked on
+                // an unlock prompt for this owner resumes.
+                let password = sealed_password.unwrap_or_default();
+                match decrypt_owned_vars(&state, &user_id, &password).await {
+                    Ok(Some(values)) => {
+                        match unlock_duration {
+                            Some(d) => {
+                                state
+                                    .env_unlock
+                                    .cache_put_for(&user_id, values.clone(), d.ttl())
+                                    .await
+                            }
+                            // No window asked for: keep a live one's expiry,
+                            // else open the default.
+                            None => {
+                                state
+                                    .env_unlock
+                                    .cache_put_keep_window(
+                                        &user_id,
+                                        values.clone(),
+                                        UnlockDuration::default().ttl(),
+                                    )
+                                    .await
+                            }
+                        }
+                        state
+                            .env_unlock
+                            .resolve_all_for_user(&user_id, &values)
+                            .await;
+                    }
+                    // Another of their secrets is sealed under a different
+                    // (older) password, or the read failed: no full window,
+                    // but this one stays usable while they are unlocked.
+                    _ => {
+                        state
+                            .env_unlock
+                            .cache_set_value(&user_id, &row.id, pt)
+                            .await
+                    }
+                }
+            }
+            ok()
+        }
         Err(e) => internal_err(e),
     }
 }
@@ -294,7 +358,10 @@ async fn upsert(State(state): State<Arc<AppState>>, request: Request<Body>) -> R
 /// scope. 404 if it doesn't exist.
 async fn delete_var(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match state.db.delete_env_var(&id).await {
-        Ok(true) => ok(),
+        Ok(true) => {
+            state.env_unlock.cache_forget_var(&id).await;
+            ok()
+        }
         Ok(false) => err(StatusCode::NOT_FOUND, "not found"),
         Err(e) => internal_err(e),
     }

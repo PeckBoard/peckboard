@@ -487,6 +487,12 @@ mod tests {
             "stale session-control.wasm: auto-pauses at the cap"
         );
         assert!(has(b"skipping until the window frees up"));
+        // 0.5.5+: a cross-folder Deny is reported as `status: denied` (not a
+        // tool error), and a vanished prompt re-asks instead of waiting.
+        assert!(
+            has(b"Don't retry unless the user asks"),
+            "stale session-control.wasm: cross-folder Deny gets stuck"
+        );
     }
 
     /// Every provider crate's static registration must pass the same shape

@@ -14,6 +14,8 @@ Session Control lets one session act on _other_ sessions — interrupt a stuck t
 
 Same-folder targets run immediately. Cross-folder mutating actions ask the user first (_Approve once_ / _Approve always_ / _Deny_); an _Always_ grant is remembered for that controlling session. `find_session` stays folder-blind so agents can discover targets without a prompt. Worker sessions cannot call these tools at all — the `session_control` permission is denied to workers by default.
 
+While the prompt is open the tool returns `awaiting_approval`. After _Deny_ the next call returns `denied` once, and the call after that asks again. If the prompt is gone (for example the session was cleared), the next call asks again.
+
 | Tool                | What it does                                                                                        |
 | ------------------- | --------------------------------------------------------------------------------------------------- |
 | `find_session`      | Lists sessions across every folder and project, with an optional substring query                    |

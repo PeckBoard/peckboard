@@ -3108,6 +3108,8 @@ pub(crate) struct PreparedExec {
     cwd: PathBuf,
     env: Vec<(String, String)>,
     masker: crate::service::secret_mask::SecretMasker,
+    /// Names of visible encrypted vars left unset (locked). Never values.
+    locked_secrets: Vec<String>,
 }
 
 impl PreparedExec {
@@ -3121,6 +3123,12 @@ impl PreparedExec {
         crate::service::secret_mask::SecretMasker,
     ) {
         (self.program, self.cwd, self.env, self.masker)
+    }
+
+    /// The agent-facing note naming visible secrets left unset because they
+    /// are locked (names only), or `None` when every one resolved.
+    pub(crate) fn locked_secrets_notice(&self) -> Option<String> {
+        crate::service::secret_mask::locked_secrets_notice(&self.locked_secrets)
     }
 }
 
@@ -3194,14 +3202,71 @@ pub(crate) fn prepare_exec(
     // ambient). The agent itself never gets these values: its own process
     // env carries no custom vars, and any secret a command prints is masked
     // with the returned masker before the agent can read it.
-    let (env, masker) =
+    let (mut env, mut masker, mut locked) =
         crate::service::secret_mask::command_env_blocking(db, inv.folder_id.as_deref());
+    // A secret this command can see is locked: on an interactive session ask
+    // its owner now (the same prompt dispatch raises) instead of silently
+    // running without it, then rebuild the env from the refreshed cache.
+    if !locked.is_empty() && unlock_prompt_allowed(db, inv) {
+        let session_id = inv.session_id.as_deref().unwrap_or_default();
+        let mut by_owner: std::collections::BTreeMap<String, (Vec<String>, Vec<String>)> =
+            std::collections::BTreeMap::new();
+        for v in &locked {
+            if let Some(owner) = &v.owner {
+                let (names, ids) = by_owner.entry(owner.clone()).or_default();
+                names.push(v.name.clone());
+                ids.push(v.id.clone());
+            }
+        }
+        let mut unlocked_any = false;
+        for (owner, (names, ids)) in by_owner {
+            unlocked_any |= crate::service::env_vars::prompt_unlock_blocking(
+                session_id,
+                &owner,
+                names,
+                &ids,
+                Duration::from_secs(EXEC_UNLOCK_WAIT_SECS),
+            );
+        }
+        if unlocked_any {
+            (env, masker, locked) =
+                crate::service::secret_mask::command_env_blocking(db, inv.folder_id.as_deref());
+        }
+    }
+    // Whatever is still locked (headless session, cancelled, timed out) runs
+    // unset; its names go back to the agent as a notice.
+    let mut locked_secrets: Vec<String> = locked.into_iter().map(|v| v.name).collect();
+    locked_secrets.sort();
+    locked_secrets.dedup();
     Ok(PreparedExec {
         program: command.to_string(),
         cwd,
         env,
         masker,
+        locked_secrets,
     })
+}
+
+/// Longest a command waits on an exec-time unlock prompt. Well under the
+/// agent CLI's ~60s MCP tool-call timeout, so a command that waited on the
+/// prompt can still run and return inside the same tool call.
+const EXEC_UNLOCK_WAIT_SECS: u64 = 30;
+
+/// May this exec block on an unlock prompt? Only an MCP call from an
+/// interactive session: workers and repeating-task sessions are headless
+/// (nobody is there to answer), pre-hatchers can't run commands at all, and
+/// user-authority or session-less calls have no session to prompt on.
+fn unlock_prompt_allowed(db: &Db, inv: &InvocationContext) -> bool {
+    if inv.authority {
+        return false;
+    }
+    let Some(session_id) = inv.session_id.as_deref() else {
+        return false;
+    };
+    match db.get_session_blocking(session_id) {
+        Ok(Some(s)) => !s.is_worker && s.repeating_task_id.is_none(),
+        _ => false,
+    }
 }
 
 /// `peckboard_exec` — run an allowlisted command in the caller's project
@@ -3236,6 +3301,7 @@ pub(crate) fn exec_impl(
         cwd: root,
         env: inject_env,
         masker,
+        locked_secrets,
         ..
     } = match prepare_exec(db, command, inv, enforce_allowlist, authority_root) {
         Ok(p) => p,
@@ -3340,6 +3406,9 @@ pub(crate) fn exec_impl(
              \u{2014} redirect a background process's output to a file, e.g. \
              `(x > log 2>&1 &)`, or use run_background)"
         );
+    }
+    if let Some(note) = crate::service::secret_mask::locked_secrets_notice(&locked_secrets) {
+        out["secret_env_notice"] = serde_json::json!(note);
     }
     out.to_string()
 }
@@ -7966,6 +8035,45 @@ mod tests {
         let stdout = v["stdout"].as_str().unwrap();
         assert!(!stdout.contains("foreignsecret555777"), "stdout: {stdout}");
         assert!(stdout.contains("********"), "stdout: {stdout}");
+    }
+
+    #[tokio::test]
+    async fn exec_locked_folder_secret_shadows_global_as_unset() {
+        let (db, _dir) = exec_fixture().await;
+        // A plain global + a same-name ENCRYPTED var in the caller's folder
+        // ("fx") whose value is not in any unlock cache (fresh random id).
+        db.upsert_env_var(custom_var("PB_TEST_LOCKSHADOW", "globalleak123", None))
+            .await
+            .unwrap();
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.upsert_env_var(crate::db::models::NewEnvVar {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "PB_TEST_LOCKSHADOW".into(),
+            value: None,
+            ciphertext: Some("irrelevant".into()),
+            nonce: Some("irrelevant".into()),
+            kdf_salt: Some("irrelevant".into()),
+            encrypted: true,
+            encrypted_by: Some("owner-x".into()),
+            folder_id: Some("fx".into()),
+            created_at: ts.clone(),
+            updated_at: ts,
+        })
+        .await
+        .unwrap();
+
+        // The locked folder secret leaves the name unset — never the
+        // global's value it was configured to override.
+        let v = exec_sh(&db, "echo got=${PB_TEST_LOCKSHADOW:-unset}").await;
+        let stdout = v["stdout"].as_str().unwrap();
+        assert!(stdout.contains("got=unset"), "stdout: {stdout}");
+
+        // The agent is told which secret is locked (by name, never value)
+        // and how to get it unlocked, instead of the command failing silently.
+        let notice = v["secret_env_notice"].as_str().unwrap_or_default();
+        assert!(notice.contains("PB_TEST_LOCKSHADOW"), "envelope: {v}");
+        assert!(notice.contains("Unlock"), "envelope: {v}");
+        assert!(!v.to_string().contains("globalleak123"), "envelope: {v}");
     }
 
     #[tokio::test]

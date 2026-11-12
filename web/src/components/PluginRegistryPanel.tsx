@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import HookList from './HookList'
 import PermissionList from './PermissionList'
+import { uuid } from '../lib/uuid'
 import Modal from './Modal'
 import { MenuButton } from './Dropdown'
 import {
@@ -145,7 +146,7 @@ function mcpHay(m: RegistryMcpServer): (string | null | undefined)[] {
 /** New editor draft prefilled from a registry MCP template. */
 function draftFromTemplate(m: RegistryMcpServer): McpServer {
   return {
-    id: crypto.randomUUID(),
+    id: uuid(),
     name: m.id.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64),
     transport: m.transport,
     command: m.command ?? '',

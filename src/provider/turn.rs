@@ -857,31 +857,42 @@ pub async fn notify_attachments_dropped(
     .await;
 }
 
+/// Heading placed above a session's custom system prompt (library prompt,
+/// `set_session_system_prompt`, hat) so the model treats it as the top
+/// authority: CLAUDE.md / AGENTS.md arrive as reminders that claim to
+/// override defaults, and without this the session's own instructions read
+/// as just one more appended block.
+pub const SESSION_PROMPT_HEADER: &str = "# Peckboard Session Instructions \u{2014} HIGHEST PRIORITY\n\n\
+     The instructions below come from the user's Peckboard session. They take precedence over \
+     the provider's default instructions, CLAUDE.md / AGENTS.md / other project rule files, and \
+     any other conflicting guidance. When they conflict, follow these.\n\n";
+
 /// The system prompt for a provider with no Claude-style
 /// `--append-system-prompt`: the provider's base prompt (the shared
 /// working-style rules, or the user's per-provider override from
 /// `provider::base_prompt` — which REPLACES them), then the graphify guide
 /// (always — an override must not drop how to read and locate code), then
 /// any per-spawn suffix (repeating-task context), then any per-session
-/// custom prompt. Mirrors how the Claude provider layers the same sources so
-/// a session behaves the same whichever CLI runs it — before this, only
-/// Claude honoured `system_prompt_suffix` at all, and cursor honoured neither.
+/// custom prompt under [`SESSION_PROMPT_HEADER`]. Mirrors how the Claude
+/// provider layers the same sources so a session behaves the same whichever
+/// CLI runs it — before this, only Claude honoured `system_prompt_suffix`
+/// at all, and cursor honoured neither.
 pub fn compose_system_prompt(config: &SpawnConfig, base_override: Option<&str>) -> String {
     let mut prompt = base_override
         .unwrap_or(crate::provider::WORKING_STYLE)
         .to_string();
     prompt.push_str(crate::provider::GRAPHIFY_GUIDE);
-    for extra in [
-        config.system_prompt_suffix.as_deref(),
-        config.system_prompt_override.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::trim)
-    .filter(|s| !s.is_empty())
-    {
+    fn non_empty(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
+    }
+    if let Some(suffix) = non_empty(config.system_prompt_suffix.as_deref()) {
         prompt.push('\n');
-        prompt.push_str(extra);
+        prompt.push_str(suffix);
+    }
+    if let Some(session) = non_empty(config.system_prompt_override.as_deref()) {
+        prompt.push('\n');
+        prompt.push_str(SESSION_PROMPT_HEADER);
+        prompt.push_str(session);
     }
     prompt
 }
@@ -1715,8 +1726,15 @@ mod tests {
         let suffix_at = prompt.find("# Repeating Task Context").unwrap();
         let override_at = prompt.find("Always answer in haiku.").unwrap();
         assert!(suffix_at < override_at, "suffix must precede the override");
+        // The session prompt sits directly under the precedence header; the
+        // repeating-task suffix is not wrapped by it.
+        let header_at = prompt.find(SESSION_PROMPT_HEADER).unwrap();
+        assert!(suffix_at < header_at);
+        assert_eq!(header_at + SESSION_PROMPT_HEADER.len(), override_at);
+        assert!(SESSION_PROMPT_HEADER.contains("HIGHEST PRIORITY"));
+        assert_eq!(prompt.matches("HIGHEST PRIORITY").count(), 1);
 
-        // Blank values add nothing (not even a stray newline).
+        // Blank values add nothing (not even a stray newline or the header).
         config.system_prompt_suffix = Some("   ".into());
         config.system_prompt_override = Some(String::new());
         assert_eq!(compose_system_prompt(&config, None), base);
@@ -1748,7 +1766,7 @@ mod tests {
         assert_eq!(
             prompt,
             format!(
-                "Custom base.{}\nSession rule.",
+                "Custom base.{}\n{SESSION_PROMPT_HEADER}Session rule.",
                 crate::provider::GRAPHIFY_GUIDE
             )
         );

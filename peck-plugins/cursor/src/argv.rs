@@ -16,10 +16,6 @@ Input: `{"questions":[{question, header, multiSelect?, options?}]}`
 Prefer multiple choice when the valid answers are known, and include an "Other" option. Wait for the answer; never assume it. If `ask_user` is not available, state the open question in your final message and stop.
 "#;
 
-/// Resumed turns don't get the system prompt again, so this is what reaches
-/// chats that started before [`ASK_USER_PROMPT`] existed.
-const ASK_USER_REMINDER: &str = "[Peckboard: to ask the user anything, call the `ask_user` tool from the `peckboard` MCP server. Never use Cursor's built-in AskQuestion tool; it does not reach the user here.]";
-
 pub fn build_cli_args(
     model: &str,
     prompt: &str,
@@ -59,23 +55,19 @@ pub fn build_cli_args(
         args.push(path.clone());
     }
     args.push("--".to_string());
-    let prompt = match conversation_id {
-        None => {
-            // A user override of the base prompt already arrived in
-            // `system_prompt` and replaces these rules outright.
-            let rules = if base_prompt_overridden {
-                ""
-            } else {
-                ASK_USER_PROMPT
-            };
-            let standing = format!("{rules}{system_prompt}");
-            match standing.trim() {
-                "" => prompt.to_string(),
-                standing => format!("{standing}\n\n{prompt}"),
-            }
-        }
-        Some(_) if base_prompt_overridden => prompt.to_string(),
-        Some(_) => format!("{ASK_USER_REMINDER}\n\n{prompt}"),
+    // The standing prompt rides on EVERY turn, resumed ones included: a
+    // resumed chat otherwise drifts from the session's instructions. A user
+    // override of the base prompt already arrived in `system_prompt` and
+    // replaces these rules outright.
+    let rules = if base_prompt_overridden {
+        ""
+    } else {
+        ASK_USER_PROMPT
+    };
+    let standing = format!("{rules}{system_prompt}");
+    let prompt = match standing.trim() {
+        "" => prompt.to_string(),
+        standing => format!("{standing}\n\n{prompt}"),
     };
     args.push(prompt);
     args
@@ -127,14 +119,15 @@ mod tests {
     }
 
     #[test]
-    fn resumed_chats_get_the_reminder_without_the_system_prompt() {
-        let prompt = sent_prompt(Some("c1"), false);
-        assert_eq!(prompt, format!("{ASK_USER_REMINDER}\n\nhello"));
+    fn resumed_chats_get_the_full_standing_prompt_every_turn() {
+        assert_eq!(sent_prompt(Some("c1"), false), sent_prompt(None, false));
     }
 
     #[test]
-    fn a_base_prompt_override_replaces_the_rules_and_the_reminder() {
+    fn a_base_prompt_override_replaces_the_rules() {
         assert_eq!(sent_prompt(None, true), "BASE\n\nhello");
-        assert_eq!(sent_prompt(Some("c1"), true), "hello");
+        assert_eq!(sent_prompt(Some("c1"), true), "BASE\n\nhello");
+        let bare = build_cli_args("cursor:auto", "hello", Some("c1"), "  ", true, true, &[]);
+        assert_eq!(bare.last().unwrap(), "hello");
     }
 }

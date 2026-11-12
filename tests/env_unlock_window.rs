@@ -8,16 +8,17 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use peckboard::auth::password::hash_password;
 use peckboard::auth::rate_limit::RateLimiter;
 use peckboard::auth::token::{create_token, generate_jwt_secret, hash_token};
 use peckboard::config::Config;
 use peckboard::db::Db;
-use peckboard::db::models::{NewAuthSession, NewEnvVar, NewUser};
+use peckboard::db::models::{NewAuthSession, NewEnvVar, NewFolder, NewUser};
 use peckboard::plugin::builtin::BuiltinPluginRegistry;
 use peckboard::plugin::manager::PluginManager;
 use peckboard::provider::manager::SessionManager;
 use peckboard::provider::registry::ProviderRegistry;
-use peckboard::service::env_vars::{EnvUnlockRegistry, encrypt_value};
+use peckboard::service::env_vars::{EnvUnlockRegistry, encrypt_value, set_global_registry};
 use peckboard::service::mcp_server::McpTokenRegistry;
 use peckboard::service::push::PushService;
 use peckboard::state::AppState;
@@ -80,7 +81,7 @@ async fn mint_user(state: &AppState, user_id: &str) -> String {
             id: user_id.into(),
             username: user_id.into(),
             email: None,
-            password_hash: "h".into(),
+            password_hash: hash_password(PASSWORD).unwrap(),
             role: "admin".into(),
             created_at: ts.clone(),
             updated_at: ts,
@@ -299,4 +300,191 @@ async fn bad_password_duration_or_nothing_to_unlock_leaves_it_locked() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     assert!(state.env_unlock.cache_get("u1").await.is_none());
+}
+
+/// Regression: a secret added (or edited) while its owner is unlocked used to
+/// be missing from command env until the next unlock, because the cache was
+/// a snapshot taken at unlock time and the upsert route never touched it.
+#[tokio::test]
+async fn secret_added_while_unlocked_reaches_folder_commands() {
+    let state = build_state().await;
+    // `command_env_blocking` reads the process-global registry; only this
+    // test in the binary binds it.
+    set_global_registry(state.env_unlock.clone());
+    let jwt = mint_user(&state, "u1").await;
+    seed_encrypted_var(&state, "e1", "GITHUB_PAT", "ghp-token", "u1").await;
+    state
+        .db
+        .create_folder(NewFolder {
+            id: "f1".into(),
+            name: "F".into(),
+            path: "/tmp/f1".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+
+    let resp = app(&state)
+        .oneshot(post(
+            &jwt,
+            "/api/env-vars/unlock",
+            serde_json::json!({ "password": PASSWORD, "duration": "1h" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Added while unlocked, scoped to the folder.
+    let resp = app(&state)
+        .oneshot(post(
+            &jwt,
+            "/api/env-vars",
+            serde_json::json!({
+                "name": "PB_FOLDER_SECRET",
+                "value": "folder-secret-1",
+                "encrypt": true,
+                "password": PASSWORD,
+                "folder_id": "f1",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let folder_env = |db: peckboard::db::Db| async move {
+        tokio::task::spawn_blocking(move || {
+            peckboard::service::secret_mask::command_env_blocking(&db, Some("f1"))
+                .0
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .await
+        .unwrap()
+    };
+    let env = folder_env(state.db.clone()).await;
+    assert_eq!(
+        env.get("PB_FOLDER_SECRET").map(String::as_str),
+        Some("folder-secret-1")
+    );
+    assert_eq!(env.get("GITHUB_PAT").map(String::as_str), Some("ghp-token"));
+
+    // Editing it while unlocked replaces the cached plaintext.
+    let resp = app(&state)
+        .oneshot(post(
+            &jwt,
+            "/api/env-vars",
+            serde_json::json!({
+                "name": "PB_FOLDER_SECRET",
+                "value": "folder-secret-2",
+                "encrypt": true,
+                "password": PASSWORD,
+                "folder_id": "f1",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let env = folder_env(state.db.clone()).await;
+    assert_eq!(
+        env.get("PB_FOLDER_SECRET").map(String::as_str),
+        Some("folder-secret-2")
+    );
+
+    // Turning it plaintext drops the stale secret from the cache.
+    let row = state
+        .db
+        .list_env_vars()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.name == "PB_FOLDER_SECRET")
+        .unwrap();
+    let resp = app(&state)
+        .oneshot(post(
+            &jwt,
+            "/api/env-vars",
+            serde_json::json!({
+                "name": "PB_FOLDER_SECRET",
+                "value": "plain",
+                "folder_id": "f1",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cached = state.env_unlock.cache_get("u1").await.unwrap();
+    assert!(!cached.contains_key(&row.id));
+    assert!(cached.contains_key("e1"));
+}
+
+/// Save = unlock: saving a secret proves the password, so it unlocks ALL the
+/// owner's secrets (not just the one saved) for the chosen window, and
+/// answers a session already blocked on an unlock prompt.
+#[tokio::test]
+async fn saving_a_secret_unlocks_all_of_the_owners_secrets() {
+    let state = build_state().await;
+    let jwt = mint_user(&state, "u1").await;
+    seed_encrypted_var(&state, "e1", "GITHUB_PAT", "ghp-token", "u1").await;
+    assert!(state.env_unlock.cache_get("u1").await.is_none());
+    // A session is already waiting on a prompt for this owner.
+    let (_req, rx) = state
+        .env_unlock
+        .begin_request("u1", vec!["GITHUB_PAT".into()])
+        .await;
+
+    let resp = app(&state)
+        .oneshot(post(
+            &jwt,
+            "/api/env-vars",
+            serde_json::json!({
+                "name": "PB_NEW_SECRET",
+                "value": "new-secret",
+                "encrypt": true,
+                "password": PASSWORD,
+                "unlock_duration": "15m",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let cached = state.env_unlock.cache_get("u1").await.unwrap();
+    // The OTHER secret is unlocked too, and so is the one just saved.
+    assert_eq!(cached.get("e1").map(String::as_str), Some("ghp-token"));
+    assert!(cached.values().any(|v| v == "new-secret"));
+    // For the window asked for.
+    let left = state
+        .env_unlock
+        .cache_status("u1")
+        .await
+        .unwrap()
+        .expires_in_secs
+        .unwrap();
+    assert!(left > 14 * 60 && left <= 15 * 60, "left: {left}");
+    // The waiting prompt was answered instead of timing out.
+    assert!(rx.await.unwrap().is_some());
+
+    // A later save with no window asked for keeps the open one's expiry.
+    let resp = app(&state)
+        .oneshot(post(
+            &jwt,
+            "/api/env-vars",
+            serde_json::json!({
+                "name": "PB_NEW_SECRET",
+                "value": "new-secret-2",
+                "encrypt": true,
+                "password": PASSWORD,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let left = state
+        .env_unlock
+        .cache_status("u1")
+        .await
+        .unwrap()
+        .expires_in_secs
+        .unwrap();
+    assert!(left <= 15 * 60, "left: {left}");
 }

@@ -141,7 +141,8 @@ export default function EnvUnlockDialog() {
       <h3>Unlock environment variables</h3>
       <p className="form-hint">
         <strong>{sessionName}</strong> needs environment variables ({pending.varNames.join(', ')})
-        that are encrypted with <strong>{pending.username}</strong>&rsquo;s password.
+        that are encrypted with <strong>{pending.username || user.username}</strong>&rsquo;s
+        password.
       </p>
       <form
         onSubmit={(e) => {

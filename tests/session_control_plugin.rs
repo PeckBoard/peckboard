@@ -29,6 +29,7 @@ struct ControlRecorder {
     terminates: Mutex<Vec<String>>,
     clears: Mutex<Vec<String>>,
     messages: Mutex<Vec<(String, String, usize)>>, // (session, text, attachment_count)
+    asks: Mutex<Vec<(String, String)>>,            // (session, approval token)
 }
 impl LiveHost for ControlRecorder {
     fn dispatch_capture(&self, _session_id: String, _prompt: String, _clear_first: bool) {}
@@ -47,6 +48,16 @@ impl LiveHost for ControlRecorder {
             .lock()
             .unwrap()
             .push((session_id, text, attachments.len()));
+    }
+    fn ask_user(
+        &self,
+        session_id: String,
+        _question: String,
+        _options: Vec<String>,
+        token: String,
+        _redirect_session_id: Option<String>,
+    ) {
+        self.asks.lock().unwrap().push((session_id, token));
     }
 }
 
@@ -412,6 +423,182 @@ async fn read_session_respects_the_folder_gate_and_session_ownership() {
     )
     .await;
     assert_eq!(capped["event_count"], json!(1), "last_n honoured: {capped}");
+}
+/// Cross-folder approval lifecycle for `send_message`, against the real host
+/// `peckboard_ask_user` / `peckboard_get_answer`: a Deny is reported ONCE as
+/// status `denied`, the next call asks afresh, Approve once delivers exactly
+/// once, and a pending record whose prompt never reached the session (cleared
+/// session, lost emit, restart) re-asks instead of "still waiting" forever.
+#[tokio::test]
+async fn cross_folder_deny_reports_denied_once_then_asks_afresh() {
+    let Some(wasm) = plugin_wasm() else {
+        eprintln!(
+            "SKIP cross_folder_deny_reports_denied_once_then_asks_afresh: plugin wasm not \
+             built (run peck-plugins/session-control/build.sh)"
+        );
+        return;
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let plugins_dir = data_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::copy(&wasm, plugins_dir.join(format!("{PLUGIN_ID}.wasm"))).unwrap();
+
+    let db = Db::open(data_dir).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    for f in ["f1", "f2"] {
+        db.create_folder(NewFolder {
+            id: f.into(),
+            name: f.into(),
+            path: data_dir.join(f).to_string_lossy().to_string(),
+            created_at: ts.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    for (id, folder) in [("caller", "f1"), ("foreign", "f2")] {
+        db.create_session(NewSession {
+            id: id.into(),
+            name: id.into(),
+            folder_id: folder.into(),
+            created_at: ts.clone(),
+            last_activity: ts.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+
+    let plugins = PluginManager::new(data_dir, db.clone());
+    plugins.load_all().await.unwrap();
+    let rec = Arc::new(ControlRecorder::default());
+    plugins.set_live_host(rec.clone());
+    let info = plugins
+        .decide(PLUGIN_ID, true)
+        .await
+        .unwrap()
+        .expect("session-control plugin should be loaded");
+    assert_eq!(info.status, "approved", "plugin must be active: {info:?}");
+
+    let ctx = json!({ "sessionId": "caller", "folderId": "f1" });
+    let args = json!({ "session_id": "foreign", "text": "hello" });
+    let asks = || rec.asks.lock().unwrap().clone();
+    let sent = || rec.messages.lock().unwrap().len();
+
+    // 1. First call asks.
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(
+        r["status"],
+        json!("awaiting_approval"),
+        "first call asks: {r}"
+    );
+    assert_eq!(asks().len(), 1, "one prompt");
+    let tok1 = asks()[0].1.clone();
+    let q1 = emit_approval_question(&db, "caller", &tok1).await;
+
+    // 2. Re-call before the user answers: still waiting, no second prompt.
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(r["status"], json!("awaiting_approval"), "{r}");
+    assert!(
+        r["message"].as_str().unwrap().contains("Still waiting"),
+        "{r}"
+    );
+    assert_eq!(asks().len(), 1, "no duplicate prompt while one is live");
+
+    // 3. The user denies → the next call reports `denied` once.
+    resolve_question(&db, "caller", &q1, "Deny").await;
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(r["status"], json!("denied"), "deny is reported: {r}");
+    assert!(r["message"].as_str().unwrap().contains("denied"), "{r}");
+    assert_eq!(sent(), 0, "nothing delivered after Deny");
+
+    // 4. The call after that asks afresh — never "still waiting".
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(r["status"], json!("awaiting_approval"), "{r}");
+    assert!(
+        !r["message"].as_str().unwrap().contains("Still waiting"),
+        "a fresh prompt, not a stale wait: {r}"
+    );
+    assert_eq!(asks().len(), 2, "a new prompt reached the user");
+    let tok2 = asks()[1].1.clone();
+    assert_ne!(tok1, tok2, "each prompt has its own token");
+    let q2 = emit_approval_question(&db, "caller", &tok2).await;
+
+    // 5. Approve once → delivered exactly once; the next call asks again.
+    resolve_question(&db, "caller", &q2, "Approve once").await;
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(sent(), 1, "approved once → delivered: {r}");
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(
+        r["status"],
+        json!("awaiting_approval"),
+        "once is one-shot: {r}"
+    );
+    assert_eq!(asks().len(), 3);
+    assert_eq!(sent(), 1);
+
+    // 6. Stale pending record: prompt 3 never landed in the session (cleared
+    //    session — clear deletes the event log — or a lost emit). The re-call
+    //    asks again instead of waiting on a prompt the user can't see.
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(r["status"], json!("awaiting_approval"), "{r}");
+    assert_eq!(asks().len(), 4, "stale pending → fresh prompt: {r}");
+
+    // 7. Restart (fresh plugin instance, same DB): tokens must not repeat the
+    //    ones already in the session's event log, or get_answer would read
+    //    an OLD question's answer (e.g. replay an earlier Approve once).
+    let before: Vec<String> = asks().into_iter().map(|(_, t)| t).collect();
+    drop(plugins);
+    let plugins = PluginManager::new(data_dir, db.clone());
+    plugins.load_all().await.unwrap();
+    let rec2 = Arc::new(ControlRecorder::default());
+    plugins.set_live_host(rec2.clone());
+    plugins.decide(PLUGIN_ID, true).await.unwrap();
+    // Drop the step-6 pending record's prompt so the call asks afresh.
+    db.delete_events_by_session("caller").await.unwrap();
+    let r = invoke(&plugins, "send_message", args.clone(), &ctx).await;
+    assert_eq!(r["status"], json!("awaiting_approval"), "{r}");
+    let fresh = rec2.asks.lock().unwrap().clone();
+    assert_eq!(fresh.len(), 1, "asked after restart");
+    assert!(
+        !before.contains(&fresh[0].1),
+        "token {} reused after restart: {before:?}",
+        fresh[0].1
+    );
+}
+
+/// Persist a plugin approval `question` event carrying `token`, shaped like
+/// `emit_plugin_question` (what the real LiveHost writes).
+async fn emit_approval_question(db: &Db, session_id: &str, token: &str) -> String {
+    db.append_event(
+        session_id,
+        "question",
+        json!({
+            "questions": [{
+                "question": "Allow?",
+                "header": "Approval",
+                "options": ["Approve once", "Approve always", "Deny"],
+            }],
+            "approval_token": token,
+            "sessionId": session_id,
+            "source": "plugin",
+        }),
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+/// The user's answer, as the question card's route persists it.
+async fn resolve_question(db: &Db, session_id: &str, question_id: &str, label: &str) {
+    db.append_event(
+        session_id,
+        "question-resolved",
+        json!({ "question_id": question_id, "answers": { "0": label } }),
+    )
+    .await
+    .unwrap();
 }
 
 async fn invoke(plugins: &PluginManager, tool: &str, args: Value, ctx: &Value) -> Value {

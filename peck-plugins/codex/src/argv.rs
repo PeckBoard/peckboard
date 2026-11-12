@@ -47,11 +47,11 @@ pub fn build_cli_args(
         args.push("--image".into());
         args.push(path.clone());
     }
-    let prompt = match conversation_id {
-        None if !system_prompt.trim().is_empty() => {
-            format!("{}\n\n{}", system_prompt.trim(), prompt)
-        }
-        _ => prompt.to_string(),
+    // Every turn, resumed ones included: a resumed thread otherwise drifts
+    // from the session's standing instructions.
+    let prompt = match system_prompt.trim() {
+        "" => prompt.to_string(),
+        standing => format!("{standing}\n\n{prompt}"),
     };
     // `--` so a prompt starting with `-` is never parsed as a flag.
     args.push("--".into());
@@ -125,5 +125,16 @@ mod tests {
             &[],
         );
         assert!(args.iter().any(|a| a == "resume"));
+    }
+
+    #[test]
+    fn system_prompt_is_prepended_on_every_turn_including_resume() {
+        let tid = "019a1b2c-3d4e-7f00-8a9b-0c1d2e3f4a5b";
+        let first = build_cli_args("auto", "go", None, None, " RULES ", &[], &[]);
+        let resumed = build_cli_args("auto", "go", Some(tid), None, " RULES ", &[], &[]);
+        assert_eq!(first.last().unwrap(), "RULES\n\ngo");
+        assert_eq!(resumed.last().unwrap(), "RULES\n\ngo");
+        let bare = build_cli_args("auto", "go", Some(tid), None, "  ", &[], &[]);
+        assert_eq!(bare.last().unwrap(), "go");
     }
 }

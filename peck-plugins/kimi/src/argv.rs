@@ -4,10 +4,11 @@ pub fn build_cli_args(
     conversation_id: Option<&str>,
     system_prompt: &str,
 ) -> Vec<String> {
-    let effective_prompt = if conversation_id.is_none() && !system_prompt.is_empty() {
-        format!("{system_prompt}\n\n{prompt}")
-    } else {
-        prompt.to_string()
+    // Every turn, resumed ones included: a resumed session otherwise drifts
+    // from the session's standing instructions.
+    let effective_prompt = match system_prompt.trim() {
+        "" => prompt.to_string(),
+        _ => format!("{system_prompt}\n\n{prompt}"),
     };
     let mut args = vec![
         "--prompt".to_string(),
@@ -64,14 +65,16 @@ mod tests {
     }
 
     #[test]
-    fn first_turn_prepends_system_prompt_but_resume_does_not() {
+    fn system_prompt_is_prepended_on_every_turn_including_resume() {
         let first = build_cli_args(None, "do it", None, "# Working style");
         assert!(first[1].starts_with("# Working style"));
         assert!(first[1].ends_with("do it"));
 
         let resume = build_cli_args(None, "do it", Some("sess-7"), "# Working style");
-        assert_eq!(resume[1], "do it");
+        assert_eq!(resume[1], first[1]);
         let s = resume.iter().position(|a| a == "--session").unwrap();
         assert_eq!(resume[s + 1], "sess-7");
+
+        assert_eq!(build_cli_args(None, "do it", Some("s"), "  ")[1], "do it");
     }
 }

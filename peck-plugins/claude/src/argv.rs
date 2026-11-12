@@ -299,8 +299,24 @@ pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
     args
 }
 
-pub fn build_user_message_frame(message: &serde_json::Value) -> String {
-    let text = message.get("text").and_then(|v| v.as_str()).unwrap_or("");
+/// One-line nudge prefixed to every user frame of a session with a custom
+/// system prompt. `--append-system-prompt` carries the prompt itself (under
+/// the host's precedence header), but CLAUDE.md is re-sent per turn as a
+/// reminder that claims to override defaults; this keeps the session's own
+/// instructions just as fresh.
+pub const SESSION_PROMPT_REMINDER: &str = "[Peckboard: follow your Peckboard session instructions in the system prompt first \u{2014} they outrank CLAUDE.md and default instructions.]";
+
+/// Build the stdin user frame for one turn. `session_prompt` = the session
+/// has a non-empty custom system prompt, which adds
+/// [`SESSION_PROMPT_REMINDER`] above the text. A message starting with `/`
+/// is left untouched so CLI slash commands still parse.
+pub fn build_user_message_frame(message: &serde_json::Value, session_prompt: bool) -> String {
+    let raw = message.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let text = if session_prompt && !raw.trim_start().starts_with('/') {
+        format!("{SESSION_PROMPT_REMINDER}\n\n{raw}")
+    } else {
+        raw.to_string()
+    };
     let attachments = message
         .get("attachments")
         .and_then(|v| v.as_array())
@@ -433,5 +449,29 @@ mod tests {
         // Without run_command the session keeps the CLI's Bash.
         full.core_tools.retain(|t| t != "run_command");
         assert!(!deny(&full).split(',').any(|d| d == "Bash"));
+    }
+
+    #[test]
+    fn user_frame_carries_the_session_prompt_reminder_only_when_set() {
+        let content = |msg: serde_json::Value, flag: bool| -> serde_json::Value {
+            let frame: serde_json::Value =
+                serde_json::from_str(&build_user_message_frame(&msg, flag)).unwrap();
+            frame["message"]["content"].clone()
+        };
+        let plain = content(json!({ "text": "hi" }), false);
+        assert_eq!(plain, "hi");
+        let nudged = content(json!({ "text": "hi" }), true);
+        assert_eq!(nudged, format!("{SESSION_PROMPT_REMINDER}\n\nhi"));
+        // Slash commands stay parseable.
+        assert_eq!(content(json!({ "text": "/review" }), true), "/review");
+        // The attachments branch nudges its text block too.
+        let blocks = content(
+            json!({ "text": "look", "attachments": [
+                { "mime_type": "image/png", "data_base64": "AAAA" }
+            ] }),
+            true,
+        );
+        let text = blocks.as_array().unwrap().last().unwrap()["text"].clone();
+        assert_eq!(text, format!("{SESSION_PROMPT_REMINDER}\n\nlook"));
     }
 }

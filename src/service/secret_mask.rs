@@ -279,7 +279,8 @@ pub fn mask_json_strings(v: &mut serde_json::Value, masker: &SecretMasker) {
 ///
 /// - inject: every custom env var (Settings → Environment Variables) visible
 ///   to `folder_id` — globals plus that folder's own vars, a folder var
-///   shadowing a global one with the same name. Plain values come from the
+///   shadowing a global one with the same name (even while it is a locked
+///   secret — the name is then left unset, never the global's value). Plain values come from the
 ///   DB, encrypted values from the unlock cache while ANY user's unlock is
 ///   warm. Layered over the inherited host env by the caller (custom wins on
 ///   collision: user-configured beats ambient).
@@ -299,12 +300,15 @@ pub fn mask_json_strings(v: &mut serde_json::Value, masker: &SecretMasker) {
 /// - masker: every resolvable value from EVERY scope (output must not leak
 ///   another folder's secret either), plus host env values whose NAME is
 ///   sensitive ([`is_sensitive_env_name`]).
+/// - locked: visible encrypted vars left unset because no unlock window
+///   holds them (name, id, owner — never values), for the exec-time unlock
+///   prompt and [`locked_secrets_notice`].
 ///
 /// Blocking (DB + lock) — call from a blocking thread only.
 pub fn command_env_blocking(
     db: &crate::db::Db,
     folder_id: Option<&str>,
-) -> (Vec<(String, String)>, SecretMasker) {
+) -> (Vec<(String, String)>, SecretMasker, Vec<LockedVar>) {
     let rows = match db.list_env_vars_blocking() {
         Ok(rows) => rows,
         Err(e) => {
@@ -318,26 +322,52 @@ pub fn command_env_blocking(
     // entries for since-deleted vars never match a row, so they are neither
     // injected nor masked.
     let unlocked = crate::service::env_vars::unlocked_values_blocking();
-
     let mut global: BTreeMap<String, String> = BTreeMap::new();
-    let mut folder: BTreeMap<String, String> = BTreeMap::new();
+    // Every var in the session's folder scope, resolved or not: a folder var
+    // shadows the same-named global even while it is a locked secret (then
+    // the name is left unset), so a folder session never silently runs with
+    // the global value it was configured to override.
+    let mut folder: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut secrets: Vec<String> = Vec::new();
+    // Visible encrypted vars with no unlocked value (never their values).
+    let mut locked: Vec<LockedVar> = Vec::new();
     for r in &rows {
         let value = if r.encrypted {
             unlocked.get(&r.id).cloned()
         } else {
             r.value.clone()
         };
-        let Some(value) = value else { continue };
-        secrets.push(value.clone());
+        if let Some(v) = &value {
+            secrets.push(v.clone());
+        }
+        let visible =
+            r.folder_id.is_none() || (folder_id.is_some() && r.folder_id.as_deref() == folder_id);
+        if r.encrypted && value.is_none() && visible {
+            locked.push(LockedVar {
+                name: r.name.clone(),
+                id: r.id.clone(),
+                owner: r.encrypted_by.clone(),
+            });
+        }
         if r.folder_id.is_none() {
-            global.insert(r.name.clone(), value);
+            if let Some(v) = value {
+                global.insert(r.name.clone(), v);
+            }
         } else if folder_id.is_some() && r.folder_id.as_deref() == folder_id {
             folder.insert(r.name.clone(), value);
         }
     }
     let mut inject = global;
-    inject.extend(folder);
+    for (name, value) in folder {
+        match value {
+            Some(v) => {
+                inject.insert(name, v);
+            }
+            None => {
+                inject.remove(&name);
+            }
+        }
+    }
 
     for (name, value) in std::env::vars() {
         if is_sensitive_env_name(&name) {
@@ -348,7 +378,17 @@ pub fn command_env_blocking(
         secrets.extend(forms.iter().cloned());
     }
     secrets.extend(extra_secrets());
-    (inject.into_iter().collect(), SecretMasker::new(secrets))
+    // Locked vars actually missing from the command — a locked global
+    // shadowed by a resolved folder var is not missing.
+    let locked: Vec<LockedVar> = locked
+        .into_iter()
+        .filter(|v| !inject.contains_key(&v.name))
+        .collect();
+    (
+        inject.into_iter().collect(),
+        SecretMasker::new(secrets),
+        locked,
+    )
 }
 
 /// The console masker alone (custom env values from every scope + sensitive
@@ -356,6 +396,30 @@ pub fn command_env_blocking(
 /// `ssh_run` output). Blocking — call from a blocking thread only.
 pub fn masker_blocking(db: &crate::db::Db) -> SecretMasker {
     command_env_blocking(db, None).1
+}
+
+/// A visible encrypted var a command did not get because no unlock window
+/// holds its value. Never carries the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedVar {
+    pub name: String,
+    pub id: String,
+    /// The user whose password unlocks it (`encrypted_by`).
+    pub owner: Option<String>,
+}
+
+/// The note a command tool result carries when visible secrets were locked
+/// and so left unset. Names only — never values. `None` when nothing is
+/// locked.
+pub fn locked_secrets_notice(locked: &[String]) -> Option<String> {
+    if locked.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Note: secret env vars locked, not set: {} \u{2014} ask the user to unlock them \
+         (Settings \u{2192} Environment Variables \u{2192} Unlock, or reply to the unlock prompt).",
+        locked.join(", ")
+    ))
 }
 
 /// Text encodings of the server's own keys (`jwt_secret`, vault keys),

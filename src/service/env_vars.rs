@@ -189,7 +189,14 @@ struct Inner {
     pending: HashMap<String, Pending>,
     /// user_id → cached decrypted values.
     cache: HashMap<String, CacheEntry>,
+    /// user_id → when they last cancelled / ignored an exec-time prompt
+    /// (see [`EXEC_PROMPT_DECLINE_COOLDOWN`]).
+    declined: HashMap<String, Instant>,
 }
+
+/// After an owner cancels or ignores a command-time unlock prompt, further
+/// command-time prompts for them are skipped for this long. 10 minutes.
+const EXEC_PROMPT_DECLINE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 
 /// In-memory registry of in-flight unlock prompts and short-lived decrypted
 /// value caches. Cheap to clone (shared `Arc` inner), modeled on
@@ -329,6 +336,25 @@ impl EnvUnlockRegistry {
         self.lock_inner().cache.remove(user_id);
     }
 
+    /// Record `var_id`'s current plaintext in `user_id`'s LIVE unlock window,
+    /// keeping that window's expiry. A var created or edited while its owner
+    /// is unlocked would otherwise be missing (or stale) until the next
+    /// unlock. No-op when the user is locked or the window has expired — a
+    /// write must never open an unlock window on its own.
+    pub async fn cache_set_value(&self, user_id: &str, var_id: &str, value: String) {
+        self.cache_set_value_at(user_id, var_id, value, Instant::now())
+            .await;
+    }
+
+    /// Drop `var_id` from every user's cached values (the var was deleted,
+    /// re-sealed by someone else, or turned plaintext), so no stale plaintext
+    /// outlives the row it came from.
+    pub async fn cache_forget_var(&self, var_id: &str) {
+        for entry in self.lock_inner().cache.values_mut() {
+            entry.values.remove(var_id);
+        }
+    }
+
     // ── time-injectable internals (used directly by tests) ────────────────
 
     async fn cache_put_at(&self, user_id: &str, values: ValueMap, expires_at: Option<Instant>) {
@@ -341,6 +367,15 @@ impl EnvUnlockRegistry {
         let mut g = self.lock_inner();
         g.cache.retain(|_, e| e.is_live(now));
         g.cache.get(user_id).map(|e| e.values.clone())
+    }
+
+    async fn cache_set_value_at(&self, user_id: &str, var_id: &str, value: String, now: Instant) {
+        let mut g = self.lock_inner();
+        if let Some(entry) = g.cache.get_mut(user_id)
+            && entry.is_live(now)
+        {
+            entry.values.insert(var_id.to_string(), value);
+        }
     }
 
     /// Snapshot of every owner's unexpired cached plaintexts, merged
@@ -358,6 +393,150 @@ impl EnvUnlockRegistry {
             }
         }
         out
+    }
+
+    /// Cache `values` for `user_id`, keeping the expiry of a still-live
+    /// window; with none open, start one for `fallback_ttl`. A password
+    /// that just re-proved itself (saving a secret) refreshes the values
+    /// without silently shortening or widening a window the user chose.
+    pub async fn cache_put_keep_window(
+        &self,
+        user_id: &str,
+        values: ValueMap,
+        fallback_ttl: Option<Duration>,
+    ) {
+        let now = Instant::now();
+        let mut g = self.lock_inner();
+        let expires_at = match g.cache.get(user_id) {
+            Some(e) if e.is_live(now) => e.expires_at,
+            _ => fallback_ttl.map(|d| now + d),
+        };
+        g.cache
+            .insert(user_id.to_string(), CacheEntry { values, expires_at });
+    }
+
+    /// Blocking use-time unlock prompt for the command-exec path (which runs
+    /// on a blocking thread, or inside a plugin host call on a runtime
+    /// worker — so it polls instead of `block_on`, which would panic there).
+    ///
+    /// Returns `true` once `owner`'s live window holds every id in
+    /// `var_ids`. Otherwise raises the same `env-unlock-request` WS prompt
+    /// dispatch does — unless one for `owner` is already open (a dispatch or
+    /// another command is asking), in which case it waits on that one rather
+    /// than stacking a second dialog — and waits up to `timeout` for it to be
+    /// answered. A wrong password leaves the request open, so the wait goes
+    /// on. Its own request is dropped on timeout and always followed by an
+    /// `env-unlock-resolved` event so the dialog closes. Values are never
+    /// logged or broadcast.
+    pub fn prompt_blocking(
+        &self,
+        broadcaster: &crate::ws::broadcaster::Broadcaster,
+        session_id: &str,
+        owner: &str,
+        var_names: Vec<String>,
+        var_ids: &[String],
+        timeout: Duration,
+    ) -> bool {
+        let holds_all = || {
+            let now = Instant::now();
+            self.lock_inner().cache.get(owner).is_some_and(|e| {
+                e.is_live(now) && var_ids.iter().all(|id| e.values.contains_key(id))
+            })
+        };
+        if holds_all() {
+            return true;
+        }
+        // The owner just cancelled / ignored an exec-time prompt: don't ask
+        // again inside the cooldown (Settings → Unlock still works).
+        {
+            let mut g = self.lock_inner();
+            let now = Instant::now();
+            g.declined
+                .retain(|_, at| now.duration_since(*at) < EXEC_PROMPT_DECLINE_COOLDOWN);
+            if g.declined.contains_key(owner) {
+                return false;
+            }
+        }
+        let owner_pending = || {
+            self.lock_inner()
+                .pending
+                .values()
+                .any(|p| p.user_id == owner)
+        };
+
+        let mut mine = None;
+        if !owner_pending() {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = oneshot::channel();
+            self.lock_inner().pending.insert(
+                request_id.clone(),
+                Pending {
+                    user_id: owner.to_string(),
+                    var_names: var_names.clone(),
+                    tx,
+                },
+            );
+            broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "env-unlock-request".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "user_id": owner,
+                    // The dialog only shows on the owner's own tab, which
+                    // falls back to its own username when this is empty.
+                    "username": "",
+                    "var_names": var_names,
+                }),
+            });
+            mine = Some((request_id, rx));
+        }
+
+        let deadline = Instant::now() + timeout;
+        let mut timed_out = false;
+        loop {
+            let open = match &mine {
+                Some((id, _)) => self.lock_inner().pending.contains_key(id),
+                None => owner_pending(),
+            };
+            if !open {
+                break;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        if let Some((id, mut rx)) = mine {
+            let reason = if timed_out {
+                self.lock_inner().pending.remove(&id);
+                "timeout"
+            } else {
+                // The unlock routes cache the values BEFORE resolving, so the
+                // payload only signals the outcome.
+                match rx.try_recv() {
+                    Ok(Some(_)) => "answered",
+                    Ok(None) => "cancelled",
+                    Err(_) => "dropped",
+                }
+            };
+            // A cancelled or ignored prompt means "not now": hold off further
+            // exec-time prompts for this owner so every later command doesn't
+            // pop the dialog again and stall for the full wait.
+            if matches!(reason, "cancelled" | "timeout") {
+                self.lock_inner()
+                    .declined
+                    .insert(owner.to_string(), Instant::now());
+            }
+            broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "env-unlock-resolved".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({ "request_id": id, "reason": reason }),
+            });
+        }
+        holds_all()
     }
 }
 
@@ -386,6 +565,34 @@ pub fn unlocked_values_blocking() -> HashMap<String, String> {
     match GLOBAL_REGISTRY.get() {
         Some(reg) => reg.all_cached_values_blocking(),
         None => HashMap::new(),
+    }
+}
+
+/// Process-global WS broadcaster, late-bound by `server` alongside
+/// [`set_global_registry`], so the blocking command-exec path can raise an
+/// unlock prompt ([`prompt_unlock_blocking`]). Unset in tests → no prompt.
+static GLOBAL_BROADCASTER: OnceLock<Arc<crate::ws::broadcaster::Broadcaster>> = OnceLock::new();
+
+/// Bind the app's broadcaster for exec-time unlock prompts. First call wins.
+pub fn set_global_broadcaster(broadcaster: Arc<crate::ws::broadcaster::Broadcaster>) {
+    let _ = GLOBAL_BROADCASTER.set(broadcaster);
+}
+
+/// Ask `owner` to unlock from the command-exec path and wait (blocking) up to
+/// `timeout`; see [`EnvUnlockRegistry::prompt_blocking`]. `false` — run
+/// without the vars — when no registry/broadcaster is bound.
+pub fn prompt_unlock_blocking(
+    session_id: &str,
+    owner: &str,
+    var_names: Vec<String>,
+    var_ids: &[String],
+    timeout: Duration,
+) -> bool {
+    match (GLOBAL_REGISTRY.get(), GLOBAL_BROADCASTER.get()) {
+        (Some(reg), Some(bc)) => {
+            reg.prompt_blocking(bc, session_id, owner, var_names, var_ids, timeout)
+        }
+        _ => false,
     }
 }
 
@@ -579,5 +786,109 @@ mod tests {
         // panic poisoned the extism instance lock and wedged the plugin.
         let all = reg.all_cached_values_blocking();
         assert_eq!(all.get("id1").map(String::as_str), Some("v"));
+    }
+
+    #[tokio::test]
+    async fn cache_set_value_only_touches_a_live_window() {
+        let reg = EnvUnlockRegistry::new();
+        let now = Instant::now();
+        let mut vals = ValueMap::new();
+        vals.insert("id1".into(), "old".into());
+        let exp = now + Duration::from_secs(60);
+        reg.cache_put_at("u1", vals, Some(exp)).await;
+
+        // Live: adds a new id and overwrites an edited one, expiry untouched.
+        reg.cache_set_value_at("u1", "id2", "new".into(), now).await;
+        reg.cache_set_value_at("u1", "id1", "edited".into(), now)
+            .await;
+        let got = reg.cache_get_at("u1", now).await.unwrap();
+        assert_eq!(got.get("id1").map(String::as_str), Some("edited"));
+        assert_eq!(got.get("id2").map(String::as_str), Some("new"));
+        assert_eq!(
+            reg.lock_inner().cache.get("u1").unwrap().expires_at,
+            Some(exp)
+        );
+
+        // Locked user: never opens a window.
+        reg.cache_set_value_at("u2", "id3", "x".into(), now).await;
+        assert!(reg.cache_get_at("u2", now).await.is_none());
+
+        // Expired window: not revived.
+        let later = exp + Duration::from_secs(1);
+        reg.cache_set_value_at("u1", "id4", "y".into(), later).await;
+        assert!(reg.cache_get_at("u1", later).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cache_forget_var_drops_the_id_for_every_user() {
+        let reg = EnvUnlockRegistry::new();
+        let mut a = ValueMap::new();
+        a.insert("id1".into(), "a".into());
+        a.insert("keep".into(), "k".into());
+        let mut b = ValueMap::new();
+        b.insert("id1".into(), "b".into());
+        reg.cache_put("u1", a).await;
+        reg.cache_put("u2", b).await;
+
+        reg.cache_forget_var("id1").await;
+        let all = reg.all_cached_values_blocking();
+        assert!(!all.contains_key("id1"));
+        assert_eq!(all.get("keep").map(String::as_str), Some("k"));
+        // The windows themselves stay open.
+        assert!(reg.cache_get("u2").await.is_some());
+    }
+
+    #[test]
+    fn prompt_blocking_waits_for_the_answer_then_times_out() {
+        let reg = EnvUnlockRegistry::new();
+        let bc = crate::ws::broadcaster::Broadcaster::new();
+        let mut events = bc.subscribe_all();
+
+        // Answered: the unlock route caches the values, then resolves.
+        let route = reg.clone();
+        let answer = std::thread::spawn(move || {
+            let id = loop {
+                if let Some(id) = route.lock_inner().pending.keys().next().cloned() {
+                    break id;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let mut vals = ValueMap::new();
+            vals.insert("id1".into(), "v".into());
+            route.lock_inner().cache.insert(
+                "u1".into(),
+                CacheEntry {
+                    values: vals,
+                    expires_at: Some(Instant::now() + Duration::from_secs(60)),
+                },
+            );
+            let p = route.lock_inner().pending.remove(&id).unwrap();
+            let _ = p.tx.send(Some(ValueMap::new()));
+        });
+        let ids = ["id1".to_string()];
+        assert!(reg.prompt_blocking(
+            &bc,
+            "s1",
+            "u1",
+            vec!["A".into()],
+            &ids,
+            Duration::from_secs(10)
+        ));
+        answer.join().unwrap();
+        let req = events.try_recv().unwrap();
+        assert_eq!(req.event_type, "env-unlock-request");
+        assert_eq!(req.data["var_names"], serde_json::json!(["A"]));
+        let done = events.try_recv().unwrap();
+        assert_eq!(done.event_type, "env-unlock-resolved");
+        assert_eq!(done.data["reason"], "answered");
+
+        // Already unlocked: no prompt at all.
+        assert!(reg.prompt_blocking(&bc, "s1", "u1", vec![], &ids, Duration::from_secs(10)));
+        assert!(events.try_recv().is_err());
+
+        // Unanswered: gives up after the timeout and drops its request.
+        let other = ["id2".to_string()];
+        assert!(!reg.prompt_blocking(&bc, "s1", "u2", vec![], &other, Duration::from_millis(300)));
+        assert!(reg.lock_inner().pending.is_empty());
     }
 }
