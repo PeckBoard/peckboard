@@ -88,7 +88,7 @@ impl PrComment {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::new()
+    crate::http_client::client()
 }
 
 fn parse_comment(v: &serde_json::Value) -> Option<PrComment> {

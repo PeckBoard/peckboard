@@ -23,7 +23,10 @@ use axum::{
 use serde::Deserialize;
 
 use crate::auth::middleware::{require_admin, require_auth};
-use crate::service::tts::lexicon::{self, LexiconError, LexiconStore};
+use crate::service::tts::{
+    self,
+    lexicon::{self, LexiconError, LexiconStore},
+};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -91,6 +94,20 @@ async fn list(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// The misaki dictionary a respelling is converted with, downloaded into
+/// the data dir on first use (see `tts::respell_dir`).
+async fn respell_dir(
+    state: &AppState,
+    respelling: Option<&str>,
+) -> Result<Option<std::path::PathBuf>, Response> {
+    tts::respell_dir(&state.config.data_dir, respelling)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %format!("{e:#}"), "tts: pronunciation dictionary unavailable");
+            err(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}"))
+        })
+}
+
 async fn upsert(
     State(state): State<Arc<AppState>>,
     Path(word): Path<String>,
@@ -100,12 +117,17 @@ async fn upsert(
         Ok(s) => s,
         Err(r) => return r,
     };
+    let dir = match respell_dir(&state, body.respelling.as_deref()).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
     match s
         .put(
             &word,
             body.display.as_deref(),
             body.respelling.as_deref(),
             body.phonemes.as_deref(),
+            dir.as_deref(),
         )
         .await
     {
@@ -125,11 +147,15 @@ async fn remove(State(state): State<Arc<AppState>>, Path(word): Path<String>) ->
     }
 }
 
-async fn preview(Json(body): Json<PreviewBody>) -> Response {
+async fn preview(State(state): State<Arc<AppState>>, Json(body): Json<PreviewBody>) -> Response {
+    let dir = match respell_dir(&state, body.respelling.as_deref()).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
     let (resp, ph) = (body.respelling, body.phonemes);
     // Respelling runs misaki (CPU); keep it off the async workers.
     match tokio::task::spawn_blocking(move || {
-        lexicon::resolve_phonemes(resp.as_deref(), ph.as_deref())
+        lexicon::resolve_phonemes(resp.as_deref(), ph.as_deref(), dir.as_deref())
     })
     .await
     {
@@ -166,7 +192,6 @@ mod tests {
     use super::*;
     use crate::auth::middleware::tests::{seed_authenticated_user, test_state};
     use crate::service::tts::kokoro::phonemize_with;
-    use crate::service::tts::lexicon::LexG2p;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -197,6 +222,11 @@ mod tests {
     async fn lexicon_crud_preview_and_hot_reload() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
+        // Respelling and phonemizing need the misaki data: skipped without it.
+        if !lexicon::link_test_misaki(&state.config.data_dir) {
+            return;
+        }
+        let g2p = lexicon::test_g2p().unwrap();
         let token = seed_authenticated_user(&state, "admin").await;
         let app = router(state.clone()).with_state(state.clone());
 
@@ -254,7 +284,7 @@ mod tests {
         assert_eq!(v["source"], "user");
         // Hot reload: the very next phonemization uses it.
         let lex = lexicon::store(&state.db).await.unwrap();
-        let ph = phonemize_with(&LexG2p::new(false), Some(&lex), "Zorbl.", false).unwrap();
+        let ph = phonemize_with(&g2p, Some(&lex), "Zorbl.", false).unwrap();
         assert!(ph.starts_with(v["phonemes"].as_str().unwrap()), "{ph}");
 
         let (s, _) = call(&app, &token, "DELETE", "/api/voice/lexicon/zorbl", "").await;
@@ -262,7 +292,7 @@ mod tests {
         assert!(lex.lookup("zorbl", false).is_none());
 
         // Unknown words: tallied, listed, dismissed.
-        phonemize_with(&LexG2p::new(false), Some(&lex), "Qwxv qwxv.", false).unwrap();
+        phonemize_with(&g2p, Some(&lex), "Qwxv qwxv.", false).unwrap();
         let (s, v) = call(&app, &token, "GET", "/api/voice/lexicon/unknown", "").await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v[0]["word"], "qwxv");

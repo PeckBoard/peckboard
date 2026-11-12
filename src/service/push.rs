@@ -345,12 +345,12 @@ fn vapid_jwt(private_b64: &str, aud: &str, exp: i64) -> Result<String> {
 
 /// The HTTP client push deliveries go through: bounded, never redirected.
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .timeout(SEND_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .unwrap_or_else(|_| crate::http_client::client())
 }
 
 impl PushService {

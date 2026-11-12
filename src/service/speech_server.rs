@@ -200,7 +200,7 @@ pub async fn save(
 }
 
 fn client(timeout: Duration) -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+    Ok(crate::http_client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())

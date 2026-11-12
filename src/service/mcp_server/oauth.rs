@@ -56,7 +56,7 @@ fn now_ms() -> i64 {
 
 /// A reqwest client for the short OAuth conversations.
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .unwrap_or_default()

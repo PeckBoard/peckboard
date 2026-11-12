@@ -77,7 +77,7 @@ fn managed() -> &'static Mutex<Option<Managed>> {
 fn http() -> &'static reqwest::Client {
     static C: OnceLock<reqwest::Client> = OnceLock::new();
     C.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
             .expect("reqwest client")

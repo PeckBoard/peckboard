@@ -104,7 +104,7 @@ mod tests {
             _ => (401, r#"{"id":"unauthorized","message":"bad token"}"#.into()),
         })
         .await;
-        let p = DigitalOcean::new(reqwest::Client::new(), "tok", &base);
+        let p = DigitalOcean::new(crate::http_client::client(), "tok", &base);
         let rec = p
             .create_txt("_acme-challenge.sub.example.com", "v1")
             .await

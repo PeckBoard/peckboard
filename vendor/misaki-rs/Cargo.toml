@@ -1,0 +1,30 @@
+# Vendored misaki-rs 0.6.0 (MIT, see LICENSE), patched for Peckboard: the
+# lexicons and POS-tagger weights are read at runtime from a directory the
+# caller passes (`G2P::load`) instead of being `include_str!`-ed into the
+# binary (~37 MB of JSON), and the optional espeak fallback is removed.
+# The data files are byte-identical to the published crate's; Peckboard
+# downloads that crate archive on first TTS use (`src/service/tts/download.rs`).
+[package]
+name = "misaki-rs"
+version = "0.6.0"
+edition = "2024"
+license = "MIT"
+description = "A self-contained, POS-aware Grapheme-to-Phoneme (G2P) engine for Rust, optimized for TTS models like Kokoro."
+homepage = "https://github.com/MicheleYin/misaki-rs"
+repository = "https://github.com/MicheleYin/misaki-rs"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "misaki_rs"
+path = "src/lib.rs"
+
+[dependencies]
+log = "0.4"
+regex = "1.10"
+num2words = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+fancy-regex = "0.13"
+language-tokenizer = { version = "0.1", features = ["snowball"] }
+thiserror = "2.0"

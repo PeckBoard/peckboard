@@ -226,7 +226,9 @@ async fn full_flow_discovery_dcr_callback_injection_refresh() {
     assert!(query_param(&url, "code_challenge").is_some());
 
     // The provider "redirects the browser" to our public callback.
-    let resp = reqwest::get(format!("{pb}/oauth/callback?code=CODE123&state={st}"))
+    let resp = peckboard::http_client::client()
+        .get(format!("{pb}/oauth/callback?code=CODE123&state={st}"))
+        .send()
         .await
         .unwrap();
     assert!(resp.status().is_success());
@@ -266,7 +268,9 @@ async fn full_flow_discovery_dcr_callback_injection_refresh() {
     );
 
     // A used state cannot be replayed.
-    let resp = reqwest::get(format!("{pb}/oauth/callback?code=CODE123&state={st}"))
+    let resp = peckboard::http_client::client()
+        .get(format!("{pb}/oauth/callback?code=CODE123&state={st}"))
+        .send()
         .await
         .unwrap();
     assert!(resp.text().await.unwrap().contains("expired"));
@@ -323,7 +327,9 @@ async fn slack_style_static_endpoints_nested_token_and_user_scope() {
     assert!(!url.contains("&scope="));
 
     let st = query_param(&url, "state").unwrap();
-    let resp = reqwest::get(format!("{pb}/oauth/callback?code=SLACKCODE&state={st}"))
+    let resp = peckboard::http_client::client()
+        .get(format!("{pb}/oauth/callback?code=SLACKCODE&state={st}"))
+        .send()
         .await
         .unwrap();
     assert!(resp.text().await.unwrap().contains("Connected"));
@@ -407,7 +413,9 @@ async fn fixed_loopback_redirect_gets_a_temporary_listener() {
     assert!(oauth::pending_on_loopback_port(port));
 
     let st = query_param(&url, "state").unwrap();
-    let resp = reqwest::get(format!("{redirect}?code=LOOPCODE&state={st}"))
+    let resp = peckboard::http_client::client()
+        .get(format!("{redirect}?code=LOOPCODE&state={st}"))
+        .send()
         .await
         .unwrap();
     let body = resp.text().await.unwrap();

@@ -279,19 +279,19 @@ mod tests {
                 .map(|f| (f.key.to_string(), "x".repeat(12)))
                 .collect();
             assert!(
-                build(spec.id, &creds, reqwest::Client::new()).is_ok(),
+                build(spec.id, &creds, crate::http_client::client()).is_ok(),
                 "{}",
                 spec.id
             );
             if let Some(f) = spec.fields.iter().find(|f| f.required) {
                 let mut missing = creds.clone();
                 missing.remove(f.key);
-                let err = build(spec.id, &missing, reqwest::Client::new())
+                let err = build(spec.id, &missing, crate::http_client::client())
                     .err()
                     .unwrap();
                 assert!(err.to_string().contains(f.key), "{err}");
             }
         }
-        assert!(build("nope", &Credentials::new(), reqwest::Client::new()).is_err());
+        assert!(build("nope", &Credentials::new(), crate::http_client::client()).is_err());
     }
 }

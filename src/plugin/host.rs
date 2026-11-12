@@ -2791,7 +2791,7 @@ fn perform_outbound_http(req: OutboundHttp) -> Result<serde_json::Value, String>
             .build()
             .map_err(|e| format!("runtime: {e}"))?;
         rt.block_on(async move {
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(req.timeout_secs))
                 .user_agent(req.user_agent)

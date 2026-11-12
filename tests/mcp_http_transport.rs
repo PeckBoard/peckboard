@@ -123,7 +123,7 @@ async fn serve_mcp() -> (String, String) {
 #[tokio::test]
 async fn http_transport_serves_full_mcp_lifecycle_without_a_proxy() {
     let (url, token) = serve_mcp().await;
-    let client = reqwest::Client::new();
+    let client = peckboard::http_client::client();
     let bearer = format!("Bearer {token}");
 
     // 1. initialize — the route (not a node proxy) answers the handshake.
@@ -235,7 +235,7 @@ async fn http_transport_serves_full_mcp_lifecycle_without_a_proxy() {
 #[tokio::test]
 async fn http_transport_rejects_missing_bearer() {
     let (url, _token) = serve_mcp().await;
-    let resp = reqwest::Client::new()
+    let resp = peckboard::http_client::client()
         .post(&url)
         .json(&serde_json::json!({
             "jsonrpc": "2.0",

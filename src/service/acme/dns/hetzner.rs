@@ -120,7 +120,7 @@ mod tests {
             ),
         })
         .await;
-        let p = Hetzner::new(reqwest::Client::new(), "tok", &base);
+        let p = Hetzner::new(crate::http_client::client(), "tok", &base);
         let rec = p
             .create_txt("_acme-challenge.example.com", "v1")
             .await

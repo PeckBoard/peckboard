@@ -194,14 +194,12 @@ pub fn validate_pem_pair(cert_pem: &[u8], key_pem: &[u8]) -> Result<()> {
         .context("failed to parse private key PEM")?
         .context("no private key found in the key PEM")?;
 
-    rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .context("failed to build a TLS config")?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .context("certificate and private key do not work together")?;
+    rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .context("failed to build a TLS config")?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("certificate and private key do not work together")?;
 
     Ok(())
 }
@@ -603,7 +601,7 @@ pub fn certified_key(tls: &TlsMaterial) -> Result<Arc<CertifiedKey>> {
         .context("failed to parse private key")?
         .context("no private key found in key.pem")?;
 
-    let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
+    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
         .context("unsupported private key type")?;
 
     Ok(Arc::new(CertifiedKey::new(certs, signing_key)))
@@ -616,13 +614,13 @@ pub fn certified_key(tls: &TlsMaterial) -> Result<Arc<CertifiedKey>> {
 pub fn acceptor_from_resolver(
     resolver: Arc<dyn rustls::server::ResolvesServerCert>,
 ) -> TlsAcceptor {
-    // Explicit aws-lc-rs: the relay crate compiles ring in too, so the
-    // process default is only set once `run_server` installs it.
+    // Explicit provider so this works even before `run_server` installs
+    // the process default (unit tests).
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
+        rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
-    .expect("aws-lc-rs supports the default TLS versions")
+    .expect("ring supports the default TLS versions")
     .with_no_client_auth()
     .with_cert_resolver(resolver);
 
@@ -817,7 +815,7 @@ mod tests {
     #[test]
     fn test_load_tls_config() {
         // Install the default crypto provider for rustls
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let tmp = TempDir::new().unwrap();
         let material = ensure_certs(tmp.path()).unwrap();
         let key = certified_key(&material).unwrap();

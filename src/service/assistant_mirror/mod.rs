@@ -296,7 +296,7 @@ impl Mailer for SmtpMailer {
             return Err("SMTP host, from address, and recipient are required".into());
         }
         // Same process-wide provider the HTTPS listener installs.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        crate::http_client::install_crypto_provider();
         type Transport = AsyncSmtpTransport<Tokio1Executor>;
         let builder = match smtp.tls {
             SmtpTls::Tls => Transport::relay(&smtp.host).map_err(short_error)?,
@@ -427,7 +427,7 @@ impl AssistantMirror {
         let me = Arc::new(AssistantMirror {
             suppressed,
             db,
-            http: reqwest::Client::new(),
+            http: crate::http_client::client(),
             mailer,
             settings: RwLock::new(settings),
             update_lock: tokio::sync::Mutex::new(()),

@@ -364,7 +364,7 @@ pub fn validate_credentials(
 }
 
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap_or_default()

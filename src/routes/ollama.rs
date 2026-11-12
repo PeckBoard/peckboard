@@ -139,7 +139,7 @@ async fn start_pull(
         anyhow::bail!("ollama base_url must be http or https");
     }
     let endpoint = format!("{trimmed}/api/pull");
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;

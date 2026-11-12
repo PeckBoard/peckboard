@@ -406,7 +406,7 @@ fn client_for(
     target: &VettedTarget,
     total: Option<Duration>,
 ) -> Result<reqwest::Client, FetchError> {
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::http_client::builder()
         .redirect(reqwest::redirect::Policy::none())
         // A proxy would resolve the host itself and defeat the pin.
         .no_proxy()

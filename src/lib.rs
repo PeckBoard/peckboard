@@ -8,6 +8,7 @@ pub mod desktop;
 pub mod error;
 pub mod frontend;
 pub mod handover;
+pub mod http_client;
 pub mod impact_log;
 pub mod keepalive;
 pub mod logging;

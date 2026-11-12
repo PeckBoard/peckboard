@@ -105,8 +105,9 @@ test('unlocking for a window stops sessions prompting for the password', async (
   const token = await authenticate(request)
   const auth = { Authorization: `Bearer ${token}` }
   await wipeEnvVars(request, auth)
-  await lockNow(request, auth)
   await createEncryptedVar(request, auth)
+  // Saving a secret unlocks it (save = unlock); start this test locked.
+  await lockNow(request, auth)
 
   await openSettings(page, token)
   const panel = page.getByTestId('env-unlock-panel')

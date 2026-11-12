@@ -172,7 +172,7 @@ async fn fetch(client: &reqwest::Client, token: &str) -> anyhow::Result<PlanUsag
 /// `oauth_token` account. Failures are recorded per login and never
 /// abort the cycle.
 pub async fn refresh_once(db: &Db) {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap_or_default();

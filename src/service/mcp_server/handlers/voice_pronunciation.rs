@@ -39,7 +39,17 @@ impl McpToolRegistry {
             "add" => {
                 let word = arg("word").ok_or_else(|| anyhow::anyhow!("add needs a word"))?;
                 let (resp, ph) = (arg("respelling"), arg("phonemes"));
-                let entry = match store.put(&word, None, resp.as_deref(), ph.as_deref()).await {
+                // A respelling needs the misaki dictionary (downloaded on
+                // first use into the data dir).
+                let dir = match (&ctx.data_dir, resp.as_deref()) {
+                    (Some(data_dir), r) => crate::service::tts::respell_dir(data_dir, r).await?,
+                    (None, Some(r)) if !r.trim().is_empty() => {
+                        anyhow::bail!("respelling is unavailable here; give phonemes instead")
+                    }
+                    (None, _) => None,
+                };
+                let put = store.put(&word, None, resp.as_deref(), ph.as_deref(), dir.as_deref());
+                let entry = match put.await {
                     Ok(e) => e,
                     Err(LexiconError::Invalid(msg)) => anyhow::bail!("{msg}"),
                     Err(LexiconError::Failed(e)) => return Err(e),
@@ -102,7 +112,7 @@ mod tests {
     use crate::service::mcp_server::{McpToolRegistry, ToolCallContext};
     use crate::service::tts::lexicon;
 
-    fn ctx(db: &Db, session_id: &str) -> ToolCallContext {
+    fn ctx(db: &Db, session_id: &str, data_dir: &std::path::Path) -> ToolCallContext {
         ToolCallContext {
             session_id: session_id.into(),
             project_id: None,
@@ -111,7 +121,7 @@ mod tests {
             db: Arc::new(db.clone()),
             broadcaster: crate::ws::broadcaster::Broadcaster::new(),
             provider_registry: None,
-            data_dir: None,
+            data_dir: Some(data_dir.to_path_buf()),
             device_registry: None,
             background: None,
         }
@@ -119,6 +129,11 @@ mod tests {
 
     #[tokio::test]
     async fn voice_pronunciation_add_list_remove() {
+        // Respelling needs the misaki data: skipped without it.
+        let data = tempfile::tempdir().unwrap();
+        if !lexicon::link_test_misaki(data.path()) {
+            return;
+        }
         let db = Db::in_memory().unwrap();
         db.create_folder(NewFolder {
             id: "f1".into(),
@@ -146,7 +161,7 @@ mod tests {
         let reg = McpToolRegistry::new();
         let call = |sid: &'static str, args: serde_json::Value| {
             let reg = &reg;
-            let c = ctx(&db, sid);
+            let c = ctx(&db, sid, data.path());
             async move { reg.handle_tool_call("voice_pronunciation", args, &c).await }
         };
 

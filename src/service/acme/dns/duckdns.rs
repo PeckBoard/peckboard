@@ -93,7 +93,7 @@ mod tests {
             }
         })
         .await;
-        let p = DuckDns::new(reqwest::Client::new(), "good", &base);
+        let p = DuckDns::new(crate::http_client::client(), "good", &base);
         let rec = p
             .create_txt("_acme-challenge.myhome.duckdns.org", "v1")
             .await
@@ -111,7 +111,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let bad = DuckDns::new(reqwest::Client::new(), "bad", &base);
+        let bad = DuckDns::new(crate::http_client::client(), "bad", &base);
         let err = bad
             .create_txt("_acme-challenge.myhome.duckdns.org", "v")
             .await

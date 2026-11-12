@@ -131,7 +131,7 @@ mod tests {
             _ => (403, r#"{"detail":"Invalid token."}"#.into()),
         })
         .await;
-        let p = Desec::new(reqwest::Client::new(), "tok", &base);
+        let p = Desec::new(crate::http_client::client(), "tok", &base);
         let rec = p
             .create_txt("_acme-challenge.example.com", "new")
             .await

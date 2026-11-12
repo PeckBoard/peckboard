@@ -1,10 +1,10 @@
 //! Server-side Kokoro text-to-speech for the voice assistant.
 //!
 //! Nothing ships in the binary but code: the first `prepare` downloads the
-//! ONNX Runtime shared library and the Kokoro model/voices into
-//! `<data-dir>/tts/`, loads them once, and from then on `synthesize` turns a
-//! sentence into a 24 kHz WAV. Inference is CPU-heavy, so it runs on the
-//! blocking pool behind a small semaphore.
+//! ONNX Runtime shared library, the Kokoro model/voices and the misaki G2P
+//! lexicons into `<data-dir>/tts/`, loads them once, and from then on
+//! `synthesize` turns a sentence into a 24 kHz WAV. Inference is CPU-heavy,
+//! so it runs on the blocking pool behind a small semaphore.
 
 pub mod download;
 pub mod hints;
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
+use anyhow::Context;
 use serde::Serialize;
 
 use kokoro::Kokoro;
@@ -93,6 +94,7 @@ pub struct TtsService {
     total: AtomicU64,
     engine: OnceLock<Arc<Kokoro>>,
     permits: tokio::sync::Semaphore,
+    misaki_lock: tokio::sync::Mutex<()>,
 }
 
 static SERVICES: LazyLock<Mutex<HashMap<PathBuf, Arc<TtsService>>>> =
@@ -109,6 +111,32 @@ pub fn service_for(data_dir: &Path) -> Arc<TtsService> {
         .clone()
 }
 
+/// The misaki data dir to convert `respelling` with (downloading it on first
+/// use, without the model). `None` when there is nothing to respell, or
+/// downloads are disabled and it isn't there ([`lexicon::respell`] then
+/// sounds the respelling out).
+pub async fn respell_dir(
+    data_dir: &Path,
+    respelling: Option<&str>,
+) -> anyhow::Result<Option<PathBuf>> {
+    if respelling.is_none_or(|r| r.trim().is_empty()) {
+        return Ok(None);
+    }
+    service_for(data_dir).ensure_misaki().await
+}
+
+/// `PECKBOARD_TTS_DOWNLOAD=0`: test servers never download TTS files.
+fn downloads_disabled() -> bool {
+    std::env::var("PECKBOARD_TTS_DOWNLOAD").as_deref() == Ok("0")
+}
+
+/// Every misaki data file is in `dir`.
+fn misaki_present(dir: &Path) -> bool {
+    misaki_rs::data::ALL_FILES
+        .iter()
+        .all(|f| dir.join(f).is_file())
+}
+
 impl TtsService {
     fn new(dir: PathBuf) -> Self {
         Self {
@@ -118,6 +146,7 @@ impl TtsService {
             total: AtomicU64::new(0),
             engine: OnceLock::new(),
             permits: tokio::sync::Semaphore::new(2),
+            misaki_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -160,6 +189,57 @@ impl TtsService {
         });
     }
 
+    /// Where the misaki G2P lexicons and tagger data live (see
+    /// [`download::MISAKI`]).
+    pub fn misaki_dir(&self) -> PathBuf {
+        self.dir
+            .join(format!("misaki-{}", download::MISAKI_VERSION))
+    }
+
+    /// Download and unpack the misaki data unless it is already there.
+    /// Serialized, so `prepare` and a respelling can't race on the files.
+    async fn fetch_misaki(
+        &self,
+        client: &reqwest::Client,
+        tick: &(dyn Fn(u64) + Send + Sync),
+    ) -> anyhow::Result<()> {
+        let _guard = self.misaki_lock.lock().await;
+        let dir = self.misaki_dir();
+        if misaki_present(&dir) {
+            return Ok(());
+        }
+        tokio::fs::create_dir_all(&dir).await?;
+        let archive = dir.join("misaki-rs.crate");
+        download::fetch(client, &download::MISAKI, &archive, tick)
+            .await
+            .context("download the pronunciation dictionary")?;
+        let a = archive.clone();
+        tokio::task::spawn_blocking(move || {
+            download::extract_files(&a, &download::MISAKI_FILES, &dir)
+        })
+        .await??;
+        let _ = tokio::fs::remove_file(&archive).await;
+        Ok(())
+    }
+
+    /// The misaki data dir for respelling, downloading it first if needed
+    /// (without the model). `None` only when downloads are disabled and the
+    /// data isn't there (test servers): respellings are then sounded out.
+    pub async fn ensure_misaki(&self) -> anyhow::Result<Option<PathBuf>> {
+        let dir = self.misaki_dir();
+        if misaki_present(&dir) {
+            return Ok(Some(dir));
+        }
+        if downloads_disabled() {
+            return Ok(None);
+        }
+        let client = crate::http_client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        self.fetch_misaki(&client, &|_| {}).await?;
+        Ok(Some(dir))
+    }
+
     async fn run_prepare(&self) -> anyhow::Result<()> {
         let ort = download::ort_asset().ok_or_else(|| {
             anyhow::anyhow!(
@@ -177,26 +257,29 @@ impl TtsService {
         // on CPU. Installs that only have fp16 download it on next prepare.
         let model = self.dir.join("kokoro-v1.0.onnx");
         let voices = self.dir.join("voices-v1.0.bin");
+        let misaki = self.misaki_dir();
 
         let need_lib = !lib.exists();
         let need_model = !model.exists();
         let need_voices = !voices.exists();
+        let need_misaki = !misaki_present(&misaki);
         let total = [
             (need_lib, ort.archive.size),
             (need_model, download::MODEL.size),
             (need_voices, download::VOICES.size),
+            (need_misaki, download::MISAKI.size),
         ]
         .iter()
         .filter(|(n, _)| *n)
         .map(|(_, s)| s)
         .sum();
         // Test servers (the e2e suite) must never pull ~200 MB.
-        if total > 0 && std::env::var("PECKBOARD_TTS_DOWNLOAD").as_deref() == Ok("0") {
+        if total > 0 && downloads_disabled() {
             anyhow::bail!("model downloads are disabled (PECKBOARD_TTS_DOWNLOAD=0)");
         }
         self.done.store(0, Ordering::Relaxed);
         self.total.store(total, Ordering::Relaxed);
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
         let tick = |n: u64| {
@@ -220,9 +303,13 @@ impl TtsService {
         if need_voices {
             download::fetch(&client, &download::VOICES, &voices, &tick).await?;
         }
+        if need_misaki {
+            self.fetch_misaki(&client, &tick).await?;
+        }
         let started = std::time::Instant::now();
         let engine =
-            tokio::task::spawn_blocking(move || Kokoro::load(&lib, &model, &voices)).await??;
+            tokio::task::spawn_blocking(move || Kokoro::load(&lib, &model, &voices, &misaki))
+                .await??;
         tracing::info!(
             ms = started.elapsed().as_millis() as u64,
             "kokoro tts loaded"

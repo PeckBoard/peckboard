@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, anyhow, bail};
@@ -263,13 +263,21 @@ pub struct Kokoro {
     voices: HashMap<String, Vec<f32>>,
     input_names: [String; 3],
     speed_is_int: bool,
+    /// The misaki lexicons/tagger data ([`super::download::MISAKI`]).
+    misaki_dir: PathBuf,
     g2p_us: Mutex<Option<LexG2p>>,
     g2p_gb: Mutex<Option<LexG2p>>,
 }
 
 impl Kokoro {
-    /// Load ONNX Runtime from `ort_lib`, then the model and voices.
-    pub fn load(ort_lib: &Path, model: &Path, voices: &Path) -> anyhow::Result<Self> {
+    /// Load ONNX Runtime from `ort_lib`, then the model and voices; the G2P
+    /// reads its lexicons from `misaki_dir`.
+    pub fn load(
+        ort_lib: &Path,
+        model: &Path,
+        voices: &Path,
+        misaki_dir: &Path,
+    ) -> anyhow::Result<Self> {
         ort::init_from(ort_lib)
             .map_err(|e| anyhow!("load ONNX Runtime {}: {e}", ort_lib.display()))?
             .with_name("peckboard-tts")
@@ -302,6 +310,7 @@ impl Kokoro {
             voices,
             input_names,
             speed_is_int,
+            misaki_dir: misaki_dir.to_path_buf(),
             g2p_us: Mutex::new(None),
             g2p_gb: Mutex::new(None),
         };
@@ -319,7 +328,12 @@ impl Kokoro {
     ) -> anyhow::Result<String> {
         let slot = if british { &self.g2p_gb } else { &self.g2p_us };
         let mut g = slot.lock().unwrap();
-        let g2p = g.get_or_insert_with(|| LexG2p::new(british));
+        // Each language's lexicons are read on its first sentence only; a
+        // failure is retried on the next one.
+        if g.is_none() {
+            *g = Some(LexG2p::new(british, &self.misaki_dir)?);
+        }
+        let g2p = g.as_ref().expect("loaded above");
         phonemize_with(g2p, lex, text, british)
     }
 
@@ -414,7 +428,9 @@ mod tests {
 
     #[test]
     fn g2p_output_maps_to_tokens() {
-        let g2p = misaki_rs::G2P::new(misaki_rs::Language::EnglishUS);
+        let Some(g2p) = crate::service::tts::lexicon::test_g2p() else {
+            return;
+        };
         let (ph, _) = g2p.g2p("Hello world.").unwrap();
         let norm = normalize_phonemes(&ph);
         assert!(!norm.contains('\u{200d}'));
@@ -542,7 +558,9 @@ mod tests {
     fn word_final_flaps_are_released() {
         // misaki-rs's dictionary spells "it" as `ɪɾ` everywhere, so "Got
         // it." ended on an unreleased flap and read as "goit".
-        let g2p = LexG2p::new(false);
+        let Some(g2p) = crate::service::tts::lexicon::test_g2p() else {
+            return;
+        };
         let ph = phonemize_with(&g2p, None, "Got it.", false).unwrap();
         assert!(ph.contains("ɪt"), "{ph:?}");
         assert!(!ph.contains('ɾ'), "{ph:?}");
@@ -596,6 +614,10 @@ mod tests {
             &lib,
             &dir.join(std::env::var("KOKORO_TEST_MODEL").unwrap_or("kokoro-v1.0.onnx".into())),
             &dir.join("voices-v1.0.bin"),
+            &dir.join(format!(
+                "misaki-{}",
+                crate::service::tts::download::MISAKI_VERSION
+            )),
         )
         .unwrap();
         let a = engine

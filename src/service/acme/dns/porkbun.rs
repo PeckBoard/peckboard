@@ -116,7 +116,7 @@ mod tests {
             ),
         })
         .await;
-        let p = Porkbun::new(reqwest::Client::new(), "pk1_x", "sk1_y", &base);
+        let p = Porkbun::new(crate::http_client::client(), "pk1_x", "sk1_y", &base);
         let rec = p
             .create_txt("_acme-challenge.www.example.com", "v1")
             .await

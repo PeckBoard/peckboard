@@ -272,13 +272,15 @@ mod pipeline_tests {
     use crate::db::Db;
     use crate::service::tts::kokoro::phonemize_with;
     use crate::service::tts::l2s;
-    use crate::service::tts::lexicon::{self, LexG2p};
+    use crate::service::tts::lexicon::{self, test_g2p};
 
     #[tokio::test]
     async fn precedence_lexicon_then_hint_then_misaki_then_guess() {
+        let Some(g) = test_g2p() else {
+            return;
+        };
         let db = Db::in_memory().unwrap();
         let lex = lexicon::store(&db).await.unwrap();
-        let g = LexG2p::new(false);
         let ph = |t: &str| phonemize_with(&g, Some(&lex), t, false).unwrap();
 
         // A valid hint is spoken as written, and is not an unknown word.
@@ -309,17 +311,22 @@ mod pipeline_tests {
 
     #[tokio::test]
     async fn short_all_caps_token_is_spelled() {
+        let Some(g) = test_g2p() else {
+            return;
+        };
         let db = Db::in_memory().unwrap();
         let lex = lexicon::store(&db).await.unwrap();
-        let out = phonemize_with(&LexG2p::new(false), Some(&lex), "QXZ", false).unwrap();
+        let out = phonemize_with(&g, Some(&lex), "QXZ", false).unwrap();
         assert_eq!(out.trim(), l2s::spell_letters("QXZ"), "{out}");
     }
 
     #[tokio::test]
     async fn fully_hinted_sentence_speaks_its_hints_except_lexicon_words() {
+        let Some(g) = test_g2p() else {
+            return;
+        };
         let db = Db::in_memory().unwrap();
         let lex = lexicon::store(&db).await.unwrap();
-        let g = LexG2p::new(false);
         let ph = |t: &str| phonemize_with(&g, Some(&lex), t, false).unwrap();
         let out = ph("[Got](/ɡˈɑt/) [it](/ɪt/), [Peckboard](/pˈɛk/) [works](/wˈɜɹks/).");
         assert_eq!(out.trim(), "ɡˈɑt ɪt , pˈɛkbˌɔːɹd wˈɜɹks .", "{out}");

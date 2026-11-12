@@ -174,7 +174,7 @@ async fn fixture() -> Fixture {
 }
 
 async fn rpc(url: &str, token: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
-    reqwest::Client::new()
+    peckboard::http_client::client()
         .post(url)
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({

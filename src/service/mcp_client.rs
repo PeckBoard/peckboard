@@ -123,7 +123,7 @@ impl McpClient {
                 })
                 .unwrap_or_default();
             Transport::Http {
-                client: reqwest::Client::new(),
+                client: crate::http_client::client(),
                 url: url.to_string(),
                 headers,
                 session_id: None,

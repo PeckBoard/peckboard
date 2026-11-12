@@ -51,10 +51,9 @@ pub async fn run_server(
     window_closed: Option<tokio::sync::oneshot::Receiver<()>>,
     ready: Option<tokio::sync::oneshot::Sender<ServerReady>>,
 ) -> anyhow::Result<()> {
-    // Two rustls backends are compiled in (aws-lc-rs here, ring via the
-    // relay crate), so rustls can't pick a process default on its own:
-    // install ours before anything builds a TLS config.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    // ring is the only rustls backend compiled in (see Cargo.toml); install
+    // it as the process default before anything builds a TLS config.
+    crate::http_client::install_crypto_provider();
     let mint_bootstrap_token = ready.is_some();
     let config = Config::from_args(args);
     let addr = format!("{}:{}", config.host, config.port);
@@ -796,7 +795,7 @@ pub async fn run_server(
     // `None` and handshakes just fail cleanly, so a certificate uploaded
     // later starts working immediately with no restart. Only a TCP bind
     // failure (port in use) skips the listener.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    crate::http_client::install_crypto_provider();
 
     let mut tls_errors: Vec<String> = Vec::new();
     let cert_loaded = match tls::ensure_certs(&state.config.data_dir) {

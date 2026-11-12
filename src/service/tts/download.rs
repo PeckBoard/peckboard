@@ -28,6 +28,40 @@ pub const VOICES: Asset = Asset {
     sha256: Some("bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d"),
 };
 
+/// The misaki-rs crate archive from crates.io (immutable; the sha256 is its
+/// `Cargo.lock` checksum). Its lexicons and POS-tagger data, ~37 MB of JSON,
+/// are what the vendored G2P (`vendor/misaki-rs`) reads at runtime; they
+/// used to be compiled into the binary.
+pub const MISAKI_VERSION: &str = "0.6.0";
+pub const MISAKI: Asset = Asset {
+    url: "https://static.crates.io/crates/misaki-rs/misaki-rs-0.6.0.crate",
+    size: 8_966_728,
+    sha256: Some("e868d9d070425960dc6c40c84caeaa4e6ebfabb1af454c8f4b9fbe6dbc01ff04"),
+};
+
+/// (path inside [`MISAKI`], file name the G2P reads it under).
+pub const MISAKI_FILES: [(&str, &str); 7] = {
+    use misaki_rs::data::*;
+    [
+        ("misaki-rs-0.6.0/data/us_gold.json", US_GOLD),
+        ("misaki-rs-0.6.0/data/us_silver.json", US_SILVER),
+        ("misaki-rs-0.6.0/data/gb_gold.json", GB_GOLD),
+        ("misaki-rs-0.6.0/data/gb_silver.json", GB_SILVER),
+        (
+            "misaki-rs-0.6.0/src/resources/tagger/weights.json",
+            TAGGER_WEIGHTS,
+        ),
+        (
+            "misaki-rs-0.6.0/src/resources/tagger/classes.txt",
+            TAGGER_CLASSES,
+        ),
+        (
+            "misaki-rs-0.6.0/src/resources/tagger/tags.json",
+            TAGGER_TAGS,
+        ),
+    ]
+};
+
 /// The official ONNX Runtime CPU release for this host: archive, the
 /// library's file name inside it, and the name it is stored under.
 pub struct OrtAsset {
@@ -187,4 +221,84 @@ pub fn extract_lib(archive: &Path, entry: &str, dest: &Path) -> anyhow::Result<(
     }
     std::fs::rename(&part, dest)?;
     Ok(())
+}
+
+/// Extract `files` — `(path inside the archive, name to store it under)` —
+/// from a `.tar.gz` into `dest_dir`, each via `<name>.part`. Fails, naming
+/// the missing entries, unless every one was found.
+pub fn extract_files(
+    archive: &Path,
+    files: &[(&str, &str)],
+    dest_dir: &Path,
+) -> anyhow::Result<()> {
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(std::fs::File::open(archive)?));
+    let mut found = vec![false; files.len()];
+    for e in tar.entries()? {
+        let mut e = e?;
+        if !e.header().entry_type().is_file() {
+            continue;
+        }
+        let path = e.path()?.to_string_lossy().into_owned();
+        let Some(i) = files.iter().position(|(entry, _)| *entry == path) else {
+            continue;
+        };
+        let dest = dest_dir.join(files[i].1);
+        let part = part_path(&dest);
+        std::io::copy(&mut e, &mut std::fs::File::create(&part)?)?;
+        std::fs::rename(&part, &dest)?;
+        found[i] = true;
+    }
+    let missing: Vec<&str> = files
+        .iter()
+        .zip(&found)
+        .filter(|(_, f)| !**f)
+        .map(|((entry, _), _)| *entry)
+        .collect();
+    if !missing.is_empty() {
+        bail!("{} missing from {}", missing.join(", "), archive.display());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tgz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        for (path, data) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, path, *data).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn extracts_named_files_and_reports_missing_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.crate");
+        std::fs::write(
+            &archive,
+            tgz(&[("pkg/data/a.json", b"{}"), ("pkg/other.txt", b"x")]),
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        extract_files(&archive, &[("pkg/data/a.json", "a.json")], &out).unwrap();
+        assert_eq!(std::fs::read(out.join("a.json")).unwrap(), b"{}");
+        let err = extract_files(&archive, &[("pkg/data/b.json", "b.json")], &out).unwrap_err();
+        assert!(err.to_string().contains("pkg/data/b.json"), "{err}");
+    }
+
+    /// Every file the vendored G2P reads has an archive entry.
+    #[test]
+    fn misaki_files_cover_every_data_file() {
+        for name in misaki_rs::data::ALL_FILES {
+            assert!(MISAKI_FILES.iter().any(|(_, n)| *n == name), "{name}");
+        }
+    }
 }

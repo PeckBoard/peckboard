@@ -109,7 +109,7 @@ mod tests {
             ),
         })
         .await;
-        let p = Cloudflare::new(reqwest::Client::new(), "tok", &base);
+        let p = Cloudflare::new(crate::http_client::client(), "tok", &base);
         let rec = p
             .create_txt("_acme-challenge.www.example.com", "v1")
             .await

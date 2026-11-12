@@ -36,7 +36,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
 /// A short-lived client for the GitHub API + release CDN.
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap_or_default()

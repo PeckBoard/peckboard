@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.154"
+version = "0.1.155"
 edition = "2024"
 
 [dependencies]
@@ -50,13 +50,16 @@ hkdf = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# TLS
+# TLS. One crypto backend for the whole binary: ring. The relay crate
+# (quinn, rustls-acme) and extism's ureq hardwire ring, so every other
+# rustls user here opts out of its aws-lc-rs default — aws-lc-sys alone is
+# several MB of the binary and needs cmake/nasm on some targets.
+# `cargo tree -e normal -i aws-lc-sys` must stay empty.
 rcgen = "0.13"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
 rustls-pemfile = "2"
-# Let's Encrypt over DNS-01 (service::acme). Default features = aws-lc-rs
-# + hyper-rustls, matching the provider the binary installs; no ring.
-instant-acme = "0.8.5"
+# Let's Encrypt over DNS-01 (service::acme), ring + hyper-rustls.
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls"] }
 # SANs + expiry of issued / uploaded certificates (service::acme).
 x509-parser = "0.18"
 if-addrs = "0.13"
@@ -90,13 +93,15 @@ hex = "0.4.3"
 semver = "1"
 futures-util = "0.3.32"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
-rustls = "0.23.40"
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 time = "0.3.47"
 libc = "0.2.186"
 async-trait = "0.1"
 regex = "1.12.3"
 similar = "2"
-reqwest = { version = "0.13.4", features = ["json", "stream"] }
+# reqwest's `rustls` feature hardwires aws-lc-rs; `rustls-no-provider` uses
+# the process-default (ring) provider instead. Rest = reqwest's defaults.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "charset", "http2", "system-proxy", "json", "stream"] }
 # WS client for the speech server's live transcription stream
 # (ws::voice_stt). Already in the tree via the test suite; rustls for wss.
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
@@ -104,12 +109,12 @@ urlencoding = "2"
 tar = "0.4"
 flate2 = "1"
 # Assistant mirror email fallback (service::assistant_mirror). rustls only
-# (the platform verifier and aws-lc-rs provider reqwest already pulls in);
+# (the platform verifier reqwest already pulls in, ring provider);
 # no native-tls / OpenSSL so every release target still builds.
-lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "rustls-platform-verifier", "ring"] }
 
 # SSH client for the native ssh_* host functions (pure Rust, no system libs)
-russh = "0.62"
+russh = { version = "0.62", default-features = false, features = ["flate2", "rsa", "ring"] }
 russh-sftp = "2"
 
 # Server-side Kokoro TTS. ONNX Runtime is loaded at runtime from a shared
@@ -118,7 +123,9 @@ russh-sftp = "2"
 # Rust (MIT); `espeak` is off because espeak-ng is GPL.
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-20"] }
 ndarray = "0.17"
-misaki-rs = { version = "0.6", default-features = false }
+# Vendored + patched (vendor/misaki-rs): its ~37 MB of lexicon/tagger JSON
+# is downloaded into <data-dir>/tts/ on first use instead of embedded.
+misaki-rs = { path = "vendor/misaki-rs" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Desktop window (OS WebView). Optional so `--no-default-features` still
@@ -149,7 +156,7 @@ default = ["desktop"]
 desktop = ["dep:wry", "dep:tao", "dep:image", "dep:open"]
 
 [dev-dependencies]
-rustls = "0.23.40"
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 tempfile = "3.27.0"
 time = "0.3.47"
 # test-util enables tokio::test(start_paused) for timeout tests.
@@ -161,6 +168,11 @@ tokio = { version = "1", features = ["full", "test-util"] }
 [profile.dev]
 debug = "line-tables-only"
 
+# Shipped binaries: drop the symbol table (~36 MB of the ~160 MB Linux
+# binary). Panics still report file:line from the message; only symbolized
+# backtrace frames are lost.
+[profile.release]
+strip = true
 # Local verify / e2e builds (scripts/build-local-release.sh). Same opt-level
 # as release, but incremental, and in its own target/verify dir so it never
 # fights plain `cargo build --release` runs over fingerprints in

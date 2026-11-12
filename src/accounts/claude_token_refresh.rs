@@ -70,7 +70,7 @@ pub async fn fresh_credential(db: &Db, account: &ClaudeAccount) -> anyhow::Resul
         .clone()
         .expect("needs_refresh implies refresh_token");
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap_or_default();

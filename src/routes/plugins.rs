@@ -458,7 +458,7 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         .collect();
     let running = registry::peckboard_version();
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client();
     let mut repo_statuses = Vec::new();
     let mut plugins = Vec::new();
     let mut mcp_servers = Vec::new();
@@ -661,7 +661,7 @@ async fn install_registry(
         ));
     }
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client();
     // Find the entry for `id` in the candidate repositories.
     let mut found: Option<registry::RegistryEntry> = None;
     for (_, url, _) in &candidates {

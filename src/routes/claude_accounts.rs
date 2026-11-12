@@ -76,7 +76,7 @@ fn user_router() -> Router<Arc<AppState>> {
 
 /// A short-lived client for the Claude OAuth token endpoint.
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default()

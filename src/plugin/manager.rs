@@ -2716,7 +2716,7 @@ impl PluginManager {
             anyhow::bail!("no plugin registry configured");
         }
 
-        let client = reqwest::Client::new();
+        let client = crate::http_client::client();
         let mut found: Option<registry::RegistryEntry> = None;
         for url in &repos {
             if let Ok(index) = registry::fetch_index(&client, url).await

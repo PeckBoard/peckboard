@@ -135,7 +135,7 @@ mod tests {
             _ => (403, r#"{"code":403,"message":"Access was denied"}"#.into()),
         })
         .await;
-        let p = Gandi::new(reqwest::Client::new(), "pat", &base);
+        let p = Gandi::new(crate::http_client::client(), "pat", &base);
         let rec = p
             .create_txt("_acme-challenge.example.com", "new")
             .await

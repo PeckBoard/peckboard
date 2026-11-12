@@ -438,7 +438,7 @@ mod tests {
         })
         .await;
         let mut p = Route53::new(
-            reqwest::Client::new(),
+            crate::http_client::client(),
             "AKID",
             "secret",
             DEFAULT_REGION,

@@ -13,6 +13,7 @@
 //! and tallies it in `tts_unknown_words` (batched, off the synthesis path).
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -248,7 +249,10 @@ impl Fallback for SpellFallback {
 }
 
 impl LexG2p {
-    pub fn new(british: bool) -> Self {
+    /// Load the US or British lexicons (and the POS tagger) from
+    /// `misaki_dir`, the data [`super::download::MISAKI`] unpacks. Only that
+    /// language's files are read.
+    pub fn new(british: bool, misaki_dir: &Path) -> anyhow::Result<Self> {
         let unknown = Arc::new(Mutex::new(Vec::new()));
         let letters = Arc::new(OnceLock::new());
         let lang = if british {
@@ -256,13 +260,15 @@ impl LexG2p {
         } else {
             Language::EnglishUS
         };
-        let g2p = G2P::with_fallback(
+        let g2p = G2P::load_with_fallback(
             lang,
+            misaki_dir,
             Some(Box::new(SpellFallback {
                 unknown: unknown.clone(),
                 letters: letters.clone(),
             })),
-        );
+        )
+        .map_err(|e| anyhow::anyhow!("load the pronunciation dictionary: {e}"))?;
         let table = ('A'..='Z')
             .filter_map(|c| {
                 let (ph, _) = g2p.lexicon.lookup(&c.to_string(), "NN", None, None)?;
@@ -270,13 +276,12 @@ impl LexG2p {
             })
             .collect();
         let _ = letters.set(table);
-        Self {
+        Ok(Self {
             g2p,
             unknown,
             letters,
-        }
+        })
     }
-
     /// Raw misaki phonemes for `text`, plus the words misaki didn't know.
     pub fn g2p(&self, text: &str) -> anyhow::Result<(String, Vec<String>)> {
         self.unknown
@@ -299,8 +304,9 @@ impl LexG2p {
     }
 }
 
-/// Shared US G2P for respelling conversion (independent of the model).
-static RESPELL_G2P: LazyLock<Mutex<LexG2p>> = LazyLock::new(|| Mutex::new(LexG2p::new(false)));
+/// Shared US G2P for respelling conversion (independent of the model),
+/// loaded on the first respelling that has the misaki data.
+static RESPELL_G2P: LazyLock<Mutex<Option<LexG2p>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Convert a respelling to phonemes: words split on spaces, syllables on
 /// hyphens. A syllable misaki knows as a word (`board`, `trade`) uses its
@@ -310,14 +316,21 @@ static RESPELL_G2P: LazyLock<Mutex<LexG2p>> = LazyLock::new(|| Mutex::new(LexG2p
 /// sounded-out ones none. A word without an ALL-CAPS syllable stresses its
 /// first syllable (a lone dictionary word keeps misaki's stress).
 ///
+/// The dictionary is read from `misaki_dir`. `None` (test servers, which
+/// never download it) sounds every syllable out.
+///
 /// `PECK-board` → `pˈɛkbˌɔːɹd`, `koh-KOH-roh` → `kOkˈOɹO`.
-pub fn respell(respelling: &str) -> Result<String, LexiconError> {
+pub fn respell(respelling: &str, misaki_dir: Option<&Path>) -> Result<String, LexiconError> {
     struct Part {
         ph: String,
         dict: bool,
         caps: bool,
     }
-    let g = RESPELL_G2P.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = RESPELL_G2P.lock().unwrap_or_else(|e| e.into_inner());
+    if let (None, Some(dir)) = (cache.as_ref(), misaki_dir) {
+        *cache = Some(LexG2p::new(false, dir)?);
+    }
+    let g = cache.as_ref();
     let mut words = Vec::new();
     for group in respelling.split_whitespace() {
         let mut parts = Vec::new();
@@ -331,26 +344,35 @@ pub fn respell(respelling: &str) -> Result<String, LexiconError> {
             let mut letters = raw.chars().filter(|c| c.is_alphabetic());
             let part = match (letters.next(), letters.next()) {
                 (Some(c), None) => Part {
-                    ph: strip_stress(g.letter(c).unwrap_or_default()),
+                    ph: match g {
+                        Some(g) => strip_stress(g.letter(c).unwrap_or_default()),
+                        None => strip_stress(&l2s::spell_letters(&c.to_string())),
+                    },
                     dict: false,
                     caps,
                 },
                 _ => {
                     let lower = raw.to_lowercase();
-                    let (ph, unknown) = g.g2p(&lower)?;
-                    let ph = kokoro::normalize_phonemes(ph.trim());
-                    if unknown.is_empty() && !ph.trim().is_empty() {
-                        Part {
-                            ph: ph.trim().to_string(),
+                    let known = match g {
+                        Some(g) => {
+                            let (ph, unknown) = g.g2p(&lower)?;
+                            let ph = kokoro::normalize_phonemes(ph.trim());
+                            (unknown.is_empty() && !ph.trim().is_empty())
+                                .then(|| ph.trim().to_string())
+                        }
+                        None => None,
+                    };
+                    match known {
+                        Some(ph) => Part {
+                            ph,
                             dict: true,
                             caps,
-                        }
-                    } else {
-                        Part {
+                        },
+                        None => Part {
                             ph: phonics(&lower),
                             dict: false,
                             caps,
-                        }
+                        },
                     }
                 }
             };
@@ -389,15 +411,17 @@ pub fn respell(respelling: &str) -> Result<String, LexiconError> {
     validate_phonemes(&ph)
 }
 
-/// Phonemes for an entry given exactly one of a respelling or raw phonemes.
+/// Phonemes for an entry given exactly one of a respelling or raw phonemes
+/// (a respelling uses the misaki dictionary in `misaki_dir`, see [`respell`]).
 pub fn resolve_phonemes(
     respelling: Option<&str>,
     phonemes: Option<&str>,
+    misaki_dir: Option<&Path>,
 ) -> Result<(Option<String>, String), LexiconError> {
     let respelling = respelling.map(str::trim).filter(|s| !s.is_empty());
     let phonemes = phonemes.map(str::trim).filter(|s| !s.is_empty());
     match (respelling, phonemes) {
-        (Some(r), None) => Ok((Some(r.to_string()), respell(r)?)),
+        (Some(r), None) => Ok((Some(r.to_string()), respell(r, misaki_dir)?)),
         (None, Some(p)) => Ok((None, validate_phonemes(p)?)),
         _ => Err(LexiconError::Invalid(
             "give exactly one of respelling or phonemes".into(),
@@ -534,13 +558,15 @@ impl LexiconStore {
     }
 
     /// Save (insert or replace) a user pronunciation for `word`. The cache
-    /// is updated before returning, so the next sentence uses it.
+    /// is updated before returning, so the next sentence uses it. A
+    /// respelling is converted with the misaki data in `misaki_dir`.
     pub async fn put(
         &self,
         word: &str,
         display: Option<&str>,
         respelling: Option<&str>,
         phonemes: Option<&str>,
+        misaki_dir: Option<&Path>,
     ) -> Result<TtsLexiconEntry, LexiconError> {
         let word = word.trim();
         if !KEY.is_match(word) {
@@ -557,7 +583,7 @@ impl LexiconStore {
                 "display '{display}' must be the same word as '{word}'"
             )));
         }
-        let (respelling, phonemes) = resolve_phonemes(respelling, phonemes)?;
+        let (respelling, phonemes) = resolve_phonemes(respelling, phonemes, misaki_dir)?;
         let entry = TtsLexiconEntry {
             word: word.to_lowercase(),
             display: display.to_string(),
@@ -642,6 +668,50 @@ impl LexiconStore {
     }
 }
 
+/// The real misaki data for tests (not in the repo: ~37 MB, downloaded on
+/// first TTS use). Tests that need it skip unless `MISAKI_DATA_DIR` points
+/// at a directory holding it, or `KOKORO_TEST_DIR` (a data dir's `tts/`)
+/// has it unpacked.
+#[cfg(test)]
+pub(crate) fn test_misaki_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let dir = std::env::var_os("MISAKI_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("KOKORO_TEST_DIR").map(|d| {
+                PathBuf::from(d).join(format!("misaki-{}", super::download::MISAKI_VERSION))
+            })
+        })?;
+    super::misaki_present(&dir).then_some(dir)
+}
+
+/// A US [`LexG2p`] over [`test_misaki_dir`], if the data is there.
+#[cfg(test)]
+pub(crate) fn test_g2p() -> Option<LexG2p> {
+    Some(LexG2p::new(false, &test_misaki_dir()?).unwrap())
+}
+
+/// Give `data_dir`'s TTS service the test misaki data (symlinked), so
+/// routes that respell don't download it. False when there is none (skip).
+#[cfg(test)]
+pub(crate) fn link_test_misaki(data_dir: &Path) -> bool {
+    let Some(src) = test_misaki_dir() else {
+        return false;
+    };
+    let dest = super::service_for(data_dir).misaki_dir();
+    std::fs::create_dir_all(&dest).unwrap();
+    for f in misaki_rs::data::ALL_FILES {
+        let to = dest.join(f);
+        if !to.exists() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(src.join(f), &to).unwrap();
+            #[cfg(not(unix))]
+            std::fs::copy(src.join(f), &to).unwrap();
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,17 +723,20 @@ mod tests {
         (db, s)
     }
 
-    fn ph(s: &LexiconStore, text: &str) -> String {
-        phonemize_with(&LexG2p::new(false), Some(s), text, false).unwrap()
+    fn ph(g: &LexG2p, s: &LexiconStore, text: &str) -> String {
+        phonemize_with(g, Some(s), text, false).unwrap()
     }
 
     #[tokio::test]
     async fn seed_words_use_lexicon_phonemes() {
+        let Some(g) = test_g2p() else {
+            return;
+        };
         let (_db, s) = fresh().await;
-        assert_eq!(ph(&s, "Peckboard").trim(), "pˈɛkbˌɔːɹd");
-        assert_eq!(ph(&s, "Kokoro").trim(), "kOkˈOɹO");
-        assert_eq!(ph(&s, "peckBOARD").trim(), "pˈɛkbˌɔːɹd");
-        assert_eq!(ph(&s, "API").trim(), "ˌApˌiˈI");
+        assert_eq!(ph(&g, &s, "Peckboard").trim(), "pˈɛkbˌɔːɹd");
+        assert_eq!(ph(&g, &s, "Kokoro").trim(), "kOkˈOɹO");
+        assert_eq!(ph(&g, &s, "peckBOARD").trim(), "pˈɛkbˌɔːɹd");
+        assert_eq!(ph(&g, &s, "API").trim(), "ˌApˌiˈI");
         let list = s.list();
         let pb = list.iter().find(|e| e.word == "peckboard").unwrap();
         assert_eq!(
@@ -674,14 +747,17 @@ mod tests {
 
     #[tokio::test]
     async fn possessives_plurals_and_prosody() {
+        let Some(g) = test_g2p() else {
+            return;
+        };
         let (_db, s) = fresh().await;
         let base = "pˈɛkbˌɔːɹd";
-        assert_eq!(ph(&s, "Peckboard's").trim(), format!("{base}z"));
-        assert_eq!(ph(&s, "Peckboards").trim(), format!("{base}z"));
+        assert_eq!(ph(&g, &s, "Peckboard's").trim(), format!("{base}z"));
+        assert_eq!(ph(&g, &s, "Peckboards").trim(), format!("{base}z"));
         assert_eq!(s.lookup("SSH's", false).unwrap(), "ˌɛsˌɛsˈAʧᵻz");
         assert_eq!(s.lookup("grok’s", false).unwrap(), "ɡɹˈɑks");
         assert_eq!(s.lookup("Peckboardish", false), None);
-        let out = ph(&s, "Welcome to Peckboard, powered by Kokoro.");
+        let out = ph(&g, &s, "Welcome to Peckboard, powered by Kokoro.");
         assert!(out.contains(&format!("{base} ,")), "{out}");
         assert!(out.trim_end().ends_with("kOkˈOɹO ."), "{out}");
         assert!(!out.contains("  "), "{out}");
@@ -697,6 +773,20 @@ mod tests {
 
     #[test]
     fn respelling_to_phonemes() {
+        assert!(matches!(
+            respell("R2-D2", None),
+            Err(LexiconError::Invalid(_))
+        ));
+        assert!(matches!(
+            resolve_phonemes(Some("a"), Some("b"), None),
+            Err(LexiconError::Invalid(_))
+        ));
+        // Without the dictionary every syllable is sounded out.
+        assert_eq!(respell("ZORB-lih", None).unwrap(), "zˈɔɹblɪ");
+        let Some(dir) = test_misaki_dir() else {
+            return;
+        };
+        let respell = |r: &str| respell(r, Some(&dir));
         assert_eq!(respell("PECK-board").unwrap(), "pˈɛkbˌɔːɹd");
         assert_eq!(respell("koh-KOH-roh").unwrap(), "kOkˈOɹO");
         // `fy` is a dictionary word to misaki: secondary stress.
@@ -707,11 +797,40 @@ mod tests {
             respell("T C G Trade G G").unwrap(),
             "tˈi sˈi ʤˈi tɹˈAd ʤˈi ʤˈi"
         );
-        assert!(matches!(respell("R2-D2"), Err(LexiconError::Invalid(_))));
-        assert!(matches!(
-            resolve_phonemes(Some("a"), Some("b")),
-            Err(LexiconError::Invalid(_))
-        ));
+    }
+
+    /// The G2P reads its data from a directory (here tiny fixtures), only
+    /// the requested language's lexicons, and a missing file is a clean
+    /// error naming it rather than a panic.
+    #[test]
+    fn g2p_loads_from_a_dir_and_reports_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            ("us_gold.json", r#"{"hello": "həlˈO"}"#),
+            ("us_silver.json", "{}"),
+            ("weights.json", "{}"),
+            ("classes.txt", "NN\n"),
+            ("tags.json", "{}"),
+        ] {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        let g = LexG2p::new(false, dir.path()).unwrap();
+        let (ph, unknown) = g.g2p("hello").unwrap();
+        assert_eq!(ph.trim(), "həlˈO");
+        assert!(unknown.is_empty(), "{unknown:?}");
+
+        // British lexicons were never needed for the US G2P, and are missing.
+        let err = LexG2p::new(true, dir.path()).err().unwrap().to_string();
+        assert!(err.contains("gb_gold.json"), "{err}");
+        std::fs::remove_file(dir.path().join("weights.json")).unwrap();
+        let err = LexG2p::new(false, dir.path()).err().unwrap().to_string();
+        assert!(err.contains("weights.json"), "{err}");
+        std::fs::write(dir.path().join("weights.json"), "not json").unwrap();
+        let err = LexG2p::new(false, dir.path()).err().unwrap().to_string();
+        assert!(
+            err.contains("parse") && err.contains("weights.json"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -724,15 +843,20 @@ mod tests {
 
     #[tokio::test]
     async fn edits_apply_immediately_and_clear_unknowns() {
+        let Some(dir) = test_misaki_dir() else {
+            return;
+        };
         let (db, s) = fresh().await;
-        let g = LexG2p::new(false);
+        let g = LexG2p::new(false, &dir).unwrap();
         let before = phonemize_with(&g, Some(&s), "Vercel", false).unwrap();
         s.flush_unknown().await.unwrap();
         let unknown = db.list_tts_unknown().await.unwrap();
         assert_eq!(unknown[0].word, "vercel");
         assert_eq!(unknown[0].count, 1);
 
-        s.put("Vercel", None, Some("ver-SELL"), None).await.unwrap();
+        s.put("Vercel", None, Some("ver-SELL"), None, Some(&dir))
+            .await
+            .unwrap();
         let after = phonemize_with(&g, Some(&s), "Vercel", false).unwrap();
         assert_ne!(before, after);
         // misaki knows "ver" as a word, so it keeps a secondary stress.
@@ -750,7 +874,7 @@ mod tests {
         let db = Db::open(dir.path()).unwrap();
         let s = LexiconStore::load(db.clone()).await.unwrap();
         assert!(s.delete("Kokoro").await.unwrap());
-        s.put("Grok", Some("GROK"), None, Some("ɡɹˈOk"))
+        s.put("Grok", Some("GROK"), None, Some("ɡɹˈOk"), None)
             .await
             .unwrap();
         drop(s);

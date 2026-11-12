@@ -186,7 +186,7 @@ async fn call_tool(
     name: &str,
     arguments: serde_json::Value,
 ) -> serde_json::Value {
-    let resp = reqwest::Client::new()
+    let resp = peckboard::http_client::client()
         .post(url)
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
@@ -262,7 +262,7 @@ async fn worker_cannot_raise_the_worker_count() {
 #[tokio::test]
 async fn worker_tools_list_omits_the_admin_tools() {
     let fx = fixture().await;
-    let resp = reqwest::Client::new()
+    let resp = peckboard::http_client::client()
         .post(&fx.url)
         .header("Authorization", format!("Bearer {}", fx.worker_token))
         .json(&serde_json::json!({
@@ -408,7 +408,7 @@ async fn worker_cannot_use_a_plugin_owned_administrative_tool() {
     );
 
     // …and it must not even be advertised.
-    let resp = reqwest::Client::new()
+    let resp = peckboard::http_client::client()
         .post(&fx.url)
         .header("Authorization", format!("Bearer {}", fx.worker_token))
         .json(&serde_json::json!({
