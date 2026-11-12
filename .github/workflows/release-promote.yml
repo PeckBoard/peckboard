@@ -158,8 +158,6 @@ jobs:
         # Every build-main.yml asset except FIRST_ASSET.
         asset:
           - peckboard-linux-x86_64-desktop
-          - peckboard-macos-arm64
-          - peckboard-windows-x86_64.exe
 
     env:
       GH_TOKEN: ${{ github.token }}

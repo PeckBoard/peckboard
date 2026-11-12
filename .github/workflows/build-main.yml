@@ -29,7 +29,9 @@ jobs:
       matrix:
         include:
           # Mirrors the release asset set. Keep cache keys stable — the
-          # (dispatch-only) per-OS build workflows share them.
+          # (dispatch-only) per-OS build workflows share them. macOS and
+          # Windows server builds are off (owner's call); build them on
+          # demand with build-macos-arm64.yml / build-windows-x86_64.yml.
           - asset: peckboard-linux-x86_64
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -42,18 +44,6 @@ jobs:
             cargo_flags: ""
             cache_key: linux-x86_64-desktop
             webkit: true
-          - asset: peckboard-macos-arm64
-            os: macos-15
-            target: aarch64-apple-darwin
-            cargo_flags: ""
-            cache_key: macos-arm64
-            webkit: false
-          - asset: peckboard-windows-x86_64.exe
-            os: windows-2025
-            target: x86_64-pc-windows-msvc
-            cargo_flags: ""
-            cache_key: windows-x86_64
-            webkit: false
 
     env:
       CARGO_TERM_COLOR: always

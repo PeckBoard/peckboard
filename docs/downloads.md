@@ -26,9 +26,13 @@ Download, make it executable, run it — see
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Linux x86_64         | [peckboard-linux-x86_64](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-linux-x86_64)                 | [sha256](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-linux-x86_64.sha256)         | Server/CLI, no desktop deps                                 |
 | Linux x86_64 desktop | [peckboard-linux-x86_64-desktop](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-linux-x86_64-desktop) | [sha256](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-linux-x86_64-desktop.sha256) | Adds `--desktop` native window; needs `libwebkit2gtk-4.1-0` |
-| macOS Apple Silicon  | [peckboard-macos-arm64](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-macos-arm64)                   | [sha256](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-macos-arm64.sha256)          | Server + desktop window                                     |
-| Windows x86_64       | [peckboard-windows-x86_64.exe](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-windows-x86_64.exe)     | [sha256](https://github.com/PeckBoard/peckboard/releases/latest/download/peckboard-windows-x86_64.exe.sha256)   | Server + desktop window (WebView2)                          |
+| macOS Apple Silicon  | [peckboard-macos-arm64](https://github.com/PeckBoard/peckboard/releases/download/0.1.153/peckboard-macos-arm64)                  | [sha256](https://github.com/PeckBoard/peckboard/releases/download/0.1.153/peckboard-macos-arm64.sha256)         | Server + desktop window. Last build: 0.1.153 (see below)    |
+| Windows x86_64       | [peckboard-windows-x86_64.exe](https://github.com/PeckBoard/peckboard/releases/download/0.1.153/peckboard-windows-x86_64.exe)    | [sha256](https://github.com/PeckBoard/peckboard/releases/download/0.1.153/peckboard-windows-x86_64.exe.sha256)  | Server + desktop window (WebView2). Last build: 0.1.153     |
 
+macOS and Windows server builds are paused: new releases ship the Linux
+server only, and macOS / Windows installs stay on 0.1.153 (self-update finds
+no newer build for them). The remote agent and the app are still built for
+every platform.
 On Linux and macOS, mark the download executable before the first run:
 
 ```bash
