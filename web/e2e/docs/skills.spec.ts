@@ -89,6 +89,10 @@ test.describe('Skills page', () => {
     await page.goto('skills.html')
     await expect(page).toHaveTitle(/PeckBoard/)
     await expect(page.locator('h1').first()).toContainText('Skills')
+    // The catalog page is just the catalog; the explanation lives on the guide.
+    await expect(page.locator('main h2')).toHaveCount(0)
+    await page.locator('main').getByRole('link', { name: 'How skills work' }).click()
+    await expect(page).toHaveURL(/skills-guide\.html$/)
     for (const h of [
       'Local, Team, and Public Skills',
       'Groups',
