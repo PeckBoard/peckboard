@@ -100,8 +100,13 @@ test('jump-to-latest pill appears while scrolled up and returns to the bottom; C
 
   // Scroll away from the bottom, then let a new event arrive: no yank to
   // the bottom, but the pill appears.
-  await page.locator('.chat-messages').evaluate((el) => {
+  // The browser dispatches the `scroll` event on the next frame, not when
+  // scrollTop is assigned; wait for it so the view has registered the
+  // scroll-up before the new event lands (otherwise the event's layout
+  // pass still sees a pinned view and follows it to the bottom).
+  await page.locator('.chat-messages').evaluate(async (el) => {
     el.scrollTop = 0
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
   })
   await injectEvent(request, authHeader, sessionId, 'agent-text', { text: 'fresh pill event' })
   const pill = page.getByTestId('chat-jump-latest')

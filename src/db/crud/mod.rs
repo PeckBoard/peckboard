@@ -40,6 +40,7 @@ mod repeating_tasks;
 mod session_memories;
 mod session_views;
 mod sessions;
+mod skills;
 mod ssh_keys;
 mod system_prompts;
 mod tabs;

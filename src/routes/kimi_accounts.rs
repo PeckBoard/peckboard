@@ -200,9 +200,7 @@ fn is_authenticated(acct: &KimiAccount) -> bool {
 /// through the installer-location fallback so a service PATH that predates
 /// the CLI install still works.
 async fn login_cli_path(state: &AppState) -> String {
-    let schema = state
-        .plugins
-        .settings_schema_for("kimi")
+    let schema = super::plugins::settings_schema_for(state, "kimi")
         .await
         .unwrap_or_else(|| crate::plugin::settings::SettingsSchema::new(vec![]));
     let store = PluginSettingsStore::new("kimi".to_string(), schema, state.db.clone());

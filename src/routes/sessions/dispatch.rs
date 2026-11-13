@@ -1081,78 +1081,13 @@ pub(crate) async fn dismiss_pending_questions(
     session_id: &str,
     reason: &str,
 ) {
-    let events = match state.db.list_events_by_session(session_id, None).await {
-        Ok(events) => events,
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session_id,
-                "Failed to scan events for pending questions: {e}"
-            );
-            return;
-        }
-    };
-
-    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut question_ids: Vec<String> = Vec::new();
-    for ev in &events {
-        match ev.kind.as_str() {
-            "question" => question_ids.push(ev.id.clone()),
-            "question-resolved" => {
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
-                    let qid = data
-                        .get("question_id")
-                        .or_else(|| data.get("questionId"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    if let Some(qid) = qid {
-                        resolved.insert(qid);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for qid in question_ids {
-        if resolved.contains(&qid) {
-            continue;
-        }
-        let data = serde_json::json!({
-            "question_id": qid,
-            "rejected": true,
-            "reason": reason,
-        });
-        match state
-            .db
-            .append_event(session_id, "question-resolved", data.clone())
-            .await
-        {
-            Ok(ev) => {
-                state.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
-                    event_type: "event".into(),
-                    session_id: session_id.to_string(),
-                    data: serde_json::json!({
-                        "id": ev.id,
-                        "seq": ev.seq,
-                        "ts": ev.ts,
-                        "kind": ev.kind,
-                        "data": serde_json::from_str::<serde_json::Value>(&ev.data).unwrap_or_default(),
-                    }),
-                });
-            }
-            Err(e) => tracing::warn!(
-                session_id = %session_id,
-                question_id = %qid,
-                "Failed to auto-dismiss pending question: {e}"
-            ),
-        }
-    }
-
-    // Dismissing the last pending question releases an `ask_user` card
-    // block just like answering it does — otherwise the card stays parked
-    // on a question that is no longer on screen.
-    crate::service::questions::clear_question_block(&state.db, &state.broadcaster, session_id)
-        .await;
+    crate::service::questions::dismiss_pending_questions(
+        &state.db,
+        &state.broadcaster,
+        session_id,
+        reason,
+    )
+    .await;
 }
 
 /// GET /api/sessions/:id/status -- derive agent status from the event tail.

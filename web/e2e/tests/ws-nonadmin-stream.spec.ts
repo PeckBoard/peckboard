@@ -204,6 +204,26 @@ test('a refused subscription shows an error state instead of hanging', async ({
     adminAuth,
     'admin session for the UI check',
   )
+  // REST enforces the same ownership rule as the stream (37c7ae4): a
+  // non-owner's `GET /api/sessions/:id` is a 404 and the app leaves the URL
+  // for the session list, so the chat never mounts. The live-stream refusal
+  // this test is about happens when REST still shows the session but the
+  // stream says no (access revoked mid-view, a REST/WS rule drift). Stand
+  // that up by serving THIS session's REST reads with the admin's token and
+  // accepting the send, while the WS — the real server, the non-admin's
+  // token — refuses the subscription.
+  await page.route(`**/api/sessions/${adminSessionId}**`, async (route) => {
+    const req = route.request()
+    if (req.method() === 'POST' && new URL(req.url()).pathname.endsWith('/message')) {
+      await route.fulfill({ status: 202, json: { ok: true } })
+      return
+    }
+    if (req.method() !== 'GET') return route.fallback()
+    const response = await route.fetch({
+      headers: { ...req.headers(), authorization: adminAuth.Authorization },
+    })
+    await route.fulfill({ response })
+  })
 
   await loadSession(page, token, adminSessionId)
 

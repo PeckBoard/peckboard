@@ -82,14 +82,14 @@ const SENSITIVE_HEADERS: &[&str] = &[
 
 // ── value-based masking ─────────────────────────────────────────────────
 
-fn bearer_re() -> &'static Regex {
+pub(crate) fn bearer_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}").expect("bearer regex")
     })
 }
 
-fn jwt_re() -> &'static Regex {
+pub(crate) fn jwt_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     // `eyJ` is base64url `{"` — the JWT header marker. Two dot-separated
     // base64url parts after it.
@@ -155,7 +155,7 @@ pub fn mask_text(text: &str) -> String {
 /// Well-known token prefixes: GitHub (`ghp_`, `gho_`, …, `github_pat_`),
 /// OpenAI / Anthropic (`sk-`, `sk-ant-`, `sk-proj-`), Slack (`xox[abpr]-`)
 /// and AWS access key ids.
-fn token_re() -> &'static Regex {
+pub(crate) fn token_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
@@ -166,7 +166,7 @@ fn token_re() -> &'static Regex {
 }
 
 /// A PEM private-key block; an unterminated one is masked to the end.
-fn pem_re() -> &'static Regex {
+pub(crate) fn pem_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
@@ -178,7 +178,7 @@ fn pem_re() -> &'static Regex {
 
 /// `password=…`, `api_key: …`, `SECRET_TOKEN = "…"`: the label is kept, the
 /// value (quoted, or up to whitespace / `,` / `;`) is masked.
-fn assignment_re() -> &'static Regex {
+pub(crate) fn assignment_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
@@ -188,7 +188,7 @@ fn assignment_re() -> &'static Regex {
     })
 }
 
-fn long_run_re() -> &'static Regex {
+pub(crate) fn long_run_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"[A-Za-z0-9+/_=-]{32,}").expect("run regex"))
 }
@@ -221,7 +221,7 @@ fn entropy(s: &str) -> f64 {
 /// A 32+ char base64/hex run that looks random: it mixes letters and
 /// digits (so identifiers and words are spared), isn't a UUID, and has
 /// high entropy (hex ≥ 3.0 bits/char, anything else ≥ 4.0).
-fn looks_random(run: &str) -> bool {
+pub(crate) fn looks_random(run: &str) -> bool {
     let has_digit = run.bytes().any(|b| b.is_ascii_digit());
     let has_alpha = run.bytes().any(|b| b.is_ascii_alphabetic());
     if !has_digit || !has_alpha || uuid_re().is_match(run) {

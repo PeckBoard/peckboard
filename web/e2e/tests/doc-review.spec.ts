@@ -664,7 +664,7 @@ test.describe('document review — desktop', () => {
 
     // ONE working row narrates the parked tool call in place — the lane
     // never grows a feed of tool rows.
-    await expect(page.getByTestId('review-chat-activity')).toContainText('get review doc', {
+    await expect(page.getByTestId('review-chat-activity')).toContainText('Get review doc', {
       timeout: 20_000,
     })
     await expect(page.getByTestId('review-chat-working')).toHaveCount(1)

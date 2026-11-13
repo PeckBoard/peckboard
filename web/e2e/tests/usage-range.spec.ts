@@ -155,7 +155,13 @@ test('usage dashboard range picker scopes every panel and refresh moves the as-o
   // ── The dashboard states the window and the timezone it is describing. ──
   const caption = page.getByTestId('usage-range-caption')
   await expect(caption).toContainText('Showing')
-  await expect(caption).toContainText('local time')
+  // The caption names the browser's IANA zone (e.g. `Europe/London`, or
+  // `UTC` on a box with no TZ set), falling back to "local time" only when
+  // Intl cannot resolve one.
+  const zone = await page.evaluate(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time',
+  )
+  await expect(caption).toContainText(`times in ${zone}`)
   await expect(page.getByTestId('usage-updated')).toContainText('updated')
   // Default range is the last 30 days, so the just-recorded spend is in it.
   // Asserted as "cost is not zero" rather than an exact figure: the server is

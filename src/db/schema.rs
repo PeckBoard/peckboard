@@ -933,6 +933,89 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    skill_sources (id) {
+        id -> Text,
+        kind -> Text,
+        name -> Text,
+        url -> Text,
+        branch -> Text,
+        secret_ref -> Nullable<Text>,
+        last_sync_at -> Nullable<Text>,
+        last_error -> Nullable<Text>,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    skills (id) {
+        id -> Text,
+        scope -> Text,
+        source_id -> Nullable<Text>,
+        name -> Text,
+        description -> Text,
+        tags -> Text,
+        version -> Text,
+        created_by -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    skill_versions (id) {
+        id -> Text,
+        skill_id -> Text,
+        version -> Text,
+        body -> Text,
+        sha256 -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    skill_subscriptions (skill_id) {
+        skill_id -> Text,
+        pinned_version -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    skill_groups (id) {
+        id -> Text,
+        slug -> Text,
+        name -> Text,
+        description -> Text,
+        scope -> Text,
+        source_id -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    skill_group_members (group_id, skill_name) {
+        group_id -> Text,
+        skill_name -> Text,
+    }
+}
+
+diesel::table! {
+    session_skills (id) {
+        id -> Text,
+        session_id -> Text,
+        skill_id -> Nullable<Text>,
+        group_id -> Nullable<Text>,
+        created_at -> Text,
+    }
+}
+
+diesel::joinable!(skills -> skill_sources (source_id));
+diesel::joinable!(skill_versions -> skills (skill_id));
+diesel::joinable!(skill_subscriptions -> skills (skill_id));
+diesel::joinable!(skill_group_members -> skill_groups (group_id));
 diesel::allow_tables_to_appear_in_same_query!(
     folders,
     sessions,
@@ -998,4 +1081,11 @@ diesel::allow_tables_to_appear_in_same_query!(
     dns_credentials,
     tls_certificates,
     chat_focus_queue,
+    skill_sources,
+    skills,
+    skill_versions,
+    skill_subscriptions,
+    skill_groups,
+    skill_group_members,
+    session_skills,
 );

@@ -1292,6 +1292,17 @@ pub async fn cancel_worker_for_card_move(state: &Arc<AppState>, session_id: &str
     // because the card moved, not because the user wants their last input
     // delivered to a fresh run.
     let _ = state.db.clear_queued_messages(session_id).await;
+    // And any question it was waiting on: the run that asked is gone, and an
+    // unanswered question would keep the card parked (`ask_user` block +
+    // the orchestrator's pending-question backstop) so it never got a
+    // worker again.
+    crate::service::questions::dismiss_pending_questions(
+        &state.db,
+        &state.broadcaster,
+        session_id,
+        "card moved",
+    )
+    .await;
 }
 
 /// Seal a worker session whose card has moved on: terminate its agent, then
@@ -1300,7 +1311,8 @@ pub async fn cancel_worker_for_card_move(state: &Arc<AppState>, session_id: &str
 /// `Db::seal_session`). From then on `send_message_locked` refuses every
 /// dispatch into it. Broadcasts `session-updated` so open tabs show it.
 /// `reason = None` derives it from the session's last run (see
-/// `Db::seal_session`).
+/// `Db::seal_session`). A sealed session can never take an answer, so its
+/// pending questions are dismissed too.
 pub async fn seal_worker_session(state: &Arc<AppState>, session_id: &str, reason: Option<&str>) {
     state.session_manager.cancel_and_wait(session_id).await;
     let lock = state.session_manager.lock_session(session_id).await;
@@ -1311,6 +1323,13 @@ pub async fn seal_worker_session(state: &Arc<AppState>, session_id: &str, reason
     if state.session_manager.is_running(session_id).await {
         state.session_manager.cancel_and_wait(session_id).await;
     }
+    crate::service::questions::dismiss_pending_questions(
+        &state.db,
+        &state.broadcaster,
+        session_id,
+        "session sealed",
+    )
+    .await;
     match outcome {
         Ok(crate::db::crud::SealOutcome::Sealed { dropped_queued }) => {
             tracing::info!(

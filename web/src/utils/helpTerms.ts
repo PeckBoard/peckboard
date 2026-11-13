@@ -58,6 +58,11 @@ export const HELP_TERMS = {
     body: 'Optional standing instructions the AI follows for the whole session, such as "You are a careful reviewer". Most chats don’t need any.',
     docs: '/core-concepts.html',
   },
+  skill: {
+    title: 'Skill',
+    body: 'A saved set of instructions for one kind of job, such as "review a pull request". Give a session a skill and its AI helper reads it whenever that job comes up.',
+    docs: '/skills.html',
+  },
 } as const
 
 export type HelpTerm = keyof typeof HELP_TERMS

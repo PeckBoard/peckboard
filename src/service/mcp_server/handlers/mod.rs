@@ -21,6 +21,7 @@ mod repeating_tasks;
 mod reports;
 mod session_memory;
 mod shared_files;
+mod skills;
 mod subagents;
 mod ui_control;
 mod ui_match;
@@ -35,6 +36,7 @@ mod voice_queue;
 mod workers;
 
 pub use model_control::autoswitch_enabled;
+pub(crate) use skills::{SKILL_TOOL_NAMES, tool_definitions as skill_tool_definitions};
 // The one event summarizer: `read_worker_session` and the plugin host's
 // `peckboard_read_session_events` return the same event shape.
 pub(crate) use workers::summarize_event;

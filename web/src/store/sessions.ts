@@ -165,6 +165,8 @@ interface SessionsState {
     modelAutoswitch?: boolean,
     systemPromptName?: string | null,
     isTemp?: boolean,
+    /** Skill / skill-group ids the new session starts with. */
+    skills?: { skills: string[]; groups: string[] },
   ) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   /** Apply the local cleanup for a session that's been deleted on the
@@ -576,6 +578,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     modelAutoswitch?: boolean,
     systemPromptName?: string | null,
     isTemp?: boolean,
+    skills?: { skills: string[]; groups: string[] },
   ) => {
     const body: Record<string, unknown> = { name, folder_id: folderId }
     if (model) body.model = model
@@ -583,6 +586,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     if (modelAutoswitch !== undefined) body.model_autoswitch = modelAutoswitch
     if (systemPromptName !== undefined) body.system_prompt_name = systemPromptName || null
     if (isTemp) body.is_temp = true
+    if (skills?.skills.length) body.skills = skills.skills
+    if (skills?.groups.length) body.skill_groups = skills.groups
     const res = await authedFetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

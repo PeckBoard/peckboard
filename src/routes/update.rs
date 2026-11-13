@@ -99,9 +99,21 @@ async fn apply_update(
             .into_response();
     }
 
+    // An update NEVER interrupts running work: whatever the caller asked
+    // for, the re-exec waits for idle while anything is running (owner's
+    // rule). An activity read that fails counts as busy.
+    let busy = match restart::collect_activity(&state).await {
+        Ok(a) => a.total > 0,
+        Err(e) => {
+            tracing::warn!("update: activity check failed ({e}) - deferring the restart");
+            true
+        }
+    };
+    let defer = should_defer_update(when.is_idle(), busy);
+
     // Download, verify, and swap the binary on disk.
     match update::download_and_swap(&client, &tag).await {
-        Ok(exe) if when.is_idle() => {
+        Ok(exe) if defer => {
             // The new binary is already on disk; only the re-exec waits.
             let pending = restart::schedule_idle_restart(
                 state,
@@ -128,5 +140,29 @@ async fn apply_update(
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// Re-exec now only when the caller asked for now AND nothing is running.
+fn should_defer_update(asked_idle: bool, busy: bool) -> bool {
+    asked_idle || busy
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_defer_update;
+
+    #[test]
+    fn an_update_never_restarts_over_running_work() {
+        assert!(
+            should_defer_update(false, true),
+            "'now' while busy must wait"
+        );
+        assert!(should_defer_update(true, true));
+        assert!(should_defer_update(true, false));
+        assert!(
+            !should_defer_update(false, false),
+            "idle + now restarts at once"
+        );
     }
 }

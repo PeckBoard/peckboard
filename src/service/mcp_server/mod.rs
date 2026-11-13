@@ -168,6 +168,9 @@ impl McpToolRegistry {
             name if name.starts_with("remote_agent_") => {
                 self.handle_remote_agent_tool(name, args, ctx).await
             }
+            name if handlers::SKILL_TOOL_NAMES.contains(&name) => {
+                self.handle_skill_tool(name, args, ctx).await
+            }
             _ => anyhow::bail!("unknown tool: {tool_name}"),
         }
     }
@@ -698,7 +701,11 @@ mod tests {
         for t in ["show_media", "media_control", "hide_media"] {
             assert!(names.contains(&t), "{t}");
         }
-        assert_eq!(names.len(), 114);
+        // Skills (service::skills).
+        for t in handlers::SKILL_TOOL_NAMES {
+            assert!(names.contains(t), "{t}");
+        }
+        assert_eq!(names.len(), 138);
     }
 
     #[test]

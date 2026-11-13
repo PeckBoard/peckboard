@@ -619,6 +619,16 @@ pub(crate) async fn pause_project_with(
                     && p.is_running(&ws.id).await
                 {
                     p.cancel(&ws.id).await;
+                    // The cancelled run can't take an answer; a question it
+                    // left pending would keep its card parked after resume
+                    // (`ask_user` block + the orchestrator's backstop).
+                    crate::service::questions::dismiss_pending_questions(
+                        db,
+                        broadcaster,
+                        &ws.id,
+                        "project paused",
+                    )
+                    .await;
                     cancelled += 1;
                     break;
                 }

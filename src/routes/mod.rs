@@ -39,6 +39,7 @@ pub mod reports;
 pub mod sessions;
 pub mod settings;
 pub mod shared_files;
+pub mod skills;
 pub mod ssh_keys;
 pub mod system_prompts;
 pub mod terminals;
@@ -140,6 +141,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(ollama::router(state.clone()))
         .merge(plugins::router(state.clone()))
         .merge(backup::router(state.clone()))
+        .merge(skills::router(state.clone()))
         // Public, plugin-owned HTTP surface. Intentionally NOT behind the
         // `/api/*` auth middleware — the serving plugin owns its own auth.
         .merge(plugin_api::router(state.clone()))

@@ -16,6 +16,8 @@ import SystemPromptPicker from './SystemPromptPicker'
 import PickerLoadError from './PickerLoadError'
 import { PRESET_PROMPTS, presetSessionName } from '../utils/presetPrompts'
 import type { WasmPlugin } from '../utils/pluginApproval'
+import SkillMultiPicker from './skills/SkillMultiPicker'
+import { splitSkillSelection, useSkillOptions } from './skills/skillOptions'
 
 interface Props {
   onClose: () => void
@@ -69,6 +71,9 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
   // Temp sessions are deleted server-side when their last tab is closed.
   const [isTemp, setIsTemp] = useState(false)
   const [systemPromptName, setSystemPromptName] = useState<string | null>(null)
+  // `skill:<id>` / `group:<id>` picks; split into the create body on submit.
+  const [skillSel, setSkillSel] = useState<string[]>([])
+  const skillOptions = useSkillOptions()
   // '' = no preset (default). Picking one auto-sends its prompt as the
   // session's first message right after create.
   const [presetId, setPresetId] = useState('')
@@ -196,6 +201,7 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
         modelAutoswitch,
         systemPromptName,
         isTemp,
+        splitSkillSelection(skillSel),
       )
       if (preset) {
         // Same create-then-message pattern as utils/installSession.ts. The
@@ -363,6 +369,21 @@ export default function NewSessionModal({ onClose, onCreated }: Props) {
                 value={systemPromptName}
                 onChange={setSystemPromptName}
                 testId="new-session-system-prompt"
+              />
+            </div>
+            <div className="form-field">
+              <label className="form-label" htmlFor="new-session-skills">
+                Skills <HelpTip term="skill" />
+              </label>
+              <SkillMultiPicker
+                id="new-session-skills"
+                testId="new-session-skills"
+                ariaLabel="Choose skills and groups"
+                placeholder="Search skills and groups…"
+                emptyLabel="No skills installed yet — add some in Settings → Skills"
+                options={skillOptions}
+                selected={skillSel}
+                onChange={setSkillSel}
               />
             </div>
             <div className="form-field">

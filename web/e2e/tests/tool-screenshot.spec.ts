@@ -85,9 +85,14 @@ test('tool screenshots render inline and open in a lightbox', async ({
   const thumb = page.getByTestId('tool-image-thumb').first()
   await expect(thumb).toBeVisible({ timeout: 10_000 })
 
-  // The thumbnail must carry a decodable data: URL for the PNG.
+  // The thumbnail must carry a decodable image. New screenshots are offloaded
+  // to blobs server-side and arrive as `images: [{id}]`, which the UI fetches
+  // with auth and swaps in as an object URL; legacy events stay `data:` URLs.
   const thumbImg = thumb.locator('img')
-  await expect(thumbImg).toHaveAttribute('src', /^data:image\/png;base64,/)
+  await expect(thumbImg).toHaveAttribute('src', /^(blob:|data:image\/png;base64,)/)
+  await expect
+    .poll(() => thumbImg.evaluate((el) => (el as HTMLImageElement).naturalWidth))
+    .toBeGreaterThan(0)
 
   // No lightbox until the user clicks.
   await expect(page.getByTestId('tool-image-lightbox')).toHaveCount(0)
@@ -98,7 +103,7 @@ test('tool screenshots render inline and open in a lightbox', async ({
   await expect(lightbox).toBeVisible({ timeout: 5_000 })
   await expect(lightbox.locator('img.image-lightbox-img')).toHaveAttribute(
     'src',
-    /^data:image\/png;base64,/,
+    /^(blob:|data:image\/png;base64,)/,
   )
 
   // Pressing Escape dismisses the lightbox (shared Modal behaviour).

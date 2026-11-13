@@ -1075,3 +1075,120 @@ select.form-input {
 .modal-title-row + * {
   margin-top: 12px;
 }
+
+/* Skills (components/skills/*): Settings → Skills tabs, the skill /
+   group pickers, the version viewer and the session skills modal. */
+.skills-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skills-tab .settings-section-head .form-hint {
+  margin: 0;
+  flex: 1 1 auto;
+}
+/* Rows carry a long meta block (scope, version, source, description):
+   keep the name whole and let the description ellipsise instead. */
+.skills-tab .list-view-item {
+  min-width: 0;
+}
+.skills-tab .list-view-name {
+  flex: 0 1 auto;
+  min-width: 6em;
+  max-width: 45%;
+  font-weight: 600;
+}
+.skills-tab .list-view-meta {
+  flex: 1;
+  min-width: 0;
+}
+.skills-tab .list-view-meta > span {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.skills-tab .list-view-meta > .skill-row-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.skill-row-desc {
+  color: var(--text3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.skill-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-picker-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.skill-picker-label {
+  color: var(--text2);
+}
+.skill-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.skill-version-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.skill-version-controls {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.skill-version-controls .form-label {
+  margin: 0;
+}
+@media (max-width: 560px) {
+  .skill-version-controls {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+}
+.skill-body-preview {
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+.skill-editor-body {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-sm);
+  resize: vertical;
+}
+.skill-guard-findings .form-field-error + .form-field-error {
+  margin-top: 2px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.skill-resolved-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--text-sm);
+}
+.skill-source-error {
+  color: var(--danger, #f85149);
+  border-color: currentColor;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

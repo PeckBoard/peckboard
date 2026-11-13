@@ -108,6 +108,9 @@ pub struct CliSpec {
     /// settings files are not loaded (they could pre-approve tools or add
     /// hooks); its peckboard MCP tools stay gated server-side.
     pub voice_lockdown: bool,
+    /// Plugin dirs loaded for this session only (`--plugin-dir`): the
+    /// session's Peckboard skills as a per-session Claude plugin.
+    pub plugin_dirs: Vec<String>,
 }
 
 /// Native CLI tools denied to the voice session (see
@@ -292,6 +295,15 @@ pub fn build_cli_args(spec: &CliSpec) -> Vec<String> {
         // must not pre-approve tools or add hooks for the voice session.
         args.push("--setting-sources=user".to_string());
     }
+    // Per-session plugins (Peckboard skills, written by the host under the
+    // account's config dir — see `service::skills::session`).
+    for dir in spec
+        .plugin_dirs
+        .iter()
+        .filter(|d| !d.is_empty() && !d.starts_with('-'))
+    {
+        args.push(format!("--plugin-dir={dir}"));
+    }
     match spec.permission_mode.as_deref() {
         Some("bypass") => args.push("--dangerously-skip-permissions".to_string()),
         _ => args.push("--permission-prompt-tool=stdio".to_string()),
@@ -375,6 +387,7 @@ mod tests {
             subagent_context_path: None,
             base_prompt_overridden: overridden,
             voice_lockdown: voice,
+            plugin_dirs: Vec::new(),
         }
     }
 
@@ -473,5 +486,22 @@ mod tests {
         );
         let text = blocks.as_array().unwrap().last().unwrap()["text"].clone();
         assert_eq!(text, format!("{SESSION_PROMPT_REMINDER}\n\nlook"));
+    }
+
+    #[test]
+    fn session_skills_plugin_dir_is_passed_and_flag_like_values_are_dropped() {
+        let mut s = spec(false, false);
+        assert!(
+            !build_cli_args(&s)
+                .iter()
+                .any(|a| a.starts_with("--plugin-dir"))
+        );
+        s.plugin_dirs = vec!["/cfg/peckboard-skills/s1".into(), "--evil".into()];
+        let args = build_cli_args(&s);
+        let dirs: Vec<&String> = args
+            .iter()
+            .filter(|a| a.starts_with("--plugin-dir"))
+            .collect();
+        assert_eq!(dirs, vec!["--plugin-dir=/cfg/peckboard-skills/s1"]);
     }
 }

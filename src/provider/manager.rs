@@ -605,6 +605,32 @@ impl SessionManager {
                 system_prompt_suffix
             }
         };
+        // Skills assigned to the session (direct + via groups, at pinned
+        // versions): every provider gets a short index in the prompt plus the
+        // `skill_read` tool; Claude also gets them as native skills. Read per
+        // spawn like memory, so a change applies from the next spawn. The
+        // pre-hatcher's read-only research prompt stays untouched.
+        let (system_prompt_suffix, skills_plugin_dir) = if session.expert_kind.as_deref()
+            == Some(crate::service::mcp_server::PRE_HATCHER_EXPERT_KIND)
+        {
+            (system_prompt_suffix, None)
+        } else {
+            let spawn_skills = crate::service::skills::session::for_spawn(
+                db,
+                session_id,
+                &provider_id,
+                &final_model,
+            )
+            .await;
+            let suffix = match spawn_skills.prompt {
+                Some(section) => Some(match system_prompt_suffix {
+                    Some(s) => format!("{s}\n{section}"),
+                    None => section,
+                }),
+                None => system_prompt_suffix,
+            };
+            (suffix, spawn_skills.claude_plugin_dir)
+        };
         let mut final_config = SpawnConfig {
             working_dir,
             model: final_model,
@@ -666,6 +692,15 @@ impl SessionManager {
                 final_config.metadata = serde_json::json!({});
             }
             final_config.metadata["voice_lockdown"] = serde_json::Value::Bool(true);
+        }
+        // Skills: Claude loads them natively from a per-session plugin dir
+        // (`--plugin-dir`, read by the Claude provider's argv builder).
+        if let Some(dir) = skills_plugin_dir {
+            if !final_config.metadata.is_object() {
+                final_config.metadata = serde_json::json!({});
+            }
+            final_config.metadata[crate::service::skills::session::PLUGIN_DIR_METADATA_KEY] =
+                serde_json::Value::String(dir);
         }
         if final_config.permission_mode.is_none()
             && crate::routes::settings::bypass_permissions_for_db(db.clone()).await

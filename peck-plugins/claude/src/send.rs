@@ -123,6 +123,13 @@ pub fn run(payload: &Value) -> Result<(), String> {
             .and_then(|m| m.get("voice_lockdown"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        // The host's per-session skills plugin (`service::skills::session`).
+        plugin_dirs: cfg
+            .get("metadata")
+            .and_then(|m| m.get("skills_plugin_dir"))
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default(),
         subagent_context_path: Some(subagent_path),
     };
     let args = argv::build_cli_args(&spec);

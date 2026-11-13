@@ -44,6 +44,7 @@ import CodexAccountsSection from './CodexAccountsSection'
 import SoftwareUpdate from './SoftwareUpdate'
 import CustomWorkflowsSection from './CustomWorkflowsSection'
 import PluginSettingsForm from './PluginSettingsForm'
+import SkillsSection from './skills/SkillsSection'
 import SystemPromptsSection from './SystemPromptsSection'
 import ModelPicker from './ModelPicker'
 import OllamaPullModel from './OllamaPullModel'
@@ -112,6 +113,7 @@ type SubPage =
   | 'sounds'
   | 'assistant'
   | 'chat'
+  | 'skills'
   | 'prompts'
   | 'workflows'
   | 'variables'
@@ -183,6 +185,11 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
         id: 'prompts',
         title: 'System Prompts',
         blurb: 'Named prompts the cost-aware auto-switch picks from',
+      },
+      {
+        id: 'skills',
+        title: 'Skills',
+        blurb: 'Reusable instructions, groups, sources and team memory',
       },
       {
         id: 'workflows',
@@ -393,6 +400,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'System Prompts',
     anchor: 'prompts',
     keywords: 'library import auto-switch pre-hatcher prompt',
+  },
+  {
+    page: 'skills',
+    section: 'Skills',
+    anchor: 'skills',
+    keywords: 'skill skills groups subscribe catalog team repository memory version publish',
   },
   {
     page: 'workflows',
@@ -640,6 +653,12 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
       <path d="M4.5 6 6 3.5h4L11.5 6M11.25 8.25h.01" />
     </>
   ),
+  skills: (
+    <>
+      <path d="M4 2.5h6.5L12 4v9.5H4z" />
+      <path d="M6 6.5h4M6 9h4M6 11.5h2.5" />
+    </>
+  ),
   security: (
     <>
       <path d="M8 2.5 13 4.5v3.5c0 3.1-2.1 5-5 5.5-2.9-.5-5-2.4-5-5.5V4.5z" />
@@ -743,6 +762,8 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
     // through to the default, so a bad deep link never shows a dead pane.
     const known = visibleSubPages.some((p) => p.id === initialSubPage)
     const initial = known ? (initialSubPage as SubPage) : null
+    // `?subscribe=<name>` (the peckboard.com skill link) lands on Skills.
+    if (!initial && new URLSearchParams(window.location.search).has('subscribe')) return 'skills'
     return initial ?? (window.matchMedia('(min-width: 769px)').matches ? 'account' : null)
   })
   const isMobile = useMediaQuery('(max-width: 768px)')
@@ -1852,6 +1873,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         {activeSubPage === 'prompts' && (
           <div data-settings-anchor="prompts">
             <SystemPromptsSection />
+          </div>
+        )}
+        {activeSubPage === 'skills' && (
+          <div data-settings-anchor="skills">
+            <SkillsSection />
           </div>
         )}
         {activeSubPage === 'workflows' && (

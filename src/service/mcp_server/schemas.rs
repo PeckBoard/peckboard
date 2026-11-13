@@ -72,6 +72,20 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "remove_view_widget",
         "delete_view",
         "voice_prompt",
+        // Skill administration is not a card's business; workers keep the
+        // read side (skill_read / list / get / search) and team memory.
+        "skill_create",
+        "skill_update",
+        "skill_delete",
+        "skill_group_create",
+        "skill_group_update",
+        "skill_group_delete",
+        "skill_subscribe",
+        "skill_unsubscribe",
+        "skill_set_version",
+        "session_set_skills",
+        "skill_publish",
+        "skill_source_sync",
     ]
 }
 
@@ -229,6 +243,15 @@ fn read_only_tool_names() -> &'static [&'static str] {
         "list_views",
         "get_view",
         "list_background",
+        "skill_list",
+        "skill_search",
+        "skill_get",
+        "skill_group_list",
+        "session_get_skills",
+        "skill_source_list",
+        "team_memory_list",
+        "team_memory_get",
+        "skill_read",
     ]
 }
 
@@ -258,6 +281,10 @@ fn destructive_tool_names() -> &'static [&'static str] {
         "remote_agent_server",
         "remote_agent_mouse",
         "remote_agent_keyboard",
+        "skill_delete",
+        "skill_group_delete",
+        "skill_unsubscribe",
+        "team_memory_remove",
     ]
 }
 
@@ -287,6 +314,17 @@ fn open_world_tool_names() -> &'static [&'static str] {
         "remote_agent_screenshot",
         "remote_agent_mouse",
         "remote_agent_keyboard",
+        // Skills: catalogs and team repos live off-host.
+        "skill_search",
+        "skill_subscribe",
+        "skill_set_version",
+        "skill_publish",
+        "skill_source_sync",
+        "team_memory_list",
+        "team_memory_get",
+        "team_memory_add",
+        "team_memory_update",
+        "team_memory_remove",
     ]
 }
 
@@ -337,7 +375,7 @@ fn view_widget_schema() -> serde_json::Value {
     })
 }
 pub(super) fn tool_definitions() -> Vec<McpToolDef> {
-    vec![
+    let mut defs = vec![
             McpToolDef {
                 name: "share_file".into(),
                 description: "Share a file from the project folder into the chat so the user can preview and download it. Use this to hand the user any artifact you produced for them — zips, tarballs, builds/binaries, images, videos, PDFs, reports, logs, CSV/JSON exports. The file is snapshotted at call time (later edits don't change the shared copy); images and videos show an inline preview, text files open in a viewer, .html files open as a live interactive preview in a side pane (use this for UI mockups; the file must be self-contained, because relative links to sibling files won't load), and every card has a download button. Max 2 GB. Path is relative to the project folder (an absolute path inside the folder also works).".into(),
@@ -2445,7 +2483,11 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                     "additionalProperties": false
                 }),
             },
-        ]
+        ];
+    // Skills tools (`handlers::skills`) keep their schemas next to their
+    // handlers.
+    defs.extend(super::handlers::skill_tool_definitions());
+    defs
 }
 
 #[cfg(test)]

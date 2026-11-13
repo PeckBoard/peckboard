@@ -1996,3 +1996,94 @@ pub struct TlsCertificateRow {
     pub created_at: String,
     pub updated_at: String,
 }
+
+// ── Skills (service::skills) ───────────────────────────────────────────
+
+/// Where non-local skills come from: a `public` index.json URL or a `team`
+/// git repo. `secret_ref` names a credential (`ssh_key:<id>` /
+/// `env:<NAME>`), never holds one.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = skill_sources)]
+pub struct SkillSourceRow {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub url: String,
+    pub branch: String,
+    pub secret_ref: Option<String>,
+    pub last_sync_at: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+}
+
+/// An installed skill (local, or a subscribed remote one). `version` is the
+/// newest stored version; `tags` is a JSON string array.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = skills)]
+pub struct SkillRow {
+    pub id: String,
+    pub scope: String,
+    pub source_id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub tags: String,
+    pub version: String,
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One immutable stored version of a skill body.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = skill_versions)]
+pub struct SkillVersionRow {
+    pub id: String,
+    pub skill_id: String,
+    pub version: String,
+    pub body: String,
+    pub sha256: String,
+    pub created_at: String,
+}
+
+/// A subscription to a remote skill; `pinned_version` NULL = latest.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = skill_subscriptions)]
+pub struct SkillSubscriptionRow {
+    pub skill_id: String,
+    pub pinned_version: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A named bundle of skills (members by skill name in
+/// `skill_group_members`).
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = skill_groups)]
+pub struct SkillGroupRow {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub scope: String,
+    pub source_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = skill_group_members)]
+pub struct SkillGroupMemberRow {
+    pub group_id: String,
+    pub skill_name: String,
+}
+
+/// A skill or group assigned to a session (exactly one of the two ids).
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq)]
+#[diesel(table_name = session_skills)]
+pub struct SessionSkillRow {
+    pub id: String,
+    pub session_id: String,
+    pub skill_id: Option<String>,
+    pub group_id: Option<String>,
+    pub created_at: String,
+}

@@ -30,6 +30,7 @@ import RepoBrowserPage from './components/RepoBrowserPage'
 import ConfirmDialog from './components/ConfirmDialog'
 import RenameModal from './components/RenameModal'
 import SessionMemoryModal from './components/SessionMemoryModal'
+import SessionSkillsModal from './components/skills/SessionSkillsModal'
 import ReportBrowser from './components/ReportBrowser'
 import ReportView from './components/ReportView'
 import PlanView from './components/PlanView'
@@ -440,6 +441,7 @@ function App() {
   const [confirmClearSessionId, setConfirmClearSessionId] = useState<string | null>(null)
   const [confirmTerminateSessionId, setConfirmTerminateSessionId] = useState<string | null>(null)
   const [memorySessionId, setMemorySessionId] = useState<string | null>(null)
+  const [skillsSessionId, setSkillsSessionId] = useState<string | null>(null)
   const [confirmDeleteRepeatingTaskId, setConfirmDeleteRepeatingTaskId] = useState<string | null>(
     null,
   )
@@ -1414,6 +1416,12 @@ function App() {
         onSelect: () => void setSessionAutoswitch(id, !sessionAutoswitchOn(id)),
         hidden: isSealed,
         testId: 'session-menu-autoswitch',
+      },
+      {
+        label: 'Skills',
+        onSelect: () => setSkillsSessionId(id),
+        hidden: isSealed,
+        testId: 'session-menu-skills',
       },
       // Temp sessions delete themselves when their last tab closes;
       // "Keep session" clears the flag so the session outlives its tab.
@@ -2673,6 +2681,9 @@ function App() {
       )}
       {memorySessionId && (
         <SessionMemoryModal sessionId={memorySessionId} onClose={() => setMemorySessionId(null)} />
+      )}
+      {skillsSessionId && (
+        <SessionSkillsModal sessionId={skillsSessionId} onClose={() => setSkillsSessionId(null)} />
       )}
       {renameSpec && (
         <RenameModal

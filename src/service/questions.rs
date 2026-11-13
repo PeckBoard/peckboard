@@ -595,6 +595,63 @@ pub async fn clear_question_block(
         Err(e) => tracing::warn!(card_id = %card_id, "failed to unblock card after answer: {e}"),
     }
 }
+/// Resolve every outstanding `question` on `session_id` as
+/// `{rejected: true, reason}`, persisting + broadcasting each resolution, then
+/// release the card's [`ASK_USER_BLOCK_REASON`] block. Writes the events
+/// directly — NOT through [`resolve_question`] — so no answer is fed back and
+/// no conversation is resumed: every caller has just stopped the run (or is
+/// about to start a new turn) on its own.
+///
+/// A worker run torn down because its card moved or its project paused must
+/// go through this: the process that asked is gone, yet an unanswered
+/// question keeps the card blocked and trips the orchestrator's
+/// pending-question backstop, so the card is never picked up again.
+pub async fn dismiss_pending_questions(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    session_id: &str,
+    reason: &str,
+) {
+    let pending = match pending_question_events(db, session_id).await {
+        Ok(pending) => pending,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "Failed to scan events for pending questions: {e}"
+            );
+            return;
+        }
+    };
+    for question in pending {
+        let data = serde_json::json!({
+            "question_id": question.id,
+            "rejected": true,
+            "reason": reason,
+        });
+        match db.append_event(session_id, "question-resolved", data).await {
+            Ok(ev) => broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+                event_type: "event".into(),
+                session_id: session_id.to_string(),
+                data: serde_json::json!({
+                    "id": ev.id,
+                    "seq": ev.seq,
+                    "ts": ev.ts,
+                    "kind": ev.kind,
+                    "data": serde_json::from_str::<serde_json::Value>(&ev.data).unwrap_or_default(),
+                }),
+            }),
+            Err(e) => tracing::warn!(
+                session_id = %session_id,
+                question_id = %question.id,
+                "Failed to auto-dismiss pending question: {e}"
+            ),
+        }
+    }
+    // Dismissing the last pending question releases an `ask_user` card
+    // block just like answering it does — otherwise the card stays parked
+    // on a question that is no longer on screen.
+    clear_question_block(db, broadcaster, session_id).await;
+}
 
 /// Live kanban update, same shape as the MCP card handlers emit.
 fn broadcast_card(

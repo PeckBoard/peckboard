@@ -121,3 +121,166 @@ h2,
 div.highlighter-rouge {
   border: 1px solid $border-color;
 }
+
+// ── skills search (skills.md + assets/js/skills-search.js) ──
+
+.skills-search {
+  margin-top: 1rem;
+}
+
+.skills-instance,
+.skills-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.skills-instance label {
+  font-weight: 600;
+}
+
+.skills-search input,
+.skills-search select {
+  padding: 6px 10px;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  background: #fff;
+  color: $pb-ink;
+  font: inherit;
+}
+
+.skills-instance input {
+  flex: 1 1 260px;
+}
+
+.skills-controls input {
+  flex: 1 1 320px;
+}
+
+.skills-search button,
+.skills-search .skill-subscribe {
+  padding: 6px 14px;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  background: #fff;
+  color: $pb-ink;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: $pb-shadow-sm;
+}
+
+.skills-search .skill-subscribe {
+  background: $pb-red;
+  border-color: $pb-red;
+  color: #fff;
+}
+
+.skills-search .skill-subscribe[data-needs-instance="true"] {
+  background: #fff;
+  border-color: $border-color;
+  color: $pb-muted;
+}
+
+.skills-instance-status,
+.skills-status {
+  color: $pb-muted;
+}
+
+.skills-status-error {
+  color: $pb-red-deep;
+}
+
+.main-content ul.skills-results {
+  padding-left: 0;
+  list-style: none;
+}
+
+.main-content ul.skills-results > li.skill-card::before {
+  content: none;
+}
+
+.skill-card {
+  margin: 0 0 10px;
+  border: 1px solid $border-color;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: $pb-shadow-sm;
+}
+
+.skills-search .skill-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 12px 14px 4px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  text-align: left;
+  font-weight: 400;
+}
+
+.skill-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.skill-name {
+  font-family: $pb-display-font;
+  font-weight: 700;
+  font-size: 1.05em;
+}
+
+.skill-latest,
+.skill-chip {
+  font-size: 0.8em;
+  color: $pb-muted;
+}
+
+.skill-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 14px 12px;
+}
+
+.skill-chip {
+  padding: 1px 8px;
+  border: 1px solid $border-color;
+  border-radius: 999px;
+}
+
+.skill-chip-group {
+  color: $pb-red-deep;
+}
+
+.skill-panel {
+  padding: 0 14px 14px;
+  border-top: 1px solid $border-color;
+}
+
+.skill-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.skills-search pre.skill-body {
+  max-height: 480px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  background: $code-background-color;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85em;
+}

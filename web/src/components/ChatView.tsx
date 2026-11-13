@@ -46,6 +46,7 @@ import ModelSwitchDialog, { type ModelSwitchMode } from './ModelSwitchDialog'
 import Modal from './Modal'
 import RenameModal from './RenameModal'
 import SessionMemoryModal from './SessionMemoryModal'
+import SessionSkillsModal from './skills/SessionSkillsModal'
 import { MenuButton, type MenuItem } from './Dropdown'
 import ModelPicker from './ModelPicker'
 import TodoPanel from './TodoPanel'
@@ -972,6 +973,7 @@ export default function ChatView({
   const [confirmBusy, setConfirmBusy] = useState(false)
   const [confirmError, setConfirmError] = useState<string | null>(null)
   const [memoryOpen, setMemoryOpen] = useState(false)
+  const [skillsOpen, setSkillsOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   // Inline interrupt request in flight — locks the button so repeated
   // clicking can't stack interrupts on the agent.
@@ -2201,6 +2203,12 @@ export default function ChatView({
       onSelect: () => patchSession({ model_autoswitch: !autoswitchOn }),
       testId: 'chat-menu-autoswitch',
     },
+    {
+      label: 'Skills',
+      hidden: sealed,
+      onSelect: () => setSkillsOpen(true),
+      testId: 'chat-menu-skills',
+    },
     { divider: true, hidden: sealed && !!sessionDetail?.is_worker && !sessionDetail?.is_temp },
     {
       label: 'Compact context',
@@ -2863,6 +2871,9 @@ export default function ChatView({
       )}
       {memoryOpen && (
         <SessionMemoryModal sessionId={sessionId} onClose={() => setMemoryOpen(false)} />
+      )}
+      {skillsOpen && (
+        <SessionSkillsModal sessionId={sessionId} onClose={() => setSkillsOpen(false)} />
       )}
     </div>
   )

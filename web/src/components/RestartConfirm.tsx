@@ -118,13 +118,36 @@ export default function RestartConfirm({
 }) {
   const target = kind === 'update' ? `Upgrade to ${version ?? 'the latest release'}` : 'Restart'
   const n = activity.total
+  const running = `${n} ${n === 1 ? 'item is' : 'items are'} still running`
+  if (kind === 'update') {
+    // An update never interrupts running work: the only way forward is to
+    // download now and restart once everything has finished.
+    return (
+      <ConfirmDialog
+        testId="restart-confirm"
+        wide
+        title={`${target} when idle?`}
+        message={`${running}. The update downloads now and Peckboard restarts once everything has finished.`}
+        confirmLabel="Upgrade when idle"
+        confirmTestId="restart-confirm-idle"
+        cancelLabel="Cancel"
+        error={error}
+        busy={busy}
+        busyLabel="Working…"
+        onConfirm={onIdle}
+        onCancel={onCancel}
+      >
+        <ActivityList activity={activity} />
+      </ConfirmDialog>
+    )
+  }
   return (
     <ConfirmDialog
       testId="restart-confirm"
       danger
       wide
       title={`${target} while work is running?`}
-      message={`${n} ${n === 1 ? 'item is' : 'items are'} still running and would be interrupted. “Restart when idle” waits until everything has finished${kind === 'update' ? ' (the update downloads now)' : ''}.`}
+      message={`${running} and would be interrupted. “Restart when idle” waits until everything has finished.`}
       confirmLabel="Restart anyway"
       confirmTestId="restart-confirm-now"
       secondaryAction={{

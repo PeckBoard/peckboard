@@ -61,7 +61,7 @@ async fn pull_model(State(state): State<Arc<AppState>>, Json(body): Json<PullBod
         return err(StatusCode::BAD_REQUEST, "invalid model reference");
     }
 
-    let Some(schema) = state.plugins.settings_schema_for("ollama").await else {
+    let Some(schema) = super::plugins::settings_schema_for(&state, "ollama").await else {
         return err(StatusCode::NOT_FOUND, "ollama plugin is not available");
     };
     let store = PluginSettingsStore::new("ollama", schema, state.db.clone());

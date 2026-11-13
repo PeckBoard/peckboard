@@ -25,6 +25,12 @@ const HTTPS_PORT = process.env.PECKBOARD_E2E_HTTPS_PORT ?? '4445'
 // boot, long before any spec runs.
 const GITHUB_STUB_PORT = process.env.PECKBOARD_E2E_GITHUB_PORT ?? '4446'
 process.env.PECKBOARD_E2E_GITHUB_PORT = GITHUB_STUB_PORT
+// Where `skills.spec.ts` serves its mock public skills index. The server
+// seeds its public skill source from PECKBOARD_SKILLS_INDEX_URL at boot, so
+// the port is fixed per shard: the GitHub stub's neighbour in the shard's
+// port block (scripts/e2e-shards.sh hands each shard PORT..PORT+9).
+const SKILLS_STUB_PORT = process.env.PECKBOARD_E2E_SKILLS_PORT ?? String(Number(PORT) + 3)
+process.env.PECKBOARD_E2E_SKILLS_PORT = SKILLS_STUB_PORT
 // Impact-map capture. Set only by scripts/e2e-impact-map.sh; when unset,
 // every branch below is inert and this config behaves exactly as before.
 // The server appends its per-request route log next to the coverage and
@@ -170,9 +176,11 @@ export default defineConfig({
     // the http://127.0.0.1 receiver `assistant-mirror.spec.ts` runs.
     // PECKBOARD_DEV_RELAY_CERT + PECKBOARD_DEV_LINK_TTL_SECS: see the
     // RELAY_STATE_DIR comment above (remote-access-enroll.spec.ts).
+    // PECKBOARD_SKILLS_INDEX_URL points the seeded public skill source at
+    // the mock index skills.spec.ts serves on SKILLS_STUB_PORT.
     // PECKBOARD_ACME_TEST=1 enables the `mock` DNS provider and swaps real
     // ACME issuance for a local self-sign (tls-acme.spec.ts).
-    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_MIRROR_TEST_ENDPOINTS=1 PECKBOARD_ACME_TEST=1 PECKBOARD_DEV_RELAY_CERT=${RELAY_STATE_DIR}/dev-cert.der PECKBOARD_DEV_LINK_TTL_SECS=3600 PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ${SERVER_BIN} --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
+    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_SKILLS_INDEX_URL=http://127.0.0.1:${SKILLS_STUB_PORT}/index.json PECKBOARD_MIRROR_TEST_ENDPOINTS=1 PECKBOARD_ACME_TEST=1 PECKBOARD_DEV_RELAY_CERT=${RELAY_STATE_DIR}/dev-cert.der PECKBOARD_DEV_LINK_TTL_SECS=3600 PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ${SERVER_BIN} --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     stdout: 'pipe',

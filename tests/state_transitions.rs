@@ -415,6 +415,39 @@ async fn cancel_worker_for_card_move_drops_queued_message() {
     );
 }
 
+/// A worker cancelled by a card move while parked on `ask_user` must not
+/// leave the question pending: the run that asked is gone, and the open
+/// question would keep the card blocked and trip the orchestrator's
+/// pending-question backstop, so the card never got a worker again.
+#[tokio::test]
+async fn cancel_worker_for_card_move_dismisses_pending_question_and_unblocks() {
+    use peckboard::service::questions::{block_card_for_question, session_has_pending_question};
+    let state = build_state().await;
+    seed_project(&state).await;
+    seed_card_with_worker(&state, "c1", "in_progress", "ws1").await;
+    state
+        .db
+        .append_event(
+            "ws1",
+            "question",
+            serde_json::json!({ "text": "Continue?" }),
+        )
+        .await
+        .unwrap();
+    block_card_for_question(&state.db, &state.broadcaster, "c1").await;
+    assert!(state.db.get_card("c1").await.unwrap().unwrap().blocked);
+
+    cancel_worker_for_card_move(&state, "ws1").await;
+
+    assert!(
+        !session_has_pending_question(&state.db, "ws1").await,
+        "the cancelled worker's question must be dismissed"
+    );
+    let card = state.db.get_card("c1").await.unwrap().unwrap();
+    assert!(!card.blocked, "the ask_user block must be released");
+    assert_eq!(card.block_reason, None);
+}
+
 // ── bulk delete of project queued messages ──────────────────────────────
 
 /// Project pause has to drop every queued message on the project so a

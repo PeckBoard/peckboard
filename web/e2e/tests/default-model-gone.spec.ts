@@ -47,46 +47,42 @@ test('a dead default model warns in New Session and creates without a pin', asyn
   const { models } = (await modelsRes.json()) as { models: { id: string }[] }
   expect(models.some((m) => m.id === DEAD_MODEL)).toBe(false)
 
-  const put = await request.put('/api/settings/default-model', {
-    headers: authHeader,
-    data: { model: DEAD_MODEL },
+  // `PUT /api/settings/default-model` rejects ids missing from the catalogue
+  // (baa1f83), so a dead default can only exist when its provider vanished
+  // after it was saved. Stand that state up by answering the form's read of
+  // the setting with the dead id; the server keeps the pristine unset value,
+  // so no other spec is affected.
+  await page.route('**/api/settings/default-model', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    await route.fulfill({ json: { model: DEAD_MODEL } })
   })
-  expect(put.status(), 'set default model').toBe(204)
 
-  try {
-    await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
-    await page.goto('/')
-    await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
+  await page.addInitScript((t) => localStorage.setItem('peckboard_token', t), token)
+  await page.goto('/')
+  await expect(page.locator('.tabbar')).toBeVisible({ timeout: 10_000 })
 
-    await page.locator('.tab-new').click()
-    await expect(page.locator('#new-session-name')).toBeVisible()
+  await page.locator('.tab-new').click()
+  await expect(page.locator('#new-session-name')).toBeVisible()
 
-    // The dead default must not preselect; the form warns and shows an
-    // empty picker instead of the raw dead id.
-    await expect(page.getByTestId('model-gone-notice')).toContainText('no longer available', {
-      timeout: 10_000,
-    })
-    await expect(page.getByTestId('model-gone-notice')).toContainText(DEAD_MODEL)
-    await expect(page.getByTestId('new-session-model')).toContainText('Select model…')
+  // The dead default must not preselect; the form warns and shows an
+  // empty picker instead of the raw dead id.
+  await expect(page.getByTestId('model-gone-notice')).toContainText('no longer available', {
+    timeout: 10_000,
+  })
+  await expect(page.getByTestId('model-gone-notice')).toContainText(DEAD_MODEL)
+  await expect(page.getByTestId('new-session-model')).toContainText('Select model…')
 
-    const name = `dead-default-${Date.now()}`
-    await page.locator('#new-session-name').fill(name)
-    await page.getByRole('button', { name: 'Create Session' }).click()
+  const name = `dead-default-${Date.now()}`
+  await page.locator('#new-session-name').fill(name)
+  await page.getByRole('button', { name: 'Create Session' }).click()
 
-    await expect(page.locator('.chat-container')).toBeVisible({ timeout: 10_000 })
-    await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]+$/)
-    const sessionId = page.url().split('/').pop()!
+  await expect(page.locator('.chat-container')).toBeVisible({ timeout: 10_000 })
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]+$/)
+  const sessionId = page.url().split('/').pop()!
 
-    const sessionRes = await request.get(`/api/sessions/${sessionId}`, { headers: authHeader })
-    expect(sessionRes.ok(), `get session failed: ${await sessionRes.text()}`).toBeTruthy()
-    const session = (await sessionRes.json()) as { model?: string | null }
-    // The untouched form must NOT have submitted the dead id as a pin.
-    expect(session.model ?? null).toBeNull()
-  } finally {
-    // Global setting — clear it so later specs see the pristine unset state.
-    await request.put('/api/settings/default-model', {
-      headers: authHeader,
-      data: { model: '' },
-    })
-  }
+  const sessionRes = await request.get(`/api/sessions/${sessionId}`, { headers: authHeader })
+  expect(sessionRes.ok(), `get session failed: ${await sessionRes.text()}`).toBeTruthy()
+  const session = (await sessionRes.json()) as { model?: string | null }
+  // The untouched form must NOT have submitted the dead id as a pin.
+  expect(session.model ?? null).toBeNull()
 })

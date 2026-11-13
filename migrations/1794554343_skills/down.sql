@@ -1,0 +1,12 @@
+DROP INDEX IF EXISTS idx_session_skills_group;
+DROP INDEX IF EXISTS idx_session_skills_skill;
+DROP TABLE IF EXISTS session_skills;
+DROP TABLE IF EXISTS skill_group_members;
+DROP INDEX IF EXISTS idx_skill_groups_source_slug;
+DROP TABLE IF EXISTS skill_groups;
+DROP TABLE IF EXISTS skill_subscriptions;
+DROP INDEX IF EXISTS idx_skill_versions_skill;
+DROP TABLE IF EXISTS skill_versions;
+DROP INDEX IF EXISTS idx_skills_source_name;
+DROP TABLE IF EXISTS skills;
+DROP TABLE IF EXISTS skill_sources;

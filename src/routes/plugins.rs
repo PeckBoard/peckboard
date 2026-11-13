@@ -248,7 +248,13 @@ async fn uninstall_plugin(
 /// (when they actually declare fields), then a loaded WASM plugin. Empty
 /// crate stubs must not shadow the WASM schema while native settings are
 /// still pending.
-async fn settings_schema_for(
+///
+/// Every server-side reader of a plugin's settings must resolve through
+/// this, not `state.plugins.settings_schema_for` alone: first-party
+/// providers are crate plugins that live in the built-in registry, so the
+/// WASM-only lookup finds no schema and `PluginSettingsStore::load` drops
+/// every stored value (e.g. codex/kimi login ignored `cli_path`).
+pub(crate) async fn settings_schema_for(
     state: &AppState,
     plugin_id: &str,
 ) -> Option<crate::plugin::settings::SettingsSchema> {

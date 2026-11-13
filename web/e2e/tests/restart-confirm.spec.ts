@@ -68,8 +68,22 @@ test('with nothing running, Restart server restarts without a dialog', async ({
   request,
   page,
 }) => {
-  const { token, auth } = await authenticate(request)
-  await expect.poll(() => activityTotal(request, auth), { timeout: 15_000 }).toBe(0)
+  const { token } = await authenticate(request)
+  // Pin "nothing running": work leaked by an earlier spec in the same shard
+  // (the shared server is never fully idle) must not flip this onto the
+  // guarded-dialog path, which the next test covers against real activity.
+  await page.route('**/api/admin/activity', (route) =>
+    route.fulfill({
+      json: {
+        sessions: [],
+        subagents: [],
+        workers: [],
+        background_tasks: [],
+        counts: { sessions: 0, subagents: 0, workers: 0, background_tasks: 0 },
+        total: 0,
+      },
+    }),
+  )
 
   const calls = await stubImmediateRestart(page)
   const btn = await openServerSettings(page, token)

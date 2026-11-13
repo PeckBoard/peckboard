@@ -41,6 +41,12 @@ struct CreateSessionRequest {
     /// at it is closed. Omitted/false creates a regular session.
     #[serde(default)]
     is_temp: bool,
+    /// Skills to attach (`service::skills`), by id or name.
+    #[serde(default)]
+    skills: Vec<String>,
+    /// Skill groups to attach, by id or slug.
+    #[serde(default)]
+    skill_groups: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -220,6 +226,24 @@ async fn create_session(
                 Json(serde_json::json!({ "error": e.to_string() })),
             )
         })?;
+    // Optional skills to attach (ids or names / group ids or slugs). A bad
+    // reference rolls the just-created session back so the caller never
+    // gets a half-configured one.
+    if (!body.skills.is_empty() || !body.skill_groups.is_empty())
+        && let Err(e) = crate::service::skills::set_session_skills(
+            &state.db,
+            &session.id,
+            body.skills,
+            body.skill_groups,
+        )
+        .await
+    {
+        let _ = delete_session_core(&state, &session.id).await;
+        return Err((
+            StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(e.body()),
+        ));
+    }
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>((
         StatusCode::CREATED,

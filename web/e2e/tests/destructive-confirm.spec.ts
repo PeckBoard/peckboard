@@ -243,6 +243,20 @@ test('"Upgrade & restart" with nothing running applies without a dialog', async 
     await route.fulfill({ json: { ok: true } })
   })
   // The post-restart poll reloads once health answers; keep it waiting.
+  // Pin "nothing running": work leaked by an earlier spec in the same shard
+  // must not turn this into the guarded-dialog path.
+  await page.route('**/api/admin/activity', (route) =>
+    route.fulfill({
+      json: {
+        sessions: [],
+        subagents: [],
+        workers: [],
+        background_tasks: [],
+        counts: { sessions: 0, subagents: 0, workers: 0, background_tasks: 0 },
+        total: 0,
+      },
+    }),
+  )
   await page.route('**/api/health', (route) => route.fulfill({ status: 503, body: '' }))
 
   await loadAt(page, token, '/settings')
@@ -256,6 +270,72 @@ test('"Upgrade & restart" with nothing running applies without a dialog', async 
   await expect(page.locator('[data-testid="update-restarting"]')).toBeVisible()
   await expect(page.locator('[data-testid="restart-confirm"]')).toHaveCount(0)
   expect(applyCalls).toBe(1)
+})
+
+test('"Upgrade & restart" while work is running only offers upgrading when idle', async ({
+  request,
+  page,
+}) => {
+  const { token } = await authenticate(request)
+
+  await page.route('**/api/update/check', (route) =>
+    route.fulfill({
+      json: {
+        current_version: '0.0.1',
+        latest_version: '9.9.9',
+        update_available: true,
+        supported: true,
+        asset: 'peckboard-linux-x86_64',
+        notes: null,
+        html_url: null,
+      },
+    }),
+  )
+  // One session mid-turn: the update must not be able to interrupt it.
+  await page.route('**/api/admin/activity', (route) =>
+    route.fulfill({
+      json: {
+        sessions: [
+          {
+            session_id: 's-busy',
+            name: 'busy session',
+            folder_name: 'f',
+            project_name: null,
+            running_since: null,
+            running_secs: 12,
+          },
+        ],
+        subagents: [],
+        workers: [],
+        background_tasks: [],
+        counts: { sessions: 1, subagents: 0, workers: 0, background_tasks: 0 },
+        total: 1,
+      },
+    }),
+  )
+  const applyUrls: string[] = []
+  await page.route('**/api/update/apply**', async (route) => {
+    applyUrls.push(route.request().url())
+    await route.fulfill({ json: { ok: true, pending: null, version: '9.9.9' } })
+  })
+
+  await loadAt(page, token, '/settings')
+  await page.locator('[data-testid="settings-nav-server"]').click()
+  const applyBtn = page.locator('[data-testid="update-apply"]')
+  await expect(applyBtn).toBeVisible({ timeout: 10_000 })
+  await applyBtn.click()
+
+  const dialog = page.locator('[data-testid="restart-confirm"]')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('busy session')
+  // No way to restart over the running work.
+  await expect(page.locator('[data-testid="restart-confirm-now"]')).toHaveCount(0)
+  await expect(dialog).not.toContainText('Restart anyway')
+
+  await page.locator('[data-testid="restart-confirm-idle"]').click()
+  await expect(dialog).toHaveCount(0)
+  expect(applyUrls).toHaveLength(1)
+  expect(applyUrls[0]).toContain('when=idle')
 })
 
 test('bypassing agent tool permissions is confirmed and then badged on the settings nav', async ({
