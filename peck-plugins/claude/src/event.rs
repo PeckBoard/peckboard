@@ -18,6 +18,7 @@ pub enum CrashKind {
     Interrupted,
     SpawnFailed,
     ResumeFailed,
+    ContextOverflow,
     ExitedMidTurn,
     NoOutput,
     #[default]
@@ -34,6 +35,7 @@ impl CrashKind {
             CrashKind::Interrupted => "interrupted",
             CrashKind::SpawnFailed => "spawn_failed",
             CrashKind::ResumeFailed => "resume_failed",
+            CrashKind::ContextOverflow => "context_overflow",
             CrashKind::ExitedMidTurn => "exited_mid_turn",
             CrashKind::NoOutput => "no_output",
             CrashKind::Unknown => "unknown",
@@ -60,6 +62,19 @@ impl CrashKind {
             "conversation not found",
         ]) {
             return CrashKind::ResumeFailed;
+        }
+        // Context overflow: the conversation no longer fits the window.
+        if has(&[
+            "prompt is too long",
+            "prompt too long",
+            "context_length_exceeded",
+            "context length exceeded",
+            "maximum context length",
+            "exceeds the context window",
+            "context window exceeded",
+            "input is too long",
+        ]) {
+            return CrashKind::ContextOverflow;
         }
         // Rate limiting next: a 429 body often also names the API key.
         if has(&[

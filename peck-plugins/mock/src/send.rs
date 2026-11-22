@@ -319,6 +319,11 @@ impl Ctx<'_> {
                     return Ok(());
                 }
             }
+            "context-overflow" => {
+                if self.context_overflow()? {
+                    return Ok(());
+                }
+            }
             "sandbox-probe" => self.sandbox_probe()?,
             "markdown" => self.markdown()?,
             "ask" => return self.ask(),
@@ -974,6 +979,24 @@ impl Ctx<'_> {
             return Ok(true);
         }
         self.emit_text("Started a fresh conversation.")?;
+        Ok(false)
+    }
+
+    /// `true` if this call already emitted a terminal (context overflow).
+    /// Any resumed turn fails the way Claude does when the conversation no
+    /// longer fits ("Prompt is too long", no `errorKind` — the host must
+    /// classify it); a fresh turn reports whether the overflow-recovery
+    /// transcript reached it.
+    fn context_overflow(&self) -> Result<bool, String> {
+        if self.resume.is_some() {
+            self.completed(json!({ "error": "Prompt is too long" }))?;
+            return Ok(true);
+        }
+        if self.message.contains("[Context reset") && self.message.contains("<transcript>") {
+            self.emit_text("Recovered with a fresh context and the transcript.")?;
+        } else {
+            self.emit_text("Fresh conversation started.")?;
+        }
         Ok(false)
     }
 

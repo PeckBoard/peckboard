@@ -187,6 +187,52 @@ pub fn build_recovery_injection(from_model: &str, transcript: &str, user_text: &
          ---\n\nUser's message:\n{user_text}"
     )
 }
+/// Overflow variant: the SAME model is continuing, but its previous
+/// conversation no longer fit the context window, so it restarts fresh
+/// with the reconstructed transcript (tool inputs/outputs dropped, the
+/// oldest turns cut if needed). See [`crate::provider::context_recovery`].
+pub fn build_overflow_injection(transcript: &str, user_text: &str) -> String {
+    format!(
+        "[Context reset — this conversation grew past the model's context \
+         window, so it was restarted with a fresh context. The transcript \
+         below is the user/assistant history reconstructed from the session \
+         log: tool calls are listed by name only (their inputs and outputs \
+         were dropped) and the oldest turns may be omitted. Treat it as \
+         authoritative background. Re-check files, git state and command \
+         output yourself instead of assuming them, keep tool output small, \
+         then respond to the user's message that follows.]\n\n\
+         <transcript>\n{transcript}\n</transcript>\n\n\
+         ---\n\nUser's message:\n{user_text}"
+    )
+}
+
+/// Keep the newest part of a transcript that fits in `max_tokens`
+/// (estimated like [`estimate_tokens`]). Cuts at a `## ` turn heading so a
+/// turn is never split mid-sentence, and says how much was omitted.
+/// Returns the input unchanged when it already fits.
+pub fn trim_transcript_to_tokens(transcript: &str, max_tokens: i64) -> String {
+    if estimate_tokens(transcript) <= max_tokens {
+        return transcript.to_string();
+    }
+    let max_chars = (max_tokens.max(0) as usize).saturating_mul(4);
+    let total_chars = transcript.chars().count();
+    let skip_chars = total_chars.saturating_sub(max_chars);
+    // Byte index of the first char we may keep.
+    let start = transcript
+        .char_indices()
+        .nth(skip_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(transcript.len());
+    let tail = &transcript[start..];
+    // Snap forward to the next turn heading; with none left, keep the raw
+    // tail rather than nothing.
+    let kept = match tail.find("\n## ") {
+        Some(i) => &tail[i + 1..],
+        None => tail,
+    };
+    let omitted = transcript.len() - kept.len();
+    format!("[Earlier history omitted — about {omitted} characters]\n\n{kept}")
+}
 
 /// ~4 Unicode chars per token — the usual estimate without a model-specific
 /// tokenizer. Round up so the preview never undersells the first-turn bill.
@@ -219,7 +265,7 @@ pub fn context_window_for(model: &str) -> i64 {
 }
 
 /// Pull `data.text` out of an event's JSON payload.
-fn event_text(data: &str) -> String {
+pub(crate) fn event_text(data: &str) -> String {
     serde_json::from_str::<serde_json::Value>(data)
         .ok()
         .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
@@ -1494,6 +1540,7 @@ pub async fn peek_pending_injection(
     {
         used.handover_doc = true;
         out = match latest_handover_meta(db, session_id).await {
+            Some(meta) if meta.overflow => build_overflow_injection(&doc, text),
             Some(meta) if meta.recovery => build_recovery_injection(&meta.from, &doc, text),
             Some(meta) if meta.compaction => build_compaction_injection(&doc, text),
             Some(meta) => build_injection(&meta.from, &doc, text),
@@ -1652,6 +1699,9 @@ struct HandoverMeta {
     from: String,
     compaction: bool,
     recovery: bool,
+    /// Same-model restart after the conversation overflowed the context
+    /// window ([`crate::provider::context_recovery`]).
+    overflow: bool,
 }
 
 /// Most recent `handover` event's metadata, if any.
@@ -1664,6 +1714,7 @@ async fn latest_handover_meta(db: &crate::db::Db, session_id: &str) -> Option<Ha
         let v = serde_json::from_str::<serde_json::Value>(&e.data).ok()?;
         let from = v.get("from")?.as_str()?.to_string();
         let recovery = v.get("recovery").and_then(|c| c.as_bool()).unwrap_or(false);
+        let overflow = v.get("overflow").and_then(|c| c.as_bool()).unwrap_or(false);
         let compaction = v
             .get("compaction")
             .and_then(|c| c.as_bool())
@@ -1672,6 +1723,7 @@ async fn latest_handover_meta(db: &crate::db::Db, session_id: &str) -> Option<Ha
             from,
             compaction,
             recovery,
+            overflow,
         })
     })
 }
@@ -1801,6 +1853,26 @@ mod tests {
         assert!(out.contains("claude:opus"));
         assert!(out.contains("Recovery context"));
         assert!(!out.contains("<handover>"));
+    }
+
+    #[test]
+    fn trim_transcript_keeps_the_newest_turns_at_a_heading() {
+        let t = "## User\n\nold question\n\n## Assistant\n\nold answer\n\n## User\n\nnew question";
+        // Fits: unchanged.
+        assert_eq!(trim_transcript_to_tokens(t, 1_000), t);
+        // ~6 tokens = 24 chars: only the last turn survives, cut at its heading.
+        let trimmed = trim_transcript_to_tokens(t, 6);
+        assert!(trimmed.starts_with("[Earlier history omitted"), "{trimmed}");
+        assert!(trimmed.ends_with("## User\n\nnew question"), "{trimmed}");
+        assert!(!trimmed.contains("old"), "{trimmed}");
+    }
+
+    #[test]
+    fn overflow_injection_wraps_transcript_and_message() {
+        let out = build_overflow_injection("## User\n\nhi", "continue");
+        assert!(out.starts_with("[Context reset"));
+        assert!(out.contains("<transcript>\n## User\n\nhi\n</transcript>"));
+        assert!(out.ends_with("User's message:\ncontinue"));
     }
 
     #[test]

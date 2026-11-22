@@ -215,6 +215,11 @@ export type DisplayItem =
       doc: string
       compaction: boolean
       recovery: boolean
+      /** Same-model fresh-context restart after the conversation overflowed
+       *  the context window ("Prompt is too long"). */
+      overflow: boolean
+      /** Estimated tokens of the carried-over transcript (0 = unknown). */
+      tokens: number
       ts: number
       key: string
     }
@@ -892,6 +897,18 @@ function foldEvent(st: FoldState, ev: Event): void {
       })
       break
     }
+    case 'context-overflow-stuck': {
+      // The fresh-context retry after a "Prompt is too long" overflowed
+      // too; nothing more happens automatically.
+      flushAssistant(st)
+      items.push({
+        type: 'system',
+        text: 'The context limit was hit again right after a fresh-context retry, so it was not retried automatically. Clear the session and send a short summary of the goal and progress to continue.',
+        key: ev.id,
+        ts: ev.ts,
+      })
+      break
+    }
     case 'interrupt': {
       flushAssistant(st)
       closeOpenTools(items, st.openTools, 'interrupted', ev.ts)
@@ -919,6 +936,8 @@ function foldEvent(st: FoldState, ev: Event): void {
         doc: (ev.data.doc as string) ?? '',
         compaction: (ev.data.compaction as boolean) ?? false,
         recovery: (ev.data.recovery as boolean) ?? false,
+        overflow: (ev.data.overflow as boolean) ?? false,
+        tokens: typeof ev.data.tokens === 'number' ? ev.data.tokens : 0,
         ts: ev.ts,
         key: ev.id,
       })

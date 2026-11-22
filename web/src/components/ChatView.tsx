@@ -591,11 +591,13 @@ export const ChatRow = memo(function ChatRow({
                 {'↔️'}
               </span>
               <span>
-                {item.compaction
-                  ? 'Context compacted'
-                  : item.recovery
-                    ? `Transcript sent to ${bareModelId(item.to)} (recovery)`
-                    : `Context handed over to ${bareModelId(item.to)}`}
+                {item.overflow
+                  ? `Context limit reached — continued with a fresh context (history carried over${item.tokens > 0 ? `, ~${item.tokens.toLocaleString()} tokens` : ''})`
+                  : item.compaction
+                    ? 'Context compacted'
+                    : item.recovery
+                      ? `Transcript sent to ${bareModelId(item.to)} (recovery)`
+                      : `Context handed over to ${bareModelId(item.to)}`}
               </span>
               <span className="chat-handover-time">{formatTime(item.ts)}</span>
             </summary>

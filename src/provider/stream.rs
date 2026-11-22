@@ -43,6 +43,11 @@ pub enum CrashKind {
     /// [`crate::provider::resume_recovery`] does.
     ResumeFailed,
     /// The CLI / child process never started.
+    /// The conversation no longer fits the model's context window (Claude:
+    /// "Prompt is too long"). Every retry on the same conversation fails
+    /// the same way; [`crate::provider::context_recovery`] restarts it
+    /// fresh with the transcript carried over.
+    ContextOverflow,
     ExitedMidTurn,
     /// The process exited without ever producing usable output.
     NoOutput,
@@ -62,6 +67,7 @@ impl CrashKind {
             CrashKind::SpawnFailed => "spawn_failed",
             CrashKind::ExitedMidTurn => "exited_mid_turn",
             CrashKind::ResumeFailed => "resume_failed",
+            CrashKind::ContextOverflow => "context_overflow",
             CrashKind::NoOutput => "no_output",
             CrashKind::Unknown => "unknown",
         }
@@ -91,6 +97,21 @@ impl CrashKind {
             return CrashKind::ResumeFailed;
         }
         // Rate limiting next: a 429 body often also names the API key.
+        // Context overflow next: an API 400 body ("prompt is too long:
+        // 213000 tokens > 200000 maximum") would otherwise read as unknown,
+        // and its remedy — a fresh context — is unlike any bucket below.
+        if has(&[
+            "prompt is too long",
+            "prompt too long",
+            "context_length_exceeded",
+            "context length exceeded",
+            "maximum context length",
+            "exceeds the context window",
+            "context window exceeded",
+            "input is too long",
+        ]) {
+            return CrashKind::ContextOverflow;
+        }
         if has(&[
             "429",
             "rate limit",
@@ -810,6 +831,17 @@ mod tests {
                 CrashKind::ResumeFailed,
             ),
             ("upstream returned an unexpected body", CrashKind::Unknown),
+            // Context overflow: Claude CLI's bare result text, the API's
+            // 400 body, and the OpenAI-compatible error code.
+            ("Prompt is too long", CrashKind::ContextOverflow),
+            (
+                "API Error: 400 {\"error\":{\"message\":\"prompt is too long: 213000 tokens > 200000 maximum\"}}",
+                CrashKind::ContextOverflow,
+            ),
+            (
+                "error code: context_length_exceeded",
+                CrashKind::ContextOverflow,
+            ),
         ];
         for (text, expected) in cases {
             assert_eq!(CrashKind::classify(text), *expected, "classifying {text:?}");

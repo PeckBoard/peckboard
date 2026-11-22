@@ -753,6 +753,17 @@ pub async fn run_server(
                     )
                     .await;
 
+                    // 1.66 Context-overflow recovery. A conversation that
+                    // outgrew the window ("Prompt is too long") restarts
+                    // fresh with its transcript carried over and the failed
+                    // turn re-queued — also before auth recovery (which
+                    // drops the replay snapshot) and the drain.
+                    crate::provider::context_recovery::handle_completion(
+                        &orchestrator_state,
+                        &completion,
+                    )
+                    .await;
+
                     // 1.7 Auth recovery. A turn that failed to authenticate
                     // parks its message and — once per credential version —
                     // releases it again immediately, so the drain below
