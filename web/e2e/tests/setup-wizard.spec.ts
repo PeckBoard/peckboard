@@ -68,6 +68,7 @@ async function restoreSharedState(request: APIRequestContext) {
   const restored = await loginToken(request, ADMIN_USER, ADMIN_PASS)
   const auth = { Authorization: `Bearer ${restored}` }
   await request.put('/api/settings/default-model', { headers: auth, data: { model: '' } })
+  await request.put('/api/me/use-cases', { headers: auth, data: { use_cases: [] } })
 }
 
 /** Open the wizard and get through the mandatory password step. */
@@ -88,7 +89,7 @@ async function skipToReady(page: Page) {
   await page.getByTestId('setup-next').click()
   await expect(page.getByRole('heading', { name: /Where files live/ })).toBeVisible()
   await page.getByTestId('setup-next').click()
-  await expect(page.getByTestId('setup-final-chat')).toBeVisible()
+  await expect(page.getByTestId('setup-final-tour')).toBeVisible()
 }
 
 async function expectSetupCompleted(request: APIRequestContext) {
@@ -118,6 +119,24 @@ test.describe('first-run setup wizard', () => {
       await expect(page.getByTestId('setup-progress')).toContainText('Connect your AI')
       await expect(page.getByTestId('setup-progress')).toContainText('Where files live')
       await expect(page.getByTestId('setup-progress')).toContainText('Ready')
+      // Optional use-case chips: each toggle is saved for this user.
+      await expect(page.getByTestId('setup-usecases')).toContainText(
+        'What will you use PeckBoard for?',
+      )
+      const useCasesSaved = page.waitForRequest(
+        (r) =>
+          r.url().endsWith('/api/me/use-cases') &&
+          r.method() === 'PUT' &&
+          r.postDataJSON()?.use_cases?.length === 2,
+      )
+      await page.getByTestId('setup-usecase-coding').click()
+      await page.getByTestId('setup-usecase-printing').click()
+      await expect(page.getByTestId('setup-usecase-coding')).toHaveAttribute('aria-pressed', 'true')
+      await expect(page.getByTestId('setup-usecase-writing')).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      )
+      await useCasesSaved
 
       // ── Step 1: what PeckBoard is, then the mandatory password ─────
       await expect(page.getByTestId('setup-what-is')).toContainText('AI helpers')
@@ -201,7 +220,9 @@ test.describe('first-run setup wizard', () => {
       // Fully filled: Next alone saves it (no "Add folder" click).
       await page.getByTestId('setup-folder-path').fill(folderPath)
       await page.getByTestId('setup-next').click()
-      await expect(page.getByTestId('setup-final-chat')).toBeVisible({ timeout: 10_000 })
+      // AI (the default model above) and folder both ready: "Try it now" is on.
+      await expect(page.getByTestId('setup-final-try')).toBeEnabled({ timeout: 10_000 })
+      await expect(page.getByTestId('setup-final-chat')).toHaveCount(0)
 
       const foldersRes = await request.get('/api/folders', { headers: auth })
       const folders = (await foldersRes.json()) as { name: string; path: string }[]
@@ -221,6 +242,12 @@ test.describe('first-run setup wizard', () => {
 
       await page.getByTestId('setup-finish').click()
       await expect(wizard).toBeHidden({ timeout: 10_000 })
+      // The use-case chips were saved for this user.
+      const useCasesRes = await request.get('/api/me/use-cases', { headers: auth })
+      expect(((await useCasesRes.json()) as { use_cases: string[] }).use_cases).toEqual([
+        'coding',
+        'printing',
+      ])
       await expectSetupCompleted(request)
 
       // With the stub gone the real (completed) state keeps it hidden.
@@ -232,17 +259,79 @@ test.describe('first-run setup wizard', () => {
       await restoreSharedState(request)
     }
   })
-
-  test('"Start a chat" finishes setup and opens the new session dialog', async ({
+  test('with no AI ready, "Try it now" says why and "Start a chat" opens the new session dialog', async ({
     request,
     page,
   }) => {
     try {
+      // No AI tool ready and no default model, whatever this host has.
+      await page.route('**/api/provider-setup', (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ providers: [], other_providers: [] }),
+        }),
+      )
+      await page.route('**/api/settings/default-model', (route) =>
+        route.request().method() === 'GET'
+          ? route.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify({ model: '' }),
+            })
+          : route.continue(),
+      )
       await passPasswordStep(page, request)
       await skipToReady(page)
+      await expect(page.getByTestId('setup-final-try')).toBeDisabled()
+      await expect(page.getByTestId('setup-final-try-reason')).toContainText('connected AI')
       await page.getByTestId('setup-final-chat').click()
       await expect(page.getByTestId('setup-wizard')).toBeHidden({ timeout: 10_000 })
       await expect(page.getByRole('dialog', { name: /session|chat/i })).toBeVisible()
+      await expectSetupCompleted(request)
+    } finally {
+      await restoreSharedState(request)
+    }
+  })
+
+  test('"Try it now" finishes setup and opens a chat already looking around the folder', async ({
+    request,
+    page,
+  }) => {
+    try {
+      const token = await loginToken(request, ADMIN_USER, ADMIN_PASS)
+      const auth = { Authorization: `Bearer ${token}` }
+      // An AI (the default model) and a folder are what it needs.
+      const model = await request.put('/api/settings/default-model', {
+        headers: auth,
+        data: { model: 'mock:echo' },
+      })
+      expect(model.ok(), `set default model failed: ${await model.text()}`).toBeTruthy()
+      const created = await request.post('/api/folders', {
+        headers: auth,
+        data: {
+          name: `try-it-${Date.now()}`,
+          path: mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-try-')),
+        },
+      })
+      expect(created.ok(), `create folder failed: ${await created.text()}`).toBeTruthy()
+
+      await passPasswordStep(page, request)
+      await skipToReady(page)
+      const tryNow = page.getByTestId('setup-final-try')
+      await expect(tryNow).toBeEnabled({ timeout: 10_000 })
+      await expect(tryNow).toContainText('Watch an AI helper look around your folder.')
+      await expect(page.getByTestId('setup-final-try-reason')).toHaveCount(0)
+      await expect(page.getByTestId('setup-final-chat')).toHaveCount(0)
+      await tryNow.click()
+
+      await expect(page.getByTestId('setup-wizard')).toBeHidden({ timeout: 10_000 })
+      await expect(page).toHaveURL(/\/sessions\/[^/]+/)
+      // The first message was sent for the user, and the echo model answered.
+      await expect(page.locator('.chat-container')).toContainText(
+        'Look around this folder and tell me',
+        { timeout: 20_000 },
+      )
       await expectSetupCompleted(request)
     } finally {
       await restoreSharedState(request)
@@ -265,18 +354,14 @@ test.describe('first-run setup wizard', () => {
     }
   })
 
-  test('"Show me around" finishes setup and lands on Sessions with no dialog', async ({
-    request,
-    page,
-  }) => {
+  test('"Show me around" finishes setup and opens the Welcome page', async ({ request, page }) => {
     try {
       await passPasswordStep(page, request)
       await skipToReady(page)
       await page.getByTestId('setup-final-tour').click()
       await expect(page.getByTestId('setup-wizard')).toBeHidden({ timeout: 10_000 })
-      // Sessions is the root route.
-      await expect(page).toHaveURL(/\/(sessions)?$/)
-      await expect(page.locator('.rail-avatar')).toBeVisible()
+      await expect(page).toHaveURL(/\/welcome$/)
+      await expect(page.getByTestId('welcome-page')).toBeVisible()
       await expect(page.getByRole('dialog', { name: /session|project|chat/i })).toHaveCount(0)
       await expectSetupCompleted(request)
     } finally {
@@ -366,7 +451,7 @@ test.describe('setup wizard resumes', () => {
 
   test('a stored step reopens there, past steps that were skipped', async ({ request, page }) => {
     await openWithProgress(page, request, { password_changed: true, step: 3 })
-    await expect(page.getByTestId('setup-final-chat')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('setup-final-tour')).toBeVisible({ timeout: 15_000 })
     await expect(page.getByTestId('setup-progress-step-4')).toHaveAttribute('aria-current', 'step')
   })
 })

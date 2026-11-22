@@ -306,6 +306,7 @@ impl Ctx<'_> {
             "thinking" => self.thinking()?,
             "tool-orphan-crash" => return self.tool_orphan_crash(),
             "crash" => return self.crash(),
+            "demo" => self.demo()?,
             "rate-limit" => return self.rate_limit(),
             "auth-error" => return self.auth_error(),
             "auth-error-once" => {
@@ -372,6 +373,31 @@ impl Ctx<'_> {
             }
         }
         self.emit_text(&format!("ran {ran}/{total} mcp block(s)"))
+    }
+
+    /// The demo project's helper (`mock:demo`, the one mock model every
+    /// install accepts — see `DEMO_MODEL_ID` in core): says each `Say: …`
+    /// line of the step instructions in plain words with a short pause
+    /// between them, then runs the step's ```mcp blocks (`finish_card`) so
+    /// the card moves on. Never touches files.
+    fn demo(&mut self) -> Result<(), String> {
+        for line in demo_lines(self.message) {
+            self.emit_text(&format!("{line}\n\n"))?;
+            if !self.wait_ms(1_000)? {
+                return Ok(());
+            }
+        }
+        for b in extract_mcp_blocks(self.message) {
+            let Some(tool) = b.get("tool").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            let args = b.get("args").cloned().unwrap_or(json!({}));
+            self.call_mcp_tool(tool, args)?;
+            if !self.tick()? {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     fn echo(&self) -> Result<(), String> {
@@ -1501,9 +1527,39 @@ fn parse_sleep_secs(message: &str) -> u64 {
         .min(30)
 }
 
+/// Prefix of a line the `demo` scenario says out loud, one per pause.
+const DEMO_SAY_PREFIX: &str = "Say:";
+
+/// What `demo` says when the message carries no `Say:` lines.
+const DEMO_DEFAULT_LINES: &[&str] = &[
+    "Reading the task.",
+    "Working through it step by step.",
+    "Done — moving the card along.",
+];
+
+/// The `Say: …` lines in `message`, in order (blank ones skipped), or the
+/// default lines when there are none.
+fn demo_lines(message: &str) -> Vec<String> {
+    let said: Vec<String> = message
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix(DEMO_SAY_PREFIX))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if said.is_empty() {
+        DEMO_DEFAULT_LINES.iter().map(|s| s.to_string()).collect()
+    } else {
+        said
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_mcp_blocks, parse_background_reports, parse_sleep_secs};
+    use super::{
+        DEMO_DEFAULT_LINES, demo_lines, extract_mcp_blocks, parse_background_reports,
+        parse_sleep_secs,
+    };
+
     #[test]
     fn extracts_multiple_blocks_and_skips_malformed() {
         let msg = "intro\n```mcp\n{\"tool\":\"a\",\"args\":{\"x\":1}}\n```\nmiddle\n```mcp\nnot json\n```\n```mcp\n{\"tool\":\"b\"}\n```\n";
@@ -1539,5 +1595,19 @@ mod tests {
         assert_eq!(parse_sleep_secs("no hint"), 3);
         assert_eq!(parse_sleep_secs("sleep:"), 3);
         assert_eq!(parse_sleep_secs("sleep:900"), 30);
+    }
+
+    #[test]
+    fn demo_lines_come_from_say_prefixed_lines_else_defaults() {
+        let msg =
+            "Card: Plan\nSay: Reading the card.\n  Say: Writing a plan.\nSay:\n```mcp\n{}\n```";
+        assert_eq!(
+            demo_lines(msg),
+            vec![
+                "Reading the card.".to_string(),
+                "Writing a plan.".to_string()
+            ]
+        );
+        assert_eq!(demo_lines("nothing to say").len(), DEMO_DEFAULT_LINES.len());
     }
 }

@@ -4,11 +4,16 @@ import HelpTip from './HelpTip'
 import PathAutocomplete from './PathAutocomplete'
 import ProviderSetupPanel from './ProviderSetupPanel'
 import FieldError from './FieldError'
+import PhonePairingCard from './PhonePairingCard'
 import { authedFetch, useAuthStore } from '../store/auth'
 import { useFoldersStore } from '../store/folders'
 import { isProviderReady, useProviderSetupStore } from '../store/providerSetup'
+import { modelGoneFromCatalogue, useResourcesStore } from '../store/resources'
+import { useSessionsStore } from '../store/sessions'
+import { USE_CASE_OPTIONS, useUseCasesStore, type UseCase } from '../store/useCases'
 import { MIN_PASSWORD_LEN } from '../utils/password'
 import type { Folder } from '../types/api'
+import '../styles/welcome.css'
 
 const STEPS = ['Welcome', 'Connect your AI', 'Where files live', 'Ready'] as const
 const FOLDER_STEP = 2
@@ -17,8 +22,14 @@ const LAST_STEP = STEPS.length - 1
 /** Name given to the ready-made workspace folder. */
 const DEFAULT_FOLDER_NAME = 'My work'
 
-/** Where to go once the wizard closes. */
-export type SetupNext = 'chat' | 'project' | 'tour'
+/** Where to go once the wizard closes. `try` = the "Try it now" chat was
+ *  created (its id is passed alongside); `tour` = the Welcome page. */
+export type SetupNext = 'try' | 'chat' | 'project' | 'tour'
+
+/** Name and first message of the "Try it now" chat. */
+const TRY_SESSION_NAME = 'First look'
+export const TRY_FIRST_MESSAGE =
+  "Look around this folder and tell me, in plain words, what's here and what you could help me with. Don't change anything."
 
 /** Stored wizard progress (`GET /api/settings/setup`). */
 export interface SetupProgress {
@@ -30,8 +41,9 @@ export interface SetupProgress {
 
 interface Props {
   /** Called after `POST /api/settings/setup/complete` succeeds, with the
-   *  action the user picked on the last step (none for a plain Finish). */
-  onDone: (next?: SetupNext) => void
+   *  action the user picked on the last step (none for a plain Finish).
+   *  For `'try'`, `sessionId` is the chat that was just created. */
+  onDone: (next?: SetupNext, sessionId?: string) => void
   /** Where to resume; read once when the wizard opens. */
   progress: SetupProgress
 }
@@ -109,6 +121,19 @@ export default function SetupWizard({ onDone, progress }: Props) {
     }
   }
 
+  // Optional "What will you use PeckBoard for?" chips. Saved per user on
+  // each toggle (best effort — it only orders onboarding content).
+  const useCases = useUseCasesStore((s) => s.useCases)
+  useEffect(() => {
+    void useUseCasesStore.getState().load()
+  }, [])
+  const toggleUseCase = (id: UseCase) => {
+    const next = useCases.includes(id) ? useCases.filter((u) => u !== id) : [...useCases, id]
+    void useUseCasesStore
+      .getState()
+      .save(next)
+      .catch(() => {})
+  }
   // ── Step 2: providers ────────────────────────────────────────────
   const providerStatuses = useProviderSetupStore((s) => s.providers)
   const anyProviderReady = providerStatuses?.some(isProviderReady) ?? false
@@ -221,22 +246,94 @@ export default function SetupWizard({ onDone, progress }: Props) {
   // ── Step 4: ready ────────────────────────────────────────────────
   const [finishBusy, setFinishBusy] = useState(false)
   const [finishError, setFinishError] = useState('')
+  const [showPhone, setShowPhone] = useState(false)
+  const [trying, setTrying] = useState(false)
+  const createSession = useSessionsStore((s) => s.createSession)
+  const setDraft = useSessionsStore((s) => s.setDraft)
+  const models = useResourcesStore((s) => s.models)
+  const defaultModel = useResourcesStore((s) => s.defaultModel)
+  const fetchModels = useResourcesStore((s) => s.fetchModels)
+  const fetchDefaultModel = useResourcesStore((s) => s.fetchDefaultModel)
+  const onLastStep = step === LAST_STEP
+  // A resume straight to Ready never mounted the provider panel that loads these.
+  useEffect(() => {
+    if (!onLastStep) return
+    void fetchModels()
+    void fetchDefaultModel()
+  }, [onLastStep, fetchModels, fetchDefaultModel])
+  // "Ready" = a signed-in AI tool, or a default model that still exists.
+  const defaultModelUsable =
+    defaultModel !== '' && !modelGoneFromCatalogue(defaultModel, models) && models.length > 0
+  const aiReady = anyProviderReady || defaultModelUsable
+  const tryReason = !aiReady
+    ? 'Try it now needs a connected AI (step 2).'
+    : !doneFolder
+      ? 'Try it now needs a folder to look at (step 3).'
+      : ''
+
+  /** Mark setup complete on the server; throws with a readable message. */
+  const completeSetup = async () => {
+    const res = await authedFetch('/api/settings/setup/complete', { method: 'POST' })
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as { error?: string } | null
+      throw new Error(data?.error || `HTTP ${res.status}`)
+    }
+  }
 
   const finish = async (next?: SetupNext) => {
     if (finishBusy) return
     setFinishError('')
     setFinishBusy(true)
     try {
-      const res = await authedFetch('/api/settings/setup/complete', { method: 'POST' })
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null
-        throw new Error(data?.error || `HTTP ${res.status}`)
-      }
+      await completeSetup()
       onDone(next)
     } catch (err) {
       setFinishError(err instanceof Error ? err.message : 'Failed to finish setup')
       setFinishBusy(false)
     }
+  }
+
+  /** "Try it now": finish, open a chat in the chosen folder on the default
+   *  model, and send it a first look-around request. */
+  const tryNow = async () => {
+    if (finishBusy || tryReason || !doneFolder) return
+    setFinishError('')
+    setFinishBusy(true)
+    setTrying(true)
+    try {
+      await completeSetup()
+    } catch (err) {
+      setFinishError(err instanceof Error ? err.message : 'Failed to finish setup')
+      setFinishBusy(false)
+      setTrying(false)
+      return
+    }
+    let session: { id: string }
+    try {
+      session = await createSession(
+        TRY_SESSION_NAME,
+        doneFolder.id,
+        defaultModelUsable ? defaultModel : undefined,
+      )
+    } catch {
+      // Setup is already complete: never strand the user in a closed
+      // wizard — fall back to the New Session dialog.
+      onDone('chat')
+      return
+    }
+    // Same create-then-message pattern as NewSessionModal's presets: the
+    // session exists, so a failed send parks the prompt in the draft.
+    try {
+      const msg = await authedFetch(`/api/sessions/${session.id}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: TRY_FIRST_MESSAGE }),
+      })
+      if (!msg.ok) setDraft(session.id, TRY_FIRST_MESSAGE)
+    } catch {
+      setDraft(session.id, TRY_FIRST_MESSAGE)
+    }
+    onDone('try', session.id)
   }
 
   const onNext = async () => {
@@ -359,6 +456,28 @@ export default function SetupWizard({ onDone, progress }: Props) {
                 <FieldError message={pwError || undefined} testId="setup-pw-error" />
               </>
             )}
+            <fieldset className="setup-wizard-usecases" data-testid="setup-usecases">
+              <legend>What will you use PeckBoard for? (optional)</legend>
+              <div className="setup-wizard-chips">
+                {USE_CASE_OPTIONS.map((opt) => {
+                  const on = useCases.includes(opt.id)
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      className="setup-wizard-chip"
+                      aria-pressed={on}
+                      onClick={() => toggleUseCase(opt.id)}
+                      data-testid={`setup-usecase-${opt.id}`}
+                    >
+                      {on ? '✓ ' : ''}
+                      {opt.label}
+                    </button>
+                  )
+                })}
+              </div>
+              <span className="form-hint">Pick any that fit. We&apos;ll show those first.</span>
+            </fieldset>
           </form>
         )}
 
@@ -493,19 +612,36 @@ export default function SetupWizard({ onDone, progress }: Props) {
           <div>
             <h3>You&apos;re ready</h3>
             <p className="form-hint">What would you like to do first?</p>
-            <div className="setup-wizard-final">
+            <div className={`setup-wizard-final${tryReason ? ' has-four' : ''}`}>
               <button
                 type="button"
-                className="setup-wizard-final-action"
-                onClick={() => void finish('chat')}
-                disabled={finishBusy}
-                data-testid="setup-final-chat"
+                className="setup-wizard-final-action primary"
+                onClick={() => void tryNow()}
+                disabled={finishBusy || tryReason !== ''}
+                aria-describedby={tryReason ? 'setup-final-try-reason' : undefined}
+                data-testid="setup-final-try"
               >
-                <span className="setup-wizard-final-title">Start a chat</span>
+                <span className="setup-wizard-final-title">
+                  {finishBusy && trying ? 'Starting…' : 'Try it now'}
+                </span>
                 <span className="setup-wizard-final-hint">
-                  Ask an AI helper to do something now.
+                  Watch an AI helper look around your folder.
                 </span>
               </button>
+              {tryReason && (
+                <button
+                  type="button"
+                  className="setup-wizard-final-action"
+                  onClick={() => void finish('chat')}
+                  disabled={finishBusy}
+                  data-testid="setup-final-chat"
+                >
+                  <span className="setup-wizard-final-title">Start a chat</span>
+                  <span className="setup-wizard-final-hint">
+                    Ask an AI helper to do something now.
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
                 className="setup-wizard-final-action"
@@ -526,13 +662,34 @@ export default function SetupWizard({ onDone, progress }: Props) {
                 data-testid="setup-final-tour"
               >
                 <span className="setup-wizard-final-title">Show me around</span>
-                <span className="setup-wizard-final-hint">A short checklist to get started.</span>
+                <span className="setup-wizard-final-hint">
+                  A walkthrough of the first steps and what PeckBoard can do.
+                </span>
               </button>
             </div>
+            {tryReason && (
+              <span
+                id="setup-final-try-reason"
+                className="form-actions-reason setup-wizard-final-reason"
+                data-testid="setup-final-try-reason"
+              >
+                {tryReason}
+              </span>
+            )}
             <p className="form-hint setup-wizard-outro" data-testid="setup-remote-note">
               Using PeckBoard from your phone or another computer? See Settings → Secure connection
-              (HTTPS).
+              (HTTPS).{' '}
+              <button
+                type="button"
+                className="btn-link"
+                onClick={() => setShowPhone((v) => !v)}
+                aria-expanded={showPhone}
+                data-testid="setup-phone-toggle"
+              >
+                {showPhone ? 'Hide the phone code' : 'Show a code for your phone'}
+              </button>
             </p>
+            {showPhone && <PhonePairingCard />}
             <FieldError message={finishError || undefined} testId="setup-finish-error" />
           </div>
         )}

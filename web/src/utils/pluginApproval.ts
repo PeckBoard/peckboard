@@ -1,6 +1,12 @@
 import { authedFetch } from '../store/auth'
 import type { McpOauthConfig } from './mcpServers'
 
+/** How settled a plugin is, from its manifest or registry entry. */
+export type PluginStability = 'stable' | 'experimental'
+
+/** Hover/accessible text for the "Experimental" badge. */
+export const EXPERIMENTAL_PLUGIN_TITLE = 'This plugin is experimental and may change or break'
+
 /** Host-side runtime usage counters for one installed plugin. */
 export interface WasmPluginStats {
   calls: number
@@ -30,6 +36,8 @@ export interface WasmPlugin {
    *  built-in plugin's, rendered by the shared settings form. */
   settings_schema?: { fields: { key: string }[] }
   error?: string | null
+  /** Manifest-declared maturity; absent means stable. */
+  stability?: PluginStability
   /** Runtime usage counters + wasm size, for the plugins page. */
   stats?: WasmPluginStats | null
 }
@@ -241,6 +249,8 @@ export interface RegistryPlugin {
   compatible?: boolean
   /** Installed AND the registry version is strictly newer than what's loaded. */
   upgrade_available?: boolean
+  /** Publisher-declared maturity; absent means stable. */
+  stability?: PluginStability
 }
 
 /** An MCP server template from the registry (one-click add — nothing is downloaded). */

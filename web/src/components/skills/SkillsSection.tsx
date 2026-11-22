@@ -3,6 +3,7 @@ import List from '../List'
 import EmptyState from '../EmptyState'
 import ConfirmDialog from '../ConfirmDialog'
 import HelpTip from '../HelpTip'
+import FirstVisitHint from '../FirstVisitHint'
 import SkillEditorModal from './SkillEditorModal'
 import SkillDetailModal from './SkillDetailModal'
 import SkillPublishModal from './SkillPublishModal'
@@ -43,6 +44,10 @@ export default function SkillsSection() {
 
   return (
     <div className="registry-panel-page" data-testid="settings-skills">
+      <FirstVisitHint hintKey="skills" docs="/skills.html">
+        New here? Pick a ready-made skill under Browse, then give it to a session from that
+        session&apos;s menu.
+      </FirstVisitHint>
       <p className="form-hint">
         Skills <HelpTip term="skill" /> are reusable instructions an agent loads when a job calls
         for them. Write your own, subscribe to shared ones, and give sessions the ones they need.

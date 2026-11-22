@@ -1,0 +1,30 @@
+[
+  {
+    "version": "0.1.158",
+    "date": "2026-11-22",
+    "highlights": [
+      "A new Welcome page helps you get going on your first launch.",
+      "\"Try it now\" gives you a ready-made first task, so you can see an agent at work in one click.",
+      "Starter prompts suggest things to ask when you open a new chat.",
+      "A demo project shows how cards, workers and the board fit together.",
+      "Scan a QR code to open PeckBoard on your phone.",
+      "Experimental plugins now carry a badge, so you know what is still being tried out."
+    ]
+  },
+  {
+    "version": "0.1.157",
+    "date": "2026-11-22",
+    "highlights": [
+      "When a long chat outgrows the model's memory (\"Prompt is too long\"), it now carries on by itself with a fresh start, keeping a summary of what came before."
+    ]
+  },
+  {
+    "version": "0.1.156",
+    "date": "2026-11-13",
+    "highlights": [
+      "Skills: reusable instructions you can give an agent. Keep them for yourself, share them with your team through git, or pick from the public catalog.",
+      "Choose which skills a session uses from its menu, or when you start it.",
+      "Updates now wait until nothing is running before restarting."
+    ]
+  }
+]

@@ -143,7 +143,7 @@ test('the wizard resumes at every step and never comes back once finished', asyn
   })
   expect(created.ok(), `create folder failed: ${await created.text()}`).toBeTruthy()
   await reloadOnStep(page, 4)
-  await expect(page.getByTestId('setup-final-chat')).toBeVisible()
+  await expect(page.getByTestId('setup-final-tour')).toBeVisible()
   await expect(page.getByTestId('setup-progress-step-3')).toContainText('✓')
   await page.getByTestId('setup-back').click()
   await expectOnStep(page, 3)

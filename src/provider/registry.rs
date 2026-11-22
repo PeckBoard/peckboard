@@ -178,6 +178,9 @@ pub struct ProviderInfo {
 struct RegisteredProvider {
     info: ProviderInfo,
     provider: Arc<dyn AgentProvider>,
+    /// Left out of every catalog listing (see
+    /// [`ProviderRegistry::register_catalog_hidden`]).
+    catalog_hidden: bool,
 }
 
 /// Registry of all available AI providers and their models.
@@ -212,15 +215,50 @@ impl ProviderRegistry {
     /// Register a provider implementation along with its metadata.
     /// Overwrites if the same ID already exists.
     pub async fn register(&self, provider: Arc<dyn AgentProvider>, info: ProviderInfo) {
+        self.register_entry(provider, info, false).await;
+    }
+
+    /// Register a provider that dispatches but is left out of every catalog
+    /// listing (`/api/models`, `list_models`, plugin listings, auth status):
+    /// the Mock plugin's demo-only mode, which exists so [`DEMO_MODEL_ID`]
+    /// runs on installs where Mock is off. Fan-out paths (`list_providers`:
+    /// interrupt, cancel, `running_provider`) still see it. A later
+    /// [`register`](Self::register) of the same id makes it listed again.
+    pub async fn register_catalog_hidden(
+        &self,
+        provider: Arc<dyn AgentProvider>,
+        info: ProviderInfo,
+    ) {
+        self.register_entry(provider, info, true).await;
+    }
+
+    async fn register_entry(
+        &self,
+        provider: Arc<dyn AgentProvider>,
+        info: ProviderInfo,
+        catalog_hidden: bool,
+    ) {
         let mut providers = self.providers.lock().await;
         tracing::info!(
-            "Registered provider '{}' ({}) with {} models",
+            "Registered provider '{}' ({}) with {} models{}",
             info.id,
             info.display_name,
-            info.models.len()
+            info.models.len(),
+            if catalog_hidden {
+                " (catalog-hidden)"
+            } else {
+                ""
+            }
         );
         self.last_good.lock().unwrap().remove(&info.id);
-        providers.insert(info.id.clone(), RegisteredProvider { info, provider });
+        providers.insert(
+            info.id.clone(),
+            RegisteredProvider {
+                info,
+                provider,
+                catalog_hidden,
+            },
+        );
     }
 
     /// Remove a provider by ID (e.g. a plugin-registered provider whose
@@ -368,7 +406,7 @@ impl ProviderRegistry {
             let providers = self.providers.lock().await;
             providers
                 .values()
-                .filter(|r| !exclude.contains(&r.info.id))
+                .filter(|r| !r.catalog_hidden && !exclude.contains(&r.info.id))
                 .map(|r| (r.info.clone(), r.provider.clone()))
                 .collect()
         };
@@ -399,7 +437,7 @@ impl ProviderRegistry {
             let providers = self.providers.lock().await;
             providers
                 .values()
-                .filter(|r| !exclude.contains(&r.info.id))
+                .filter(|r| !r.catalog_hidden && !exclude.contains(&r.info.id))
                 .map(|r| (r.info.clone(), r.provider.clone()))
                 .collect()
         };
@@ -432,6 +470,7 @@ impl ProviderRegistry {
             let providers = self.providers.lock().await;
             providers
                 .values()
+                .filter(|r| !r.catalog_hidden)
                 .map(|r| (r.info.id.clone(), r.provider.clone()))
                 .collect()
         };
@@ -738,6 +777,18 @@ pub const REVIEW_MODELS_FALLBACK: &[&str] = &[
     "gpt-5.6-terra",
     "grok-4.6",
 ];
+/// The hidden model the demo project's workers run on (`POST
+/// /api/demo-project`): the ONE mock scenario every install accepts, even
+/// with the Mock plugin off — boot then registers the mock crate in
+/// demo-only mode (`crate::plugin::crates::register_all`), which refuses
+/// every other scenario and any session outside a demo project. Never
+/// listed in a catalog or model picker.
+pub const DEMO_MODEL_ID: &str = "mock:demo";
+
+/// Whether `model` is exactly [`DEMO_MODEL_ID`].
+pub fn is_demo_model(model: &str) -> bool {
+    model.trim() == DEMO_MODEL_ID
+}
 /// Providers whose catalogs list only account-scoped `model@acct` ids.
 const ACCOUNT_PROVIDERS: &[&str] = &["claude", "grok", "kimi", "codex"];
 

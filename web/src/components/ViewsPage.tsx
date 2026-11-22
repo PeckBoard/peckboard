@@ -18,6 +18,7 @@ import {
   type WidgetKind,
 } from '../store/views'
 import EmptyState from './EmptyState'
+import FirstVisitHint from './FirstVisitHint'
 import { authedFetch } from '../store/auth'
 import {
   popOutTerminal,
@@ -136,6 +137,10 @@ function ViewsList({ onOpen }: { onOpen: (id: string) => void }) {
         onAction={() => setShowNew(true)}
         actionTestId="views-new"
       />
+      <FirstVisitHint hintKey="views" docs="/features.html">
+        Views are dashboards you arrange yourself: live sessions, terminals and project boards, side
+        by side.
+      </FirstVisitHint>
       {error && (
         <div className="fetch-error-banner" role="alert">
           <span>{error}</span>

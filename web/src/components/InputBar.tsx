@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState, useEffect } from 'react'
-import type { KeyboardEvent, ChangeEvent, ClipboardEvent } from 'react'
+import { useCallback, useImperativeHandle, useRef, useState, useEffect } from 'react'
+import type { KeyboardEvent, ChangeEvent, ClipboardEvent, Ref } from 'react'
 import { authedFetch } from '../store/auth'
 import { useSessionsStore } from '../store/sessions'
 import { useMentions, filterMentions, type MentionItem } from '../hooks/useMentions'
@@ -19,6 +19,14 @@ interface InputBarProps {
   /** A send raced the session being sealed (HTTP 409 `session_sealed`):
    *  the parent swaps the composer for the read-only banner. */
   onSealed?: () => void
+  /** Lets the parent fill the composer (starter prompts) without sending. */
+  composerRef?: Ref<ComposerHandle>
+}
+
+/** Imperative handle on the composer, for `InputBar`'s `composerRef`. */
+export interface ComposerHandle {
+  /** Replace the draft with `text`, focus, and put the caret at the end. */
+  fill: (text: string) => void
 }
 
 interface PendingAttachment {
@@ -45,6 +53,7 @@ export default function InputBar({
   handoverActive = false,
   attachDisabledReason = null,
   onSealed,
+  composerRef,
 }: InputBarProps) {
   const getDraft = useSessionsStore((s) => s.getDraft)
   const setDraft = useSessionsStore((s) => s.setDraft)
@@ -91,6 +100,23 @@ export default function InputBar({
   const [handoverCancelError, setHandoverCancelError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  useImperativeHandle(
+    composerRef,
+    () => ({
+      fill: (value: string) => {
+        setSendError(null)
+        setMentionQuery(null)
+        setText(value)
+        setDraft(sessionId, value)
+        const ta = textareaRef.current
+        if (!ta) return
+        ta.focus()
+        // After React commits the new value, so the caret lands past it.
+        requestAnimationFrame(() => ta.setSelectionRange(value.length, value.length))
+      },
+    }),
+    [sessionId, setDraft],
+  )
   // Files being dragged over the window (drop-to-attach). Depth-counted
   // because dragenter/dragleave fire per element as the drag crosses
   // children; the overlay must only clear when the drag leaves the window.

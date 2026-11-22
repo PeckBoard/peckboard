@@ -1,8 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { authedFetch } from '../store/auth'
 import { withPluginTheme } from '../util/appearance'
 import usePluginDataForward from '../hooks/usePluginDataForward'
 import { resolvePluginUiPath } from '../utils/pluginUiPath'
+import type { PluginStability, WasmPlugin } from '../utils/pluginApproval'
+import ExperimentalBadge from './ExperimentalBadge'
 
 interface Props {
   /** Human label for the page (shown in the header). */
@@ -196,6 +198,22 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
     return () => window.removeEventListener('message', onMessage)
   }, [plugin])
 
+  // The plugin's manifest-declared stability, for the header badge. Looked up
+  // here (one catalog read per page) so every caller gets it for free.
+  const [stability, setStability] = useState<PluginStability | undefined>()
+  useEffect(() => {
+    let cancelled = false
+    authedFetch('/api/plugins')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { wasm_plugins?: Pick<WasmPlugin, 'name' | 'stability'>[] } | null) => {
+        if (cancelled) return
+        setStability(data?.wasm_plugins?.find((p) => p.name === plugin)?.stability)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [plugin])
   return (
     <div className="plugin-fullpage" data-testid="plugin-fullpage" data-plugin={plugin}>
       <div className="plugin-fullpage-header">
@@ -203,6 +221,7 @@ export default function PluginFullPage({ title, plugin, path, scope, search, onB
           ← Back
         </button>
         <h2 className="plugin-fullpage-title">{title}</h2>
+        <ExperimentalBadge stability={stability} testId="plugin-fullpage-experimental" />
       </div>
       <iframe
         // Remount per src instead of re-pointing the SAME iframe: changing a

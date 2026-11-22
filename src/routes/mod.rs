@@ -11,6 +11,7 @@ pub mod claude_accounts;
 pub mod codex_accounts;
 pub mod dashboard_cards;
 pub mod dashboard_ops;
+pub mod demo_project;
 pub mod devices;
 pub mod doc_reviews;
 pub mod env_vars;
@@ -26,6 +27,7 @@ pub mod mockup_frame;
 pub mod notifications;
 pub mod oauth_server;
 pub mod ollama;
+pub mod pairing;
 pub mod plans;
 pub mod plugin_api;
 pub mod plugin_ui;
@@ -105,6 +107,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(provider_setup::router(state.clone()))
         .merge(folders::router(state.clone()))
         .merge(sessions::router(state.clone()))
+        .merge(demo_project::router(state.clone()))
         .merge(projects::router(state.clone()))
         .merge(doc_reviews::router(state.clone()))
         .merge(plans::router(state.clone()))
@@ -132,6 +135,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(voice_lexicon::router(state.clone()))
         .merge(agent_vars::router(state.clone()))
         .merge(ssh_keys::router(state.clone()))
+        .merge(pairing::router(state.clone()))
         .merge(env_vars::router(state.clone()))
         .merge(remote_access::router(state.clone()))
         .merge(devices::router(state.clone()))

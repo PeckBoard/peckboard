@@ -6,6 +6,8 @@ import EditProjectModal from './EditProjectModal'
 import List from './List'
 import ListViewHeader from './ListViewHeader'
 import EmptyState from './EmptyState'
+import DemoProjectCard from './DemoProjectCard'
+import FirstVisitHint from './FirstVisitHint'
 import type { MenuItem } from './Dropdown'
 import type { Project } from '../types/api'
 
@@ -91,6 +93,9 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
           ) : undefined
         }
       />
+      <FirstVisitHint hintKey="projects" term="project">
+        Add tasks as cards on a project board, and AI helpers work through them for you.
+      </FirstVisitHint>
       {projectsError && projects.length > 0 && (
         <div className="fetch-error-banner" role="alert" data-testid="projects-error">
           <span>{projectsError}</span>
@@ -154,7 +159,9 @@ export default function ProjectList({ onNewProject }: ProjectListProps) {
                 term="project"
                 actionLabel={onNewProject ? 'Create your first project' : undefined}
                 onAction={onNewProject}
-              />
+              >
+                <DemoProjectCard />
+              </EmptyState>
             )
           }
         />

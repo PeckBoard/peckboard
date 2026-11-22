@@ -1,0 +1,101 @@
+/* First-run nudges: starter prompts in an empty chat and the one-time
+   page hints (`FirstVisitHint`). */
+
+.starter-prompts {
+  width: 100%;
+  max-width: 640px;
+  padding: 16px;
+  text-align: center;
+}
+.starter-prompts-intro {
+  margin: 0 0 12px;
+  color: var(--text3);
+  font-size: var(--text-sm);
+}
+.starter-prompts-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.starter-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.starter-prompt:hover,
+.starter-prompt:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+.starter-prompt-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.starter-prompt-desc {
+  color: var(--text3);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.first-visit-hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.first-visit-hint-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.first-visit-hint-dismiss {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.first-visit-hint-dismiss:hover {
+  background: var(--surface-hover);
+}
+
+@media (max-width: 768px) {
+  .starter-prompts {
+    padding: 12px 8px;
+  }
+  .starter-prompts-grid {
+    grid-template-columns: 1fr;
+  }
+  .first-visit-hint {
+    margin: 8px;
+    flex-wrap: wrap;
+  }
+}

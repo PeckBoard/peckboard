@@ -246,7 +246,13 @@ and cut a release — don't stop at a working tree and ask.** The user
 expects every completed change to go out. The release flow:
 
 1. Bump `version` in `Cargo.toml` (patch bump, e.g. `0.1.26` →
-   `0.1.27`) and let `cargo build` refresh `Cargo.lock`.
+   `0.1.27`) and let `cargo build` refresh `Cargo.lock`. **If the
+   release has user-visible changes, add an entry for the new version
+   at the top of `web/src/whatsNew.json`** (`{version, date,
+highlights}`): a few short highlights in plain words for someone who
+   isn't a developer — what they can now do, not how it was built. The
+   in-app "What's new" card shows it to users upgrading from an older
+   version (`web/src/components/WhatsNew.tsx`).
 2. Commit only the files you changed plus `Cargo.toml` / `Cargo.lock`
    (never `git add -A` — the tree holds many untracked scratch files),
    with a subject of the form `0.1.27: <short summary>` and a body
@@ -396,6 +402,14 @@ expected to use:
   fields the user filled in correctly. Pair it with a
   `.form-actions-reason` span stating why the primary action is disabled —
   a disabled button with no stated reason reads as broken.
+- **`ExperimentalBadge`** (`web/src/components/ExperimentalBadge.tsx`) —
+  the "Experimental" pill for a plugin whose registry entry or manifest has
+  `stability: "experimental"`. Show it wherever the plugin is listed or
+  headed; experimental plugins are never suggested in onboarding.
+- **`FirstVisitHint`** (`web/src/components/FirstVisitHint.tsx`) — the
+  one-time, dismissible hint at the top of a page a user opens for the first
+  time (Projects, Views, Skills). Dismissal is per user in localStorage. Use
+  it instead of a spotlight tour.
 - **`SharedFileCard` + `FilePreviewModal`**
   (`web/src/components/SharedFileCard.tsx`) — a file an agent shared
   (`file-shared` event): icon, name, size, caption, inline thumbnail for

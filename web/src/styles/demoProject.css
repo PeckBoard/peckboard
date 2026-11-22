@@ -1,0 +1,59 @@
+/* ═══════════════════════════════════════════════════
+   Demo project card (components/DemoProjectCard.tsx)
+   ═══════════════════════════════════════════════════ */
+
+.demo-project-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(420px, 100%);
+  margin: 16px auto 0;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+/* On the Welcome page it lines up with the sections, not centred. */
+.welcome-demo .demo-project-card {
+  width: 100%;
+  max-width: 928px;
+  margin: 0;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 16px;
+}
+
+.welcome-demo .demo-project-card-body {
+  flex: 1 1 260px;
+}
+
+.welcome-demo .demo-project-card-title {
+  flex-basis: 100%;
+}
+.demo-project-card-title {
+  margin: 0;
+  font-size: var(--text-md, 15px);
+}
+
+.demo-project-card-body {
+  margin: 0;
+  color: var(--text2);
+  line-height: 1.4;
+}
+
+.demo-project-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.demo-project-card-error {
+  margin: 0;
+  color: var(--danger, #e5484d);
+}

@@ -3,6 +3,7 @@ import HookList from './HookList'
 import PermissionList from './PermissionList'
 import { uuid } from '../lib/uuid'
 import Modal from './Modal'
+import ExperimentalBadge from './ExperimentalBadge'
 import { MenuButton } from './Dropdown'
 import {
   addRepository,
@@ -454,6 +455,7 @@ function RegistryDetailModal({
           <h2>{p.name}</h2>
           <div className="registry-detail-badges">
             <span className="registry-kind-badge">Plugin</span>
+            <ExperimentalBadge stability={p.stability} testId="registry-detail-experimental" />
             {p.upgrade_available ? (
               <span className="plugin-badge plugin-badge--pending">Update available</span>
             ) : p.installed ? (
@@ -908,6 +910,10 @@ function BrowseTab({
                   <span className="wasm-plugin-name">
                     {p.name} <span className="wasm-plugin-version">v{p.version}</span>
                   </span>
+                  <ExperimentalBadge
+                    stability={p.stability}
+                    testId={`registry-experimental-badge-${p.id}`}
+                  />
                   {p.upgrade_available && (
                     <span
                       className="plugin-badge plugin-badge--pending"

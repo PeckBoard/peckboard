@@ -66,6 +66,30 @@ pub async fn register_crate_provider(
     db: &Db,
     hooks: CrateHooks,
 ) {
+    register(provider_registry, plugins, db, hooks, false).await;
+}
+
+/// Register the Mock crate in demo-only mode, for installs where the Mock
+/// plugin is off: it lists no models, is left out of every catalog
+/// ([`ProviderRegistry::register_catalog_hidden`]), and runs only
+/// [`DEMO_MODEL_ID`](crate::provider::registry::DEMO_MODEL_ID) turns in a
+/// demo project. Installing Mock replaces it with the full provider.
+pub async fn register_demo_only_provider(
+    provider_registry: &ProviderRegistry,
+    plugins: Arc<PluginManager>,
+    db: &Db,
+    hooks: CrateHooks,
+) {
+    register(provider_registry, plugins, db, hooks, true).await;
+}
+
+async fn register(
+    provider_registry: &ProviderRegistry,
+    plugins: Arc<PluginManager>,
+    db: &Db,
+    hooks: CrateHooks,
+    demo_only: bool,
+) {
     let body = (hooks.registration)();
     let reg: ProviderRegistration = match serde_json::from_value(body) {
         Ok(r) => r,
@@ -78,15 +102,31 @@ pub async fn register_crate_provider(
         tracing::error!(provider = %reg.id, "crate provider registration invalid: {e}");
         return;
     }
-    let adapter = Arc::new(CrateAgentProvider::new(&reg, plugins, db.clone(), hooks));
+    let adapter = Arc::new(CrateAgentProvider::new(
+        &reg,
+        plugins,
+        db.clone(),
+        hooks,
+        demo_only,
+    ));
     let info = ProviderInfo {
         id: reg.id.clone(),
         display_name: reg.display_name.clone(),
-        models: reg.models.clone(),
+        models: if demo_only {
+            Vec::new()
+        } else {
+            reg.models.clone()
+        },
         effort_levels: reg.effort_levels.clone(),
         capabilities: effective_capabilities(&reg),
     };
-    provider_registry.register(adapter, info).await;
+    if demo_only {
+        provider_registry
+            .register_catalog_hidden(adapter, info)
+            .await;
+    } else {
+        provider_registry.register(adapter, info).await;
+    }
 }
 
 struct CrateAgentProvider {
@@ -98,6 +138,10 @@ struct CrateAgentProvider {
     hooks: CrateHooks,
     pricing: HashMap<String, (f64, f64)>,
     mid_stream: bool,
+    /// Demo-only mode (see [`register_demo_only_provider`]): every turn
+    /// but [`DEMO_MODEL_ID`](crate::provider::registry::DEMO_MODEL_ID) in a
+    /// demo project is refused.
+    demo_only: bool,
 }
 
 impl CrateAgentProvider {
@@ -106,6 +150,7 @@ impl CrateAgentProvider {
         plugins: Arc<PluginManager>,
         db: Db,
         hooks: CrateHooks,
+        demo_only: bool,
     ) -> Self {
         Self {
             provider_id: registration.id.clone(),
@@ -120,6 +165,7 @@ impl CrateAgentProvider {
                 .iter()
                 .map(|(m, p)| (m.clone(), (p.input_usd_per_mtok, p.output_usd_per_mtok)))
                 .collect(),
+            demo_only,
         }
     }
 
@@ -181,6 +227,26 @@ impl AgentProvider for CrateAgentProvider {
             .get_session(&ctx.session_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("session not found: {}", ctx.session_id))?;
+        if self.demo_only {
+            // Demo-only mode (Mock plugin off): the demo helper in a demo
+            // project, nothing else — no backdoor to the other scenarios.
+            let scenario = ctx.config.model.strip_prefix("mock:");
+            let in_demo = match session.project_id.as_deref() {
+                Some(pid) => ctx
+                    .db
+                    .get_project(pid)
+                    .await?
+                    .is_some_and(|p| crate::routes::demo_project::is_demo_project(&p)),
+                None => false,
+            };
+            if scenario != Some("demo") || !in_demo {
+                anyhow::bail!(
+                    "the Mock plugin is off: only the demo project's helper ({}) can run \
+                     — install Mock from Settings → Plugins to use other mock models",
+                    crate::provider::registry::DEMO_MODEL_ID
+                );
+            }
+        }
         let snapshot = SessionSnapshot {
             folder_path: ctx.config.working_dir.clone(),
             folder_id: session.folder_id.clone(),

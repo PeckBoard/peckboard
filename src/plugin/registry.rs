@@ -9,6 +9,7 @@
 //! goes through the per-plugin hook-approval gate, so the checksum only
 //! guards integrity-against-the-index; capability is guarded by approval.
 
+pub use super::hooks::PluginStability;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -106,6 +107,10 @@ pub struct RegistryEntry {
     /// Curated category (e.g. `dev-tools`, `infrastructure`); optional.
     #[serde(default)]
     pub category: Option<String>,
+    /// `experimental` marks a plugin the UI badges as likely to change or
+    /// break. Absent (older indexes) or unrecognised ⇒ `stable`.
+    #[serde(default)]
+    pub stability: PluginStability,
 }
 
 /// One key/value row in an MCP server template (env var or header). Secret
@@ -466,5 +471,42 @@ mod tests {
         assert_eq!(index.crate_plugins.len(), 1);
         assert_eq!(index.crate_plugins[0].id, "claude");
         assert!(index.plugins.is_empty());
+    }
+
+    #[test]
+    fn stability_parses_and_defaults_to_stable() {
+        let entry = |extra: &str| {
+            format!(
+                r#"{{"schema_version":1,"plugins":[{{
+                    "id":"x","name":"X","description":"d","author":"a",
+                    "version":"1.0.0","hooks":[],"url":"https://e/x.wasm","sha256":"00"{extra}
+                }}]}}"#
+            )
+        };
+        let parse = |extra: &str| {
+            serde_json::from_str::<RegistryIndex>(&entry(extra))
+                .unwrap()
+                .plugins[0]
+                .stability
+        };
+        assert_eq!(parse(""), PluginStability::Stable);
+        assert_eq!(
+            parse(r#","stability":"experimental""#),
+            PluginStability::Experimental
+        );
+        assert_eq!(parse(r#","stability":"stable""#), PluginStability::Stable);
+        // An unknown future level must not break parsing of the whole index.
+        assert_eq!(parse(r#","stability":"beta""#), PluginStability::Stable);
+
+        // The plugin manifest carries the same optional field.
+        let manifest = |extra: &str| {
+            serde_json::from_str::<super::super::hooks::PluginManifest>(&format!(
+                r#"{{"description":"d","version":"1","repository":"r","hooks":[]{extra}}}"#
+            ))
+            .unwrap()
+            .stability
+        };
+        assert_eq!(manifest(""), PluginStability::Stable);
+        assert!(manifest(r#","stability":"experimental""#).is_experimental());
     }
 }

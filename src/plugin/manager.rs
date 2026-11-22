@@ -308,6 +308,7 @@ impl LoadedPlugin {
             settings_schema: SettingsSchema::new(self.manifest.settings.clone()),
             status: self.status_label(),
             error: self.init_error.clone(),
+            stability: self.manifest.stability,
             stats: self.stats.snapshot(self.wasm_bytes),
         }
     }
@@ -368,6 +369,8 @@ pub struct WasmPluginInfo {
     pub status: &'static str,
     /// Present only when `status` is `init_failed`.
     pub error: Option<String>,
+    /// Manifest-declared maturity (`stable` unless the plugin says otherwise).
+    pub stability: crate::plugin::hooks::PluginStability,
     /// Runtime usage counters + wasm size, for the plugins page.
     pub stats: WasmPluginStats,
 }
@@ -3777,6 +3780,7 @@ mod tests {
             call_timeout_secs: None,
             concurrency: None,
             settings: Vec::new(),
+            stability: Default::default(),
         }
     }
 

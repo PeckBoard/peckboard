@@ -1,0 +1,51 @@
+/* ═══════════════════════════════════════════════════
+   Phone pairing card (components/PhonePairingCard.tsx)
+   The QR itself reuses `.mfa-qr` (auth.css).
+   ═══════════════════════════════════════════════════ */
+
+.phone-pairing-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.phone-pairing-title {
+  margin: 0;
+}
+
+.phone-pairing-qr-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.phone-pairing-qr {
+  margin: 0;
+  flex-shrink: 0;
+  width: 168px;
+}
+
+.phone-pairing-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.phone-pairing-qr-text {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.phone-pairing-url {
+  display: inline-block;
+  word-break: break-all;
+}
+
+.phone-pairing-app {
+  margin: 0;
+}
+
+.phone-pairing-app .btn-link {
+  display: inline;
+}

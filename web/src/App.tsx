@@ -47,6 +47,7 @@ const AssistantPage = lazy(() => import('./components/assistant/AssistantPage'))
 import RepeatingTasksView from './components/RepeatingTasksView'
 import EmptyState from './components/EmptyState'
 import GettingStarted from './components/GettingStarted'
+import WelcomePage from './components/WelcomePage'
 import { useGettingStartedStore } from './store/gettingStarted'
 import AgentsView from './components/AgentsView'
 import UsageDashboard from './components/UsageDashboard'
@@ -66,6 +67,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import AskpassDialog from './components/AskpassDialog'
 import EnvUnlockDialog from './components/EnvUnlockDialog'
 import SoundsListener from './components/SoundsListener'
+import WhatsNew from './components/WhatsNew'
 import VoiceDock, { VoiceListenButton } from './components/VoiceDock'
 import { useVoiceStore } from './store/voice'
 import ConnectionBanner from './components/ConnectionBanner'
@@ -90,6 +92,7 @@ type View =
   | 'assistant'
   | 'views'
   | 'terminals'
+  | 'welcome'
 
 /** A UI page a loaded plugin contributes, surfaced as a user-menu link.
  * Generic: the host renders whatever panels a plugin declares (from the
@@ -172,6 +175,8 @@ function parseRoute(): {
         activeId: id,
         sub: subFor(),
       }
+    case 'welcome':
+      return { view: 'welcome', activeId: null, sub: 'chat' }
     case 'usage':
       return { view: 'usage', activeId: null, sub: 'chat' }
     case 'repeating-tasks':
@@ -1995,8 +2000,7 @@ function App() {
                     onClick={() => {
                       setUserMenuOpen(false)
                       useGettingStartedStore.getState().show()
-                      setActiveSession(null)
-                      navigate('sessions', null)
+                      navigate('welcome')
                     }}
                   >
                     Getting started
@@ -2132,6 +2136,7 @@ function App() {
                         setActiveProject(null)
                         navigate('projects', null)
                       }}
+                      onOpenWelcome={() => navigate('welcome')}
                     />
                   )}
                   <List
@@ -2305,6 +2310,37 @@ function App() {
               />
             )}
             {view === 'usage' && <UsageDashboard />}
+            {view === 'welcome' && (
+              <WelcomePage
+                onAction={(action) => {
+                  if (action === 'connectAi' || action === 'skills' || action === 'plugins') {
+                    const sub =
+                      action === 'connectAi'
+                        ? 'providers'
+                        : action === 'skills'
+                          ? 'skills'
+                          : 'registry'
+                    setSettingsSub(sub)
+                    navigate('settings', sub)
+                  } else if (action === 'newSession' || action === 'mockup') {
+                    setShowNewSession(true)
+                  } else if (action === 'newProject') {
+                    setShowNewProject(true)
+                  } else if (action === 'openProjects') {
+                    setActiveProject(null)
+                    navigate('projects', null)
+                  } else if (action === 'views') {
+                    setActiveViewId(null)
+                    navigate('views', null)
+                  } else if (action === 'repeatingTasks') {
+                    setActiveRepeatingTaskId(null)
+                    navigate('repeatingTasks', null)
+                  } else if (action === 'assistant') {
+                    navigate('assistant')
+                  }
+                }}
+              />
+            )}
             {view === 'pluginPage' &&
               (() => {
                 const [pl, itemId] = (activePluginPageId ?? '').split(':')
@@ -2499,6 +2535,8 @@ function App() {
       {authenticated && <MockupPane />}
 
       {authenticated && <SoundsListener />}
+      {/* For admins, only once setup is known complete: never over the wizard. */}
+      {authenticated && (user?.role !== 'admin' || setupCompleted === true) && <WhatsNew />}
       {/* On the Assistant page its transcript drawer hosts the panel; anywhere
           else this is the live conversation's compact view. */}
       {authenticated && view !== 'assistant' && (
@@ -2544,10 +2582,21 @@ function App() {
       {setupCompleted === false && user?.role === 'admin' && (
         <SetupWizard
           progress={setupProgress}
-          onDone={(next) => {
+          onDone={(next, sessionId) => {
             setSetupCompleted(true)
-            // "Show me around" lands on Sessions, where the getting-started
-            // checklist lives; the other two open their create dialogs there.
+            if (next === 'try' && sessionId) {
+              // "Try it now": the chat already exists with its first message.
+              setActiveSession(sessionId)
+              navigate('sessions', sessionId, 'chat')
+              void useTabsStore.getState().openTab('session', sessionId)
+              return
+            }
+            // "Show me around" opens the Welcome page; the other two open
+            // their create dialogs on Sessions.
+            if (next === 'tour') {
+              navigate('welcome')
+              return
+            }
             navigate('sessions', null)
             if (next === 'chat') setShowNewSession(true)
             else if (next === 'project') setShowNewProject(true)

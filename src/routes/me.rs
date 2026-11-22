@@ -1,14 +1,16 @@
 //! `/api/me/*` — per-user data not tied to a specific resource.
 //!
-//! Currently only the cross-device tab list. The frontend tab strip
+//! The cross-device tab list: the frontend tab strip
 //! fetches `GET /api/me/tabs` on mount and on window focus, POSTs to
 //! upsert when a tab is opened (this both creates a new tab and bumps
 //! `last_active` so MRU ordering + read state stays in sync across
-//! devices), and DELETEs to close.
+//! devices), and DELETEs to close. And the user's use cases (`GET`/`PUT
+//! /api/me/use-cases`), picked in the setup wizard to order onboarding
+//! content.
 
 use axum::body::Body;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, State},
     http::{Request, StatusCode},
     middleware,
@@ -70,6 +72,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/me/tabs", get(list_tabs).post(upsert_tab))
         .route("/api/me/tabs/{item_type}/{item_id}", delete(delete_tab))
+        .route("/api/me/use-cases", get(get_use_cases).put(put_use_cases))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -483,5 +486,168 @@ async fn maybe_delete_temp_session(state: &AppState, session_id: &str) {
         Err(e) => {
             tracing::warn!(session_id = %session_id, "Temp-session tab count failed: {e}");
         }
+    }
+}
+
+// ── Use cases ─────────────────────────────────────────────────────────
+
+/// Plugin-store collection holding each user's answer to the setup wizard's
+/// "What will you use PeckBoard for?", keyed by user id (same KV the app
+/// settings use — no table of its own).
+const USE_CASES_COLLECTION: &str = "user_use_cases";
+
+/// The use cases a user can pick. The web app's `store/useCases.ts` keeps the
+/// labels; anything else in a PUT is a 400.
+const USE_CASES: &[&str] = &["coding", "writing", "ops", "printing", "other"];
+
+#[derive(Deserialize)]
+struct UseCasesBody {
+    use_cases: Vec<String>,
+}
+
+/// GET /api/me/use-cases → `{"use_cases": [...]}` (empty when never answered).
+async fn get_use_cases(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(
+            crate::routes::settings::SETTINGS_NS,
+            USE_CASES_COLLECTION,
+            &user.user_id,
+        )
+    })
+    .await;
+    let use_cases: Vec<String> = match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str(&json).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    Json(serde_json::json!({ "use_cases": use_cases }))
+}
+
+/// PUT /api/me/use-cases `{"use_cases": [...]}` → 204. Replaces the caller's
+/// own answer (deduplicated, in the fixed [`USE_CASES`] order).
+async fn put_use_cases(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<UseCasesBody>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(bad) = body
+        .use_cases
+        .iter()
+        .find(|u| !USE_CASES.contains(&u.as_str()))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("unknown use case '{bad}' (expected one of {})", USE_CASES.join(", "))
+            })),
+        ));
+    }
+    let picked: Vec<&str> = USE_CASES
+        .iter()
+        .copied()
+        .filter(|u| body.use_cases.iter().any(|b| b == u))
+        .collect();
+    let value = serde_json::to_string(&picked).unwrap_or_else(|_| "[]".into());
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(
+            crate::routes::settings::SETTINGS_NS,
+            USE_CASES_COLLECTION,
+            &user.user_id,
+            &value,
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::middleware::tests::{
+        seed_authenticated_user, seed_authenticated_user_with_suffix, test_state,
+    };
+    use axum::http::header;
+    use tower::ServiceExt;
+
+    async fn call(
+        state: &Arc<AppState>,
+        token: &str,
+        method: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let builder = Request::builder()
+            .method(method)
+            .uri("/api/me/use-cases")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        let req = match body {
+            Some(v) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(v.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        let app = Router::new()
+            .merge(router(state.clone()))
+            .with_state(state.clone());
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// Each user's answer is their own, round-trips in a fixed order, and
+    /// an unknown value is refused.
+    #[tokio::test]
+    async fn use_cases_are_per_user_and_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let alice = seed_authenticated_user(&state, "admin").await;
+        let bob = seed_authenticated_user_with_suffix(&state, "user", "bob").await;
+
+        let (status, body) = call(&state, &alice, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["use_cases"], serde_json::json!([]));
+
+        let (status, _) = call(
+            &state,
+            &alice,
+            "PUT",
+            Some(serde_json::json!({ "use_cases": ["printing", "coding", "coding"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, body) = call(&state, &alice, "GET", None).await;
+        assert_eq!(body["use_cases"], serde_json::json!(["coding", "printing"]));
+
+        let (_, body) = call(&state, &bob, "GET", None).await;
+        assert_eq!(body["use_cases"], serde_json::json!([]), "not shared");
+
+        let (status, _) = call(
+            &state,
+            &bob,
+            "PUT",
+            Some(serde_json::json!({ "use_cases": ["gardening"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

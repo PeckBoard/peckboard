@@ -167,16 +167,38 @@ pub async fn activate(
 /// Live-deactivate one crate plugin after an uninstall: providers leave the
 /// registry (in-flight turns get a stop request); session-control's wasm is
 /// denied, which shuts its hooks down but keeps the file for reinstall.
+/// Mock drops back to demo-only mode so the demo project keeps running.
 pub async fn deactivate(
     id: &str,
     provider_registry: &Arc<ProviderRegistry>,
+    db: &Db,
     plugins: &Arc<PluginManager>,
 ) {
     if is_crate_provider_id(id) {
         provider_registry.unregister(id).await;
         plugins.provider_runtime().request_stop_for_plugin(id);
+        if id == MOCK_ID {
+            register_mock_demo_only(provider_registry, plugins, db).await;
+        }
     } else {
         let _ = plugins.decide(id, false).await;
+    }
+}
+
+/// The Mock crate's plugin id.
+const MOCK_ID: &str = "mock";
+
+/// Mock is off: register it in demo-only mode, so the demo project's
+/// hidden [`DEMO_MODEL_ID`](crate::provider::registry::DEMO_MODEL_ID) runs on
+/// every install while the other mock models stay unavailable and unlisted.
+async fn register_mock_demo_only(
+    provider_registry: &Arc<ProviderRegistry>,
+    plugins: &Arc<PluginManager>,
+    db: &Db,
+) {
+    if let Some(hooks) = hooks_for(MOCK_ID) {
+        crate_provider::register_demo_only_provider(provider_registry, plugins.clone(), db, hooks)
+            .await;
     }
 }
 /// session-control's own release version (the crate versions independently
@@ -250,6 +272,9 @@ pub async fn register_all(
             )
             .await;
         if !installed.contains(spec.id) {
+            if spec.id == MOCK_ID {
+                register_mock_demo_only(&provider_registry, &plugins, db).await;
+            }
             continue;
         }
         if let Some(hooks) = spec.hooks {

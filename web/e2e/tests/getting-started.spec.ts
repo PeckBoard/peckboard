@@ -6,9 +6,9 @@ import path from 'node:path'
 /**
  * Onboarding on a fresh install:
  *
- * - The Getting Started checklist on Sessions ticks its steps from real data
+ * - The Getting Started summary on Sessions ticks its steps from real data
  *   (here: a folder created through the API), hides on dismiss, stays hidden
- *   across reloads, and comes back from the user menu.
+ *   across reloads, and comes back from the user menu (which opens Welcome).
  * - Top-level pages explain themselves when empty (Projects, Folders).
  * - The remote-computers page is called Machines, so "agents" only ever
  *   means the AI.
@@ -80,12 +80,15 @@ test('getting started ticks a folder from real data, dismisses, and comes back',
   })
   await expect(page.getByTestId('getting-started')).toHaveCount(0)
 
-  // The user menu brings it back, from any page.
+  // The user menu opens the Welcome page from any page, and brings the
+  // Sessions summary back.
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await expect(page).toHaveURL(/\/projects/)
   await page.getByRole('button', { name: 'User menu' }).click()
   await page.getByTestId('user-menu-getting-started').click()
-  await expect(page).not.toHaveURL(/\/projects/)
+  await expect(page).toHaveURL(/\/welcome$/)
+  await expect(page.getByTestId('welcome-page')).toBeVisible()
+  await page.getByRole('button', { name: 'Sessions', exact: true }).click()
   await expect(page.getByTestId('getting-started')).toBeVisible()
 
   // The shortcuts dialog is reachable without knowing the `?` key.

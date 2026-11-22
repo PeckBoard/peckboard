@@ -200,6 +200,30 @@ pub struct PluginManifest {
     /// a broken form.
     #[serde(default)]
     pub settings: Vec<SettingField>,
+    /// Publisher-declared maturity; `experimental` shows a badge in the UI.
+    #[serde(default)]
+    pub stability: PluginStability,
+}
+
+/// How settled a plugin is, declared by its publisher in the manifest and/or
+/// the registry index (`"stability": "experimental"`). The UI shows an
+/// "Experimental" badge for anything not `stable`. Absent ⇒ `stable`; an
+/// unrecognised value also reads as `stable` so a newer index or manifest
+/// can add levels without failing to parse on older cores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginStability {
+    Experimental,
+    // `serde(other)` must sit on the last variant.
+    #[default]
+    #[serde(other)]
+    Stable,
+}
+
+impl PluginStability {
+    pub fn is_experimental(self) -> bool {
+        self == PluginStability::Experimental
+    }
 }
 
 /// One MCP tool a plugin contributes, declared in the manifest's `mcp_tools`.

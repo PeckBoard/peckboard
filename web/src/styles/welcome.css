@@ -1,0 +1,248 @@
+/* Welcome page, the compact Getting Started summary on Sessions, and the
+   setup wizard's use-case chips / "Try it now" reason. */
+
+/* ── Compact Getting Started summary ─────────────────────────────── */
+.getting-started-open-welcome {
+  margin-left: auto;
+  font-size: var(--text-sm);
+}
+.getting-started-compact .getting-started-dismiss {
+  margin-left: 0;
+}
+.getting-started-bar {
+  height: 6px;
+  margin: 10px 0;
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  overflow: hidden;
+}
+.getting-started-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--success);
+  transition: width 0.3s ease;
+}
+.getting-started-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.getting-started-chip > button,
+.getting-started-chip > span {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+}
+.getting-started-chip > button {
+  cursor: pointer;
+}
+.getting-started-chip > button:hover,
+.getting-started-chip > button:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.getting-started-chip.done > span {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text3);
+}
+
+/* ── Welcome page ────────────────────────────────────────────────── */
+.welcome-page {
+  overflow-y: auto;
+}
+.welcome-body {
+  max-width: 960px;
+  padding: 0 16px 32px;
+}
+.welcome-lead {
+  margin: 4px 0 20px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+.welcome-section {
+  margin-bottom: 28px;
+}
+.welcome-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.welcome-section-head h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+.welcome-walkthrough {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) 1fr;
+  gap: 16px;
+}
+.welcome-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.welcome-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+}
+.welcome-step:hover {
+  background: var(--surface-hover);
+}
+.welcome-step.selected {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.welcome-step-dot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  line-height: 1;
+}
+.welcome-step.done .welcome-step-dot {
+  border-color: var(--success);
+  background: var(--success);
+  color: var(--text-inverse);
+}
+.welcome-step.done .welcome-step-label {
+  color: var(--text3);
+}
+.welcome-step-panel {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.welcome-step-panel h3 {
+  margin: 0 0 6px;
+}
+.welcome-step-panel p {
+  margin: 0 0 12px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+.welcome-step-panel .welcome-step-done {
+  color: var(--success);
+  margin: 0;
+}
+.welcome-gallery {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.welcome-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.welcome-card h3 {
+  margin: 0;
+  font-size: var(--text-base);
+}
+.welcome-card p {
+  flex: 1;
+  margin: 0 0 6px;
+  color: var(--text2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.welcome-card button {
+  align-self: flex-start;
+}
+@media (max-width: 768px) {
+  .welcome-body {
+    padding: 0 8px 24px;
+  }
+  .welcome-walkthrough {
+    grid-template-columns: 1fr;
+  }
+  .welcome-gallery {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Setup wizard additions ─────────────────────────────────────── */
+.setup-wizard-usecases {
+  margin: 16px 0 4px;
+  padding: 0;
+  border: 0;
+}
+.setup-wizard-usecases legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.setup-wizard-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.setup-wizard-chip {
+  padding: 5px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.setup-wizard-chip[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  font-weight: 600;
+}
+.setup-wizard-final-action.primary {
+  border-color: var(--accent);
+}
+/* "Try it now" disabled → "Start a chat" joins it: four cards, 2 × 2. */
+.setup-wizard-final.has-four {
+  grid-template-columns: repeat(2, 1fr);
+}
+@media (max-width: 560px) {
+  .setup-wizard-final.has-four {
+    grid-template-columns: 1fr;
+  }
+}
+.setup-wizard-final-reason {
+  display: block;
+  margin-top: 8px;
+}

@@ -276,7 +276,8 @@ async fn put_keep_awake(Json(req): Json<KeepAwakeRequest>) -> impl IntoResponse 
     }))
 }
 
-/// GET /api/config — returns current config values
+/// GET /api/config — returns current config values, plus the running
+/// `version` (the web app's "What's new" card compares it per user).
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = &state.config;
     Json(serde_json::json!({
@@ -286,6 +287,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "data_dir": config.data_dir.to_string_lossy(),
         "keep_alive_hours": config.keep_alive_hours,
         "keepalive_last_runs": crate::keepalive::last_runs(),
+        "version": env!("PECKBOARD_VERSION"),
     }))
 }
 

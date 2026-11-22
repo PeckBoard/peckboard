@@ -210,8 +210,13 @@ async fn uninstall_plugin(
             ));
         }
         crate::plugin::crates::write_installed(&state.db, &set).await;
-        crate::plugin::crates::deactivate(&plugin_id, &state.provider_registry, &state.plugins)
-            .await;
+        crate::plugin::crates::deactivate(
+            &plugin_id,
+            &state.provider_registry,
+            &state.db,
+            &state.plugins,
+        )
+        .await;
         state
             .broadcaster
             .broadcast(crate::ws::broadcaster::WsEvent {
@@ -455,13 +460,19 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     // entry can be tagged with the installed version, whether a newer one is
     // on offer, and — crucially — whether the installed copy is actually
     // running or still sitting inert awaiting approval.
-    let installed: std::collections::HashMap<String, (String, &'static str, Vec<String>)> = state
-        .plugins
-        .wasm_plugins()
-        .await
-        .into_iter()
-        .map(|p| (p.name, (p.version, p.status, p.permissions)))
+    let loaded_plugins = state.plugins.wasm_plugins().await;
+    // A plugin is badged experimental when either its index entry or the
+    // installed manifest says so.
+    let experimental_installed: std::collections::HashSet<String> = loaded_plugins
+        .iter()
+        .filter(|p| p.stability.is_experimental())
+        .map(|p| p.name.clone())
         .collect();
+    let installed: std::collections::HashMap<String, (String, &'static str, Vec<String>)> =
+        loaded_plugins
+            .into_iter()
+            .map(|p| (p.name, (p.version, p.status, p.permissions)))
+            .collect();
     let running = registry::peckboard_version();
 
     let client = crate::http_client::client();
@@ -487,6 +498,11 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                         .as_deref()
                         .map(|iv| registry::is_newer(&e.version, iv))
                         .unwrap_or(false);
+                    let stability = if experimental_installed.contains(&e.id) {
+                        registry::PluginStability::Experimental
+                    } else {
+                        e.stability
+                    };
                     plugins.push(serde_json::json!({
                         "id": e.id,
                         "name": e.name,
@@ -501,6 +517,7 @@ async fn list_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                         "permissions": e.permissions,
                         "tags": e.tags,
                         "category": e.category,
+                        "stability": stability,
                         "repository": url,
                         "repository_label": label,
                         "installed": installed_version.is_some(),

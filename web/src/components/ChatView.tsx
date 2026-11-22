@@ -36,7 +36,8 @@ import {
 import { useUsageStore } from '../store/usage'
 import { bareModelId, usageCost } from '../util/cost'
 import { downloadTranscript } from '../util/transcript'
-import InputBar from './InputBar'
+import InputBar, { type ComposerHandle } from './InputBar'
+import StarterPrompts from './StarterPrompts'
 import ToolUseBlock, { CopyButton } from './ToolUseBlock'
 import DiffBlock from './DiffBlock'
 import SharedFileCard from './SharedFileCard'
@@ -953,6 +954,8 @@ export default function ChatView({
     (s) => s.pendingUserMessages[sessionId] ?? EMPTY_PENDING_MESSAGES,
   )
   const prunePendingUserMessages = useSessionsStore((s) => s.prunePendingUserMessages)
+  // Starter prompts fill the composer through this handle (never send).
+  const composerRef = useRef<ComposerHandle>(null)
   const costTable = useUsageStore((s) => s.costTable)
   const fetchCostTable = useUsageStore((s) => s.fetchCostTable)
   useEffect(() => {
@@ -2599,8 +2602,16 @@ export default function ChatView({
             </button>
           </div>
         )}
-        {displayItems.length === 0 && (
-          <div className="chat-empty">No messages yet. Send one below.</div>
+        {/* Starter prompts only while nothing has been sent: an optimistic
+            bubble already counts as a message. A sealed run has no composer. */}
+        {displayItems.length === 0 && pendingUserMessages.length === 0 && (
+          <div className="chat-empty">
+            {sealed ? (
+              'No messages yet.'
+            ) : (
+              <StarterPrompts onPick={(prompt) => composerRef.current?.fill(prompt)} />
+            )}
+          </div>
         )}
         <div
           ref={listWrapRef}
@@ -2813,6 +2824,7 @@ export default function ChatView({
         <InputBar
           key={sessionId}
           sessionId={sessionId}
+          composerRef={composerRef}
           agentWorking={agentWorking}
           handoverActive={!!sessionDetail?.handover_to_model}
           attachDisabledReason={attachDisabledReason}

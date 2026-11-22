@@ -803,6 +803,11 @@
   background: rgba(200, 40, 40, 0.12);
   color: rgb(170, 30, 30);
 }
+/* Publisher-declared stability: shown next to a plugin's name. */
+.plugin-badge--experimental {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
 
 /* ── Installed (WASM) plugin list in Settings → Plugins ───────────── */
 .wasm-plugins {

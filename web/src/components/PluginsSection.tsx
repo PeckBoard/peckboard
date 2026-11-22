@@ -5,6 +5,7 @@ import PluginPanelModal from './PluginPanelModal'
 import ConfirmDialog from './ConfirmDialog'
 import HookList from './HookList'
 import PermissionList from './PermissionList'
+import ExperimentalBadge from './ExperimentalBadge'
 import PluginSettingsForm from './PluginSettingsForm'
 import {
   decidePluginApproval,
@@ -234,6 +235,10 @@ function WasmPluginList({
               onClick={() => setDetailsFor(p)}
             >
               <span className="wasm-plugin-name">{p.name}</span>
+              <ExperimentalBadge
+                stability={p.stability}
+                testId={`wasm-plugin-experimental-${p.name}`}
+              />
               {badgeFor(p.status)}
               <span className="plugin-row-summary">{firstSentence(p.description)}</span>
               {p.stats && <PluginUsageChips stats={p.stats} />}
@@ -261,6 +266,7 @@ function WasmPluginList({
         >
           <header className="plugin-details-head">
             <h2>{detailsFor.name}</h2>
+            <ExperimentalBadge stability={detailsFor.stability} />
             {badgeFor(detailsFor.status)}
           </header>
           <div className="plugin-card-meta">
