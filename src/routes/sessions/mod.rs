@@ -179,6 +179,18 @@ async fn create_session(
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
     crate::routes::settings::check_model_or_400(body.model.as_deref())?;
+    // The demo project's folder is only for the demo's scripted helpers: it
+    // sits inside the data dir, which the agent sandbox blocks for real work.
+    if let Ok(Some(folder)) = state.db.get_folder(&body.folder_id).await
+        && crate::routes::demo_project::is_demo_folder(&state.config.data_dir, &folder.path)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "That folder belongs to the demo project. Pick another folder for your session."
+            })),
+        ));
+    }
 
     // Resolve a selected library prompt into (name, body). Empty/None clears
     // both; an unknown name is a 400. Some => set both columns; None => leave

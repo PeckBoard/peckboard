@@ -155,6 +155,12 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${PORT}`,
     ignoreHTTPSErrors: true,
     trace: 'on-first-retry',
+    // The app's service worker (`/sw.js`, `clients.claim()`) can take over a
+    // page mid-test, and requests it handles skip `page.route` — stubs then
+    // silently hit the real server (askpass "session not found", a real
+    // Codex device sign-in). Specs that need the worker opt back in with
+    // `test.use({ serviceWorkers: 'allow' })` (push-notifications).
+    serviceWorkers: 'block',
   },
   webServer: {
     // Fresh data dir each run so prior state can't bleed in.

@@ -73,10 +73,27 @@ test('start the demo, watch a card reach Done, then delete the demo', async ({ r
   await expect(page.locator('.kanban-card-title', { hasText: 'List the pages' })).toBeVisible()
 
   const demoRes = await request.get('/api/demo-project', { headers: auth })
-  const demo = (await demoRes.json()) as { id: string; name: string; model: string }
+  const demo = (await demoRes.json()) as {
+    id: string
+    name: string
+    model: string
+    folder_id: string
+  }
   expect(demo.name).toBe('Demo: Plan a small website')
   expect(demo.model).toBe('mock:demo')
   expect(page.url()).toContain(demo.id)
+
+  // Its folder (inside the data dir) is never offered for real work: it is
+  // missing from the folder list, and a session there is refused.
+  const foldersRes = await request.get('/api/folders', { headers: auth })
+  const folders = (await foldersRes.json()) as { id: string }[]
+  expect(folders.map((f) => f.id)).not.toContain(demo.folder_id)
+  const sessionRes = await request.post('/api/sessions', {
+    headers: auth,
+    data: { name: 'not here', folder_id: demo.folder_id, model: 'mock:echo' },
+  })
+  expect(sessionRes.status()).toBe(400)
+  expect(await sessionRes.text()).toContain('belongs to the demo project')
 
   // The scripted helpers move at least one card all the way to Done.
   const doneColumn = page.locator('.kanban-column').filter({

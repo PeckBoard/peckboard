@@ -43,6 +43,17 @@ pub fn is_demo_project(project: &Project) -> bool {
     project.name.starts_with(DEMO_NAME_PREFIX)
         && project.context.lines().any(|l| l.trim() == DEMO_MARKER)
 }
+/// Path of the demo folder (`<data_dir>/demo-project`).
+pub fn demo_folder_path(data_dir: &std::path::Path) -> String {
+    data_dir.join(DEMO_DIR).to_string_lossy().to_string()
+}
+
+/// Whether a folder entry is the demo's folder. It sits under the data dir
+/// (skipping `reject_unsafe_path`), so it is hidden from folder listings and
+/// refused as a place for real sessions: only the demo's helpers run there.
+pub fn is_demo_folder(data_dir: &std::path::Path, folder_path: &str) -> bool {
+    folder_path == demo_folder_path(data_dir)
+}
 
 /// Serialises create/delete so two quick clicks can't make two demos.
 static DEMO_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

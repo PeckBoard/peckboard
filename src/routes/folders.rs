@@ -368,6 +368,10 @@ async fn list_folders(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Hide the internal keep-alive folder — it's an implementation detail of
     // the login keep-alive, not a place the user picks work from.
     folders.retain(|f| f.id != crate::keepalive::KEEPALIVE_FOLDER_ID);
+    // Hide the demo project's folder too: it lives under the data dir and is
+    // only for the demo's scripted helpers, never a place to pick for work.
+    folders
+        .retain(|f| !crate::routes::demo_project::is_demo_folder(&state.config.data_dir, &f.path));
 
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!(folders)))
 }

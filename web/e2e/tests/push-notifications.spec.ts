@@ -11,6 +11,8 @@ import { test, expect, type APIRequestContext } from '../harness'
  * round trips. Encryption + VAPID signing are covered by the Rust unit
  * tests in `src/service/push.rs`.
  */
+// Needs the real service worker (the suite blocks it by default).
+test.use({ serviceWorkers: 'allow' })
 
 const E2E_USER = 'e2e-user'
 const E2E_PASS = 'e2e-password-1234'
