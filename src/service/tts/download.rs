@@ -189,12 +189,17 @@ pub fn extract_lib(archive: &Path, entry: &str, dest: &Path) -> anyhow::Result<(
     let mut out = std::fs::File::create(&part)?;
     let found = if is_zip {
         let mut zip = zip::ZipArchive::new(file)?;
-        let name = (0..zip.len())
-            .filter_map(|i| zip.name_for_index(i).map(str::to_string))
-            .find(|n| n.ends_with(&format!("/lib/{entry}")));
-        match name {
-            Some(n) => {
-                std::io::copy(&mut zip.by_name(&n)?, &mut out)?;
+        let suffix = format!("/lib/{entry}");
+        // zip 9 reports undecodable names as errors; such an entry can't be
+        // the one we want, so skip it.
+        let index = (0..zip.len()).find(|&i| {
+            zip.name_for_index(i)
+                .and_then(Result::ok)
+                .is_some_and(|n| n.ends_with(&suffix))
+        });
+        match index {
+            Some(i) => {
+                std::io::copy(&mut zip.by_index(i)?, &mut out)?;
                 true
             }
             None => false,

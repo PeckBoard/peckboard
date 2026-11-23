@@ -178,9 +178,12 @@ impl client::Handler for HostKeyHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // Pin on the underlying host key: a certificate-presenting server is
+        // fingerprinted by the key it certifies, same as a plain host key.
         let fp = server_public_key
+            .public_key()
             .fingerprint(russh::keys::HashAlg::Sha256)
             .to_string();
         if let Ok(mut slot) = self.observed.lock() {

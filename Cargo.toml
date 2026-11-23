@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.160"
+version = "0.1.161"
 edition = "2024"
 
 [dependencies]
@@ -68,12 +68,16 @@ if-addrs = "0.13"
 mdns-sd = "0.12"
 
 # Plugin system (WASM)
-extism = "1"
+# 1.41+ is the first extism on wasmtime 49 (wasmtime-wasi replaces the
+# old wasi-common); older lines pin wasmtime 43, which has WASI sandbox
+# escapes (GHSA-f2pq-268w-886c among others).
+extism = "1.41"
 # Direct dep solely to construct `wasmtime::Config` for `PluginBuilder::
 # with_wasmtime_config` (shrinks the per-memory address-space reservation).
-# Must unify with extism's wasmtime (43.x); features are unioned with
-# extism's, so default-features can stay off here.
-wasmtime = { version = "43", default-features = false }
+# Must unify with extism's wasmtime (49.x); features are unioned with
+# extism's, so default-features can stay off here. 49.0.7 is the first
+# patched 49.x release.
+wasmtime = { version = "49.0.7", default-features = false }
 
 # Embedded frontend assets
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
@@ -114,7 +118,7 @@ flate2 = "1"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "rustls-platform-verifier", "ring"] }
 
 # SSH client for the native ssh_* host functions (pure Rust, no system libs)
-russh = { version = "0.62", default-features = false, features = ["flate2", "rsa", "ring"] }
+russh = { version = "0.65.4", default-features = false, features = ["flate2", "rsa", "ring"] }
 russh-sftp = "2"
 
 # Server-side Kokoro TTS. ONNX Runtime is loaded at runtime from a shared
@@ -126,7 +130,7 @@ ndarray = "0.17"
 # Vendored + patched (vendor/misaki-rs): its ~37 MB of lexicon/tagger JSON
 # is downloaded into <data-dir>/tts/ on first use instead of embedded.
 misaki-rs = { path = "vendor/misaki-rs" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Desktop window (OS WebView). Optional so `--no-default-features` still
 # produces a CLI-only binary that runs on headless Linux without WebKitGTK.

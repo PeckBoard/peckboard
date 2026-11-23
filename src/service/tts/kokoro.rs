@@ -180,7 +180,7 @@ pub fn parse_voices_npz(bytes: &[u8]) -> anyhow::Result<HashMap<String, Vec<f32>
     let mut out = HashMap::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
-        let Some(name) = f.name().strip_suffix(".npy").map(str::to_string) else {
+        let Some(name) = f.name()?.strip_suffix(".npy").map(str::to_string) else {
             continue;
         };
         let mut buf = Vec::with_capacity(f.size() as usize);
