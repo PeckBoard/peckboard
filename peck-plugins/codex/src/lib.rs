@@ -96,7 +96,9 @@ fn handle_models() -> String {
     let discovery_on = settings::bool("discover_models", true);
     let mut discovered = Vec::new();
     if discovery_on
-        && let Some(out) = settings::probe(&cli, &["debug", "models", "--bundled"])
+        // No `--bundled`: that skips the refresh and dumps only the catalog
+        // compiled into this CLI build, so server-side models never appear.
+        && let Some(out) = settings::probe(&cli, &["debug", "models"])
         && let Some(ids) = parser::parse_cli_models(&out)
     {
         discovered = ids;

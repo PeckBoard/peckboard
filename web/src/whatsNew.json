@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.1.162",
+    "date": "2026-11-23",
+    "highlights": [
+      "Codex now lists the models your Codex account actually offers, including new ones as soon as OpenAI adds them, instead of an old built-in list."
+    ]
+  },
+  {
     "version": "0.1.160",
     "date": "2026-11-23",
     "highlights": [

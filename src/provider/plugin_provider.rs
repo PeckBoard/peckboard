@@ -1622,6 +1622,9 @@ const PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
 /// Past this age a stale entry is dropped instead of served, so a CLI that
 /// changed long ago can't keep answering from memory.
 const PROBE_CACHE_MAX_STALE: Duration = Duration::from_secs(60 * 60);
+/// Most stdout a probe returns. Sized well above real catalog dumps; see
+/// the truncate in [`probe_cli_uncached`].
+const PROBE_STDOUT_CAP: usize = 8 * 1024 * 1024;
 
 /// Where a provider's config path resolves from. Normally the session folder.
 /// With `project_root`, the nearest ancestor holding a `.git` (or the folder
@@ -1808,7 +1811,11 @@ fn probe_cli_uncached(input: &str) -> String {
                 let mut stderr = stderr_reader
                     .and_then(|h| h.join().ok())
                     .unwrap_or_default();
-                stdout.truncate(256 * 1024);
+                // Catalog dumps are large and grow with every model (codex's
+                // is ~450 KB): a cap below that cuts the JSON mid-document,
+                // the plugin can't parse it, and discovery silently falls
+                // back to the compile-time seed.
+                stdout.truncate(PROBE_STDOUT_CAP);
                 stderr.truncate(16 * 1024);
                 return serde_json::json!({
                     "ok": true,
@@ -3069,5 +3076,22 @@ mod tests {
         }
         assert_eq!(RUNS.load(Ordering::SeqCst), 2);
         assert_eq!(CACHE.get("k", slow_probe), "fresh");
+    }
+
+    /// A catalog dump bigger than the old 256 KiB cap comes back whole —
+    /// a truncated dump is unparseable and discovery falls back to the seed.
+    #[test]
+    fn probe_returns_large_catalog_dump_whole() {
+        let input = serde_json::json!({
+            "command": "sh",
+            "args": ["-c", "yes x | head -c 600000"],
+        })
+        .to_string();
+        let out: serde_json::Value = serde_json::from_str(&probe_cli_uncached(&input)).unwrap();
+        assert_eq!(
+            out["stdout"].as_str().map(str::len),
+            Some(600_000),
+            "got: {out}"
+        );
     }
 }
