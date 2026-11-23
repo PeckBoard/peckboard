@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.159"
+version = "0.1.160"
 edition = "2024"
 
 [dependencies]
@@ -150,6 +150,9 @@ peckboard-mock-plugin = { path = "peck-plugins/mock" }
 # Remote access: rendezvous + hole punch + QUIC tunnel to paired devices
 # (service::remote_access).
 peckboard-relay = { path = "peckboard-relay", features = ["tunnel"] }
+# SKILL.md parser + proprietary-content guard, shared with the public
+# skills hub (peckboard-skills-hub) so both validate a skill the same way.
+peckboard-skill-format = { path = "peckboard-skill-format" }
 
 [features]
 default = ["desktop"]

@@ -1175,6 +1175,43 @@ select.form-input {
   margin-top: 2px;
   font-family: var(--font-mono, ui-monospace, monospace);
 }
+/* Skills tab bar: one line, scrolls when narrow; badge sits beside the label. */
+.skills-tabs {
+  overflow-x: auto;
+}
+.skills-tabs .registry-tab {
+  white-space: nowrap;
+}
+.skills-tab-badge {
+  margin-left: 6px;
+}
+/* Merge request rows wrap their details instead of spilling out. */
+.skill-mr-meta {
+  flex-wrap: wrap;
+  min-width: 0;
+  row-gap: 2px;
+}
+.skill-mr-meta > span {
+  overflow-wrap: anywhere;
+}
+.skill-mr-comments {
+  margin-top: 16px;
+}
+.skill-mr-comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.skill-mr-publish {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.skill-mr-publish .form-input {
+  width: auto;
+}
 .skill-resolved-list {
   list-style: none;
   margin: 0;

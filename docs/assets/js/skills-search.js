@@ -1,5 +1,5 @@
 // Client-side search over the public PeckBoard skills catalog
-// (github.com/PeckBoard/skills). Loads index.json from the container's
+// (skills.peckboard.com). Loads index.json from the container's
 // data-index-url, filters by text and group, lists versions, fetches a
 // version's SKILL.md on expand, and links to "Subscribe in PeckBoard" on
 // the instance address the visitor saved (localStorage).
@@ -11,7 +11,7 @@
 
   var INDEX_URL =
     root.getAttribute("data-index-url") ||
-    "https://raw.githubusercontent.com/PeckBoard/skills/main/index.json";
+    "https://skills.peckboard.com/index.json";
   var RAW_BASE = INDEX_URL.replace(/index\.json(\?.*)?$/, "");
   var STORAGE_KEY = "peckboard.instanceUrl";
   var NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -220,7 +220,7 @@
     });
     updateSubscribeLink(sub, readInstance());
     bar.appendChild(sub);
-    var src = el("a", "skill-source", "View on GitHub");
+    var src = el("a", "skill-source", "View SKILL.md");
     src.rel = "noopener";
     bar.appendChild(src);
     panel.appendChild(bar);
@@ -230,12 +230,7 @@
     li.appendChild(panel);
 
     function setSource(v) {
-      src.href =
-        "https://github.com/PeckBoard/skills/blob/main/skills/" +
-        skill.name +
-        "/" +
-        v +
-        "/SKILL.md";
+      src.href = RAW_BASE + "skills/" + skill.name + "/" + v + "/SKILL.md";
     }
     setSource(skill.latest);
 

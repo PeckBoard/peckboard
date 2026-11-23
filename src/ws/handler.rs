@@ -483,6 +483,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // parked until idle (counts only, no names), so
                             // every client can show it and offer Cancel.
                             | "restart-pending"
+                            // skills-merge-requests: incoming hub merge-
+                            // request counts (numbers only) for the Skills
+                            // badge; not tied to a session.
+                            | "skills-merge-requests"
                     );
 
                     let should_send = if is_global {

@@ -1,0 +1,17 @@
+[package]
+name = "peckboard-skill-format"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# The SKILL.md frontmatter parser/serializer and the proprietary-content
+# guard, shared by PeckBoard (publishing side) and `peckboard-skills-hub`
+# (the public skills server) so both validate a skill exactly the same way.
+#
+# Standalone crate (the repo root is a package, not a workspace). Test with
+# `cargo test --manifest-path peckboard-skill-format/Cargo.toml`.
+
+[dependencies]
+regex = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }

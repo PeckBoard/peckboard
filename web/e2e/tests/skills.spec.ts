@@ -1,6 +1,13 @@
 import { test, expect, type APIRequestContext, type Page } from '../harness'
-import { createServer, type Server } from 'node:http'
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http'
 import { execFileSync } from 'node:child_process'
+import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -19,6 +26,10 @@ import path from 'node:path'
  *  - Publish a local skill: the guard's 422 lists body lines and metadata
  *    findings; a clean skill is pushed to a team repo (a local bare git repo
  *    behind a file:// url).
+ *  - Publish to Peckboard Public: the same stub plays the hub (challenge,
+ *    proof of work, ed25519 signature check, name ownership) — a name
+ *    another install owns shows the plain-words 409; a free one is published
+ *    with a link.
  */
 
 const E2E_USER = 'e2e-user'
@@ -68,20 +79,366 @@ const INDEX = {
   ],
 }
 
+/** What the stub hub has accepted: skill name → the publishing install's
+ *  public key. A name owned by another install is answered `name_taken`. */
+const HUB_OWNERS = new Map<string, string>()
+const HUB_NONCES = new Set<string>()
+const HUB_POW_BITS = 4
+const HUB_TAKEN = `e2e-hub-taken-${Date.now()}`
+HUB_OWNERS.set(HUB_TAKEN, Buffer.alloc(32, 7).toString('base64'))
+
+function leadingZeroBits(hash: Buffer): number {
+  let n = 0
+  for (const b of hash) {
+    if (b === 0) {
+      n += 8
+      continue
+    }
+    return n + Math.clz32(b) - 24
+  }
+  return n
+}
+
+/** `POST /api/publish` of the hub contract: one-time nonce, proof of work,
+ *  ed25519 signature over the publish message, name ownership. */
+function hubPublish(raw: string): { status: number; body: unknown } {
+  const b = JSON.parse(raw) as Record<string, string>
+  if (!HUB_NONCES.delete(b.nonce))
+    return { status: 400, body: { error: 'nonce', code: 'nonce_invalid' } }
+  const pow = createHash('sha256')
+    .update(`${b.nonce}${b.pow ?? ''}`)
+    .digest()
+  if (leadingZeroBits(pow) < HUB_POW_BITS)
+    return { status: 400, body: { error: 'pow', code: 'pow_required' } }
+  const digest = createHash('sha256').update(b.skill_md, 'utf8').digest('hex')
+  const key = createPublicKey({
+    key: {
+      kty: 'OKP',
+      crv: 'Ed25519',
+      x: Buffer.from(b.public_key, 'base64').toString('base64url'),
+    },
+    format: 'jwk',
+  })
+  const msg = Buffer.from(`peckboard-skills-publish-v1\n${b.nonce}\n${digest}`, 'utf8')
+  if (!verify(null, msg, key, Buffer.from(b.signature, 'base64')))
+    return { status: 401, body: { error: 'bad signature', code: 'bad_signature' } }
+  const name = /^name:\s*(\S+)/m.exec(b.skill_md)?.[1] ?? ''
+  const version = /^version:\s*(\S+)/m.exec(b.skill_md)?.[1] ?? ''
+  const owner = HUB_OWNERS.get(name)
+  if (owner && owner !== b.public_key)
+    return { status: 409, body: { error: 'taken', code: 'name_taken' } }
+  HUB_OWNERS.set(name, b.public_key)
+  // Publishing `<name>@<handle>` publishes to that fork.
+  HUB_FORK_VERSIONS.get(name)?.set(version, b.skill_md)
+  return {
+    status: 201,
+    body: { name, version, url: `https://skills.peckboard.com/s/${name}` },
+  }
+}
+
+// ── The stub hub's fork / merge-request side (peckboard-skills-hub/API.md) ──
+
+const HUB_ME = 'e2e-me'
+const ALICE_KEY = Buffer.alloc(32, 9).toString('base64')
+/** This PeckBoard's key, learnt from its first signed request. */
+let MY_KEY = ''
+/** The stub also plays the original's author, so one PeckBoard can walk
+ *  both sides of a merge request. */
+let HUB_ACT_AS_OWNER = false
+/** fork name → version → SKILL.md */
+const HUB_FORK_VERSIONS = new Map<string, Map<string, string>>()
+type StubMr = Record<string, unknown> & { id: number; state: string; target_owner_key: string }
+const HUB_MRS: StubMr[] = []
+/** Every signed request that verified: method, path, JSON body. */
+const HUB_SIGNED: { method: string; path: string; body: unknown }[] = []
+
+const newestFirst = (vs: string[]) =>
+  [...vs].sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+
+function forkLatest(fork: string): { version: string; text: string } {
+  const versions = HUB_FORK_VERSIONS.get(fork)!
+  const version = newestFirst([...versions.keys()])[0]
+  return { version, text: versions.get(version)! }
+}
+
+/** A whole-file unified diff — enough for the UI to render. */
+function unifiedDiff(a: string, b: string): string {
+  const x = a.trimEnd().split('\n')
+  const y = b.trimEnd().split('\n')
+  return [
+    '--- a/SKILL.md',
+    '+++ b/SKILL.md',
+    `@@ -1,${x.length} +1,${y.length} @@`,
+    ...x.map((l) => `-${l}`),
+    ...y.map((l) => `+${l}`),
+    '',
+  ].join('\n')
+}
+
+/** The `X-Peck-*` signed headers: single-use nonce, proof of work, an
+ *  ed25519 signature over method, path, nonce and sha256(body). */
+function verifySigned(method: string, path: string, headers: IncomingHttpHeaders, raw: string) {
+  const h = (k: string) => String(headers[k] ?? '')
+  const nonce = h('x-peck-nonce')
+  if (!HUB_NONCES.delete(nonce)) return false
+  const pow = createHash('sha256')
+    .update(`${nonce}${h('x-peck-pow')}`)
+    .digest()
+  if (leadingZeroBits(pow) < HUB_POW_BITS) return false
+  const key = createPublicKey({
+    key: {
+      kty: 'OKP',
+      crv: 'Ed25519',
+      x: Buffer.from(h('x-peck-key'), 'base64').toString('base64url'),
+    },
+    format: 'jwk',
+  })
+  const digest = createHash('sha256').update(raw, 'utf8').digest('hex')
+  const msg = Buffer.from(`peckboard-skills-request-v1\n${method}\n${path}\n${nonce}\n${digest}`)
+  if (!verify(null, msg, key, Buffer.from(h('x-peck-signature'), 'base64'))) return false
+  MY_KEY = h('x-peck-key')
+  HUB_SIGNED.push({ method, path, body: raw ? JSON.parse(raw) : null })
+  return true
+}
+
+function json(res: ServerResponse, status: number, body: unknown) {
+  res.statusCode = status
+  res.setHeader('Content-Type', 'application/json')
+  res.end(JSON.stringify(body))
+}
+
+/** Handles, skill details / history / diff, forks and merge requests.
+ *  Returns false for anything else. */
+function hubCollab(
+  req: IncomingMessage,
+  url: string,
+  query: string | undefined,
+  res: ServerResponse,
+) {
+  const path = decodeURIComponent(url)
+  const params = new URLSearchParams(query)
+  const signed = (handle: (body: Record<string, unknown>) => [number, unknown]) => {
+    let raw = ''
+    req.on('data', (c: Buffer) => (raw += c.toString('utf8')))
+    req.on('end', () => {
+      if (!verifySigned(req.method ?? '', url, req.headers, raw))
+        return json(res, 401, { error: 'bad signature', code: 'bad_signature' })
+      const [status, body] = handle(raw ? (JSON.parse(raw) as Record<string, unknown>) : {})
+      json(res, status, body)
+    })
+    return true
+  }
+  if (path.startsWith('/api/publishers/')) {
+    json(res, 200, { public_key: path.slice(16), handle: HUB_ME })
+    return true
+  }
+  const sk = /^\/api\/skills\/([^/]+)(\/history|\/forks|\/diff)?$/.exec(path)
+  if (sk && req.method === 'GET') {
+    const [, name, sub] = sk
+    const isFork = HUB_FORK_VERSIONS.has(name)
+    if (name !== PUBLIC_SKILL && !isFork) {
+      json(res, 404, { error: 'no such skill', code: 'not_found' })
+    } else if (sub === '/history') {
+      json(res, 200, [
+        {
+          commit: 'c2'.padEnd(40, '0'),
+          parents: ['c1'.padEnd(40, '0')],
+          author_key: ALICE_KEY,
+          author_handle: 'alice',
+          message: 'Run the tests locally',
+          at: '2026-11-02T00:00:00Z',
+          tag: 'v1.1.0',
+        },
+        {
+          commit: 'c1'.padEnd(40, '0'),
+          parents: [],
+          author_key: ALICE_KEY,
+          author_handle: 'alice',
+          message: 'First version',
+          at: '2026-11-01T00:00:00Z',
+          tag: 'v1.0.0',
+        },
+      ])
+    } else if (sub === '/forks') {
+      json(
+        res,
+        200,
+        [...HUB_FORK_VERSIONS.keys()].map((fork) => ({
+          fork,
+          owner_handle: HUB_ME,
+          owner_key: MY_KEY,
+          latest: forkLatest(fork).version,
+          ahead: 1,
+          behind: 0,
+        })),
+      )
+    } else if (sub === '/diff') {
+      const text = (rev: string) =>
+        PUBLIC_VERSIONS.includes(rev) ? skillFile(rev) : skillFile('1.1.0')
+      json(res, 200, {
+        from: params.get('from'),
+        to: params.get('to'),
+        diff: unifiedDiff(text(params.get('from') ?? ''), text(params.get('to') ?? '')),
+      })
+    } else if (isFork) {
+      const versions = newestFirst([...HUB_FORK_VERSIONS.get(name)!.keys()])
+      json(res, 200, {
+        name,
+        owner_handle: HUB_ME,
+        owner_key: MY_KEY,
+        parent: PUBLIC_SKILL,
+        latest: versions[0],
+        versions,
+        description: 'fork',
+        tags: [],
+        groups: [],
+      })
+    } else {
+      json(res, 200, {
+        name,
+        owner_handle: 'alice',
+        owner_key: HUB_ACT_AS_OWNER ? MY_KEY : ALICE_KEY,
+        parent: null,
+        latest: PUBLIC_VERSIONS[0],
+        versions: PUBLIC_VERSIONS,
+        description: INDEX.skills[0].description,
+        tags: ['review', 'git'],
+        groups: ['pr-review'],
+      })
+    }
+    return true
+  }
+  if (path === '/api/fork' && req.method === 'POST')
+    return signed((b) => {
+      const fork = `${String(b.name)}@${HUB_ME}`
+      if (HUB_FORK_VERSIONS.has(fork)) return [409, { error: 'forked', code: 'already_forked' }]
+      const text = skillFile('1.1.0').replace(`name: ${PUBLIC_SKILL}`, `name: ${fork}`)
+      HUB_FORK_VERSIONS.set(fork, new Map([['1.1.0', text]]))
+      return [201, { fork, url: `https://skills.peckboard.com/s/${fork}` }]
+    })
+  if (path === '/api/merge-requests' && req.method === 'POST')
+    return signed((b) => {
+      const fork = String(b.fork)
+      const now = new Date().toISOString()
+      const mr: StubMr = {
+        id: HUB_MRS.length + 1,
+        target: PUBLIC_SKILL,
+        fork,
+        title: b.title,
+        description: b.description,
+        state: 'open',
+        author_key: MY_KEY,
+        author_handle: HUB_ME,
+        target_owner_key: ALICE_KEY,
+        base_commit: 'c2'.padEnd(40, '0'),
+        head_commit: 'f1'.padEnd(40, '0'),
+        mergeable: true,
+        diff: unifiedDiff(skillFile('1.1.0'), forkLatest(fork).text),
+        comments: [],
+        created_at: now,
+        updated_at: now,
+        merged_commit: null,
+        merged_version: null,
+      }
+      HUB_MRS.push(mr)
+      return [201, mr]
+    })
+  if (path === '/api/merge-requests' && req.method === 'GET') {
+    const key = params.get('key')
+    const state = params.get('state') ?? 'open'
+    const list = HUB_MRS.filter(
+      (m) =>
+        (params.get('role') === 'owner' ? m.target_owner_key === key : m.author_key === key) &&
+        (state === 'all' || m.state === state),
+    ).map((m) => {
+      // List entries carry no diff or comments.
+      const rest: Record<string, unknown> = { ...m }
+      delete rest.diff
+      delete rest.comments
+      return rest
+    })
+    json(res, 200, list)
+    return true
+  }
+  const mm = /^\/api\/merge-requests\/(\d+)(\/merge|\/close|\/comments)?$/.exec(path)
+  if (mm) {
+    const mr = HUB_MRS.find((m) => m.id === Number(mm[1]))
+    if (!mr) {
+      json(res, 404, { error: 'no such merge request', code: 'not_found' })
+      return true
+    }
+    if (!mm[2]) {
+      json(res, 200, mr)
+      return true
+    }
+    return signed((b) => {
+      if (mm[2] === '/merge') {
+        Object.assign(mr, {
+          state: 'merged',
+          merged_commit: 'm1'.padEnd(40, '0'),
+          merged_version: b.publish ? '1.2.0' : null,
+        })
+      } else if (mm[2] === '/close') {
+        mr.state = 'closed'
+      } else {
+        const c = {
+          id: 1,
+          author_handle: HUB_ME,
+          author_key: MY_KEY,
+          body: b.body,
+          at: new Date().toISOString(),
+        }
+        ;(mr.comments as unknown[]).push(c)
+        return [201, c]
+      }
+      return [200, mr]
+    })
+  }
+  return false
+}
+
 /** Serves `index.json` and `skills/<name>/<version>/SKILL.md`, the public
- *  repo layout, from the URL the server was booted with. */
+ *  repo layout, from the URL the server was booted with — plus the hub's
+ *  `/api/challenge` + `/api/publish`, since publishing goes to the same
+ *  base URL. */
 function startIndexStub(): Promise<Server> {
   const server = createServer((req, res) => {
-    const url = (req.url ?? '/').split('?')[0]
+    const [url, query] = (req.url ?? '/').split('?')
     if (url.endsWith('/index.json')) {
       res.setHeader('Content-Type', 'application/json')
       res.end(JSON.stringify(INDEX))
       return
     }
+    if (url.endsWith('/api/challenge')) {
+      const nonce = randomBytes(16).toString('base64')
+      HUB_NONCES.add(nonce)
+      expect(new URLSearchParams(query).get('public_key')).toBeTruthy()
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ nonce, expires_in: 60, pow_difficulty: HUB_POW_BITS }))
+      return
+    }
+    if (url.endsWith('/api/publish') && req.method === 'POST') {
+      let raw = ''
+      req.on('data', (c: Buffer) => (raw += c.toString('utf8')))
+      req.on('end', () => {
+        const out = hubPublish(raw)
+        res.statusCode = out.status
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify(out.body))
+      })
+      return
+    }
+    if (hubCollab(req, url, query, res)) return
     const m = /\/skills\/([^/]+)\/([^/]+)\/SKILL\.md$/.exec(url)
     if (m && m[1] === PUBLIC_SKILL && PUBLIC_VERSIONS.includes(m[2])) {
       res.setHeader('Content-Type', 'text/markdown')
       res.end(skillFile(m[2]))
+      return
+    }
+    const forkText = m ? HUB_FORK_VERSIONS.get(decodeURIComponent(m[1]))?.get(m[2]) : undefined
+    if (forkText) {
+      res.setHeader('Content-Type', 'text/markdown')
+      res.end(forkText)
       return
     }
     res.statusCode = 404
@@ -434,5 +791,134 @@ test.describe('skills', () => {
     expect(pushed).toContain('One line per change.')
     await modal.getByTestId('skill-publish-close').click()
     await expect(modal).toHaveCount(0)
+  })
+
+  test('publish to Peckboard Public: a taken name says so, a free one is published', async ({
+    request,
+    page,
+  }) => {
+    const { token, auth } = await authenticate(request)
+    const pub = (await listSources(request, auth)).find((s) => s.kind === 'public')!
+    const mine = `e2e-hub-mine-${Date.now()}`
+    for (const name of [HUB_TAKEN, mine]) {
+      const res = await request.post('/api/skills', {
+        headers: auth,
+        data: {
+          name,
+          description: 'Write a friendly changelog entry',
+          tags: [],
+          groups: [],
+          body: '# Changelog\n\nOne line per change.\n',
+        },
+      })
+      expect(res.ok(), `create ${name} failed: ${await res.text()}`).toBeTruthy()
+    }
+
+    await loadAt(page, token, '/settings/skills')
+    const modal = page.getByTestId('skill-publish-modal')
+    const publicLabel = `${pub.name} (public catalog)`
+
+    // 1. Another install owns the name: the hub's 409 reads in plain words.
+    await page.getByTestId(`skill-row-${HUB_TAKEN}`).click()
+    await page.getByTestId('skill-detail-publish').click()
+    await modal.getByTestId('skill-publish-target').selectOption({ label: publicLabel })
+    await modal.getByTestId('skill-publish-submit').click()
+    await expect(modal.getByTestId('skill-publish-error')).toContainText(
+      `Another PeckBoard already published a skill called ${HUB_TAKEN}. Rename yours to publish it.`,
+    )
+    await expect(modal.getByTestId('skill-publish-result')).toHaveCount(0)
+    await page.keyboard.press('Escape')
+    await expect(modal).toHaveCount(0)
+    await page.keyboard.press('Escape')
+
+    // 2. A free name: signed, proof of work done, published with a link.
+    await page.getByTestId(`skill-row-${mine}`).click()
+    await page.getByTestId('skill-detail-publish').click()
+    await modal.getByTestId('skill-publish-target').selectOption({ label: publicLabel })
+    await modal.getByTestId('skill-publish-submit').click()
+    const result = modal.getByTestId('skill-publish-result')
+    await expect(result).toContainText('Published to Peckboard Public.')
+    await expect(result).toContainText('within a minute')
+    await expect(result).not.toContainText('pull request')
+    await expect(modal.getByTestId('skill-publish-link')).toHaveAttribute(
+      'href',
+      `https://skills.peckboard.com/s/${mine}`,
+    )
+    // The stub verified the signature and recorded this install as owner.
+    expect(HUB_OWNERS.get(mine)).toBeTruthy()
+    await modal.getByTestId('skill-publish-close').click()
+    await expect(modal).toHaveCount(0)
+  })
+
+  test('fork and edit, ask the author to merge, then merge it from Merge requests', async ({
+    request,
+    page,
+  }) => {
+    const { token } = await authenticate(request)
+    const fork = `${PUBLIC_SKILL}@${HUB_ME}`
+    await loadAt(page, token, '/settings/skills')
+
+    // 1. Browse → a public skill someone else owns → Fork and edit opens the
+    //    fork's local copy in the editor.
+    await page.getByTestId('skills-tab-browse').click()
+    await page.getByTestId(`skill-row-${PUBLIC_SKILL}`).first().click()
+    const catalog = page.getByTestId('skill-catalog-modal')
+    await expect(catalog.getByTestId('skill-catalog-tab-history')).toBeVisible()
+    await catalog.getByTestId('skill-catalog-tab-history').click()
+    await expect(catalog.getByTestId('skill-hub-history')).toContainText('Run the tests locally')
+    await catalog.getByTestId('skill-catalog-tab-overview').click()
+    await expect(catalog.getByTestId('skill-fork')).toHaveText(/Fork and edit|Edit my fork/)
+    await catalog.getByTestId('skill-fork').click()
+    const editor = page.getByTestId('skill-editor-modal')
+    await expect(editor.getByTestId('skill-editor-body')).toHaveValue(/Run the tests locally/)
+    await editor
+      .getByTestId('skill-editor-body')
+      .fill('# PR review checklist\n\n1. Read the description.\n2. Run the tests and the linter.\n')
+    await editor.getByTestId('skill-editor-save').click()
+    await expect(editor).toHaveCount(0)
+    expect(HUB_SIGNED.some((s) => s.method === 'POST' && s.path === '/api/fork')).toBeTruthy()
+
+    // 2. The fork is installed; "Ask the author to merge" publishes the edit to
+    //    the fork and opens the merge request.
+    await page.getByTestId('skills-tab-installed').click()
+    await page.getByTestId(`skill-row-${fork}`).click()
+    await page.getByTestId('skill-detail-ask-merge').click()
+    const ask = page.getByTestId('skill-ask-merge-modal')
+    await ask.getByTestId('skill-mr-submit').click()
+    await expect(ask.getByTestId('skill-mr-title-error')).toBeVisible()
+    await ask.getByTestId('skill-mr-title').fill('Also run the linter')
+    await ask.getByTestId('skill-mr-description').fill('Catches style issues before review.')
+    await ask.getByTestId('skill-mr-submit').click()
+    await expect(ask.getByTestId('skill-ask-merge-done')).toBeVisible()
+    expect(forkLatest(fork).text).toContain('Run the tests and the linter.')
+    const mr = HUB_MRS.find((m) => m.fork === fork && m.state === 'open')!
+    expect(mr.title).toBe('Also run the linter')
+    await ask.getByTestId('skill-mr-close').click()
+
+    // 3. Merge requests → Outgoing lists it.
+    await page.getByTestId('skills-tab-merge-requests').click()
+    await page.getByTestId('skill-mr-role-outgoing').click()
+    await expect(page.getByTestId(`skill-mr-row-${mr.id}`)).toContainText('Also run the linter')
+
+    // 4. The original's author (the stub plays them) sees it as Incoming,
+    //    with a badge, and merges it as a new minor version.
+    HUB_ACT_AS_OWNER = true
+    mr.target_owner_key = MY_KEY
+    await page.goto('/settings/skills?tab=merge-requests')
+    await expect(page.getByTestId('skills-mr-badge')).toContainText('1')
+    await page.getByTestId(`skill-mr-row-${mr.id}`).click()
+    const detail = page.getByTestId('skill-mr-modal')
+    await expect(detail.getByTestId('skill-mr-diff')).toContainText('Run the tests and the linter.')
+    await expect(detail.getByTestId('skill-mr-not-mergeable')).toHaveCount(0)
+    await expect(detail.getByTestId('skill-mr-publish')).toBeChecked()
+    await detail.getByTestId('skill-mr-bump').selectOption('minor')
+    await detail.getByTestId('skill-mr-merge').click()
+    await expect(detail.getByTestId('skill-mr-notice')).toHaveText(
+      'Merged and published as v1.2.0.',
+    )
+    await expect(detail.getByTestId('skill-mr-state-badge')).toHaveText('Merged')
+    const merge = HUB_SIGNED.find((s) => s.path === `/api/merge-requests/${mr.id}/merge`)
+    expect(merge?.body).toEqual({ publish: true, bump: 'minor' })
+    HUB_ACT_AS_OWNER = false
   })
 })

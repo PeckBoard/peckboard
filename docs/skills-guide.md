@@ -62,9 +62,27 @@ Subscribing copies a team or public skill onto your instance so sessions can use
 Only local skills are published. On the Installed tab, choose **Publish…** from a skill's menu (or open the skill and click **Publish…**), pick where it goes, and click **Publish**. The newest version is published, and the [guard](#no-proprietary-content) checks it first.
 
 - **A team repository** — PeckBoard writes `skills/<name>/<version>/SKILL.md` (and the skill's groups) into its clone and pushes a commit. Teammates subscribed to the repo get it when they sync.
-- **The public catalog** — nothing is pushed for you. PeckBoard writes the file to `skills/public-outbox/` in its data directory and shows the path, with instructions to open a pull request against [PeckBoard/skills](https://github.com/PeckBoard/skills) adding it; the repository's CI rebuilds the index.
+- **Peckboard Public** — one click. The public catalog is hosted at [skills.peckboard.com](https://skills.peckboard.com), and PeckBoard publishes the skill there straight away and links to it; it shows up in everyone's catalog within a minute.
 
-A version that is already in the repository is never overwritten. To publish changes, edit the skill so it gets a new version, then publish again.
+On Peckboard Public, a skill's name belongs to the PeckBoard install that first published it: each install signs its publishes with its own identity key (the same key remote access uses, kept in `remote_access_identity` in the data directory), so only that install can publish new versions of the name. If another install already owns the name, rename your skill to publish it. Keep that file in your backups — an install that loses it can't publish to its names again.
+
+Published versions never change, on Peckboard Public or in a team repository. To publish changes, edit the skill so it gets a new version, then publish again.
+
+## Forks and Merge Requests
+
+You can't publish to a public skill someone else owns, but you can **fork** it: make your own copy, change it, and ask its author to take your changes.
+
+1. **Fork and edit.** On Settings → Skills → Browse, open a public skill and click **Fork and edit**. PeckBoard makes the fork on Peckboard Public and opens it in the skill editor. A fork is named `<skill>@<handle>` — for example `pr-review-checklist@alice` — and shows up on the Installed tab like any local skill. Publishing it publishes to the fork, never to the original.
+2. **Sync from original.** When the original gets new versions, open your fork and click **Sync from original** to bring them in. Publish your own edits to the fork first. If the original's changes clash with yours, nothing changes and PeckBoard tells you so.
+3. **Ask the author to merge.** Open your fork and click **Ask the author to merge…**, give it a title and a short description, and send it. Edits not yet on the fork are published to it first.
+
+Your **handle** is the name your forks carry. Set it under Settings → Skills → Merge requests (2 to 32 lowercase letters, digits, or dashes); until you do, Peckboard Public gives your install one like `k-1a2b3c4d`.
+
+The **Merge requests** tab lists **Incoming** requests (into skills you published) and **Outgoing** ones (from your forks), filtered by state: open, merged, closed, or all. A number on the tab shows how many incoming requests are open; PeckBoard checks every five minutes and sends a notification when a new one arrives. Open a request to read its changes as a diff, comment on it, and — for an incoming one — **Merge** it. Leave **Publish a new version** on to publish the merged text straight away as a patch, minor, or major version; turn it off to merge now and publish later. A request that says **Needs an update from the fork** no longer merges cleanly: its author has to sync the fork from the original and publish again. **Close request** turns it down without merging.
+
+## History
+
+A public skill keeps every change. Open it on the Browse tab and switch to **History** to see each change with who made it and which version it published, and compare any two versions or changes as a diff.
 
 ## Skills in a Session
 
@@ -80,6 +98,10 @@ Agents can manage skills too, through the PeckBoard MCP server:
 - Sessions: `session_set_skills`, `session_get_skills`, `skill_read`
 - Sources and publishing: `skill_source_list`, `skill_source_sync`, `skill_publish`
 - Team memory: `team_memory_list`, `team_memory_get`, `team_memory_add`, `team_memory_update`, `team_memory_remove`
+- Forks and history on Peckboard Public: `skill_fork`, `skill_sync_fork`, `skill_history`, `skill_diff` (`skill_update` with `publish: true` publishes a new version of a skill or fork you own; a fork publishes by default)
+- Merge requests: `skill_merge_request_create`, `skill_merge_request_list` (`role`: incoming or outgoing; `state`), `skill_merge_request_get`, `skill_merge_request_comment`, `skill_merge_request_merge` (`publish`, `bump` or `version`), `skill_merge_request_close`
+
+The tools that change something on Peckboard Public follow the same rules as publishing: an admin or the user who added the skill involved, and never from a worker session.
 
 ## Team Repositories
 
@@ -96,6 +118,6 @@ index.json                         generated list of skills, versions, and group
 
 ## No Proprietary Content
 
-The public catalog is public. Before PeckBoard publishes a skill or a team note, a guard scans it for content that must not leave your organisation — private keys, API tokens (AWS, GitHub, Anthropic, OpenAI, Slack), secret-looking values, email addresses, private IP addresses, internal hostnames (`.internal`, `.local`, `.corp`, `.lan`), absolute home-directory paths, and the values of secrets configured on your instance — and refuses, listing each finding with its line (or **Metadata** when it is in the name, description, tags, or groups). The public repository runs the same scan on every pull request.
+The public catalog is public. Before PeckBoard publishes a skill or a team note, a guard scans it for content that must not leave your organisation — private keys, API tokens (AWS, GitHub, Anthropic, OpenAI, Slack), secret-looking values, email addresses, private IP addresses, internal hostnames (`.internal`, `.local`, `.corp`, `.lan`), absolute home-directory paths, and the values of secrets configured on your instance — and refuses, listing each finding with its line (or **Metadata** when it is in the name, description, tags, or groups). Peckboard Public runs the same scan again on every skill it receives and refuses it the same way.
 
-The scan is a safety net, not a guarantee. Never contribute company-internal procedures, customer names, code, or documents to the public catalog; keep them in a team repo. To contribute a generic skill, follow the [contributing guide](https://github.com/PeckBoard/skills#contributing).
+The scan is a safety net, not a guarantee. Never contribute company-internal procedures, customer names, code, or documents to the public catalog; keep them in a team repo.

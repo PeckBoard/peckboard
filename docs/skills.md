@@ -9,7 +9,7 @@ has_toc: false
 
 Reusable agent instructions from the public catalog. Open one to read it, or subscribe from your PeckBoard. [How skills work](skills-guide.html)
 
-<div id="skills-search" class="skills-search" data-index-url="https://raw.githubusercontent.com/PeckBoard/skills/main/index.json" markdown="0">
+<div id="skills-search" class="skills-search" data-index-url="https://skills.peckboard.com/index.json" markdown="0">
   <form class="skills-instance" id="skills-instance-form" data-testid="skills-instance-form" novalidate>
     <label for="skills-instance-url">Your PeckBoard address</label>
     <input id="skills-instance-url" data-testid="skills-instance-url" type="text" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://peckboard.example.com:3345" />

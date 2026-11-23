@@ -17,7 +17,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::auth::middleware::{AuthUser, require_auth, require_session_access};
-use crate::service::skills::{self, Actor, SkillError};
+use crate::service::skills::{self, Actor, SkillError, collab};
 use crate::state::AppState;
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -63,6 +63,34 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/skills/{id}/subscription",
             put(set_subscription).delete(unsubscribe),
+        )
+        .route(
+            "/api/skills/hub/handle",
+            get(hub_handle).put(hub_set_handle),
+        )
+        .route("/api/skills/hub/skills/{name}", get(hub_skill))
+        .route("/api/skills/hub/skills/{name}/history", get(hub_history))
+        .route("/api/skills/hub/skills/{name}/forks", get(hub_forks))
+        .route("/api/skills/hub/skills/{name}/diff", get(hub_diff))
+        .route("/api/skills/hub/fork", post(hub_fork))
+        .route("/api/skills/hub/forks/{fork}/sync", post(hub_sync_fork))
+        .route(
+            "/api/skills/hub/merge-requests",
+            get(hub_list_mrs).post(hub_create_mr),
+        )
+        .route("/api/skills/hub/merge-requests/check", post(hub_check_mrs))
+        .route("/api/skills/hub/merge-requests/{id}", get(hub_get_mr))
+        .route(
+            "/api/skills/hub/merge-requests/{id}/comments",
+            post(hub_comment_mr),
+        )
+        .route(
+            "/api/skills/hub/merge-requests/{id}/merge",
+            post(hub_merge_mr),
+        )
+        .route(
+            "/api/skills/hub/merge-requests/{id}/close",
+            post(hub_close_mr),
         )
         .route("/api/skills/{id}/publish", post(publish))
         .route("/api/skill-groups", get(list_groups).post(create_group))
@@ -266,6 +294,244 @@ async fn publish(
     .await
     .map(Json)
     .map_err(api_err)
+}
+
+// ── Public hub: handle, forks, merge requests, history ──────────────────
+
+async fn hub_handle(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
+    collab::my_handle(&state.db, &state.config.data_dir)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+#[derive(Deserialize)]
+struct HandleBody {
+    handle: String,
+}
+
+async fn hub_set_handle(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<HandleBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::set_handle(
+        &state.db,
+        &state.config.data_dir,
+        &actor(&user),
+        &body.handle,
+    )
+    .await
+    .map(Json)
+    .map_err(api_err)
+}
+
+async fn hub_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::skill_detail(&state.db, &state.config.data_dir, &name)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+async fn hub_history(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::history(&state.db, &name)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+async fn hub_forks(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::forks(&state.db, &name)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+#[derive(Deserialize, Default)]
+struct DiffQuery {
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+}
+
+async fn hub_diff(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<DiffQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::diff(&state.db, &name, &q.from, &q.to)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+#[derive(Deserialize)]
+struct ForkBody {
+    name: String,
+}
+
+async fn hub_fork(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<ForkBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let v = collab::fork(&state.db, &state.config.data_dir, &actor(&user), &body.name)
+        .await
+        .map_err(api_err)?;
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+async fn hub_sync_fork(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(fork): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::sync_fork(&state.db, &state.config.data_dir, &actor(&user), &fork)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+#[derive(Deserialize, Default)]
+struct MrListQuery {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    state: String,
+}
+
+async fn hub_list_mrs(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MrListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::list_merge_requests(&state.db, &state.config.data_dir, &q.role, &q.state)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+#[derive(Deserialize)]
+struct MrCreateBody {
+    fork: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+}
+
+async fn hub_create_mr(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(b): Json<MrCreateBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let v = collab::create_merge_request(
+        &state.db,
+        &state.config.data_dir,
+        &actor(&user),
+        &b.fork,
+        &b.title,
+        &b.description,
+    )
+    .await
+    .map_err(api_err)?;
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+/// Run the incoming merge-request poll now (the Merge requests tab does on
+/// open): `{open, new}`, plus the usual WS broadcast / push.
+async fn hub_check_mrs(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
+    collab::check_incoming(
+        &state.db,
+        &state.config.data_dir,
+        Some(&state.broadcaster),
+        Some(&state.push_service),
+    )
+    .await
+    .map(Json)
+    .map_err(api_err)
+}
+
+async fn hub_get_mr(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::get_merge_request(&state.db, id)
+        .await
+        .map(Json)
+        .map_err(api_err)
+}
+
+#[derive(Deserialize)]
+struct CommentBody {
+    body: String,
+}
+
+async fn hub_comment_mr(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<u64>,
+    Json(b): Json<CommentBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let v = collab::comment_merge_request(
+        &state.db,
+        &state.config.data_dir,
+        &actor(&user),
+        id,
+        &b.body,
+    )
+    .await
+    .map_err(api_err)?;
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+#[derive(Deserialize, Default)]
+struct MergeBody {
+    #[serde(default)]
+    publish: bool,
+    #[serde(default)]
+    bump: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+async fn hub_merge_mr(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<u64>,
+    Json(b): Json<MergeBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::merge_merge_request(
+        &state.db,
+        &state.config.data_dir,
+        &actor(&user),
+        id,
+        b.publish,
+        b.bump.as_deref(),
+        b.version.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(api_err)
+}
+
+async fn hub_close_mr(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<u64>,
+) -> Result<impl IntoResponse, ApiError> {
+    collab::close_merge_request(&state.db, &state.config.data_dir, &actor(&user), id)
+        .await
+        .map(Json)
+        .map_err(api_err)
 }
 
 // ── Groups ──────────────────────────────────────────────────────────────

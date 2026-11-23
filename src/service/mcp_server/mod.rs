@@ -705,7 +705,7 @@ mod tests {
         for t in handlers::SKILL_TOOL_NAMES {
             assert!(names.contains(t), "{t}");
         }
-        assert_eq!(names.len(), 138);
+        assert_eq!(names.len(), 148);
     }
 
     #[test]

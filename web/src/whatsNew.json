@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.1.160",
+    "date": "2026-11-23",
+    "highlights": [
+      "Publishing a skill to Peckboard Public now takes one click: it goes straight to skills.peckboard.com, no pull request needed.",
+      "Fork anyone's public skill, make it your own, and ask its author to merge your changes back.",
+      "Skill authors see incoming merge requests in Settings → Skills, with the changes side by side, and can merge them as a new version.",
+      "Every public skill now has a History tab showing each version and what changed."
+    ]
+  },
+  {
     "version": "0.1.158",
     "date": "2026-11-22",
     "highlights": [

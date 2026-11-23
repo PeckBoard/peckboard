@@ -86,6 +86,12 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "session_set_skills",
         "skill_publish",
         "skill_source_sync",
+        "skill_fork",
+        "skill_sync_fork",
+        "skill_merge_request_create",
+        "skill_merge_request_comment",
+        "skill_merge_request_merge",
+        "skill_merge_request_close",
     ]
 }
 
@@ -252,6 +258,10 @@ fn read_only_tool_names() -> &'static [&'static str] {
         "team_memory_list",
         "team_memory_get",
         "skill_read",
+        "skill_history",
+        "skill_diff",
+        "skill_merge_request_list",
+        "skill_merge_request_get",
     ]
 }
 
@@ -324,6 +334,16 @@ fn open_world_tool_names() -> &'static [&'static str] {
         "team_memory_get",
         "team_memory_add",
         "team_memory_update",
+        "skill_fork",
+        "skill_sync_fork",
+        "skill_history",
+        "skill_diff",
+        "skill_merge_request_create",
+        "skill_merge_request_list",
+        "skill_merge_request_get",
+        "skill_merge_request_comment",
+        "skill_merge_request_merge",
+        "skill_merge_request_close",
         "team_memory_remove",
     ]
 }

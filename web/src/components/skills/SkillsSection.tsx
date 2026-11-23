@@ -11,22 +11,48 @@ import SkillsBrowseTab from './SkillsBrowseTab'
 import SkillGroupsTab from './SkillGroupsTab'
 import SkillSourcesTab from './SkillSourcesTab'
 import TeamMemoryTab from './TeamMemoryTab'
-import { inUseVersion, SCOPE_LABEL, useSkillsStore, type Skill } from '../../store/skills'
+import MergeRequestsTab from './MergeRequestsTab'
+import AskMergeModal from './AskMergeModal'
+import {
+  forkParts,
+  inUseVersion,
+  SCOPE_LABEL,
+  syncFork,
+  useMergeRequestBadge,
+  useSkillsStore,
+  type Skill,
+  type SyncStatus,
+} from '../../store/skills'
 import type { MenuItem } from '../Dropdown'
 
-type Tab = 'installed' | 'browse' | 'groups' | 'sources' | 'memory'
+type Tab = 'installed' | 'browse' | 'merge-requests' | 'groups' | 'sources' | 'memory'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'installed', label: 'Installed' },
   { id: 'browse', label: 'Browse' },
+  { id: 'merge-requests', label: 'Merge requests' },
   { id: 'groups', label: 'Groups' },
   { id: 'sources', label: 'Sources' },
   { id: 'memory', label: 'Team memory' },
 ]
 
+const SYNC_MESSAGE: Record<SyncStatus, string> = {
+  up_to_date: 'Already up to date with the original.',
+  fast_forward: "Updated with the original's latest changes.",
+  merged: "The original's latest changes were merged into your fork.",
+  conflict:
+    "The original's changes clash with yours, so nothing changed. Edit your fork to match the original, or ask the author to merge it as it is.",
+}
+
 /** `?subscribe=<name>` — the peckboard.com "Add to Peckboard" link. */
 function subscribeParam(): string | null {
   return new URLSearchParams(window.location.search).get('subscribe')
+}
+
+/** `?tab=merge-requests` — where a merge-request notification lands. */
+function initialTab(): Tab {
+  const t = new URLSearchParams(window.location.search).get('tab')
+  return TABS.some((x) => x.id === t) ? (t as Tab) : 'installed'
 }
 
 /**
@@ -35,12 +61,26 @@ function subscribeParam(): string | null {
  */
 export default function SkillsSection() {
   const [deepLink] = useState(subscribeParam)
-  const [tab, setTab] = useState<Tab>(deepLink ? 'browse' : 'installed')
+  const [tab, setTab] = useState<Tab>(deepLink ? 'browse' : initialTab())
   const fetchAll = useSkillsStore((s) => s.fetchAll)
+  const badge = useMergeRequestBadge((s) => s.open)
+  const setBadge = useMergeRequestBadge((s) => s.setOpen)
+  const checkBadge = useMergeRequestBadge((s) => s.check)
 
   useEffect(() => {
     void fetchAll()
   }, [fetchAll])
+
+  // The badge: checked on open, then kept live by the server's poller.
+  useEffect(() => {
+    void checkBadge()
+    const onEvent = (e: Event) => {
+      const open = (e as CustomEvent<{ open?: number }>).detail?.open
+      if (typeof open === 'number') setBadge(open)
+    }
+    window.addEventListener('peckboard:skills-merge-requests', onEvent)
+    return () => window.removeEventListener('peckboard:skills-merge-requests', onEvent)
+  }, [checkBadge, setBadge])
 
   return (
     <div className="registry-panel-page" data-testid="settings-skills">
@@ -52,7 +92,7 @@ export default function SkillsSection() {
         Skills <HelpTip term="skill" /> are reusable instructions an agent loads when a job calls
         for them. Write your own, subscribe to shared ones, and give sessions the ones they need.
       </p>
-      <div className="registry-tabs" role="tablist">
+      <div className="registry-tabs skills-tabs" role="tablist">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -64,11 +104,20 @@ export default function SkillsSection() {
             onClick={() => setTab(t.id)}
           >
             {t.label}
+            {t.id === 'merge-requests' && badge > 0 && (
+              <span
+                className="plugin-badge plugin-badge--pending skills-tab-badge"
+                data-testid="skills-mr-badge"
+              >
+                {badge}
+              </span>
+            )}
           </button>
         ))}
       </div>
       {tab === 'installed' && <InstalledTab onBrowse={() => setTab('browse')} />}
       {tab === 'browse' && <SkillsBrowseTab initialName={deepLink} />}
+      {tab === 'merge-requests' && <MergeRequestsTab />}
       {tab === 'groups' && <SkillGroupsTab />}
       {tab === 'sources' && <SkillSourcesTab />}
       {tab === 'memory' && <TeamMemoryTab onAddSource={() => setTab('sources')} />}
@@ -90,6 +139,21 @@ function InstalledTab({ onBrowse }: { onBrowse: () => void }) {
   const [publishing, setPublishing] = useState<Skill | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirmError, setConfirmError] = useState<string | null>(null)
+  const [askMerge, setAskMerge] = useState<string | null>(null)
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
+
+  const doSync = (s: Skill) => {
+    setSyncBusy(true)
+    setSyncMessage(null)
+    syncFork(s.name)
+      .then((r) => {
+        setSyncMessage(SYNC_MESSAGE[r.status] ?? `Sync finished (${r.status}).`)
+        void fetchSkills()
+      })
+      .catch((e: Error) => setSyncMessage(e.message))
+      .finally(() => setSyncBusy(false))
+  }
 
   const q = query.trim().toLowerCase()
   const visible = skills.filter(
@@ -118,6 +182,20 @@ function InstalledTab({ onBrowse }: { onBrowse: () => void }) {
                   label: 'Publish…',
                   onSelect: () => setPublishing(s),
                   testId: `skill-publish-${s.name}`,
+                },
+              ]
+            : []),
+          ...(forkParts(s.name)
+            ? [
+                {
+                  label: 'Sync from original',
+                  onSelect: () => doSync(s),
+                  testId: `skill-sync-${s.name}`,
+                },
+                {
+                  label: 'Ask the author to merge…',
+                  onSelect: () => setAskMerge(s.name),
+                  testId: `skill-ask-merge-${s.name}`,
                 },
               ]
             : []),
@@ -154,6 +232,11 @@ function InstalledTab({ onBrowse }: { onBrowse: () => void }) {
           </button>
         </div>
       )}
+      {syncMessage && !open && (
+        <p className="form-hint" role="status" data-testid="skill-sync-result">
+          {syncMessage}
+        </p>
+      )}
       <List<Skill>
         items={visible}
         getKey={(s) => s.id}
@@ -167,6 +250,9 @@ function InstalledTab({ onBrowse }: { onBrowse: () => void }) {
             </span>
             <span className="list-view-meta">
               <span className="list-view-tag">{SCOPE_LABEL[s.scope]}</span>
+              {forkParts(s.name) && (
+                <span className="list-view-tag">Fork of {forkParts(s.name)?.base}</span>
+              )}
               <span>
                 v{inUseVersion(s)}
                 {s.subscribed ? (s.pinned_version ? ' (pinned)' : ' (latest)') : ''}
@@ -227,9 +313,21 @@ function InstalledTab({ onBrowse }: { onBrowse: () => void }) {
                 }
               : undefined
           }
+          onSync={forkParts(open.name) ? () => doSync(open) : undefined}
+          onAskMerge={
+            forkParts(open.name)
+              ? () => {
+                  setOpenId(null)
+                  setAskMerge(open.name)
+                }
+              : undefined
+          }
+          syncBusy={syncBusy}
+          syncMessage={syncMessage}
         />
       )}
       {publishing && <SkillPublishModal skill={publishing} onClose={() => setPublishing(null)} />}
+      {askMerge && <AskMergeModal fork={askMerge} onClose={() => setAskMerge(null)} />}
       {confirm && (
         <ConfirmDialog
           title={confirm.subscribed ? 'Unsubscribe' : 'Delete skill'}

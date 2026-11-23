@@ -222,19 +222,21 @@ export async function putSessionSkills(
 }
 
 /** `POST /api/skills/{id}/publish`. A team target commits + pushes the
- *  newest version; the public target writes it to the server's outbox and
- *  returns pull-request `instructions`. A guard rejection throws
- *  `GuardError`. */
+ *  newest version; the public target publishes it to Peckboard Public (the
+ *  hosted catalog) and returns its `url`. A content-check rejection, local
+ *  or on the public side, throws `GuardError`. */
 export interface PublishResult {
-  pr_url: string | null
   /** Repo path, `skills/<name>/<version>/SKILL.md`. */
-  path: string
+  path?: string
   source_id?: string
   /** Team: false when the repo already held this exact version. */
   committed?: boolean
-  /** Public: where the file was written on the Peckboard server. */
-  local_path?: string
-  instructions?: string
+  /** Public: the hub accepted it. */
+  published?: boolean
+  name?: string
+  version?: string
+  /** Public: where the published skill can be viewed. */
+  url?: string
 }
 
 export async function publishSkill(id: string, targetSourceId: string): Promise<PublishResult> {
@@ -244,6 +246,182 @@ export async function publishSkill(id: string, targetSourceId: string): Promise<
     }),
   )
 }
+// ── Peckboard Public: handle, forks, merge requests, history ─────────
+
+/** A hub handle: what this install's forks are named after. */
+export const HANDLE_RE = /^[a-z0-9-]{2,32}$/
+
+export interface HubHandle {
+  public_key: string
+  handle: string
+}
+
+export async function getHubHandle(): Promise<HubHandle> {
+  return readJson<HubHandle>(await authedFetch('/api/skills/hub/handle'))
+}
+
+export async function setHubHandle(handle: string): Promise<HubHandle> {
+  return readJson<HubHandle>(await send('/api/skills/hub/handle', 'PUT', { handle }))
+}
+
+/** `name@handle` → its parts; null for an original skill. */
+export function forkParts(name: string): { base: string; handle: string } | null {
+  const i = name.indexOf('@')
+  if (i <= 0) return null
+  return { base: name.slice(0, i), handle: name.slice(i + 1) }
+}
+
+export interface HubSkillDetail {
+  name: string
+  owner_handle: string
+  owner_key: string
+  /** A fork's original. */
+  parent?: string | null
+  latest: string | null
+  versions: string[]
+  description: string
+  /** This install owns it. */
+  mine: boolean
+  /** This install's fork of it, if it has one. */
+  my_fork: string | null
+}
+
+export async function getHubSkill(name: string): Promise<HubSkillDetail> {
+  const d = await readJson<HubSkillDetail>(
+    await authedFetch(`/api/skills/hub/skills/${encodeURIComponent(name)}`),
+  )
+  return { ...d, versions: d.versions ?? [], my_fork: d.my_fork ?? null, mine: !!d.mine }
+}
+
+export interface HubCommit {
+  commit: string
+  parents: string[]
+  author_key: string
+  author_handle: string
+  message: string
+  at: string
+  /** The version this commit published, if any. */
+  tag?: string | null
+}
+
+export async function getHubHistory(name: string): Promise<HubCommit[]> {
+  const res = await authedFetch(`/api/skills/hub/skills/${encodeURIComponent(name)}/history`)
+  return listOf<HubCommit>(await readJson(res), 'history')
+}
+
+export async function getHubDiff(name: string, from: string, to: string): Promise<string> {
+  const res = await authedFetch(
+    `/api/skills/hub/skills/${encodeURIComponent(name)}/diff${qs({ from, to })}`,
+  )
+  return (await readJson<{ diff?: string }>(res))?.diff ?? ''
+}
+
+/** Fork a public skill (or reuse this install's fork); returns the local,
+ *  editable copy. */
+export async function forkSkill(name: string): Promise<{ fork: string; skill: Skill }> {
+  return readJson(await send('/api/skills/hub/fork', 'POST', { name }))
+}
+
+export type SyncStatus = 'up_to_date' | 'fast_forward' | 'merged' | 'conflict'
+
+export async function syncFork(
+  fork: string,
+): Promise<{ status: SyncStatus; local_updated: boolean; skill: Skill | null }> {
+  return readJson(await send(`/api/skills/hub/forks/${encodeURIComponent(fork)}/sync`, 'POST'))
+}
+
+export type MrState = 'open' | 'merged' | 'closed'
+export type MrStateFilter = MrState | 'all'
+export type MrRole = 'incoming' | 'outgoing'
+
+export interface MrComment {
+  id: number
+  author_handle: string
+  author_key: string
+  body: string
+  at: string
+}
+
+export interface MergeRequest {
+  id: number
+  target: string
+  fork: string
+  title: string
+  description: string
+  state: MrState
+  author_key: string
+  author_handle: string
+  target_owner_key: string
+  base_commit: string
+  head_commit: string
+  mergeable: boolean
+  /** Detail only. */
+  diff?: string
+  comments?: MrComment[]
+  created_at: string
+  updated_at: string
+  merged_commit: string | null
+  merged_version: string | null
+}
+
+export async function listMergeRequests(
+  role: MrRole,
+  state: MrStateFilter,
+): Promise<MergeRequest[]> {
+  const res = await authedFetch(`/api/skills/hub/merge-requests${qs({ role, state })}`)
+  return listOf<MergeRequest>(await readJson(res), 'merge_requests')
+}
+
+export async function getMergeRequest(id: number): Promise<MergeRequest> {
+  return readJson<MergeRequest>(await authedFetch(`/api/skills/hub/merge-requests/${id}`))
+}
+
+export async function createMergeRequest(
+  fork: string,
+  title: string,
+  description: string,
+): Promise<{ merge_request: MergeRequest; published_version: string | null }> {
+  return readJson(
+    await send('/api/skills/hub/merge-requests', 'POST', { fork, title, description }),
+  )
+}
+
+export async function commentMergeRequest(id: number, body: string): Promise<MrComment> {
+  return readJson(await send(`/api/skills/hub/merge-requests/${id}/comments`, 'POST', { body }))
+}
+
+export async function mergeMergeRequest(
+  id: number,
+  opts: { publish: boolean; bump?: VersionBump },
+): Promise<{ merge_request: MergeRequest; local_updated: boolean }> {
+  return readJson(await send(`/api/skills/hub/merge-requests/${id}/merge`, 'POST', opts))
+}
+
+export async function closeMergeRequest(id: number): Promise<MergeRequest> {
+  return readJson(await send(`/api/skills/hub/merge-requests/${id}/close`, 'POST'))
+}
+
+/** Open merge requests into skills this install owns — the Merge requests
+ *  tab badge. Refreshed on demand and by the `skills-merge-requests` WS
+ *  event the server's poller broadcasts. */
+export const useMergeRequestBadge = create<{
+  open: number
+  setOpen: (n: number) => void
+  check: () => Promise<void>
+}>((set) => ({
+  open: 0,
+  setOpen: (n) => set({ open: n }),
+  check: async () => {
+    try {
+      const res = await readJson<{ open?: number }>(
+        await send('/api/skills/hub/merge-requests/check', 'POST'),
+      )
+      set({ open: res?.open ?? 0 })
+    } catch {
+      // No public source, or the hub is unreachable: no badge.
+    }
+  },
+}))
 
 // ── Cached state: installed skills, groups, sources ──────────────────
 

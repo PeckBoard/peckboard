@@ -4,10 +4,10 @@ import { test, expect, type Page, type Route } from '@playwright/test'
  * The Skills docs page (docs/skills.md) and its client-side catalog search
  * (docs/assets/js/skills-search.js). The public index and SKILL.md files
  * are served from mocks via route interception, so the spec never depends
- * on raw.githubusercontent.com.
+ * on skills.peckboard.com.
  */
 
-const RAW = 'https://raw.githubusercontent.com/PeckBoard/skills/main/'
+const RAW = 'https://skills.peckboard.com/'
 
 const INDEX = {
   schema: 1,

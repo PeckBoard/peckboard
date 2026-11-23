@@ -120,6 +120,100 @@ impl BoxIdentity {
         let msg = identity_message(&self.public_key(), nonce, rendezvous_id, exporter);
         self.signing.sign(&msg).to_bytes()
     }
+
+    /// Sign a skills-hub publish (see [`skills_publish_message`]): the
+    /// hub's challenge nonce makes it single-use, the digest binds the exact
+    /// `SKILL.md`. The context prefix keeps it disjoint from every other
+    /// message this key signs.
+    pub fn sign_skills_publish(&self, nonce: &str, skill_sha256_hex: &str) -> [u8; 64] {
+        self.signing
+            .sign(&skills_publish_message(nonce, skill_sha256_hex))
+            .to_bytes()
+    }
+
+    /// Sign one signed-header skills-hub request (see
+    /// [`skills_request_message`]).
+    pub fn sign_request(
+        &self,
+        method: &str,
+        path: &str,
+        nonce: &str,
+        body_sha256_hex: &str,
+    ) -> [u8; 64] {
+        self.signing
+            .sign(&skills_request_message(
+                method,
+                path,
+                nonce,
+                body_sha256_hex,
+            ))
+            .to_bytes()
+    }
+}
+
+const SKILLS_PUBLISH_CONTEXT: &str = "peckboard-skills-publish-v1\n";
+
+/// What a box signs to publish a skill to the hub (skills.peckboard.com):
+/// `"peckboard-skills-publish-v1\n" + nonce + "\n" + hex(sha256(SKILL.md))`.
+pub fn skills_publish_message(nonce: &str, skill_sha256_hex: &str) -> Vec<u8> {
+    format!("{SKILLS_PUBLISH_CONTEXT}{nonce}\n{skill_sha256_hex}").into_bytes()
+}
+
+/// Hub-side check of [`BoxIdentity::sign_skills_publish`]; false on any
+/// malformed or weak key or non-canonical signature.
+pub fn verify_skills_publish(
+    identity_key: &[u8; 32],
+    nonce: &str,
+    skill_sha256_hex: &str,
+    signature: &[u8; 64],
+) -> bool {
+    let Ok(vk) = VerifyingKey::from_bytes(identity_key) else {
+        return false;
+    };
+    if vk.is_weak() {
+        return false;
+    }
+    vk.verify_strict(
+        &skills_publish_message(nonce, skill_sha256_hex),
+        &Signature::from_bytes(signature),
+    )
+    .is_ok()
+}
+const SKILLS_REQUEST_CONTEXT: &str = "peckboard-skills-request-v1\n";
+
+/// What a box signs for any other signed skills-hub write (the
+/// `X-Peck-Signature` header): `"peckboard-skills-request-v1\n" + METHOD +
+/// "\n" + PATH + "\n" + nonce + "\n" + hex(sha256(body))`. `path` has no
+/// query string.
+pub fn skills_request_message(
+    method: &str,
+    path: &str,
+    nonce: &str,
+    body_sha256_hex: &str,
+) -> Vec<u8> {
+    format!("{SKILLS_REQUEST_CONTEXT}{method}\n{path}\n{nonce}\n{body_sha256_hex}").into_bytes()
+}
+
+/// Hub-side check of [`BoxIdentity::sign_request`].
+pub fn verify_skills_request(
+    identity_key: &[u8; 32],
+    method: &str,
+    path: &str,
+    nonce: &str,
+    body_sha256_hex: &str,
+    signature: &[u8; 64],
+) -> bool {
+    let Ok(vk) = VerifyingKey::from_bytes(identity_key) else {
+        return false;
+    };
+    if vk.is_weak() {
+        return false;
+    }
+    vk.verify_strict(
+        &skills_request_message(method, path, nonce, body_sha256_hex),
+        &Signature::from_bytes(signature),
+    )
+    .is_ok()
 }
 
 /// Bytes a box signs with its identity key to prove possession on one

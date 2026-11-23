@@ -2,7 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import List from '../List'
 import Modal from '../Modal'
 import EmptyState from '../EmptyState'
-import { SCOPE_LABEL, searchCatalog, useSkillsStore, type CatalogSkill } from '../../store/skills'
+import SkillEditorModal from './SkillEditorModal'
+import HubHistory from './HubHistory'
+import {
+  forkSkill,
+  getHubSkill,
+  SCOPE_LABEL,
+  searchCatalog,
+  useSkillsStore,
+  type CatalogSkill,
+  type HubSkillDetail,
+  type Skill,
+} from '../../store/skills'
 
 const keyOf = (s: CatalogSkill) => `${s.source_id ?? 'local'}:${s.name}`
 
@@ -200,11 +211,29 @@ function CatalogDetailModal({
   onSubscribed: () => void
 }) {
   const subscribe = useSkillsStore((s) => s.subscribe)
+  const fetchSkills = useSkillsStore((s) => s.fetchSkills)
   const [version, setVersion] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<'overview' | 'history'>('overview')
+  const [hub, setHub] = useState<HubSkillDetail | null>(null)
+  const [forked, setForked] = useState<Skill | null>(null)
   const versions = skill.available_versions.length > 0 ? skill.available_versions : [skill.version]
   const canSubscribe = !!skill.source_id && !skill.subscribed
+  const isPublic = skill.scope === 'public'
+
+  // Who owns it on Peckboard Public, and whether this PeckBoard already
+  // has a fork: decides between "Fork and edit" and "Edit my fork".
+  useEffect(() => {
+    if (!isPublic) return
+    let cancelled = false
+    getHubSkill(skill.name)
+      .then((d) => !cancelled && setHub(d))
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [isPublic, skill.name])
 
   const doSubscribe = () => {
     if (!skill.source_id) return
@@ -219,12 +248,33 @@ function CatalogDetailModal({
       .finally(() => setBusy(false))
   }
 
+  const doFork = () => {
+    setBusy(true)
+    setError(null)
+    forkSkill(skill.name)
+      .then((res) => {
+        void fetchSkills()
+        setForked({ ...res.skill, tags: res.skill.tags ?? [], groups: res.skill.groups ?? [] })
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false))
+  }
+
+  // Forked: straight into the editor; saving stores a new version of the
+  // fork, and publishing it publishes to the fork.
+  if (forked) return <SkillEditorModal skill={forked} onClose={onClose} />
+
   return (
-    <Modal onClose={onClose} maxWidth={560} data-testid="skill-catalog-modal">
+    <Modal
+      onClose={onClose}
+      maxWidth={view === 'history' ? 820 : 560}
+      data-testid="skill-catalog-modal"
+    >
       <h2>{skill.name}</h2>
       <div className="skill-detail-meta">
         <span className="list-view-tag">{SCOPE_LABEL[skill.scope]}</span>
         <span className="list-view-tag">{sourceLabel}</span>
+        {hub?.owner_handle && <span className="list-view-tag">by {hub.owner_handle}</span>}
         {skill.tags.map((t) => (
           <span key={t} className="list-view-tag">
             #{t}
@@ -237,27 +287,48 @@ function CatalogDetailModal({
         ))}
       </div>
       {skill.description && <p className="form-hint">{skill.description}</p>}
-      {skill.source_id && (
-        <div className="form-field">
-          <label className="form-label" htmlFor="skill-catalog-version">
-            Version
-          </label>
-          <select
-            id="skill-catalog-version"
-            className="form-input"
-            value={version}
-            disabled={!canSubscribe}
-            onChange={(e) => setVersion(e.target.value)}
-            data-testid="skill-version-select"
-          >
-            <option value="">Latest (v{versions[0]}) — follow new releases</option>
-            {versions.map((v) => (
-              <option key={v} value={v}>
-                v{v} — stay on this version
-              </option>
-            ))}
-          </select>
+      {isPublic && hub && (
+        <div className="registry-tabs" role="tablist">
+          {(['overview', 'history'] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={view === v}
+              className={`registry-tab ${view === v ? 'registry-tab--active' : ''}`}
+              onClick={() => setView(v)}
+              data-testid={`skill-catalog-tab-${v}`}
+            >
+              {v === 'overview' ? 'Overview' : 'History'}
+            </button>
+          ))}
         </div>
+      )}
+      {view === 'history' && hub ? (
+        <HubHistory name={skill.name} versions={hub.versions.length ? hub.versions : versions} />
+      ) : (
+        skill.source_id && (
+          <div className="form-field">
+            <label className="form-label" htmlFor="skill-catalog-version">
+              Version
+            </label>
+            <select
+              id="skill-catalog-version"
+              className="form-input"
+              value={version}
+              disabled={!canSubscribe}
+              onChange={(e) => setVersion(e.target.value)}
+              data-testid="skill-version-select"
+            >
+              <option value="">Latest (v{versions[0]}) — follow new releases</option>
+              {versions.map((v) => (
+                <option key={v} value={v}>
+                  v{v} — stay on this version
+                </option>
+              ))}
+            </select>
+          </div>
+        )
       )}
       {error && (
         <p className="form-error" role="alert" data-testid="skill-subscribe-error">
@@ -275,6 +346,17 @@ function CatalogDetailModal({
         <button type="button" className="btn-secondary" onClick={onClose}>
           Close
         </button>
+        {hub && !hub.mine && (
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy}
+            onClick={doFork}
+            data-testid="skill-fork"
+          >
+            {hub.my_fork ? 'Edit my fork' : 'Fork and edit'}
+          </button>
+        )}
         <button
           type="button"
           className="btn-primary"
@@ -282,7 +364,7 @@ function CatalogDetailModal({
           onClick={doSubscribe}
           data-testid="skill-subscribe"
         >
-          {busy ? 'Subscribing…' : 'Subscribe'}
+          {busy ? 'Working…' : 'Subscribe'}
         </button>
       </div>
     </Modal>

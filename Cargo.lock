@@ -4464,7 +4464,7 @@ dependencies = [
 
 [[package]]
 name = "peckboard"
-version = "0.1.159"
+version = "0.1.160"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4511,6 +4511,7 @@ dependencies = [
  "peckboard-ollama-plugin",
  "peckboard-openai-compat-plugin",
  "peckboard-relay",
+ "peckboard-skill-format",
  "qrcode",
  "rand 0.8.6",
  "rand_core 0.10.1",
@@ -4660,6 +4661,15 @@ dependencies = [
  "tokio-util",
  "tracing",
  "webpki-roots 1.0.7",
+]
+
+[[package]]
+name = "peckboard-skill-format"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "semver",
+ "serde",
 ]
 
 [[package]]

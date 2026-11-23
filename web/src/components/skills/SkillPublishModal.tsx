@@ -19,9 +19,9 @@ interface Props {
 
 /**
  * Share a local skill's newest version. A team repository gets it committed
- * and pushed; the public catalog gets it written to this server's outbox,
- * with the steps to open the pull request. The proprietary-content guard runs
- * first either way, and its findings are listed here.
+ * and pushed; Peckboard Public (the hosted catalog) publishes it right away,
+ * signed by this install. The proprietary-content check runs first either
+ * way (and again on the public side); its findings are listed here.
  */
 export default function SkillPublishModal({ skill, onClose }: Props) {
   const sources = useSkillsStore((s) => s.sources)
@@ -67,8 +67,8 @@ export default function SkillPublishModal({ skill, onClose }: Props) {
         <>
           <p className="form-hint">
             Publishes the newest version. Teammates subscribed to a team repository get it on their
-            next sync; the public catalog takes a pull request. The text is checked for secrets and
-            internal details first.
+            next sync; Peckboard Public puts it in the public catalog for everyone. The text is
+            checked for secrets and internal details first.
           </p>
           <div className="form-field">
             <label className="form-label" htmlFor="skill-publish-target">
@@ -159,24 +159,18 @@ function PublishDone({ source, res }: { source: SkillSource; res: PublishResult 
   }
   return (
     <div className="skill-publish-result" data-testid="skill-publish-result" role="status">
-      <p>Ready for {source.name}. One step left: open a pull request.</p>
-      {res.instructions && <p className="form-hint">{res.instructions}</p>}
-      <p className="form-hint">
-        Path in the repository: <code>{res.path}</code>
-      </p>
-      {res.local_path && (
-        <p className="form-hint">
-          File on this Peckboard server:{' '}
-          <code data-testid="skill-publish-local-path">{res.local_path}</code>
-        </p>
-      )}
-      {res.pr_url && (
+      <p>Published to Peckboard Public.</p>
+      {res.url && (
         <p>
-          <a href={res.pr_url} target="_blank" rel="noreferrer">
-            Open the pull request
+          <a href={res.url} target="_blank" rel="noreferrer" data-testid="skill-publish-link">
+            View {res.name ?? 'the skill'} v{res.version}
           </a>
         </p>
       )}
+      <p className="form-hint">
+        It shows up in the public catalog within a minute. Published versions can't change: to
+        update it, edit the skill and publish the new version.
+      </p>
     </div>
   )
 }

@@ -16,6 +16,12 @@ interface Props {
   onEdit?: () => void
   /** Local skills only: opens the publish dialog. */
   onPublish?: () => void
+  /** A fork you own: bring in the original's new changes. */
+  onSync?: () => void
+  /** A fork you own: open a merge request into the original. */
+  onAskMerge?: () => void
+  syncBusy?: boolean
+  syncMessage?: string | null
 }
 
 const byVersionDesc = (a: string, b: string) => compareVersions(b, a)
@@ -25,7 +31,16 @@ const byVersionDesc = (a: string, b: string) => compareVersions(b, a)
  * text and a diff between two versions. A subscription's pinned version is
  * changed here ("Latest" follows each new release).
  */
-export default function SkillDetailModal({ skill, onClose, onEdit, onPublish }: Props) {
+export default function SkillDetailModal({
+  skill,
+  onClose,
+  onEdit,
+  onPublish,
+  onSync,
+  onAskMerge,
+  syncBusy,
+  syncMessage,
+}: Props) {
   const setPinnedVersion = useSkillsStore((s) => s.setPinnedVersion)
   const [pinBusy, setPinBusy] = useState(false)
   const [pinError, setPinError] = useState<string | null>(null)
@@ -104,6 +119,11 @@ export default function SkillDetailModal({ skill, onClose, onEdit, onPublish }: 
         </div>
       )}
 
+      {syncMessage && (
+        <p className="form-hint" role="status" data-testid="skill-sync-result">
+          {syncMessage}
+        </p>
+      )}
       <SkillVersionViewer skillId={skill.id} versions={versions} initial={inUseVersion(skill)} />
 
       <div className="form-actions">
@@ -125,6 +145,27 @@ export default function SkillDetailModal({ skill, onClose, onEdit, onPublish }: 
             data-testid="skill-detail-publish"
           >
             Publish…
+          </button>
+        )}
+        {onSync && (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onSync}
+            disabled={syncBusy}
+            data-testid="skill-detail-sync"
+          >
+            {syncBusy ? 'Syncing…' : 'Sync from original'}
+          </button>
+        )}
+        {onAskMerge && (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onAskMerge}
+            data-testid="skill-detail-ask-merge"
+          >
+            Ask the author to merge…
           </button>
         )}
         <button type="button" className="btn-primary" onClick={onClose}>

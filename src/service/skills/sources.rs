@@ -28,8 +28,12 @@ use super::format::{self, SkillDoc};
 use crate::db::Db;
 use crate::db::models::SkillSourceRow;
 
-/// The default public catalog the migration seeds as source `public`.
-pub const DEFAULT_PUBLIC_INDEX_URL: &str =
+/// The default public catalog: the hosted registry, which also takes
+/// publishes (see `super::hub`).
+pub const DEFAULT_PUBLIC_INDEX_URL: &str = "https://skills.peckboard.com/index.json";
+/// What the skills migration seeded as source `public`'s URL, before the
+/// hosted registry; [`effective_url`] reads it as the default.
+const LEGACY_PUBLIC_INDEX_URL: &str =
     "https://raw.githubusercontent.com/PeckBoard/skills/main/index.json";
 /// Overrides the seeded public source's URL at runtime (e2e mock index).
 pub const INDEX_URL_ENV: &str = "PECKBOARD_SKILLS_INDEX_URL";
@@ -95,13 +99,18 @@ fn schema_one() -> u32 {
 }
 
 /// The URL a public source is read from: the env override wins for the
-/// seeded source.
+/// seeded source, and a seeded source still on the old GitHub catalog URL
+/// reads the hosted registry.
 pub fn effective_url(source: &SkillSourceRow) -> String {
-    if source.id == PUBLIC_SOURCE_ID
-        && let Ok(u) = std::env::var(INDEX_URL_ENV)
-        && !u.trim().is_empty()
-    {
-        return u.trim().to_string();
+    if source.id == PUBLIC_SOURCE_ID {
+        if let Ok(u) = std::env::var(INDEX_URL_ENV)
+            && !u.trim().is_empty()
+        {
+            return u.trim().to_string();
+        }
+        if source.url == LEGACY_PUBLIC_INDEX_URL {
+            return DEFAULT_PUBLIC_INDEX_URL.to_string();
+        }
     }
     source.url.clone()
 }
@@ -112,6 +121,15 @@ fn base_url(index_url: &str) -> String {
         Some((base, _)) => format!("{base}/"),
         None => format!("{index_url}/"),
     }
+}
+
+/// The hub a public source publishes to: its index URL without
+/// `/index.json` (`https://skills.peckboard.com`), so the
+/// `PECKBOARD_SKILLS_INDEX_URL` override points publishing at a test hub too.
+pub fn hub_base_url(source: &SkillSourceRow) -> String {
+    base_url(&effective_url(source))
+        .trim_end_matches('/')
+        .to_string()
 }
 
 async fn http_get_text(url: &str, cap: usize) -> anyhow::Result<String> {
@@ -628,6 +646,27 @@ mod tests {
             base_url("https://raw.githubusercontent.com/PeckBoard/skills/main/index.json"),
             "https://raw.githubusercontent.com/PeckBoard/skills/main/"
         );
+        let source = |id: &str, url: &str| SkillSourceRow {
+            id: id.into(),
+            kind: "public".into(),
+            name: id.into(),
+            url: url.into(),
+            branch: "main".into(),
+            secret_ref: None,
+            last_sync_at: None,
+            last_error: None,
+            created_at: String::new(),
+        };
+        assert_eq!(
+            hub_base_url(&source("other", "http://127.0.0.1:9/hub/index.json")),
+            "http://127.0.0.1:9/hub"
+        );
+        // The seeded source still on the old GitHub URL reads the hub.
+        if std::env::var_os(INDEX_URL_ENV).is_none() {
+            let seeded = source(PUBLIC_SOURCE_ID, LEGACY_PUBLIC_INDEX_URL);
+            assert_eq!(effective_url(&seeded), DEFAULT_PUBLIC_INDEX_URL);
+            assert_eq!(hub_base_url(&seeded), "https://skills.peckboard.com");
+        }
     }
 
     #[test]

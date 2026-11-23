@@ -288,6 +288,14 @@ export const useWsStore = create<WsState>((set, get) => ({
         window.dispatchEvent(new CustomEvent('peckboard:device-update', { detail: msg }))
         return
       }
+      if (msg.type === 'skills-merge-requests') {
+        // Incoming hub merge-request counts (`{open, new}`) for the Skills
+        // → Merge requests badge.
+        window.dispatchEvent(
+          new CustomEvent('peckboard:skills-merge-requests', { detail: msg.data ?? {} }),
+        )
+        return
+      }
       if (msg.type === 'restart-pending') {
         // A server restart is parked until idle (or just fired). Counts
         // only; the banner renders it for every connected client.

@@ -6,6 +6,7 @@
 //! - [`format`]: `SKILL.md` / memory frontmatter, names, semver bumps.
 //! - [`guard`]: the proprietary-content check on anything leaving the host.
 //! - [`sources`]: public index fetch, team repo clone / sync / commit+push.
+//! - [`hub`]: publishing to the hosted public registry (signed challenge).
 //! - [`session`]: per-session resolution (direct + via groups, at pinned
 //!   versions) and how a spawn sees the result.
 //!
@@ -15,8 +16,10 @@
 //! edit stores a new, bumped version; a remote skill's versions are cached
 //! as they are fetched.
 
+pub mod collab;
 pub mod format;
 pub mod guard;
+pub mod hub;
 pub mod session;
 pub mod sources;
 
@@ -49,6 +52,14 @@ pub enum SkillError {
     Proprietary(Vec<Finding>),
     /// A source could not be reached / read.
     Upstream(String),
+    /// The public skills hub refused a publish: its HTTP-ish `status`, the
+    /// hub's `code` (`name_taken`, `rate_limited`, …) and a plain-words
+    /// `message` (see `hub`).
+    Refused {
+        status: u16,
+        code: String,
+        message: String,
+    },
     Internal(anyhow::Error),
 }
 
@@ -92,7 +103,8 @@ impl std::fmt::Display for SkillError {
             | SkillError::BadRequest(m)
             | SkillError::Forbidden(m)
             | SkillError::Conflict(m)
-            | SkillError::Upstream(m) => f.write_str(m),
+            | SkillError::Upstream(m)
+            | SkillError::Refused { message: m, .. } => f.write_str(m),
             SkillError::Proprietary(findings) => {
                 let parts: Vec<String> = findings
                     .iter()
@@ -118,17 +130,23 @@ impl SkillError {
             SkillError::Conflict(_) => 409,
             SkillError::Proprietary(_) => 422,
             SkillError::Upstream(_) => 502,
+            SkillError::Refused { status, .. } => *status,
             SkillError::Internal(_) => 500,
         }
     }
-
-    /// The JSON error body (`{error}`; the guard's
     /// `{error:"proprietary_content", findings}`).
+    /// The JSON error body (`{error}`; the guard's
+    /// `{error:"proprietary_content", findings}`; a hub refusal's
+    /// `{error, code}`).
     pub fn body(&self) -> serde_json::Value {
         match self {
             SkillError::Proprietary(findings) => serde_json::json!({
                 "error": "proprietary_content",
                 "findings": findings,
+            }),
+            SkillError::Refused { code, message, .. } => serde_json::json!({
+                "error": message,
+                "code": code,
             }),
             other => serde_json::json!({ "error": other.to_string() }),
         }
@@ -602,6 +620,10 @@ pub struct UpdateSkill {
     pub body: Option<String>,
     #[serde(default)]
     pub bump: Option<String>,
+    /// An exact new version (must be newer than the current one); wins
+    /// over `bump`.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// `PUT /api/skills/{id}` — store a new immutable version (bump defaults to
@@ -629,7 +651,8 @@ pub async fn update(
     let content_change = input.description.is_some()
         || input.tags.is_some()
         || input.body.is_some()
-        || input.bump.is_some();
+        || input.bump.is_some()
+        || input.version.is_some();
     if content_change {
         let head = db
             .get_skill_version(&s.id, &s.version)
@@ -642,8 +665,26 @@ pub async fn update(
         let tags = input.tags.unwrap_or_else(|| parse_tags(&s.tags));
         let body = input.body.unwrap_or(head.body);
         validate_meta(&description, &tags, Some(&body))?;
-        let next = format::bump_version(&s.version, input.bump.as_deref().unwrap_or("patch"))
-            .map_err(bad)?;
+        let next = match input
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            Some(v) => {
+                let parsed = semver::Version::parse(v)
+                    .map_err(|_| bad(format!("version '{v}' is not semver")))?;
+                if semver::Version::parse(&s.version).is_ok_and(|head| parsed <= head) {
+                    return Err(bad(format!(
+                        "version {v} must be newer than the current {}",
+                        s.version
+                    )));
+                }
+                parsed.to_string()
+            }
+            None => format::bump_version(&s.version, input.bump.as_deref().unwrap_or("patch"))
+                .map_err(bad)?,
+        };
         db.add_skill_version(
             version_row(&s.id, &next, &body),
             true,
@@ -1022,9 +1063,8 @@ pub async fn search(
 // ── Publish ─────────────────────────────────────────────────────────────
 
 /// `POST /api/skills/{id}/publish` — share the skill's newest version to a
-/// team source (commit + push) or prepare it for the public repo (written to
-/// `<data_dir>/skills/public-outbox/` with PR instructions). The guard runs
-/// first either way.
+/// team source (commit + push) or to the hosted public registry (signed with
+/// this install's identity, see [`hub`]). The guard runs first either way.
 pub async fn publish(
     db: &Db,
     data_dir: &Path,
@@ -1117,20 +1157,24 @@ pub async fn publish(
             }))
         }
         _ => {
-            let outbox = data_dir.join("skills").join("public-outbox");
-            let local = sources::write_skill(&outbox, &doc)
-                .map_err(|e| SkillError::Conflict(e.to_string()))?;
-            sources::write_index(&outbox)?;
+            // The hosted registry runs the same content check again on its
+            // side; a refusal there comes back as the same findings.
+            let identity = hub::identity(db, data_dir).await?;
+            let published = hub::publish(
+                &sources::hub_base_url(&target),
+                &identity,
+                &doc.name,
+                &doc.version,
+                &format::serialize_skill(&doc),
+            )
+            .await?;
             Ok(serde_json::json!({
-                "pr_url": null,
+                "published": true,
+                "name": published.name,
+                "version": published.version,
+                "url": published.url,
                 "path": repo_path,
-                "local_path": local.to_string_lossy(),
-                "instructions": format!(
-                    "Passed the proprietary-content check. To publish, open a pull request \
-                     against github.com/PeckBoard/skills adding `{repo_path}` (the file is \
-                     ready at the local_path on the Peckboard server; the repo's CI \
-                     regenerates index.json)."
-                ),
+                "source_id": target.id,
             }))
         }
     }

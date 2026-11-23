@@ -12,7 +12,17 @@ use serde_json::{Value, json};
 
 use super::super::McpToolRegistry;
 use crate::service::mcp_server::context::{McpToolDef, ToolCallContext};
-use crate::service::skills::{self, Actor, SkillError};
+use crate::service::skills::{self, Actor, SkillError, collab};
+
+/// A merge request id (`id`, a number or a numeric string).
+fn mr_id(args: &Value, tool: &str) -> anyhow::Result<u64> {
+    match args.get("id") {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| anyhow::anyhow!("{tool} requires a numeric 'id'"))
+}
 
 /// Every skills tool name, in definition order.
 pub(crate) const SKILL_TOOL_NAMES: &[&str] = &[
@@ -40,6 +50,16 @@ pub(crate) const SKILL_TOOL_NAMES: &[&str] = &[
     "team_memory_update",
     "team_memory_remove",
     "skill_read",
+    "skill_fork",
+    "skill_sync_fork",
+    "skill_history",
+    "skill_diff",
+    "skill_merge_request_create",
+    "skill_merge_request_list",
+    "skill_merge_request_get",
+    "skill_merge_request_comment",
+    "skill_merge_request_merge",
+    "skill_merge_request_close",
 ];
 
 fn e(err: SkillError) -> anyhow::Error {
@@ -237,11 +257,26 @@ impl McpToolRegistry {
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
                     bump: s(&args, "bump").map(str::to_string),
+                    version: s(&args, "version").map(str::to_string),
                 };
                 let v = skills::update(db, &actor, &skill.id, input)
                     .await
                     .map_err(e)?;
-                Ok(json!({ "status": "ok", "skill": skills::compact(&v) }))
+                let publish = args
+                    .get("publish")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| collab::fork_parts(&skill.name).is_some());
+                let published = if publish {
+                    let source = collab::public_source(db).await.map_err(e)?;
+                    Some(
+                        skills::publish(db, &data_dir(ctx)?, &actor, &skill.id, &source.id)
+                            .await
+                            .map_err(e)?,
+                    )
+                } else {
+                    None
+                };
+                Ok(json!({ "status": "ok", "skill": skills::compact(&v), "published": published }))
             }
             "skill_delete" => {
                 let actor = Actor::for_session(db, &ctx.session_id).await?;
@@ -438,6 +473,90 @@ impl McpToolRegistry {
                     .map_err(e)?;
                 Ok(json!({ "status": "ok", "removed": slug }))
             }
+            "skill_fork" => {
+                let actor = Actor::for_session(db, &ctx.session_id).await?;
+                collab::fork(db, &data_dir(ctx)?, &actor, req(&args, "name", tool)?)
+                    .await
+                    .map_err(e)
+            }
+            "skill_sync_fork" => {
+                let actor = Actor::for_session(db, &ctx.session_id).await?;
+                collab::sync_fork(db, &data_dir(ctx)?, &actor, req(&args, "name", tool)?)
+                    .await
+                    .map_err(e)
+            }
+            "skill_history" => collab::history(db, req(&args, "name", tool)?)
+                .await
+                .map_err(e),
+            "skill_diff" => collab::diff(
+                db,
+                req(&args, "name", tool)?,
+                req(&args, "from", tool)?,
+                req(&args, "to", tool)?,
+            )
+            .await
+            .map_err(e),
+            "skill_merge_request_create" => {
+                let actor = Actor::for_session(db, &ctx.session_id).await?;
+                collab::create_merge_request(
+                    db,
+                    &data_dir(ctx)?,
+                    &actor,
+                    req(&args, "name", tool)?,
+                    req(&args, "title", tool)?,
+                    s(&args, "description").unwrap_or(""),
+                )
+                .await
+                .map_err(e)
+            }
+            "skill_merge_request_list" => {
+                let list = collab::list_merge_requests(
+                    db,
+                    &data_dir(ctx)?,
+                    s(&args, "role").unwrap_or("incoming"),
+                    s(&args, "state").unwrap_or("open"),
+                )
+                .await
+                .map_err(e)?;
+                Ok(json!({ "merge_requests": list }))
+            }
+            "skill_merge_request_get" => collab::get_merge_request(db, mr_id(&args, tool)?)
+                .await
+                .map_err(e),
+            "skill_merge_request_comment" => {
+                let actor = Actor::for_session(db, &ctx.session_id).await?;
+                collab::comment_merge_request(
+                    db,
+                    &data_dir(ctx)?,
+                    &actor,
+                    mr_id(&args, tool)?,
+                    req(&args, "body", tool)?,
+                )
+                .await
+                .map_err(e)
+            }
+            "skill_merge_request_merge" => {
+                let actor = Actor::for_session(db, &ctx.session_id).await?;
+                collab::merge_merge_request(
+                    db,
+                    &data_dir(ctx)?,
+                    &actor,
+                    mr_id(&args, tool)?,
+                    args.get("publish")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    s(&args, "bump"),
+                    s(&args, "version"),
+                )
+                .await
+                .map_err(e)
+            }
+            "skill_merge_request_close" => {
+                let actor = Actor::for_session(db, &ctx.session_id).await?;
+                collab::close_merge_request(db, &data_dir(ctx)?, &actor, mr_id(&args, tool)?)
+                    .await
+                    .map_err(e)
+            }
             _ => anyhow::bail!("unknown tool: {tool}"),
         }
     }
@@ -540,14 +659,16 @@ pub(crate) fn tool_definitions() -> Vec<McpToolDef> {
         ),
         def(
             "skill_update",
-            "Edit a local skill. Content changes store a NEW immutable version (`bump`: patch (default) | minor | major); a groups-only change re-tags without one.",
+            "Edit a local skill or a fork you own. Content changes store a NEW immutable version (`bump`: patch (default) | minor | major, or an exact `version`); a groups-only change re-tags without one. `publish`: also publish the new version to Peckboard Public (default true for a fork, false otherwise).",
             obj(
                 with(json!({
                     "description": { "type": "string" },
                     "body": { "type": "string" },
                     "tags": strs("Replaces the tags."),
                     "groups": strs("Replaces the local groups."),
-                    "bump": { "type": "string", "enum": ["patch", "minor", "major"] }
+                    "bump": { "type": "string", "enum": ["patch", "minor", "major"] },
+                    "version": { "type": "string", "description": "Exact new version, newer than the current one." },
+                    "publish": { "type": "boolean" }
                 })),
                 &[],
             ),
@@ -630,7 +751,7 @@ pub(crate) fn tool_definitions() -> Vec<McpToolDef> {
         ),
         def(
             "skill_publish",
-            "Publish a skill's newest version to a source (target_source_id or target_source_name): a team repo gets a commit + push; the public catalog gets a prepared file + PR instructions. Refused when the proprietary-content check finds secrets, emails, internal hosts/IPs or home paths.",
+            "Publish a skill's newest version to a source (target_source_id or target_source_name): a team repo gets a commit + push; the public catalog (skills.peckboard.com) publishes it at once, signed by this install, and returns {published, name, version, url}. Published public versions can't change, and a name belongs to the install that first published it. Refused when the proprietary-content check finds secrets, emails, internal hosts/IPs or home paths.",
             obj(
                 with(json!({
                     "target_source_id": { "type": "string" },
@@ -691,6 +812,89 @@ pub(crate) fn tool_definitions() -> Vec<McpToolDef> {
             "skill_read",
             "Load the full instructions of a skill assigned to this session (listed under Available Skills in your system prompt). Read it before doing the work it covers.",
             obj(json!({ "name": { "type": "string" } }), &["name"]),
+        ),
+        def(
+            "skill_fork",
+            "Fork a public skill you don't own, then edit the fork like a local skill (named <name>@<your handle>). skill_update with publish=true publishes the fork.",
+            obj(
+                json!({ "name": { "type": "string", "description": "The original skill's name." } }),
+                &["name"],
+            ),
+        ),
+        def(
+            "skill_sync_fork",
+            "Bring the original skill's new changes into your fork and its local copy. Publish the fork's own edits first.",
+            obj(
+                json!({ "name": { "type": "string", "description": "Fork name, <name>@<handle>." } }),
+                &["name"],
+            ),
+        ),
+        def(
+            "skill_history",
+            "A public skill's or fork's history on Peckboard Public: commits, newest first, with the version each one published.",
+            obj(json!({ "name": { "type": "string" } }), &["name"]),
+        ),
+        def(
+            "skill_diff",
+            "Unified diff of a public skill's SKILL.md between two revisions: a version (1.2.0), a commit id, or main.",
+            obj(
+                json!({ "name": { "type": "string" }, "from": { "type": "string" }, "to": { "type": "string" } }),
+                &["name", "from", "to"],
+            ),
+        ),
+        def(
+            "skill_merge_request_create",
+            "Ask the original skill's author to merge your fork. Unpublished edits to the fork are published first.",
+            obj(
+                json!({
+                    "name": { "type": "string", "description": "Fork name, <name>@<handle>." },
+                    "title": { "type": "string" },
+                    "description": { "type": "string" }
+                }),
+                &["name", "title"],
+            ),
+        ),
+        def(
+            "skill_merge_request_list",
+            "List merge requests: incoming (into skills this PeckBoard owns) or outgoing (from its forks).",
+            obj(
+                json!({
+                    "role": { "type": "string", "enum": ["incoming", "outgoing"] },
+                    "state": { "type": "string", "enum": ["open", "merged", "closed", "all"] }
+                }),
+                &[],
+            ),
+        ),
+        def(
+            "skill_merge_request_get",
+            "Read one merge request: its diff, comments and whether it still merges cleanly.",
+            obj(json!({ "id": { "type": "integer" } }), &["id"]),
+        ),
+        def(
+            "skill_merge_request_comment",
+            "Comment on a merge request you opened or one into your skill.",
+            obj(
+                json!({ "id": { "type": "integer" }, "body": { "type": "string" } }),
+                &["id", "body"],
+            ),
+        ),
+        def(
+            "skill_merge_request_merge",
+            "Merge a merge request into your skill. publish=true also publishes it as a new version (bump: patch|minor|major, or an exact version).",
+            obj(
+                json!({
+                    "id": { "type": "integer" },
+                    "publish": { "type": "boolean" },
+                    "bump": { "type": "string", "enum": ["patch", "minor", "major"] },
+                    "version": { "type": "string" }
+                }),
+                &["id"],
+            ),
+        ),
+        def(
+            "skill_merge_request_close",
+            "Close a merge request without merging it.",
+            obj(json!({ "id": { "type": "integer" } }), &["id"]),
         ),
     ]
 }

@@ -4,9 +4,16 @@ import type { FileDiff } from './chat/events'
 /** Collapsible unified-diff card for a `file-diff` event: collapsed it shows
  *  the path and +/− counts; expanded, the diff body with hunk coloring.
  *  Rendered under the edit/write tool card it belongs to, or standalone when
- *  the matching card isn't in the transcript. */
-export default function DiffBlock({ diff }: { diff: FileDiff }) {
-  const [expanded, setExpanded] = useState(false)
+ *  the matching card isn't in the transcript (and for skill merge requests /
+ *  history, opened with `defaultExpanded`). */
+export default function DiffBlock({
+  diff,
+  defaultExpanded = false,
+}: {
+  diff: FileDiff
+  defaultExpanded?: boolean
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
   const lines = diff.diff === '' ? [] : diff.diff.split('\n')
   const hasBody = lines.length > 0
 

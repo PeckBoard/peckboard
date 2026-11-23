@@ -445,6 +445,19 @@ pub async fn run_server(
     // forever).
     crate::service::retention::spawn_sweeper(state.clone());
 
+    // Skills hub: poll for merge requests into skills this install owns
+    // (push + `skills-merge-requests` WS event on a new one). Skipped with
+    // PECKBOARD_NO_RESUME=1 like the other schedulers; the Merge requests
+    // tab still checks on demand.
+    if !no_resume {
+        crate::service::skills::collab::spawn_poller(
+            state.db.clone(),
+            state.config.data_dir.clone(),
+            state.broadcaster.clone(),
+            state.push_service.clone(),
+        );
+    }
+
     // Temp-session orphan sweep: delete temp sessions no tab points at
     // anymore (a client died between create and tab-open, or a
     // last-tab-close delete failed mid-way). One-shot at boot; failures
