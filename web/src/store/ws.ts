@@ -384,6 +384,15 @@ export const useWsStore = create<WsState>((set, get) => ({
         return
       }
 
+      if (msg.type === 'folder-memory') {
+        // A folder's long-term memory changed. The Memory modal refetches.
+        const folderId = (msg.data as { folder_id?: string } | undefined)?.folder_id
+        if (folderId) {
+          window.dispatchEvent(new CustomEvent('peckboard:folder-memory', { detail: { folderId } }))
+        }
+        return
+      }
+
       if (msg.type === 'session-cleared') {
         // Server wiped this session's events + todos. Two event caches
         // need to drop the snapshot in lockstep — `useWsStore`'s

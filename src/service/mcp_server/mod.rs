@@ -104,6 +104,7 @@ impl McpToolRegistry {
             "delete_plan" => self.handle_delete_plan(args, ctx).await,
             "memory_add" => self.handle_memory_add(args, ctx).await,
             "memory_list" => self.handle_memory_list(args, ctx).await,
+            "memory_read" => self.handle_memory_read(args, ctx).await,
             "memory_update" => self.handle_memory_update(args, ctx).await,
             "memory_remove" => self.handle_memory_remove(args, ctx).await,
             "memory_compact" => self.handle_memory_compact(args, ctx).await,
@@ -649,6 +650,7 @@ mod tests {
         // Per-session durable memory pool.
         assert!(names.contains(&"memory_add"));
         assert!(names.contains(&"memory_list"));
+        assert!(names.contains(&"memory_read"));
         assert!(names.contains(&"memory_update"));
         assert!(names.contains(&"memory_remove"));
         assert!(names.contains(&"memory_compact"));
@@ -705,7 +707,7 @@ mod tests {
         for t in handlers::SKILL_TOOL_NAMES {
             assert!(names.contains(t), "{t}");
         }
-        assert_eq!(names.len(), 148);
+        assert_eq!(names.len(), 149);
     }
 
     #[test]

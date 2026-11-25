@@ -1645,6 +1645,9 @@ pub struct SessionMemory {
     pub content: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Short-term note: deleted once this time passes. `None` = never
+    /// expires (every note written before short-term memory existed).
+    pub expires_at: Option<String>,
 }
 
 #[derive(Insertable, Debug, Default)]
@@ -1653,6 +1656,37 @@ pub struct NewSessionMemory {
     pub id: String,
     pub session_id: String,
     pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub expires_at: Option<String>,
+}
+
+/// One long-term memory note of a folder: architecture, a design decision,
+/// code structure, project layout, or a working convention. Shared by every
+/// session in the folder, rendered into their system prompt on spawn, never
+/// expires; deleted with the folder (FK cascade).
+#[derive(Queryable, Selectable, Serialize, Debug, Clone, PartialEq, Eq)]
+#[diesel(table_name = folder_memories)]
+pub struct FolderMemory {
+    pub id: String,
+    pub folder_id: String,
+    pub category: String,
+    pub title: String,
+    pub content: String,
+    pub source_session_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Insertable, Debug, Default)]
+#[diesel(table_name = folder_memories)]
+pub struct NewFolderMemory {
+    pub id: String,
+    pub folder_id: String,
+    pub category: String,
+    pub title: String,
+    pub content: String,
+    pub source_session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

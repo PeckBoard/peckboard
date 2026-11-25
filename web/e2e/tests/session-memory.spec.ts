@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '../harness'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * End-to-end for the per-session memory pool.
@@ -140,4 +141,195 @@ test('agent memory survives Clear session and can be deleted from the Memory mod
   await page.keyboard.press('Escape')
   const del = await request.delete(`/api/sessions/${session.id}`, { headers: auth })
   expect(del.ok(), `delete session failed: ${await del.text()}`).toBeTruthy()
+})
+
+// Screenshots for a visual check of the dialog and the setting (light,
+// dark, narrow). Written next to the repo; not asserted on.
+const SHOTS = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../.tmp-memory-shots',
+)
+
+async function shoot(page: Page, name: string, target: ReturnType<Page['getByTestId']>) {
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme })
+    await target.screenshot({ path: path.join(SHOTS, `${name}-${scheme}.png`) })
+  }
+  await page.emulateMedia({ colorScheme: null })
+}
+
+async function makeFolder(request: APIRequestContext, auth: Record<string, string>) {
+  const folderPath = mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-memory-'))
+  const res = await request.post('/api/folders', {
+    headers: auth,
+    data: { name: `e2e-memory-${Date.now()}`, path: folderPath },
+  })
+  expect(res.ok(), `create folder failed: ${await res.text()}`).toBeTruthy()
+  return ((await res.json()) as { id: string }).id
+}
+
+async function makeSession(
+  request: APIRequestContext,
+  auth: Record<string, string>,
+  folderId: string,
+  name: string,
+) {
+  const res = await request.post('/api/sessions', {
+    headers: auth,
+    data: { name, folder_id: folderId, model: 'mock:mcp' },
+  })
+  expect(res.ok(), `create session failed: ${await res.text()}`).toBeTruthy()
+  return ((await res.json()) as { id: string }).id
+}
+
+async function openMemory(page: Page) {
+  await expect(page.locator('.chat-toolbar')).toBeVisible({ timeout: 10_000 })
+  await page.getByTestId('chat-toolbar-menu').click()
+  await page.getByTestId('chat-menu-memory').click()
+  const modal = page.getByTestId('session-memory-modal')
+  await expect(modal).toBeVisible()
+  return modal
+}
+
+test('a short-term note shows how long it has left', async ({ request, page }) => {
+  const { token, auth } = await authenticate(request)
+  const folder = await makeFolder(request, auth)
+  const session = await makeSession(request, auth, folder, 'short-term note')
+  const note = 'Halfway through the login refactor'
+  const sendRes = await request.post(`/api/sessions/${session}/message`, {
+    headers: auth,
+    data: { text: `note\n${mcpBlock('memory_add', { content: note })}`, model: 'mock:mcp' },
+  })
+  expect(sendRes.ok(), `send message failed: ${await sendRes.text()}`).toBeTruthy()
+  await expect
+    .poll(async () => (await listMemories(request, auth, session)).length, { timeout: 15_000 })
+    .toBe(1)
+
+  await loadAt(page, token, `/sessions/${session}`)
+  const modal = await openMemory(page)
+  const row = modal.getByTestId('session-memory-row')
+  await expect(row).toContainText(note)
+  // A fresh note: a whole lifetime ahead, not fading, not in the kept group.
+  await expect(row.getByTestId('session-memory-expiry')).toHaveText(/^expires in \d+(h|d)$/)
+  await expect(row.getByTestId('session-memory-fading')).toHaveCount(0)
+  await expect(modal.getByTestId('session-memory-kept-heading')).toHaveCount(0)
+  await shoot(page, 'session-tab', modal)
+  await page.setViewportSize({ width: 380, height: 800 })
+  await shoot(page, 'session-tab-narrow', modal)
+})
+
+test('a long-term note is shared by every session in the folder and can be edited and deleted', async ({
+  request,
+  page,
+}) => {
+  const { token, auth } = await authenticate(request)
+  const folder = await makeFolder(request, auth)
+  const first = await makeSession(request, auth, folder, 'long-term writer')
+  const second = await makeSession(request, auth, folder, 'long-term reader')
+
+  // 1. Add a note from the first session's dialog.
+  await loadAt(page, token, `/sessions/${first}`)
+  let modal = await openMemory(page)
+  await modal.getByTestId('memory-tab-folder').click()
+  await expect(modal.getByTestId('folder-memory-empty')).toBeVisible()
+  await modal.getByTestId('folder-memory-add-empty').click()
+  // Saving with nothing filled in names the missing fields inline.
+  await modal.getByTestId('folder-memory-save').click()
+  await expect(modal.getByTestId('folder-memory-title-error')).toBeVisible()
+  await expect(modal.getByTestId('folder-memory-content-error')).toBeVisible()
+  await modal.getByTestId('folder-memory-category').selectOption('decision')
+  await modal.getByTestId('folder-memory-title').fill('SQLite over Postgres')
+  await modal.getByTestId('folder-memory-content').fill('One embedded binary, no server to run.')
+  await modal.getByTestId('folder-memory-save').click()
+  await expect(modal.getByTestId('folder-memory-editor')).toHaveCount(0)
+  const decisionGroup = modal.getByTestId('folder-memory-group-decision')
+  await expect(decisionGroup).toContainText('Design decisions')
+  await expect(decisionGroup.getByTestId('folder-memory-row')).toContainText('SQLite over Postgres')
+  await page.keyboard.press('Escape')
+  await expect(modal).toHaveCount(0)
+
+  // 2. The second session in the same folder sees it.
+  await page.goto(`/sessions/${second}`)
+  modal = await openMemory(page)
+  await modal.getByTestId('memory-tab-folder').click()
+  const row = modal.getByTestId('folder-memory-row')
+  await expect(row).toHaveCount(1)
+  await expect(row).toContainText('SQLite over Postgres')
+  await expect(row).toContainText('One embedded binary, no server to run.')
+  await shoot(page, 'folder-tab', modal)
+
+  // 3. Edit: new title and category; the note moves to its new group.
+  await row.getByTestId('folder-memory-edit').click()
+  await expect(modal.getByTestId('folder-memory-category')).toHaveValue('decision')
+  await shoot(page, 'folder-tab-editing', modal)
+  await modal.getByTestId('folder-memory-category').selectOption('architecture')
+  await modal.getByTestId('folder-memory-title').fill('Single embedded SQLite database')
+  await modal.getByTestId('folder-memory-save').click()
+  await expect(modal.getByTestId('folder-memory-group-decision')).toHaveCount(0)
+  const archGroup = modal.getByTestId('folder-memory-group-architecture')
+  await expect(archGroup).toContainText('Architecture')
+  await expect(archGroup.getByTestId('folder-memory-row')).toContainText(
+    'Single embedded SQLite database',
+  )
+  const listed = await request.get(`/api/folders/${folder}/memories`, { headers: auth })
+  const body = (await listed.json()) as { memories: { title: string; category: string }[] }
+  expect(body.memories.map((m) => [m.category, m.title])).toEqual([
+    ['architecture', 'Single embedded SQLite database'],
+  ])
+
+  // 4. Delete, after confirming.
+  await modal.getByTestId('folder-memory-delete').click()
+  const confirm = page.getByTestId('confirm-delete-folder-memory')
+  await expect(confirm).toBeVisible()
+  await confirm.getByTestId('confirm-dialog-confirm').click()
+  await expect(confirm).toHaveCount(0)
+  await expect(modal.getByTestId('folder-memory-row')).toHaveCount(0)
+  await expect(modal.getByTestId('folder-memory-empty')).toBeVisible()
+  const after = await request.get(`/api/folders/${folder}/memories`, { headers: auth })
+  expect(((await after.json()) as { memories: unknown[] }).memories).toEqual([])
+})
+
+test('the short-term memory lifetime setting saves and rejects an out-of-range value', async ({
+  request,
+  page,
+}) => {
+  const { token, auth } = await authenticate(request)
+  const before = await request.get('/api/settings/memory', { headers: auth })
+  expect(before.ok(), `get memory settings failed: ${await before.text()}`).toBeTruthy()
+  const original = (await before.json()) as {
+    short_term_hours: number
+    min_hours: number
+    max_hours: number
+  }
+
+  await loadAt(page, token, '/settings/chat')
+  const section = page.getByTestId('memory-settings-section')
+  await expect(section).toBeVisible({ timeout: 15_000 })
+  const input = section.getByTestId('memory-short-term-hours')
+  await expect(input).toHaveValue(String(original.short_term_hours))
+
+  // Out of range: inline error, Save disabled, nothing saved.
+  await input.fill(String(original.max_hours + 1))
+  await expect(section.getByTestId('memory-short-term-hours-error')).toContainText(
+    `from ${original.min_hours} to ${original.max_hours}`,
+  )
+  await expect(section.getByTestId('memory-settings-save')).toBeDisabled()
+  await shoot(page, 'setting-error', section)
+
+  // In range: saves.
+  const next = original.short_term_hours === 12 ? 13 : 12
+  await input.fill(String(next))
+  await expect(section.getByTestId('memory-short-term-hours-error')).toHaveCount(0)
+  await section.getByTestId('memory-settings-save').click()
+  await expect(section).toContainText('Saved.')
+  const saved = await request.get('/api/settings/memory', { headers: auth })
+  expect(((await saved.json()) as { short_term_hours: number }).short_term_hours).toBe(next)
+  await shoot(page, 'setting', section)
+
+  // Restore for later specs.
+  const restore = await request.put('/api/settings/memory', {
+    headers: auth,
+    data: { short_term_hours: original.short_term_hours },
+  })
+  expect(restore.status()).toBe(204)
 })

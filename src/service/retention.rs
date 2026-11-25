@@ -44,6 +44,14 @@ pub async fn run_sweep(state: &AppState) {
     ) {
         tracing::warn!("Retention sweep: report prune failed: {e:#}");
     }
+    // Short-term memory notes past their time. Readers already skip them;
+    // this is what actually deletes the rows. Not an admin retention bound:
+    // it always runs.
+    match state.db.purge_expired_session_memories().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Retention sweep: deleted {n} expired short-term memory notes"),
+        Err(e) => tracing::warn!("Retention sweep: memory purge failed: {e:#}"),
+    }
 }
 
 /// Delete repeating-task run sessions past the configured age and/or

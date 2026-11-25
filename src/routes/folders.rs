@@ -110,6 +110,17 @@ fn user_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // per-repo diff viewer. Same audience and jail as `/api/repos`:
         // the tree is only served when the scan itself found it.
         .route("/api/repos/diff", get(repo_diff))
+        // A folder's long-term memory. Any authenticated user may already
+        // start a session in a folder, and that session's agent reads and
+        // writes these notes, so editing them here widens nothing.
+        .route(
+            "/api/folders/{id}/memories",
+            get(list_folder_memories).post(create_folder_memory),
+        )
+        .route(
+            "/api/folders/{id}/memories/{memory_id}",
+            delete(delete_folder_memory).patch(update_folder_memory),
+        )
 }
 
 /// Moving a session cancels its running agent and repoints the workspace
@@ -1055,6 +1066,126 @@ async fn repo_diff(
     }
 }
 
+#[derive(Deserialize)]
+struct FolderMemoryBody {
+    category: Option<String>,
+    title: Option<String>,
+    content: Option<String>,
+}
+
+fn memory_error(
+    status: StatusCode,
+    msg: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({ "error": msg.to_string() })),
+    )
+}
+
+/// 404 unless `folder_id` names a registered folder.
+async fn require_folder(
+    state: &AppState,
+    folder_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match state.db.get_folder(folder_id).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(memory_error(StatusCode::NOT_FOUND, "folder not found")),
+        Err(e) => Err(memory_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+/// Tell open UIs that a folder's long-term memory changed.
+fn broadcast_folder_memory(state: &AppState, folder_id: &str) {
+    state
+        .broadcaster
+        .broadcast(crate::ws::broadcaster::WsEvent {
+            event_type: "folder-memory".into(),
+            session_id: String::new(),
+            data: serde_json::json!({ "folder_id": folder_id }),
+        });
+}
+
+/// GET /api/folders/:id/memories → `{ "memories": [...], "categories": [...] }`:
+/// the folder's long-term memory, grouped by category.
+async fn list_folder_memories(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    require_folder(&state, &id).await?;
+    match state.db.list_folder_memories(&id).await {
+        Ok(memories) => Ok(Json(serde_json::json!({
+            "memories": memories,
+            "categories": crate::db::crud::FOLDER_MEMORY_CATEGORIES,
+        }))),
+        Err(e) => Err(memory_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+/// POST /api/folders/:id/memories `{category, title, content}` → 201 + the note.
+async fn create_folder_memory(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<FolderMemoryBody>,
+) -> impl IntoResponse {
+    require_folder(&state, &id).await?;
+    let note = state
+        .db
+        .add_folder_memory(
+            &id,
+            body.category.as_deref().unwrap_or_default(),
+            body.title.as_deref().unwrap_or_default(),
+            body.content.as_deref().unwrap_or_default(),
+            None,
+        )
+        .await
+        .map_err(|e| memory_error(StatusCode::BAD_REQUEST, e))?;
+    broadcast_folder_memory(&state, &id);
+    Ok::<_, (StatusCode, Json<serde_json::Value>)>((StatusCode::CREATED, Json(note)))
+}
+
+/// PATCH /api/folders/:id/memories/:memory_id `{category?, title?, content?}`
+/// → the changed note, or 404 when it is not a note of this folder.
+async fn update_folder_memory(
+    State(state): State<Arc<AppState>>,
+    Path((id, memory_id)): Path<(String, String)>,
+    Json(body): Json<FolderMemoryBody>,
+) -> impl IntoResponse {
+    let updated = state
+        .db
+        .update_folder_memory(
+            &id,
+            &memory_id,
+            body.category.as_deref(),
+            body.title.as_deref(),
+            body.content.as_deref(),
+        )
+        .await
+        .map_err(|e| memory_error(StatusCode::BAD_REQUEST, e))?;
+    match updated {
+        Some(note) => {
+            broadcast_folder_memory(&state, &id);
+            Ok(Json(note))
+        }
+        None => Err(memory_error(StatusCode::NOT_FOUND, "memory not found")),
+    }
+}
+
+/// DELETE /api/folders/:id/memories/:memory_id → 204, or 404 when it is not
+/// a note of this folder.
+async fn delete_folder_memory(
+    State(state): State<Arc<AppState>>,
+    Path((id, memory_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.db.remove_folder_memories(&id, &[memory_id]).await {
+        Ok(0) => Err(memory_error(StatusCode::NOT_FOUND, "memory not found")),
+        Ok(_) => {
+            broadcast_folder_memory(&state, &id);
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => Err(memory_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

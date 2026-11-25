@@ -54,6 +54,7 @@ import MfaSetupModal, { MfaActionModal } from './MfaSetupModal'
 import UserManagement from './UserManagement'
 import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
+import MemorySettingsSection from './MemorySettingsSection'
 import RetentionSettingsSection from './RetentionSettingsSection'
 import LinkPreviewSettingsSection from './LinkPreviewSettingsSection'
 import TlsSettingsSection from './TlsSettingsSection'
@@ -394,6 +395,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'Link Previews',
     anchor: 'link-previews',
     keywords: 'link preview embed youtube auto-load trusted hosts screenshot unfurl',
+  },
+  {
+    page: 'chat',
+    section: 'Agent Memory',
+    anchor: 'memory',
+    keywords: 'memory notes short-term long-term expire hours forget remember',
   },
   {
     page: 'prompts',
@@ -1556,6 +1563,7 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
               )}
             </section>
             <LinkPreviewSettingsSection isAdmin={isAdmin} />
+            {isAdmin && <MemorySettingsSection />}
           </>
         )}
 

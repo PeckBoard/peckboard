@@ -20,6 +20,7 @@ mod doc_review_anchors;
 mod doc_reviews;
 mod env_vars;
 mod events;
+mod folder_memories;
 mod folders;
 mod grok_accounts;
 mod kimi_accounts;
@@ -64,6 +65,10 @@ pub use cards::CardOverview;
 pub use claude_accounts::AccountModelUsage;
 pub use custom_workflows::{CustomWorkflowWithSteps, WorkflowReference};
 pub use doc_reviews::RESOLUTION_ACTIONS;
+pub use folder_memories::{
+    FOLDER_MEMORY_CATEGORIES, MAX_FOLDER_MEMORY_CHARS, MAX_FOLDER_MEMORY_ENTRIES,
+    MAX_FOLDER_MEMORY_TITLE_CHARS,
+};
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use oauth_clients::{EXTERNAL_MCP_SEAL_REASON, OAuthClientView, oauth_ts};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
@@ -71,7 +76,8 @@ pub use remote_device_enrollments::{
     ActivateAttempt, EnrollAttempt, EnrollOutcome, EnrollRefusal, rfc3339_after,
 };
 pub use session_memories::{
-    MAX_MEMORY_ENTRIES, MAX_MEMORY_ENTRY_CHARS, MAX_MEMORY_TOTAL_CHARS, render_memory_prompt,
+    DEFAULT_SHORT_TERM_HOURS, MAX_MEMORY_ENTRIES, MAX_MEMORY_ENTRY_CHARS, MAX_MEMORY_TOTAL_CHARS,
+    MAX_SHORT_TERM_HOURS, MIN_SHORT_TERM_HOURS, memory_is_faded, render_memory_prompt,
 };
 #[cfg(test)]
 pub(crate) use session_views::insert_layout as session_views_insert_layout;

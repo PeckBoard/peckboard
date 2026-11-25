@@ -487,6 +487,11 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // request counts (numbers only) for the Skills
                             // badge; not tied to a session.
                             | "skills-merge-requests"
+                            // folder-memory: a folder's long-term memory
+                            // changed — the folder id only, never note
+                            // text — so a Memory dialog open on any session
+                            // of that folder can reload.
+                            | "folder-memory"
                     );
 
                     let should_send = if is_global {

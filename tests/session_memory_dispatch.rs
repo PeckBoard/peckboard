@@ -1,7 +1,8 @@
-//! The session memory pool must reach the provider on every dispatch as a
-//! "Session memory" section of the per-spawn system-prompt suffix — that is
-//! what makes the pool visible to the agent after a clear, a resume, or a
-//! compaction. An empty pool must add nothing (no prompt tokens spent).
+//! Memory must reach the provider on every dispatch as the "Memory" section
+//! of the per-spawn system-prompt suffix: the rules for long- and short-term
+//! notes (always), the folder's long-term notes and the session's own notes.
+//! That is what makes memory visible to the agent after a clear, a resume,
+//! or a compaction.
 
 use std::sync::Arc;
 
@@ -140,21 +141,27 @@ async fn memory_pool_is_appended_to_the_spawn_prompt_suffix() {
         .await
         .expect("completion rx available");
 
-    // Empty pool: nothing is added, the caller's suffix passes through.
-    assert_eq!(
-        dispatch_and_read_suffix(&state, &mut completion_rx, None).await,
-        serde_json::Value::Null,
-        "an empty pool must not add a section"
-    );
+    // Nothing remembered yet: the rules still reach the agent (that is how
+    // every provider learns what to save where), but no empty note lists.
+    let rules = dispatch_and_read_suffix(&state, &mut completion_rx, None).await;
+    let rules = rules.as_str().expect("memory rules always present");
+    assert!(rules.contains("# Memory"), "got: {rules}");
+    assert!(rules.contains("**Long-term**") && rules.contains("**Short-term**"));
+    assert!(!rules.contains("## "), "no empty sections: {rules}");
 
-    let a = state
+    let kept = state
         .db
         .add_session_memory("s1", "user prefers tabs")
         .await
         .unwrap();
-    let b = state
+    let short = state
         .db
-        .add_session_memory("s1", "deploy target is prod-eu")
+        .add_short_term_memory("s1", "deploying to prod-eu", 24)
+        .await
+        .unwrap();
+    let long = state
+        .db
+        .add_folder_memory("f1", "architecture", "One binary", "axum + sqlite", None)
         .await
         .unwrap();
 
@@ -170,14 +177,20 @@ async fn memory_pool_is_appended_to_the_spawn_prompt_suffix() {
         text.starts_with("# Repeating Task Context\n"),
         "caller's suffix stays first: {text}"
     );
-    assert!(text.contains("# Session memory"), "got: {text}");
     assert!(
-        text.contains(&format!("- [{}] user prefers tabs", a.id)),
-        "got: {text}"
+        text.contains(&format!("- [{}] **One binary** — axum + sqlite", long.id)),
+        "the folder's long-term note: {text}"
     );
     assert!(
-        text.contains(&format!("- [{}] deploy target is prod-eu", b.id)),
-        "got: {text}"
+        text.contains(&format!(
+            "- [{}] deploying to prod-eu (expires in 24h)",
+            short.id
+        )),
+        "the session's short-term note: {text}"
+    );
+    assert!(
+        text.contains(&format!("- [{}] user prefers tabs", kept.id)),
+        "a note without expiry: {text}"
     );
 
     std::mem::forget(folder);

@@ -233,6 +233,7 @@ fn read_only_tool_names() -> &'static [&'static str] {
         "parse_web",
         "search_web",
         "memory_list",
+        "memory_read",
         "search_files",
         "list_files",
         "read_file",
@@ -529,13 +530,27 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "memory_add".into(),
-                description: "Save one durable note to this session's memory pool. The pool is injected into your system prompt (as a 'Session memory' section listing every entry with its id) whenever the session starts fresh — after a clear, a resume, or a context compaction — so it is the ONLY thing that survives those. Use it for facts you will need again and cannot re-derive cheaply: user preferences and conventions, decisions and their reasons, project facts (ports, paths, accounts, names), and open commitments. Do NOT store transient progress, tool output, or anything already in the repo. Keep each entry a short self-contained sentence or two; one fact per entry. Call memory_compact when the pool grows past a dozen entries or starts repeating itself.".into(),
+                description: "Save one note to memory. Two kinds. term=\"short\" (default): a note for THIS session about what is happening now — the current task and where it stands, open commitments, context you need to carry on after a clear, resume or compaction. It is deleted a set time after it was last written (24 hours unless configured); memory_update restarts its clock. term=\"long\": a note for the FOLDER, shared by every session working in it, never expires — architecture, design decisions and their reasons, code structure, how the project is laid out, working conventions and user preferences that hold beyond this session; needs a title and a category. Both kinds are injected into your system prompt (the 'Memory' section, each entry with its id) whenever a session starts fresh. Do NOT store tool output, credentials, or anything the repo's own docs already say. Keep each note short and self-contained; one fact per note.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "content": {
                             "type": "string",
                             "description": "The note to remember (short, self-contained, one fact)."
+                        },
+                        "term": {
+                            "type": "string",
+                            "enum": ["short", "long"],
+                            "description": "short (default) = this session, expires; long = this folder, shared, permanent."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Long-term notes only (required): a one-line title."
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": ["architecture", "decision", "structure", "layout", "convention"],
+                            "description": "Long-term notes only (required): architecture; decision (a design decision and why); structure (how the code is organised); layout (where things live in the project); convention (working rules and user preferences)."
                         }
                     },
                     "required": ["content"],
@@ -544,7 +559,7 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "memory_list".into(),
-                description: "List this session's memory pool: every entry with its id, plus counts and size limits. Use it to find ids for memory_update / memory_remove, or to re-read the pool when the injected 'Session memory' section may be stale (you added entries this conversation).".into(),
+                description: "List memory in full: this session's notes (short-term ones with their expiry, and whether they are fading) and, under long_term, the folder's long-term notes. Use it to find ids for memory_update / memory_remove, to read a fading note in full, or to re-read memory when the injected 'Memory' section may be stale.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {},
@@ -552,28 +567,46 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                 }),
             },
             McpToolDef {
-                name: "memory_update".into(),
-                description: "Rewrite one memory entry in place (same id, new content). Use when a remembered fact changed — a preference flipped, a decision was revised — instead of adding a contradicting entry. Ids come from the injected 'Session memory' section or memory_list; only this session's ids are accepted.".into(),
+                name: "memory_read".into(),
+                description: "Read one memory note in full by id. Use it when the 'Memory' section lists long-term notes by title only, or shows a short-term note as a one-line mention.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "description": "Id of the entry to rewrite." },
-                        "content": { "type": "string", "description": "The replacement note." }
+                        "id": { "type": "string", "description": "Id of the note to read." }
                     },
-                    "required": ["id", "content"],
+                    "required": ["id"],
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "memory_update".into(),
+                description: "Rewrite one memory note in place (same id). For a short-term note this also restarts its clock — rewrite a note you still need before it expires. For a long-term note you may change the content, title or category; use it when a remembered fact changed instead of adding a contradicting note. Ids come from the injected 'Memory' section or memory_list; only this session's notes and this folder's long-term notes are accepted.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Id of the note to rewrite." },
+                        "content": { "type": "string", "description": "The replacement note (required for a session note)." },
+                        "title": { "type": "string", "description": "Long-term notes only: new title." },
+                        "category": {
+                            "type": "string",
+                            "enum": ["architecture", "decision", "structure", "layout", "convention"],
+                            "description": "Long-term notes only: new category."
+                        }
+                    },
+                    "required": ["id"],
                     "additionalProperties": false
                 }),
             },
             McpToolDef {
                 name: "memory_remove".into(),
-                description: "Delete memory entries by id. Use for notes that are no longer true or no longer needed. All-or-nothing: an id that is not in this session's pool fails the call and nothing is removed.".into(),
+                description: "Delete memory notes by id — session notes or the folder's long-term notes. Use for notes that are no longer true or no longer needed. Removing a long-term note removes it for every session in the folder. All-or-nothing: an unknown id fails the call and nothing is removed.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "ids": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Ids of the entries to delete."
+                            "description": "Ids of the notes to delete."
                         }
                     },
                     "required": ["ids"],
@@ -582,14 +615,14 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
             },
             McpToolDef {
                 name: "memory_compact".into(),
-                description: "Replace the ENTIRE memory pool with a condensed set of entries, atomically (one transaction: either every new entry is saved and every old one is gone, or nothing changes). Use when the pool has grown large, repeats itself, or holds stale notes: read it (memory_list), merge related facts, drop obsolete ones, and pass the result. Every old entry not restated here is lost, so carry forward everything still true. Pass an empty array to forget everything.".into(),
+                description: "Replace ALL of this session's short-term notes with a condensed set, atomically (one transaction: either every new note is saved and every old short-term note is gone, or nothing changes). Use when the notes have grown large, repeat themselves, or are stale: read them (memory_list), merge related facts, drop obsolete ones, and pass the result. Every short-term note not restated here is lost, so carry forward everything still needed. The new notes start a fresh clock. Long-term notes and older notes without an expiry are not touched. Pass an empty array to drop every short-term note.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "entries": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "The complete new pool, one note per string, in the order they should be listed."
+                            "description": "The complete new set of short-term notes, one per string, in the order they should be listed."
                         }
                     },
                     "required": ["entries"],

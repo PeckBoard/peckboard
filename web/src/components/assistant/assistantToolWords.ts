@@ -128,6 +128,7 @@ export function describeTool(
     case 'memory_update':
     case 'memory_remove':
     case 'memory_list':
+    case 'memory_read':
       return 'Checking my notes…'
     default:
       return `Using ${tool.name.replace(/_/g, ' ')}…`

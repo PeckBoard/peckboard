@@ -143,6 +143,10 @@ fn admin_router() -> Router<Arc<AppState>> {
             "/api/settings/retention",
             get(get_retention).put(set_retention),
         )
+        .route(
+            "/api/settings/memory",
+            get(get_memory_settings).put(set_memory_settings),
+        )
         .route("/api/settings/tls", get(get_tls))
         .route(
             "/api/settings/tls/cert",
@@ -813,6 +817,79 @@ async fn set_retention(
     let value = serde_json::to_string(&body).unwrap();
     let res = tokio::task::spawn_blocking(move || {
         db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, RETENTION_KEY, &value)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// Plugin-store key for memory settings (`{"short_term_hours": N}`).
+const MEMORY_KEY: &str = "memory";
+
+/// How long a short-term memory note lives after it was last written, in
+/// hours. Missing/unparseable ⇒ the default; always within the allowed
+/// bounds. Read when a note is written and when the prompt is rendered.
+pub async fn short_term_memory_hours(db: &crate::db::Db) -> i64 {
+    use crate::db::crud::{DEFAULT_SHORT_TERM_HOURS, MAX_SHORT_TERM_HOURS, MIN_SHORT_TERM_HOURS};
+    let db = db.clone();
+    let raw = tokio::task::spawn_blocking(move || {
+        db.plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, MEMORY_KEY)
+    })
+    .await;
+    match raw {
+        Ok(Ok(Some(json))) => serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("short_term_hours").and_then(|h| h.as_i64()))
+            .map(|h| h.clamp(MIN_SHORT_TERM_HOURS, MAX_SHORT_TERM_HOURS))
+            .unwrap_or(DEFAULT_SHORT_TERM_HOURS),
+        _ => DEFAULT_SHORT_TERM_HOURS,
+    }
+}
+
+/// GET /api/settings/memory → `{"short_term_hours": N, "min_hours", "max_hours"}`.
+async fn get_memory_settings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "short_term_hours": short_term_memory_hours(&state.db).await,
+        "min_hours": crate::db::crud::MIN_SHORT_TERM_HOURS,
+        "max_hours": crate::db::crud::MAX_SHORT_TERM_HOURS,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct MemorySettingsBody {
+    short_term_hours: i64,
+}
+
+/// PUT /api/settings/memory `{"short_term_hours": N}` → 204. Applies to
+/// notes written from now on; existing notes keep the time they were given.
+async fn set_memory_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<MemorySettingsBody>,
+) -> impl IntoResponse {
+    use crate::db::crud::{MAX_SHORT_TERM_HOURS, MIN_SHORT_TERM_HOURS};
+    if !(MIN_SHORT_TERM_HOURS..=MAX_SHORT_TERM_HOURS).contains(&body.short_term_hours) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "short-term memory must last between {MIN_SHORT_TERM_HOURS} and {MAX_SHORT_TERM_HOURS} hours"
+                ),
+            })),
+        ));
+    }
+    let db = state.db.clone();
+    let value = serde_json::json!({ "short_term_hours": body.short_term_hours }).to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, MEMORY_KEY, &value)
     })
     .await;
     match res {

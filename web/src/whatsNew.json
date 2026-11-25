@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.1.163",
+    "date": "2026-11-25",
+    "highlights": [
+      "Agents now keep long-term memory for each folder: architecture, design decisions, code structure and your working rules. Every session in that folder starts out knowing it.",
+      "Short-term memory holds what an agent is working on right now and clears itself after 24 hours. You can change how long it lasts in Settings → Chat.",
+      "The Memory dialog has a new Long-term tab where you can read, add, edit and delete what a folder's agents remember."
+    ]
+  },
+  {
     "version": "0.1.162",
     "date": "2026-11-23",
     "highlights": [

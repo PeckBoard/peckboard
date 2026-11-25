@@ -57,6 +57,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_plans_tables(conn)?;
     ensure_terminals_table(conn)?;
     ensure_session_memories_table(conn)?;
+    ensure_memory_terms(conn)?;
     ensure_projects_review_columns(conn)?;
     ensure_projects_worktree_isolation_column(conn)?;
     ensure_cards_worktree_unmerged_columns(conn)?;
@@ -1239,6 +1240,39 @@ fn ensure_session_memories_table(conn: &mut SqliteConnection) -> anyhow::Result<
     sql_query(
         "CREATE INDEX IF NOT EXISTS idx_session_memories_session \
          ON session_memories (session_id, created_at)",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that missed `1795590673_memory_terms`: the nullable short-term
+/// expiry on session notes (NULL = never expires, matching the migration)
+/// and the long-term `folder_memories` table. DDL mirrors the migration.
+fn ensure_memory_terms(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(session_memories)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if !existing.is_empty() && !existing.iter().any(|c| c == "expires_at") {
+        tracing::info!("Repairing schema: adding session_memories.expires_at");
+        sql_query("ALTER TABLE session_memories ADD COLUMN expires_at TEXT").execute(conn)?;
+    }
+    log_if_healing_table(conn, "folder_memories")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS folder_memories (
+            id                 TEXT PRIMARY KEY NOT NULL,
+            folder_id          TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+            category           TEXT NOT NULL CHECK (category IN
+                                   ('architecture', 'decision', 'structure', 'layout', 'convention')),
+            title              TEXT NOT NULL,
+            content            TEXT NOT NULL,
+            source_session_id  TEXT,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_folder_memories_folder \
+         ON folder_memories (folder_id, category, created_at)",
     )
     .execute(conn)?;
     Ok(())

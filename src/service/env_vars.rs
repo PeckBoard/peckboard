@@ -515,11 +515,21 @@ impl EnvUnlockRegistry {
                 "timeout"
             } else {
                 // The unlock routes cache the values BEFORE resolving, so the
-                // payload only signals the outcome.
-                match rx.try_recv() {
-                    Ok(Some(_)) => "answered",
-                    Ok(None) => "cancelled",
-                    Err(_) => "dropped",
+                // payload only signals the outcome. A resolver takes the
+                // request out of `pending` and only then sends, so the
+                // request can be gone a moment before the outcome arrives:
+                // wait briefly for it instead of reading "empty" as dropped
+                // (which would also skip the cooldown after a cancel).
+                let give_up = Instant::now() + Duration::from_millis(500);
+                loop {
+                    match rx.try_recv() {
+                        Ok(Some(_)) => break "answered",
+                        Ok(None) => break "cancelled",
+                        Err(oneshot::error::TryRecvError::Empty) if Instant::now() < give_up => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break "dropped",
+                    }
                 }
             };
             // A cancelled or ignored prompt means "not now": hold off further

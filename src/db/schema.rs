@@ -710,6 +710,20 @@ diesel::table! {
         content -> Text,
         created_at -> Text,
         updated_at -> Text,
+        expires_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    folder_memories (id) {
+        id -> Text,
+        folder_id -> Text,
+        category -> Text,
+        title -> Text,
+        content -> Text,
+        source_session_id -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
     }
 }
 
@@ -853,6 +867,7 @@ diesel::joinable!(doc_reviews -> folders (folder_id));
 diesel::joinable!(doc_review_versions -> doc_reviews (review_id));
 diesel::joinable!(doc_review_comments -> doc_reviews (review_id));
 diesel::joinable!(session_memories -> sessions (session_id));
+diesel::joinable!(folder_memories -> folders (folder_id));
 diesel::joinable!(assistant_memories -> sessions (voice_session_id));
 diesel::joinable!(agent_vars -> folders (folder_id));
 
@@ -1047,6 +1062,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     plans,
     env_vars,
     session_memories,
+    folder_memories,
     agent_vars,
     ssh_keys,
     doc_reviews,

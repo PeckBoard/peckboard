@@ -585,26 +585,40 @@ impl SessionManager {
                 None => config.system_prompt_suffix,
             }
         };
-        // Session memory: the agent's durable notes ride the per-spawn
-        // suffix. Read on every dispatch (one indexed query) but only
-        // reaching the model when a child is actually spawned — a live
-        // child keeps its original system prompt, and already saw its own
-        // memory_* tool results. So the section is fresh exactly when it
-        // matters (after a clear, a resume, a compaction, a model switch)
-        // and never re-sent per turn. An empty pool adds nothing.
-        let system_prompt_suffix = match db.list_session_memories(session_id).await {
-            Ok(entries) => match crate::db::crud::render_memory_prompt(&entries) {
-                Some(section) => Some(match system_prompt_suffix {
+        // Memory: the rules for long- and short-term notes, the folder's
+        // long-term notes and the session's own notes ride the per-spawn
+        // suffix, which the shared prompt composer hands to every provider.
+        // Read on every dispatch (two indexed queries) but only reaching
+        // the model when a child is actually spawned — a live child keeps
+        // its original system prompt, and already saw its own memory_* tool
+        // results. So the section is fresh exactly when it matters (after a
+        // clear, a resume, a compaction, a model switch) and never re-sent
+        // per turn. A failed lookup drops only the notes, not the dispatch.
+        let system_prompt_suffix =
+            {
+                let long_term = db
+                .list_folder_memories(&session.folder_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(session_id = %session_id, "folder memory lookup failed: {e}");
+                    Vec::new()
+                });
+                let notes = db.list_session_memories(session_id).await.unwrap_or_else(|e| {
+                tracing::warn!(session_id = %session_id, "session memory lookup failed: {e}");
+                Vec::new()
+            });
+                let hours = crate::routes::settings::short_term_memory_hours(db).await;
+                let section = crate::db::crud::render_memory_prompt(
+                    &long_term,
+                    &notes,
+                    hours,
+                    chrono::Utc::now(),
+                );
+                Some(match system_prompt_suffix {
                     Some(s) => format!("{s}\n{section}"),
                     None => section,
-                }),
-                None => system_prompt_suffix,
-            },
-            Err(e) => {
-                tracing::warn!(session_id = %session_id, "session memory lookup failed: {e}");
-                system_prompt_suffix
-            }
-        };
+                })
+            };
         // Skills assigned to the session (direct + via groups, at pinned
         // versions): every provider gets a short index in the prompt plus the
         // `skill_read` tool; Claude also gets them as native skills. Read per

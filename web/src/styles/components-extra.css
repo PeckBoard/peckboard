@@ -998,6 +998,69 @@ select.form-input {
   padding: 2px 10px;
   font-size: var(--text-xs);
 }
+.session-memory-scroll {
+  max-height: 60vh;
+  overflow-y: auto;
+  margin: 0 0 16px;
+}
+.session-memory-scroll .session-memory-list {
+  max-height: none;
+  overflow: visible;
+  margin-bottom: 12px;
+}
+.session-memory-group {
+  margin: 4px 0 8px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text2);
+}
+.session-memory-date-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.session-memory-expiry {
+  font-size: var(--text-xs);
+  color: var(--text2);
+}
+.session-memory-fading {
+  font-size: var(--text-xs);
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text3);
+}
+.folder-memory-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.folder-memory-row-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.folder-memory-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 10px;
+}
+.folder-memory-editor {
+  margin: 0 0 12px;
+}
+.folder-memory-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.memory-settings-input {
+  width: 8em;
+}
 
 /* ── HelpTip: "What's this?" (?) button + popover ───────────────────── */
 .help-tip-button {

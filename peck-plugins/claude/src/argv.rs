@@ -47,7 +47,7 @@ The user is talking to you by voice and hears your replies read aloud. Ask every
 
 # Memory
 
-Use Peckboard's `memory_add` / `memory_update` / `memory_remove` / `memory_list` tools for notes that must persist.
+Use Peckboard's `memory_add` / `memory_update` / `memory_remove` / `memory_list` tools for notes: short-term notes for the work in progress, long-term notes (`term: "long"`) for what should be kept.
 
 # Other sessions
 
