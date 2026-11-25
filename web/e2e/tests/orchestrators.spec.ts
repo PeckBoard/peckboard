@@ -178,3 +178,76 @@ test('orchestrator: create on the page → watched session idles → fire lands 
     timeout: 10_000,
   })
 })
+
+test('orchestrator: a model changed after the brain exists is used on the next run', async ({
+  request,
+}) => {
+  test.setTimeout(120_000)
+  const auth = await authenticate(request)
+  const BASE = '/api/plugin-ui/session-control/orchestrators'
+  type Orch = { id: string; session_id: string | null; stats: { fires: number } }
+  const list = async () => {
+    const r = await request.get(BASE, { headers: auth })
+    expect(r.ok(), await r.text()).toBeTruthy()
+    return (await r.json()) as { clock: string; orchestrators: Orch[] }
+  }
+
+  const folderRes = await request.post('/api/folders', {
+    headers: auth,
+    data: {
+      name: `e2e-orch-model-${Date.now()}`,
+      path: mkdtempSync(path.join(tmpdir(), 'peckboard-e2e-orch-model-')),
+    },
+  })
+  expect(folderRes.ok(), `create folder failed: ${await folderRes.text()}`).toBeTruthy()
+  const folder = (await folderRes.json()) as { id: string }
+
+  // Disabled + no cooldown: the only fires are this test's "Run now" calls.
+  const createRes = await request.post(BASE, {
+    headers: auth,
+    data: {
+      name: `Model switch ${Date.now()}`,
+      folder_id: folder.id,
+      goal: 'Check the brain follows the model setting',
+      model: 'mock:happy-path',
+      prompt: '{{goal}}',
+      enabled: false,
+      cooldown_secs: 0,
+    },
+  })
+  expect(createRes.ok(), `create orchestrator failed: ${await createRes.text()}`).toBeTruthy()
+  const { id } = (await createRes.json()) as { id: string }
+  const orch = async () => (await list()).orchestrators.find((o) => o.id === id)!
+  const brainModel = async () => {
+    const sid = (await orch()).session_id
+    if (!sid) return null
+    const r = await request.get(`/api/sessions/${sid}`, { headers: auth })
+    return r.ok() ? ((await r.json()) as { model: string | null }).model : null
+  }
+
+  // Run now needs the engine clock, set on the plugin's first timer tick.
+  await expect.poll(async () => (await list()).clock, { timeout: 60_000 }).not.toBe('')
+
+  // First run creates the brain on the model the orchestrator has now.
+  await request.post(`${BASE}/${id}/run`, { headers: auth })
+  await expect.poll(brainModel, { timeout: 30_000 }).toBe('mock:happy-path')
+
+  // Change the model on the orchestrator; the brain session already exists.
+  const updateRes = await request.post(`${BASE}/${id}`, {
+    headers: auth,
+    data: { model: 'mock:mcp' },
+  })
+  expect(updateRes.ok(), `update failed: ${await updateRes.text()}`).toBeTruthy()
+
+  // The next run moves the brain to it. A run is skipped while the brain is
+  // still busy with the first one, so keep asking until one lands.
+  await expect
+    .poll(
+      async () => {
+        await request.post(`${BASE}/${id}/run`, { headers: auth })
+        return brainModel()
+      },
+      { timeout: 60_000, intervals: [2_000], message: 'the brain kept its old model' },
+    )
+    .toBe('mock:mcp')
+})

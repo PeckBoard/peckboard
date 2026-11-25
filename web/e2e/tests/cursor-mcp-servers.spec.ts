@@ -52,7 +52,9 @@ test('a Cursor turn approves Peckboard, Settings and project MCP servers at the 
   const headers = await authenticate(request)
 
   const dir = mkdtempSync(join(tmpdir(), 'peckboard-e2e-cursor-mcp-'))
-  const log = join(dir, 'cli.log')
+  // Inside the session folder: the CLI runs sandboxed and can write there
+  // wherever the run keeps its scratch (it is not always under /tmp).
+  const log = join(dir, 'repo', 'packages', 'app', 'cli.log')
   const fakeCli = join(dir, 'cursor-agent')
   writeFileSync(fakeCli, fakeCursor(log))
   chmodSync(fakeCli, 0o755)

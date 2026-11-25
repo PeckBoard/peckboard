@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.1.165",
+    "date": "2026-11-25",
+    "highlights": [
+      "Orchestrators: changing an orchestrator's model or account now takes effect on its next run. Before, it kept the one it was first created with."
+    ]
+  },
+  {
     "version": "0.1.164",
     "date": "2026-11-25",
     "highlights": [

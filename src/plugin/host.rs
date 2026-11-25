@@ -2501,6 +2501,13 @@ struct OrchestrateSendRequest {
     /// a clear never touches) carries what it must remember.
     #[serde(default)]
     fresh: bool,
+    /// With `fresh`: the model the session must run this turn on. A brain
+    /// keeps the model it was created with, so an orchestrator whose model
+    /// was changed later passes it on every run. Applied only together
+    /// with the wipe — no conversation is left to carry over, so crossing a
+    /// provider or account needs no handover. Ignored without `fresh`.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 pub(crate) fn orchestrate_send_impl(
@@ -2522,6 +2529,31 @@ pub(crate) fn orchestrate_send_impl(
     let Some(live) = live else {
         return error_json("live control unavailable");
     };
+    let wanted = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    if let Some(model) = wanted
+        && req.fresh
+        && target.sealed_at.is_none()
+        && target.model.as_deref() != Some(model)
+    {
+        if let Err(e) = crate::provider::registry::check_model(Some(model)) {
+            return error_json(e);
+        }
+        let update = crate::db::models::UpdateSession {
+            model: Some(Some(model.to_string())),
+            ..Default::default()
+        };
+        // Written before the wipe is queued: the wipe kills any idle child,
+        // so the run spawns a new one that reads this row.
+        match db.update_session_blocking(&target.id, update) {
+            Ok(Some(_)) => {}
+            Ok(None) => return error_json("session not found"),
+            Err(e) => return error_json(e),
+        }
+    }
     if req.fresh {
         live.clear_then_send(target.id.clone(), req.text);
     } else {
@@ -8434,6 +8466,24 @@ mod tests {
         );
         assert!(r.contains("\"ok\":true"), "fresh send ok: {r}");
         assert_eq!(rec.calls.lock().unwrap().as_slice(), ["clear-send:sO:go"]);
+        // fresh + model: the session is moved to that model (another
+        // account included) before the run; without `fresh` it is left alone.
+        let send = |body: serde_json::Value| {
+            orchestrate_send_impl(&db, &body.to_string(), Some(rec.clone()))
+        };
+        let r = send(serde_json::json!({
+            "session_id": "sO", "text": "go", "model": "claude:claude-opus-5-5@acc2"
+        }));
+        assert!(r.contains("\"ok\":true"), "plain send ok: {r}");
+        let row = db.get_session("sO").await.unwrap().unwrap();
+        assert_eq!(row.model, None, "no wipe, no model change");
+        let r = send(serde_json::json!({
+            "session_id": "sO", "text": "go", "fresh": true,
+            "model": "claude:claude-opus-5-5@acc2"
+        }));
+        assert!(r.contains("\"ok\":true"), "fresh send with model ok: {r}");
+        let row = db.get_session("sO").await.unwrap().unwrap();
+        assert_eq!(row.model.as_deref(), Some("claude:claude-opus-5-5@acc2"));
 
         // create: unknown folder refuses; a real folder creates the session.
         let r = orchestrate_create_session_impl(&db, r#"{"folder_id":"nope","name":"W"}"#);
