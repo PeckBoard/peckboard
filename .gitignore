@@ -27,3 +27,5 @@ peck-plugins/project-planner/
 peck-plugins/session-control/
 peck-plugins/ssh-fleet/
 peck-plugins/ui-gauge/
+# Per-run e2e scratch (scripts/e2e-shards.sh); removed when a run ends.
+.e2e-tmp/

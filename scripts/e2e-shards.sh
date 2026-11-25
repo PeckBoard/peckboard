@@ -48,7 +48,24 @@ if [[ "${PECKBOARD_E2E_SKIP_BUILD:-}" != "1" ]]; then
 fi
 export PECKBOARD_E2E_SKIP_BUILD=1
 
-LOG_DIR="$(mktemp -d)"
+# ── scratch on disk, removed when the run ends ─────────────────────────────────
+# Each shard's server data dir and every folder a spec makes go through
+# the system temp dir (`mktemp -d`, Node's `os.tmpdir()`), and nothing
+# deleted them. On the build box /tmp is RAM-backed: 38,000 leftover dirs
+# were holding 1.3 GB of memory when this was found (2026-11-25), on a
+# machine where a verify had already run the live server out of memory.
+# So the whole run gets its own temp dir on disk, and it is removed at the
+# end. Only a failing run keeps its shard logs.
+RUN_ROOT="${PECKBOARD_E2E_TMP_ROOT:-$ROOT/.e2e-tmp}"
+mkdir -p "$RUN_ROOT"
+# What a killed run could not clean up (never a run still going: 12 h).
+find "$RUN_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin +720 -exec rm -rf {} + 2>/dev/null
+RUN_DIR="$(mktemp -d "$RUN_ROOT/run-XXXXXX")"
+LOG_DIR="$RUN_DIR/logs"
+SCRATCH="$RUN_DIR/scratch"
+mkdir -p "$LOG_DIR" "$SCRATCH"
+export TMPDIR="$SCRATCH"
+
 declare -a PIDS=()
 declare -a LOGS=()
 
@@ -58,6 +75,7 @@ cleanup() {
   for pid in "${PIDS[@]:-}"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
   done
+  rm -rf "$SCRATCH"
 }
 trap cleanup INT TERM
 
@@ -133,6 +151,8 @@ if [[ "$failed" -eq 1 ]]; then
   echo ""
   echo "Failing shard logs kept at: $LOG_DIR"
 else
-  rm -rf "$LOG_DIR"
+  rm -rf "$RUN_DIR"
 fi
+# Scratch always goes: server data dirs and the folders specs made.
+rm -rf "$SCRATCH"
 exit "$failed"
