@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.1.164",
+    "date": "2026-11-25",
+    "highlights": [
+      "Teams: link your PeckBoard with your coworkers' servers under Settings → Teams. No accounts to create.",
+      "Invite a server with a one-time link. Before you approve it, you and your coworker compare a six-digit code, so a forwarded or leaked link cannot get anyone in.",
+      "Owners and admins manage who is in the team; your server checks every change itself instead of trusting the service that passes it along."
+    ]
+  },
+  {
     "version": "0.1.163",
     "date": "2026-11-25",
     "highlights": [

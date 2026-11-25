@@ -296,6 +296,13 @@ export const useWsStore = create<WsState>((set, get) => ({
         )
         return
       }
+      if (msg.type === 'team-update') {
+        // A team of servers this one is in (or wants to join) changed, or a
+        // join request is waiting (`{waiting_requests?}`). The Teams
+        // settings page listens and reloads.
+        window.dispatchEvent(new CustomEvent('peckboard:team-update', { detail: msg.data ?? {} }))
+        return
+      }
       if (msg.type === 'restart-pending') {
         // A server restart is parked until idle (or just fired). Counts
         // only; the banner renders it for every connected client.

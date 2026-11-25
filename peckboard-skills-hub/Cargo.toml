@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 peckboard-skill-format = { path = "../peckboard-skill-format" }
+peckboard-team-format = { path = "../peckboard-team-format" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 axum = "0.8"

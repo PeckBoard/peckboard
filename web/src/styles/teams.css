@@ -1,0 +1,222 @@
+/* Settings → Teams (teams of servers). Rows reuse the shared .list-view-*
+   skin; these rules only lay out the per-team card around them. */
+
+/* The three header actions drop under the heading on a narrow screen
+   instead of squeezing it. */
+.teams-section > .settings-section-head {
+  flex-wrap: wrap;
+}
+
+.teams-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.teams-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 12px;
+  font-size: var(--text-sm);
+  color: var(--text2);
+}
+
+.team-fingerprint {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text2);
+  background: var(--surface2);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  overflow-wrap: anywhere;
+}
+
+.team-muted {
+  color: var(--text3);
+}
+
+.team-warning {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.team-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 14px 16px;
+  margin: 12px 0;
+}
+
+.team-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.team-card-name {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.team-card-spacer {
+  flex: 1;
+}
+
+.team-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.team-block {
+  margin-top: 16px;
+}
+
+.team-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.team-block-head h5 {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text2);
+}
+
+.team-self-tag {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The six-digit verification code: big, monospaced, spaced out so it is
+   easy to read aloud. */
+.team-code {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.team-code-large {
+  font-size: 2.4rem;
+  margin: 4px 0 8px;
+}
+
+.team-code-label {
+  margin: 12px 0 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.team-code-instruction {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text2);
+  line-height: 1.45;
+}
+
+.team-card-pending {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.team-request {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface2);
+}
+
+.team-request-who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+}
+
+.team-request-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.team-request-code-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.team-request-code-wrap .team-code-label {
+  margin: 0;
+}
+
+.team-past .list-view-name {
+  font-weight: 500;
+}
+
+.team-join-link {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  resize: vertical;
+  word-break: break-all;
+}
+
+.team-join-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface2);
+}
+
+.team-join-preview-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.team-invite-link-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.team-invite-link {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.teams-empty-join {
+  margin: 8px 0 0 8px;
+}

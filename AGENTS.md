@@ -619,3 +619,31 @@ and is required to be idempotent.
   (`READ THIS BEFORE ADDING ONE`), acronyms (`HTTP`, `MCP`),
   mixed-case names (`ESLint`, `GitHub`), and digit+letter tokens
   (`e2e`, `OAuth2`).
+
+## Memory and Teams
+
+- **Memory** has two kinds. Long-term notes belong to a folder
+  (`folder_memories`, `src/db/crud/folder_memories.rs`), short-term notes to
+  a session (`session_memories.expires_at`). The "Memory" prompt section
+  (rules + notes) is rendered in `db::crud::render_memory_prompt` and
+  appended for every provider in `provider::manager`. Change the rules text
+  there, not per provider.
+- **Teams** are sets of PeckBoard servers with no accounts
+  (`src/service/teams.rs`, `src/routes/teams.rs`, Settings → Teams). A team
+  is a signed membership log; the format and the role rules live in the
+  `peckboard-team-format` crate, shared with the hub
+  (`peckboard-skills-hub/src/teams.rs`, contract in its `API.md`). **Change
+  a rule in that crate only**, never on one side: the hub and every member
+  server must judge a record identically, or a record one accepts breaks
+  the team for the other.
+- The server never trusts the hub about membership: every fetched log is
+  replayed and must continue the pinned `teams.log_len` / `log_head`. Keep
+  that check on any new read path.
+- The hub serves `skills.peckboard.com`, `team.peckboard.com` and
+  `memory.peckboard.com` from one program on skills-01. Deploy the hub
+  **before** releasing a core version that calls a new hub endpoint.
+- Tests: `tests/teams_hub.rs` runs two servers against the real hub
+  in-process (the hub is a dev-dependency); `web/e2e/tests/teams.spec.ts`
+  runs against a real hub binary that `scripts/build-local-release.sh`
+  builds and `web/e2e/playwright.config.ts` starts
+  (`PECKBOARD_TEAM_HUB_URL`), with the spec playing the other server.

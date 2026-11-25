@@ -69,6 +69,7 @@ import ConfirmDialog from './ConfirmDialog'
 import ProviderBasePrompt, { type ProviderPrompt } from './ProviderBasePrompt'
 import ProviderModelTiers from './ProviderModelTiers'
 import VoiceSettingsSection from './VoiceSettingsSection'
+import TeamsSection from './teams/TeamsSection'
 
 interface KeepAliveRun {
   provider: string
@@ -122,6 +123,7 @@ type SubPage =
   | 'mcp'
   | 'ssh-keys'
   | 'remote-access'
+  | 'teams'
   | 'external-access'
   | 'plugins'
   | 'registry'
@@ -234,6 +236,12 @@ const GROUPS: { title: string | null; pages: PageDef[] }[] = [
         id: 'external-access',
         title: 'External Access',
         blurb: 'OAuth clients that let outside systems call the MCP server',
+        adminOnly: true,
+      },
+      {
+        id: 'teams',
+        title: 'Teams',
+        blurb: "Link this server with your coworkers' servers",
         adminOnly: true,
       },
     ],
@@ -510,6 +518,13 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     keywords: 'oauth client credentials secret token mcp api integration external rotate revoke',
   },
   {
+    page: 'teams',
+    section: 'Teams',
+    anchor: 'teams',
+    keywords:
+      'team of servers coworkers link invite join approve verification code members owner admin',
+  },
+  {
     page: 'plugins',
     section: 'Installed Plugins',
     anchor: 'plugins',
@@ -646,6 +661,14 @@ const NAV_ICON_PATHS: Record<SubPage, ReactNode> = {
     <>
       <rect x="2.5" y="2.5" width="11" height="11" rx="2" />
       <path d="M8 5.5v5M5.5 8h5" />
+    </>
+  ),
+  teams: (
+    <>
+      <rect x="1.75" y="2.5" width="5" height="4" rx="1" />
+      <rect x="9.25" y="2.5" width="5" height="4" rx="1" />
+      <rect x="5.5" y="10" width="5" height="4" rx="1" />
+      <path d="M4.25 6.5v1.75h7.5V6.5M8 8.25V10" />
     </>
   ),
   registry: (
@@ -1856,6 +1879,11 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
         {activeSubPage === 'external-access' && (
           <div data-settings-anchor="external-access">
             <ExternalAccessSection />
+          </div>
+        )}
+        {activeSubPage === 'teams' && (
+          <div data-settings-anchor="teams">
+            <TeamsSection />
           </div>
         )}
         {activeSubPage === 'variables' && (

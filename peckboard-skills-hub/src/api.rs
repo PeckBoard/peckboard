@@ -88,6 +88,12 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<rusqlite::Error> for ApiError {
+    fn from(e: rusqlite::Error) -> Self {
+        ApiError::internal(e.into())
+    }
+}
+
 pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 pub(crate) fn content_findings(findings: Vec<Finding>) -> ApiError {
@@ -119,7 +125,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/challenge", get(challenge))
         .route("/api/publish", post(publish))
         .route("/api/yank", post(yank));
-    crate::collab::routes(r)
+    crate::teams::routes(crate::collab::routes(r))
         // Bodies are read by hand so an oversized one gets a JSON error.
         .layer(DefaultBodyLimit::disable())
         .with_state(hub)

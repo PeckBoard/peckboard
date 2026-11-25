@@ -45,6 +45,7 @@ mod skills;
 mod ssh_keys;
 mod system_prompts;
 mod tabs;
+mod teams;
 mod terminals;
 mod tls_certificates;
 mod todos;

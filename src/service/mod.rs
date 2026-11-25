@@ -32,6 +32,7 @@ pub mod shared_files;
 pub mod skills;
 pub mod speech_server;
 pub mod ssh_keys;
+pub mod teams;
 pub mod tls;
 pub mod tool_images;
 pub mod tts;

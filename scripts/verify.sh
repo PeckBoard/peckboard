@@ -164,6 +164,14 @@ relay_steps() {
   run_step "relay: cargo test" cargo test --manifest-path "$m" --all-features
 }
 
+# The team-format crate and the hub are their own crates too. The hub is
+# what skills / team .peckboard.com run, and the team rules live in the
+# shared crate: a change there must be tested on both sides.
+hub_steps() {
+  run_step "team-format: cargo test" cargo test --manifest-path "$ROOT/peckboard-team-format/Cargo.toml"
+  run_step "hub: cargo test" cargo test --manifest-path "$ROOT/peckboard-skills-hub/Cargo.toml"
+}
+
 cd "$ROOT"
 if [[ "$CHANGED" -eq 1 ]]; then
   echo "▶ proportional verify: scope=$SCOPE (rust=$RUST_CHANGED web=$WEB_CHANGED) vs $BASE"
@@ -203,6 +211,7 @@ else
   run_step "cargo clippy" cargo clippy --all-targets --no-deps
   run_step "cargo test" cargo test
   relay_steps
+  hub_steps
   run_step "plugin blobs current" "$ROOT/scripts/check-plugin-blobs.sh"
 
   run_step "embedded JS syntax" node --check "$ROOT/src/service/browser_sidecar.mjs"

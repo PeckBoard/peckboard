@@ -292,6 +292,8 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA).context("create schema")?;
+        conn.execute_batch(crate::teams::SCHEMA)
+            .context("create team schema")?;
         for (table, col, decl) in ADDED_COLUMNS {
             let has: bool = conn.query_row(
                 &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = ?1"),
@@ -312,6 +314,11 @@ impl Store {
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// For a transaction spanning several statements.
+    pub fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     /// Changes whenever this or any other connection (the admin CLI) has

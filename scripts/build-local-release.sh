@@ -76,3 +76,16 @@ if [[ "${PECKBOARD_E2E_SKIP_TOOLS:-}" != "1" ]]; then
   cargo build --release --manifest-path "$ROOT/peckboard-connect/Cargo.toml" \
     --target-dir "$TOOLS" || exit 1
 fi
+
+# The teams spec (web/e2e/tests/teams.spec.ts) runs a real team hub — the
+# skills hub binary, which also serves the team endpoints — next to the box
+# (web/e2e/playwright.config.ts starts it). Standalone crate with its own
+# Cargo.lock and target dir (peckboard-skills-hub/target). It defines no
+# `verify` profile, so it builds with --release; after the first build it
+# only relinks when the hub or peckboard-team-format changes. Skipped with
+# PECKBOARD_E2E_SKIP_TOOLS=1 (the teams spec then skips itself).
+if [[ "${PECKBOARD_E2E_SKIP_TOOLS:-}" != "1" ]]; then
+  echo "▶ cargo build --release peckboard-skills-hub → peckboard-skills-hub/target/release"
+  cargo build --release --manifest-path "$ROOT/peckboard-skills-hub/Cargo.toml" \
+    --bin peckboard-skills-hub || exit 1
+fi

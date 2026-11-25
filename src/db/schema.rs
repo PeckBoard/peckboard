@@ -728,6 +728,41 @@ diesel::table! {
 }
 
 diesel::table! {
+    teams (id) {
+        id -> Text,
+        name -> Text,
+        state -> Text,
+        role -> Nullable<Text>,
+        log_len -> BigInt,
+        log_head -> Text,
+        request_id -> Nullable<Text>,
+        invite_id -> Nullable<Text>,
+        invite_secret -> Nullable<Text>,
+        last_error -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    team_log (team_id, seq) {
+        team_id -> Text,
+        seq -> BigInt,
+        record -> Text,
+    }
+}
+
+diesel::table! {
+    team_invites (invite_id) {
+        invite_id -> Text,
+        team_id -> Text,
+        secret -> Text,
+        expires_at -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
     doc_reviews (id) {
         id -> Text,
         title -> Text,
@@ -868,6 +903,8 @@ diesel::joinable!(doc_review_versions -> doc_reviews (review_id));
 diesel::joinable!(doc_review_comments -> doc_reviews (review_id));
 diesel::joinable!(session_memories -> sessions (session_id));
 diesel::joinable!(folder_memories -> folders (folder_id));
+diesel::joinable!(team_log -> teams (team_id));
+diesel::joinable!(team_invites -> teams (team_id));
 diesel::joinable!(assistant_memories -> sessions (voice_session_id));
 diesel::joinable!(agent_vars -> folders (folder_id));
 
@@ -1063,6 +1100,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     env_vars,
     session_memories,
     folder_memories,
+    teams,
+    team_log,
+    team_invites,
     agent_vars,
     ssh_keys,
     doc_reviews,

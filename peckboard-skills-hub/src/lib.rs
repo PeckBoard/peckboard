@@ -20,6 +20,7 @@ pub mod backup;
 pub mod collab;
 pub mod git;
 pub mod store;
+pub mod teams;
 pub mod tls;
 
 /// Default leading-zero bits a never-seen key must solve before its first

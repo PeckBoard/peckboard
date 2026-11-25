@@ -149,6 +149,16 @@ impl BoxIdentity {
             ))
             .to_bytes()
     }
+
+    /// Sign one team membership-log record. `message` is the record's
+    /// signed text and must start with [`TEAM_LOG_CONTEXT`] — `None`
+    /// otherwise, so this can never be used to sign a message meant for
+    /// another purpose of this key.
+    pub fn sign_team_record(&self, message: &str) -> Option<[u8; 64]> {
+        message
+            .starts_with(TEAM_LOG_CONTEXT)
+            .then(|| self.signing.sign(message.as_bytes()).to_bytes())
+    }
 }
 
 const SKILLS_PUBLISH_CONTEXT: &str = "peckboard-skills-publish-v1\n";
@@ -214,6 +224,28 @@ pub fn verify_skills_request(
         &Signature::from_bytes(signature),
     )
     .is_ok()
+}
+
+/// First line of every team membership-log record a box signs (the
+/// `peckboard-team-format` crate builds the rest of the message).
+pub const TEAM_LOG_CONTEXT: &str = "peckboard-team-log-v1\n";
+
+/// Check a team membership-log record's signature
+/// ([`BoxIdentity::sign_team_record`]); false (never panics) on a message
+/// without the team context, a malformed or weak key, or a non-canonical
+/// signature.
+pub fn verify_team_record(identity_key: &[u8; 32], message: &str, signature: &[u8; 64]) -> bool {
+    if !message.starts_with(TEAM_LOG_CONTEXT) {
+        return false;
+    }
+    let Ok(vk) = VerifyingKey::from_bytes(identity_key) else {
+        return false;
+    };
+    if vk.is_weak() {
+        return false;
+    }
+    vk.verify_strict(message.as_bytes(), &Signature::from_bytes(signature))
+        .is_ok()
 }
 
 /// Bytes a box signs with its identity key to prove possession on one
@@ -397,5 +429,27 @@ mod tests {
         let other = BoxIdentity::generate().public_key();
         assert!(!verify_identity(&other, &n, &r, &ex, &sig));
         assert!(!verify_identity(&[0; 32], &n, &r, &ex, &sig));
+    }
+
+    #[test]
+    fn team_records_are_signed_only_under_the_team_context() {
+        let id = BoxIdentity::generate();
+        let pk = id.public_key();
+        let msg = format!("{TEAM_LOG_CONTEXT}1\nprev\n2026-11-25T10:00:00Z\nabc");
+        let sig = id.sign_team_record(&msg).expect("a team record signs");
+        assert!(verify_team_record(&pk, &msg, &sig));
+        assert!(!verify_team_record(&pk, &format!("{msg}x"), &sig));
+        assert!(!verify_team_record(
+            &BoxIdentity::generate().public_key(),
+            &msg,
+            &sig
+        ));
+        // The key cannot be made to sign another purpose's message this way,
+        // and a signature over one is not a team record.
+        let request =
+            String::from_utf8(skills_request_message("POST", "/api/fork", "n", "d")).unwrap();
+        assert!(id.sign_team_record(&request).is_none());
+        let request_sig = id.sign_request("POST", "/api/fork", "n", "d");
+        assert!(!verify_team_record(&pk, &request, &request_sig));
     }
 }

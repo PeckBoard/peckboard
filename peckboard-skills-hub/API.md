@@ -136,3 +136,106 @@ description}` → 201 `<MergeRequest>`. At most one open MR per fork.
 
 New commits published to the fork update an open MR's `head_commit`,
 `diff` and `mergeable` automatically.
+
+## Teams (`team.peckboard.com`)
+
+A team is a set of PeckBoard servers. There are no accounts: a member is a
+server, named by its install key (`public_key`, standard padded base64 —
+the same key and text form as everywhere above). Same program and same
+signed headers as the skills endpoints; `team.peckboard.com` is another
+name for the same hub.
+
+The hub is storage and a gatekeeper, not the authority. A team is its
+**membership log**, and every member server replays and checks the whole
+log itself (`peckboard-team-format` holds the format and the rules, shared
+by both sides). The hub refuses a record that breaks the rules, but it has
+no key a member would accept, so it cannot add a server to a team.
+
+All team reads are signed and members-only. Signed `GET`s sign the empty
+body. Ids in paths: a team id is 32 hex chars; invite and request ids are
+`[A-Za-z0-9_-]`.
+
+### Membership Log
+
+A record: `{seq, prev, at, body, signer, signature}`.
+
+- `body`: the change, as the exact JSON text that was signed. One of
+  `{"type":"create","name","founder","label","salt"}`,
+  `{"type":"add","key","role","label"}`, `{"type":"remove","key"}`,
+  `{"type":"set_role","key","role"}`, `{"type":"rename","name"}`.
+  `role` is `owner`, `admin` or `member`.
+- `signature`: standard padded base64 Ed25519 signature by `signer` over
+  `"peckboard-team-log-v1\n" + seq + "\n" + prev + "\n" + at + "\n" +
+hex(sha256(body))`. Keys and signatures must be in exactly this text form.
+- `prev`: `hex(sha256(message + "\n" + signer + "\n" + signature))` of the
+  record before it (`message` = that record's signed text); empty for
+  `seq` 0.
+- The team id is the first 32 hex chars of
+  `sha256("peckboard-team-id-v1\n" + body of record 0)`.
+
+Rules: record 0 is `create`, signed by `founder`, who becomes an owner.
+Owners may do everything. Admins may add and remove plain members. Any
+member may remove itself. A team always keeps at least one owner. At most
+200 members.
+
+A member server remembers the newest `(length, head hash)` it has verified
+and refuses a log that does not continue it, so hiding a removal by serving
+older history is detected.
+
+### Endpoints
+
+- `POST /api/teams` (signed) `{record}` → 201 `{team_id, name}`. The record
+  must be a valid record 0 signed by the caller. At most 20 teams per
+  founding key.
+- `GET /api/teams` (signed) → `{teams: [{team_id, name, role, members}]}`:
+  the caller's teams.
+- `GET /api/teams/<id>/log` (signed, member) → `{team_id, records}`.
+- `POST /api/teams/<id>/log` (signed, member) `{record, request_id?}` →
+  `{team_id, len, head}`. The record must be the next one and signed by the
+  caller. With `request_id`, an `add` for that join request's key approves
+  it and uses up its invite.
+- `POST /api/teams/<id>/invites` (signed, owner/admin)
+  `{invite_id, gate, expires_at}` → 201. At most 7 days ahead, 20 open
+  invites per team. `GET` (signed, owner/admin) lists open invites;
+  `DELETE /api/teams/<id>/invites/<invite_id>` withdraws one.
+- `GET /api/teams/<id>/preview` with header `X-Peck-Invite:
+<invite_id>.<gate>` (not signed) → `{team_id, name, members}`.
+- `POST /api/teams/<id>/join` (signed by the joining server)
+  `{invite_id, gate, proof, label}` → 201 `{request_id, team_id, name}`.
+  One invite accepts up to 5 open requests.
+- `GET /api/teams/<id>/requests` (signed, owner/admin) →
+  `{requests: [{request_id, invite_id, key, label, proof, created_at,
+invited_by}]}`.
+- `GET /api/teams/<id>/requests/<request_id>` (signed by the server that
+  filed it) → `{request_id, state}`, `state` = `pending`, `approved` or
+  `rejected`. `DELETE` on the same path (same signer) takes the request
+  back → 204.
+- `POST /api/teams/<id>/requests/<request_id>/reject` (signed,
+  owner/admin) → 204.
+
+### Invites
+
+The inviting server makes up `invite_id` and a random `secret` and builds
+the link `<hub>/join#<team_id>.<invite_id>.<secret>`. The secret is never
+sent to the hub:
+
+- `gate = hex(sha256("peckboard-team-gate-v1\n" + secret))` is what the hub
+  stores and what a joiner presents. It shows the joiner holds the link.
+- `proof = hex(hmac_sha256(secret, "peckboard-team-join-v1\n" + team_id +
+"\n" + joiner_key))` is opaque to the hub. The inviting server checks it:
+  the request came from someone holding the link, for exactly this key.
+- The verification code both people compare before approval is the first
+  four bytes (big-endian) of `hmac_sha256(secret, "peckboard-team-verify-
+v1\n" + team_id + "\n" + joiner_key)` mod 1,000,000, shown as `123 456`.
+  It depends on the joining key, so someone else who got the link sees a
+  different code.
+
+Only the server that created an invite holds its secret, so only it can
+check a request's proof and approve it.
+
+### Errors
+
+Additional codes: `not_member` 403 (also the answer for a team that does
+not exist), `not_allowed` 403, `invite_invalid` 403, `already_member` 409,
+`log_conflict` 409 (another change landed first: reload and retry),
+`team_exists` 409, `invite_exists` 409, `bad_record` 422.

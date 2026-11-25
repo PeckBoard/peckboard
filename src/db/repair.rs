@@ -58,6 +58,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_terminals_table(conn)?;
     ensure_session_memories_table(conn)?;
     ensure_memory_terms(conn)?;
+    ensure_teams_tables(conn)?;
     ensure_projects_review_columns(conn)?;
     ensure_projects_worktree_isolation_column(conn)?;
     ensure_cards_worktree_unmerged_columns(conn)?;
@@ -1275,6 +1276,51 @@ fn ensure_memory_terms(conn: &mut SqliteConnection) -> anyhow::Result<()> {
          ON folder_memories (folder_id, category, created_at)",
     )
     .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that missed `1795596976_teams`. Idempotent CREATE TABLE IF NOT
+/// EXISTS + index; DDL mirrors the migration.
+fn ensure_teams_tables(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "teams")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS teams (
+            id             TEXT PRIMARY KEY NOT NULL,
+            name           TEXT NOT NULL,
+            state          TEXT NOT NULL CHECK (state IN ('member', 'pending', 'left', 'removed')),
+            role           TEXT CHECK (role IS NULL OR role IN ('owner', 'admin', 'member')),
+            log_len        BIGINT NOT NULL DEFAULT 0,
+            log_head       TEXT NOT NULL DEFAULT '',
+            request_id     TEXT,
+            invite_id      TEXT,
+            invite_secret  TEXT,
+            last_error     TEXT,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS team_log (
+            team_id  TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            seq      BIGINT NOT NULL,
+            record   TEXT NOT NULL,
+            PRIMARY KEY (team_id, seq)
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS team_invites (
+            invite_id   TEXT PRIMARY KEY NOT NULL,
+            team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            secret      TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query("CREATE INDEX IF NOT EXISTS idx_team_invites_team ON team_invites (team_id)")
+        .execute(conn)?;
     Ok(())
 }
 

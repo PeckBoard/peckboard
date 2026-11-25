@@ -668,7 +668,7 @@ pub(crate) fn request_error(status: u16, text: &str, op: &str) -> SkillError {
 
 /// A decimal counter `pow` such that `sha256(nonce + pow)` starts with at
 /// least `bits` zero bits.
-fn solve_pow(nonce: &str, bits: u32) -> String {
+pub(crate) fn solve_pow(nonce: &str, bits: u32) -> String {
     let mut buf = String::with_capacity(nonce.len() + 20);
     for i in 0u64.. {
         buf.clear();

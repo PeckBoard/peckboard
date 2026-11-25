@@ -107,6 +107,34 @@ if (process.env.PECKBOARD_E2E_SKIP_BUILD !== '1' && !process.env.PECKBOARD_E2E_B
   process.env.PECKBOARD_E2E_SKIP_BUILD = '1'
 }
 
+// A real team hub for `teams.spec.ts`: the skills hub binary (it also serves
+// the team endpoints), built by scripts/build-local-release.sh into the
+// crate's own target dir. Started as a second webServer on the shard's
+// PORT+4 with its own data dir, and the box points PECKBOARD_TEAM_HUB_URL at
+// it. `--new-key-pow-bits 4` keeps the proof of work for a fresh key cheap.
+// When the binary is missing (PECKBOARD_E2E_SKIP_TOOLS=1), no hub starts
+// and the spec skips itself (PECKBOARD_E2E_TEAM_HUB stays unset).
+const TEAM_HUB_PORT = process.env.PECKBOARD_E2E_TEAM_PORT ?? String(Number(PORT) + 4)
+process.env.PECKBOARD_E2E_TEAM_PORT = TEAM_HUB_PORT
+const TEAM_HUB_URL = `http://127.0.0.1:${TEAM_HUB_PORT}`
+const TEAM_HUB_BIN =
+  process.env.PECKBOARD_E2E_TEAM_HUB_BIN ??
+  path.resolve(
+    e2eDir,
+    '..',
+    '..',
+    'peckboard-skills-hub',
+    'target',
+    'release',
+    'peckboard-skills-hub',
+  )
+const TEAM_HUB_DATA = path.join(DATA_DIR, 'e2e-team-hub')
+const teamHub = existsSync(TEAM_HUB_BIN)
+if (teamHub) {
+  mkdirSync(TEAM_HUB_DATA, { recursive: true })
+  process.env.PECKBOARD_E2E_TEAM_HUB = TEAM_HUB_URL
+}
+
 const pluginsSrcRoots = [
   path.resolve(e2eDir, '..', '..', 'peck-plugins'),
   path.resolve(e2eDir, '..', '..', '..', 'peck-plugins'),
@@ -162,34 +190,52 @@ export default defineConfig({
     // `test.use({ serviceWorkers: 'allow' })` (push-notifications).
     serviceWorkers: 'block',
   },
-  webServer: {
-    // Fresh data dir each run so prior state can't bleed in.
-    // The binary embeds the frontend, so we only run the binary here —
-    // both builds happen in global-setup before webServer launches.
-    // PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 pins the Claude catalog to the
-    // static seed: specs assert exact model labels, which must not depend
-    // on whatever `claude` binary the host machine has installed.
-    // PECKBOARD_GITHUB_TOKEN + PECKBOARD_GITHUB_API_BASE point the PR
-    // features at the stub `doc-review-pr.spec.ts` runs on
-    // GITHUB_STUB_PORT, so "both directions" is exercised for real without
-    // ever leaving the machine.
-    // PECKBOARD_E2E_ROUTE_LOG is empty (inert) outside the impact-map run.
-    // PECKBOARD_PREINSTALL_PLUGINS=all seeds every bundled crate plugin
-    // installed — fresh installs default to none, but specs assume mock
-    // and friends are active; the install/uninstall flow is covered by
-    // crate-plugin-install.spec.ts which round-trips from this state.
-    // PECKBOARD_MIRROR_TEST_ENDPOINTS=1 lets the Assistant mirror post to
-    // the http://127.0.0.1 receiver `assistant-mirror.spec.ts` runs.
-    // PECKBOARD_DEV_RELAY_CERT + PECKBOARD_DEV_LINK_TTL_SECS: see the
-    // RELAY_STATE_DIR comment above (remote-access-enroll.spec.ts).
-    // PECKBOARD_SKILLS_INDEX_URL points the seeded public skill source at
-    // the mock index skills.spec.ts serves on SKILLS_STUB_PORT.
-    // PECKBOARD_ACME_TEST=1 enables the `mock` DNS provider and swaps real
-    // ACME issuance for a local self-sign (tls-acme.spec.ts).
-    command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_SKILLS_INDEX_URL=http://127.0.0.1:${SKILLS_STUB_PORT}/index.json PECKBOARD_MIRROR_TEST_ENDPOINTS=1 PECKBOARD_ACME_TEST=1 PECKBOARD_DEV_RELAY_CERT=${RELAY_STATE_DIR}/dev-cert.der PECKBOARD_DEV_LINK_TTL_SECS=3600 PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ${SERVER_BIN} --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  },
+  webServer: [
+    // The team hub boots first so it is listening before the box can reach
+    // for it (see TEAM_HUB_BIN above).
+    ...(teamHub
+      ? [
+          {
+            command: `${TEAM_HUB_BIN} --http-only --listen 127.0.0.1:${TEAM_HUB_PORT} --data-dir ${TEAM_HUB_DATA} --new-key-pow-bits 4 --domain team.test`,
+            url: `${TEAM_HUB_URL}/`,
+            reuseExistingServer: !process.env.CI,
+            timeout: 30_000,
+            stdout: 'pipe' as const,
+            stderr: 'pipe' as const,
+          },
+        ]
+      : []),
+    {
+      // Fresh data dir each run so prior state can't bleed in.
+      // The binary embeds the frontend, so we only run the binary here —
+      // both builds happen in global-setup before webServer launches.
+      // PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 pins the Claude catalog to the
+      // static seed: specs assert exact model labels, which must not depend
+      // on whatever `claude` binary the host machine has installed.
+      // PECKBOARD_GITHUB_TOKEN + PECKBOARD_GITHUB_API_BASE point the PR
+      // features at the stub `doc-review-pr.spec.ts` runs on
+      // GITHUB_STUB_PORT, so "both directions" is exercised for real without
+      // ever leaving the machine.
+      // PECKBOARD_E2E_ROUTE_LOG is empty (inert) outside the impact-map run.
+      // PECKBOARD_PREINSTALL_PLUGINS=all seeds every bundled crate plugin
+      // installed — fresh installs default to none, but specs assume mock
+      // and friends are active; the install/uninstall flow is covered by
+      // crate-plugin-install.spec.ts which round-trips from this state.
+      // PECKBOARD_MIRROR_TEST_ENDPOINTS=1 lets the Assistant mirror post to
+      // the http://127.0.0.1 receiver `assistant-mirror.spec.ts` runs.
+      // PECKBOARD_DEV_RELAY_CERT + PECKBOARD_DEV_LINK_TTL_SECS: see the
+      // RELAY_STATE_DIR comment above (remote-access-enroll.spec.ts).
+      // PECKBOARD_SKILLS_INDEX_URL points the seeded public skill source at
+      // the mock index skills.spec.ts serves on SKILLS_STUB_PORT.
+      // PECKBOARD_ACME_TEST=1 enables the `mock` DNS provider and swaps real
+      // ACME issuance for a local self-sign (tls-acme.spec.ts).
+      // PECKBOARD_TEAM_HUB_URL points Settings → Teams at the local hub
+      // (teams.spec.ts); harmless when no hub runs.
+      command: `PECKBOARD_DATA_DIR=${DATA_DIR} PECKBOARD_BOOTSTRAP_USERNAME=${E2E_USER} PECKBOARD_BOOTSTRAP_PASSWORD=${E2E_PASS} PECKBOARD_PREINSTALL_PLUGINS=all PECKBOARD_CLAUDE_MODEL_DISCOVERY=0 PECKBOARD_TTS_DOWNLOAD=0 PECKBOARD_GITHUB_TOKEN=e2e-stub-token PECKBOARD_GITHUB_API_BASE=http://127.0.0.1:${GITHUB_STUB_PORT} PECKBOARD_SKILLS_INDEX_URL=http://127.0.0.1:${SKILLS_STUB_PORT}/index.json PECKBOARD_MIRROR_TEST_ENDPOINTS=1 PECKBOARD_ACME_TEST=1 PECKBOARD_DEV_RELAY_CERT=${RELAY_STATE_DIR}/dev-cert.der PECKBOARD_DEV_LINK_TTL_SECS=3600 PECKBOARD_TEAM_HUB_URL=${TEAM_HUB_URL} PECKBOARD_E2E_ROUTE_LOG=${ROUTE_LOG} ${SERVER_BIN} --port ${PORT} --https-port ${HTTPS_PORT} --host 127.0.0.1`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  ],
 })

@@ -5,7 +5,7 @@ name = "peckboard"
 # 0.1.1 jumped the 0.0.x line on purpose: the 0.0.191 binaries shipped
 # stamped "0.1.0" (see build.rs), and only a release that compares newer
 # than that could wake their self-updater again.
-version = "0.1.163"
+version = "0.1.164"
 edition = "2024"
 
 [dependencies]
@@ -157,12 +157,18 @@ peckboard-relay = { path = "peckboard-relay", features = ["tunnel"] }
 # SKILL.md parser + proprietary-content guard, shared with the public
 # skills hub (peckboard-skills-hub) so both validate a skill the same way.
 peckboard-skill-format = { path = "peckboard-skill-format" }
+# Team membership log: record format + rules, shared with the hub so both
+# judge a team the same way.
+peckboard-team-format = { path = "peckboard-team-format" }
 
 [features]
 default = ["desktop"]
 desktop = ["dep:wry", "dep:tao", "dep:image", "dep:open"]
 
 [dev-dependencies]
+# The real team/skills hub, run in-process by tests/teams_hub.rs so the
+# team client is tested against the server it will actually talk to.
+peckboard-skills-hub = { path = "peckboard-skills-hub" }
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 tempfile = "3.27.0"
 time = "0.3.47"

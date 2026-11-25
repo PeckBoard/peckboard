@@ -1690,6 +1690,42 @@ pub struct NewFolderMemory {
     pub created_at: String,
     pub updated_at: String,
 }
+
+// ── Teams ─────────────────────────────────────────
+
+/// A team of PeckBoard servers this server founded, belongs to, has asked
+/// to join, or was in (`state`: member | pending | left | removed).
+/// `log_len` / `log_head` pin the newest membership-log state this server
+/// has verified. Never serialized as is: `invite_secret` must not leave the
+/// server (`service::teams` builds the view).
+#[derive(Queryable, Selectable, Insertable, AsChangeset, Debug, Clone, PartialEq, Eq)]
+#[diesel(table_name = teams)]
+#[diesel(treat_none_as_null = true)]
+pub struct TeamRow {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+    pub role: Option<String>,
+    pub log_len: i64,
+    pub log_head: String,
+    pub request_id: Option<String>,
+    pub invite_id: Option<String>,
+    pub invite_secret: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// An open invite this server created; `secret` never leaves the server.
+#[derive(Queryable, Selectable, Insertable, Debug, Clone, PartialEq, Eq)]
+#[diesel(table_name = team_invites)]
+pub struct TeamInviteRow {
+    pub invite_id: String,
+    pub team_id: String,
+    pub secret: String,
+    pub expires_at: String,
+    pub created_at: String,
+}
 // ── Document Reviews ─────────────────────────────
 
 /// A review pass over one markdown document. The document's text lives in

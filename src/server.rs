@@ -458,6 +458,17 @@ pub async fn run_server(
         );
     }
 
+    // Teams: keep each team's membership up to date and notice join
+    // requests (`team-update` WS event). Skipped with PECKBOARD_NO_RESUME=1
+    // like the other schedulers; the Team page refreshes on demand.
+    if !no_resume {
+        crate::service::teams::spawn_poller(
+            state.db.clone(),
+            state.config.data_dir.clone(),
+            state.broadcaster.clone(),
+        );
+    }
+
     // Temp-session orphan sweep: delete temp sessions no tab points at
     // anymore (a client died between create and tab-open, or a
     // last-tab-close delete failed mid-way). One-shot at boot; failures

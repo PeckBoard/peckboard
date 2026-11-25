@@ -33,9 +33,10 @@ if [[ ! "$SHARDS" =~ ^[0-9]+$ ]] || [[ "$SHARDS" -lt 1 ]]; then
 fi
 shift || true
 
-# Each shard needs three free ports (http, https, github stub). Step by
-# 10 from a base well clear of the 3344/3345 default install and the
-# 4444-4447 single-run / screenshots configs.
+# Each shard needs a few free ports (http, https, github stub, skills stub
+# at +3, team hub at +4). Step by 10 from a base well clear of the
+# 3344/3345 default install and the 4444-4448 single-run / screenshots
+# configs.
 PORT_BASE="${PECKBOARD_E2E_PORT_BASE:-4500}"
 
 # ── build once ────────────────────────────────────────────────────────
@@ -70,6 +71,7 @@ for ((i = 1; i <= SHARDS; i++)); do
     PECKBOARD_E2E_PORT="$port" \
       PECKBOARD_E2E_HTTPS_PORT="$((port + 1))" \
       PECKBOARD_E2E_GITHUB_PORT="$((port + 2))" \
+      PECKBOARD_E2E_TEAM_PORT="$((port + 4))" \
       PECKBOARD_E2E_SHARD="$i" \
       PECKBOARD_E2E_DATA_DIR="$(mktemp -d)" \
       npx playwright test \

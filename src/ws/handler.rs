@@ -492,6 +492,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             // text — so a Memory dialog open on any session
                             // of that folder can reload.
                             | "folder-memory"
+                            // team-update: a team this server is in changed,
+                            // or has join requests waiting (a count only,
+                            // no names or keys); not tied to a session.
+                            | "team-update"
                     );
 
                     let should_send = if is_global {
