@@ -1,4 +1,13 @@
 import { test, expect, type APIRequestContext, type Page } from '../harness'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// Screenshots for a visual check of the section (light, dark, narrow).
+// Written next to the repo; not asserted on.
+const SHOTS = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../.tmp-retention-shots',
+)
 
 /**
  * E2E for the data-retention settings surface (`/api/settings/retention` +
@@ -85,7 +94,9 @@ test('an admin can read and persist retention settings via the API', async ({ re
   const get = await request.get('/api/settings/retention', { headers: auth })
   expect(get.ok()).toBeTruthy()
   const body = await get.json()
-  expect(body).toEqual({
+  // toMatchObject: the file-cleanup limits not sent above come back as 0.
+  expect(body.transcript_max_age_days).toBe(0)
+  expect(body).toMatchObject({
     repeating_session_max_age_days: 30,
     repeating_session_max_per_task: 5,
     event_max_age_days: 14,
@@ -150,4 +161,48 @@ test('an admin can edit and save retention settings from the Server sub-page', a
     headers: auth,
     data: { ...body, report_max_age_days: 0 },
   })
+})
+
+test('an admin can preview the file cleanup without saving or deleting anything', async ({
+  request,
+  page,
+}) => {
+  const { token, auth } = await authenticateAdmin(request)
+
+  // An out-of-range limit is refused before anything is measured.
+  const bad = await request.post('/api/settings/retention/preview', {
+    headers: auth,
+    data: { browser_run_max_age_days: 99_999 },
+  })
+  expect(bad.status()).toBe(400)
+
+  await openSettings(page, token)
+  const settings = page.getByTestId('settings-page')
+  await settings.getByTestId('settings-nav-data').click()
+  const section = settings.getByTestId('retention-settings-section')
+
+  await section.getByTestId('retention-input-browser_run_max_age_days').fill('30')
+  await section.getByTestId('retention-settings-preview').click()
+  const preview = section.getByTestId('retention-preview')
+  // A fresh server has nothing 30 days old; a limit left at 0 says so.
+  await expect(preview).toContainText('Browser runs: nothing is old enough yet.')
+  await expect(preview).toContainText('Tool images: kept forever.')
+  await expect(preview).toContainText('Nothing has been deleted.')
+
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme })
+    await section.screenshot({ path: path.join(SHOTS, `preview-${scheme}.png`) })
+  }
+  await page.setViewportSize({ width: 380, height: 800 })
+  await section.screenshot({ path: path.join(SHOTS, 'preview-dark-380.png') })
+  await page.emulateMedia({ colorScheme: null })
+  await page.setViewportSize({ width: 1280, height: 720 })
+
+  // Preview is not Save: the stored limit is unchanged.
+  const get = await request.get('/api/settings/retention', { headers: auth })
+  expect((await get.json()).browser_run_max_age_days).toBe(0)
+
+  // Editing a limit drops the now-stale preview.
+  await section.getByTestId('retention-input-browser_run_max_age_days').fill('31')
+  await expect(preview).toHaveCount(0)
 })

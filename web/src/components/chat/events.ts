@@ -888,10 +888,15 @@ function foldEvent(st: FoldState, ev: Event): void {
       // The provider refused to resume the conversation this session was
       // on (its store no longer has it), so the turn was re-run cold. The
       // transcript above is intact; the model's memory of it is not.
+      // `transcript-pruned`: the retention sweep removed the saved
+      // conversation of a session unused for `days` days.
       flushAssistant(st)
       items.push({
         type: 'system',
-        text: 'The earlier conversation could not be resumed, so this session continues in a fresh one. Everything above is still here, but the agent no longer remembers it.',
+        text:
+          ev.data.reason === 'transcript-pruned'
+            ? `This session was not used for ${Number(ev.data.days) || 'many'} days, so the automatic cleanup removed the agent's saved conversation. Everything above is still here, but the agent starts fresh and no longer remembers it.`
+            : 'The earlier conversation could not be resumed, so this session continues in a fresh one. Everything above is still here, but the agent no longer remembers it.',
         key: ev.id,
         ts: ev.ts,
       })

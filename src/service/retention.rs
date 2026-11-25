@@ -52,6 +52,18 @@ pub async fn run_sweep(state: &AppState) {
         Ok(n) => tracing::info!("Retention sweep: deleted {n} expired short-term memory notes"),
         Err(e) => tracing::warn!("Retention sweep: memory purge failed: {e:#}"),
     }
+    // Files on disk that only ever grow: browser runs, tool images, and
+    // provider CLI transcripts.
+    let report = sweep_files(state, &settings, false).await;
+    if report != FileSweepReport::default() {
+        tracing::info!(
+            browser_run_bytes = report.browser_runs.bytes,
+            tool_image_bytes = report.tool_images.bytes,
+            transcript_bytes = report.transcripts.bytes,
+            sessions_reset = report.sessions_reset,
+            "Retention sweep: pruned old files"
+        );
+    }
 }
 
 /// Delete repeating-task run sessions past the configured age and/or
@@ -242,6 +254,328 @@ pub fn sweep_reports(data_dir: &Path, max_age_days: u32, max_count: u32) -> anyh
     Ok(deleted)
 }
 
+// ── Files that only grow: browser runs, tool images, CLI transcripts ────
+
+/// What one file prune removed (or, on a dry run, would remove).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PruneStats {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// Result of [`sweep_files`], also the body of the Settings preview.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct FileSweepReport {
+    pub browser_runs: PruneStats,
+    pub tool_images: PruneStats,
+    pub transcripts: PruneStats,
+    /// Sessions idle past the transcript limit whose conversation pointer
+    /// was (or would be) dropped, so their next turn starts fresh.
+    pub sessions_reset: u64,
+}
+
+/// The only places a transcript is deleted from: per provider, the folder
+/// under the data dir holding one directory per Peckboard-managed account,
+/// and the subfolders of an account that hold conversations. Everything
+/// else in an account folder (sign-in files, settings, caches, the CLI's
+/// own databases) is never touched, and neither is the host's own
+/// `~/.claude` / `~/.codex` / `~/.grok`.
+const TRANSCRIPT_DIRS: &[(&str, &[&str])] = &[
+    ("claude-accounts", &["projects"]),
+    ("codex-accounts", &["sessions", "generated_images"]),
+    ("grok-accounts", &["sessions"]),
+];
+
+fn days_ago(days: u32) -> SystemTime {
+    SystemTime::now()
+        .checked_sub(Duration::from_secs(days as u64 * 86_400))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+/// Run (or, with `dry_run`, only measure) the three file prunes for the
+/// limits in `settings`; a limit of 0 skips that kind.
+pub async fn sweep_files(
+    state: &AppState,
+    settings: &RetentionSettings,
+    dry_run: bool,
+) -> FileSweepReport {
+    let mut report = FileSweepReport::default();
+    let data_dir = state.config.data_dir.clone();
+
+    let (run_days, image_days) = (
+        settings.browser_run_max_age_days,
+        settings.tool_image_max_age_days,
+    );
+    if run_days > 0 || image_days > 0 {
+        let dir = data_dir.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            let runs = if run_days > 0 {
+                sweep_browser_runs(&dir, days_ago(run_days), dry_run)
+            } else {
+                PruneStats::default()
+            };
+            let mut images = PruneStats::default();
+            if image_days > 0 {
+                prune_tree(
+                    &dir.join("tool-images"),
+                    days_ago(image_days),
+                    &|_| false,
+                    dry_run,
+                    &mut images,
+                );
+            }
+            (runs, images)
+        })
+        .await;
+        if let Ok((runs, images)) = done {
+            report.browser_runs = runs;
+            report.tool_images = images;
+        }
+    }
+
+    let days = settings.transcript_max_age_days;
+    if days > 0 {
+        let rows = match state.db.list_session_conversations().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                // Without the keep-list nothing may be deleted.
+                tracing::warn!("Retention sweep: listing session conversations failed: {e:#}");
+                return report;
+            }
+        };
+        let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let (idle, mut keep) = split_conversations(rows, &cutoff);
+        // Sessions first: a session still pointing at a deleted transcript
+        // would fail its next turn before recovering. One that can't be
+        // reset keeps its files.
+        for (session_id, conversation_id) in idle {
+            if dry_run || reset_idle_session(state, &session_id, days).await {
+                report.sessions_reset += 1;
+            } else {
+                keep.insert(conversation_id);
+            }
+        }
+        let dir = data_dir.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            sweep_transcript_files(&dir, days_ago(days), &keep, dry_run)
+        })
+        .await;
+        if let Ok(stats) = done {
+            report.transcripts = stats;
+        }
+    }
+    report
+}
+
+/// Conversation ids whose files must survive a transcript sweep.
+#[derive(Debug, Default)]
+struct KeepIds {
+    /// The usual shape: a 36-character uuid, found by window lookup.
+    uuids: std::collections::HashSet<String>,
+    /// Anything else, matched by substring.
+    other: Vec<String>,
+}
+
+impl KeepIds {
+    fn insert(&mut self, id: String) {
+        if id.len() == 36 {
+            self.uuids.insert(id.to_ascii_lowercase());
+        } else if !id.trim().is_empty() {
+            self.other.push(id);
+        }
+    }
+
+    /// True when `path` names a kept conversation anywhere in it — the
+    /// transcript file itself, or a folder of its images / subagent logs.
+    fn mentions(&self, path: &Path) -> bool {
+        let text = path.to_string_lossy().to_ascii_lowercase();
+        if self.other.iter().any(|id| text.contains(id.as_str())) {
+            return true;
+        }
+        if self.uuids.is_empty() {
+            return false;
+        }
+        text.split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+            .filter(|run| run.len() >= 36)
+            .any(|run| (0..=run.len() - 36).any(|i| self.uuids.contains(&run[i..i + 36])))
+    }
+}
+
+/// Split `(session id, conversation id, last_activity)` rows at `cutoff`
+/// (RFC 3339, compared as text like the other sweeps): sessions idle since
+/// before it are returned for a reset, every other session's conversation
+/// goes on the keep-list.
+fn split_conversations(
+    rows: Vec<(String, String, String)>,
+    cutoff: &str,
+) -> (Vec<(String, String)>, KeepIds) {
+    let mut idle = Vec::new();
+    let mut keep = KeepIds::default();
+    for (session_id, conversation_id, last_activity) in rows {
+        if last_activity.as_str() < cutoff {
+            idle.push((session_id, conversation_id));
+        } else {
+            keep.insert(conversation_id);
+        }
+    }
+    (idle, keep)
+}
+
+/// Drop an idle session's conversation pointer and leave the marker that
+/// stops the event-log fallback from handing the same id back (see
+/// `provider::manager::resume_conversation_id_from_tail`). Its chat history
+/// stays; its next turn starts cold. False when the pointer could not be
+/// cleared, in which case the caller keeps the transcript.
+async fn reset_idle_session(state: &AppState, session_id: &str, days: u32) -> bool {
+    let update = crate::db::models::UpdateSession {
+        conversation_id: Some(None),
+        ..Default::default()
+    };
+    match state.db.update_session(session_id, update).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return false,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "Retention sweep: session reset failed: {e:#}");
+            return false;
+        }
+    }
+    if let Err(e) = state
+        .db
+        .append_event(
+            session_id,
+            crate::provider::resume_recovery::CONVERSATION_RESET_KIND,
+            serde_json::json!({ "reason": "transcript-pruned", "days": days }),
+        )
+        .await
+    {
+        tracing::warn!(session_id = %session_id, "Retention sweep: reset marker failed: {e:#}");
+    }
+    true
+}
+
+/// Delete whole browser-run folders in which nothing was written since
+/// `cutoff`. A run is one unit (frames + DOM log + meta), so it goes or
+/// stays as a whole; a run still recording keeps writing and is skipped.
+fn sweep_browser_runs(data_dir: &Path, cutoff: SystemTime, dry_run: bool) -> PruneStats {
+    let mut stats = PruneStats::default();
+    let root = crate::service::browser_runs::runs_root(data_dir);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return stats;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let mut run = PruneStats::default();
+        // Age is the newest FILE: a folder's own time moves whenever an
+        // entry is added or removed. An empty run falls back to the folder.
+        let mut newest = None;
+        measure_tree(&path, &mut run, &mut newest);
+        let newest = newest.or_else(|| entry.metadata().ok().and_then(|m| m.modified().ok()));
+        if newest.is_some_and(|t| t < cutoff) && (dry_run || std::fs::remove_dir_all(&path).is_ok())
+        {
+            stats.files += run.files;
+            stats.bytes += run.bytes;
+        }
+    }
+    stats
+}
+
+/// Total file count / bytes under `dir` and the newest modification time.
+fn measure_tree(dir: &Path, stats: &mut PruneStats, newest: &mut Option<SystemTime>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.is_dir() {
+            measure_tree(&entry.path(), stats, newest);
+        } else {
+            stats.files += 1;
+            stats.bytes += meta.len();
+            if let Ok(modified) = meta.modified()
+                && newest.is_none_or(|n| modified > n)
+            {
+                *newest = Some(modified);
+            }
+        }
+    }
+}
+
+/// Delete transcripts older than `cutoff` from every managed account's
+/// conversation folders ([`TRANSCRIPT_DIRS`]), except files naming a kept
+/// conversation.
+fn sweep_transcript_files(
+    data_dir: &Path,
+    cutoff: SystemTime,
+    keep: &KeepIds,
+    dry_run: bool,
+) -> PruneStats {
+    let mut stats = PruneStats::default();
+    for (accounts, subdirs) in TRANSCRIPT_DIRS {
+        let Ok(entries) = std::fs::read_dir(data_dir.join(accounts)) else {
+            continue;
+        };
+        for account in entries.flatten() {
+            if !account.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            for sub in *subdirs {
+                prune_tree(
+                    &account.path().join(sub),
+                    cutoff,
+                    &|p| keep.mentions(p),
+                    dry_run,
+                    &mut stats,
+                );
+            }
+        }
+    }
+    stats
+}
+
+/// Delete every regular file under `root` last modified before `cutoff`
+/// unless `keep` claims it, then remove folders left empty (never `root`
+/// itself). Symlinks are neither followed nor removed. Returns whether
+/// `root` ended up empty.
+fn prune_tree(
+    root: &Path,
+    cutoff: SystemTime,
+    keep: &dyn Fn(&Path) -> bool,
+    dry_run: bool,
+    stats: &mut PruneStats,
+) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    let mut empty = true;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            empty = false;
+            continue;
+        };
+        if meta.is_dir() {
+            let now_empty = prune_tree(&path, cutoff, keep, dry_run, stats);
+            if !(now_empty && (dry_run || std::fs::remove_dir(&path).is_ok())) {
+                empty = false;
+            }
+        } else if meta.is_file()
+            && meta.modified().is_ok_and(|m| m < cutoff)
+            && !keep(&path)
+            && (dry_run || std::fs::remove_file(&path).is_ok())
+        {
+            stats.files += 1;
+            stats.bytes += meta.len();
+        } else {
+            empty = false;
+        }
+    }
+    empty
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +654,201 @@ mod tests {
     fn sweep_reports_missing_dir_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(sweep_reports(tmp.path(), 30, 10).unwrap(), 0);
+    }
+
+    /// Write `rel` under `root` and backdate it by `age_days`.
+    fn aged(root: &Path, rel: &str, age_days: u64) -> std::path::PathBuf {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"0123456789").unwrap();
+        let when = SystemTime::now() - Duration::from_secs(age_days * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn browser_runs_go_whole_and_only_when_nothing_in_them_is_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = aged(tmp.path(), "browser-runs/old/0000.png", 40);
+        aged(tmp.path(), "browser-runs/old/meta.json", 40);
+        // One fresh frame keeps the whole run, old frames included.
+        let mixed = aged(tmp.path(), "browser-runs/live/0000.png", 40);
+        aged(tmp.path(), "browser-runs/live/0001.png", 0);
+
+        let dry = sweep_browser_runs(tmp.path(), days_ago(30), true);
+        assert_eq!(
+            dry,
+            PruneStats {
+                files: 2,
+                bytes: 20
+            }
+        );
+        assert!(old.exists(), "a dry run deletes nothing");
+
+        let done = sweep_browser_runs(tmp.path(), days_ago(30), false);
+        assert_eq!(done, dry);
+        assert!(!old.parent().unwrap().exists());
+        assert!(mixed.exists());
+    }
+
+    #[test]
+    fn transcript_sweep_spares_kept_conversations_and_everything_outside_the_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let kept = "11111111-2222-3333-4444-555555555555";
+        let gone = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let auth = aged(d, "codex-accounts/c1/auth.json", 400);
+        let history = aged(d, "codex-accounts/c1/thread_history_1.sqlite", 400);
+        let claude_keys = aged(d, "claude-accounts/a1/sessions/1.key", 400);
+        let old = aged(
+            d,
+            &format!(
+                "codex-accounts/c1/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{gone}.jsonl"
+            ),
+            90,
+        );
+        let old_kept = aged(
+            d,
+            &format!(
+                "codex-accounts/c1/sessions/2026/01/02/rollout-2026-01-02T11-00-00-{kept}.jsonl"
+            ),
+            90,
+        );
+        let kept_image = aged(
+            d,
+            &format!("codex-accounts/c1/generated_images/{kept}/1.png"),
+            90,
+        );
+        let old_claude = aged(
+            d,
+            &format!("claude-accounts/a1/projects/-home-x/{gone}.jsonl"),
+            90,
+        );
+        let old_sub = aged(
+            d,
+            &format!("claude-accounts/a1/projects/-home-x/{gone}/subagents/agent-1.jsonl"),
+            90,
+        );
+        let fresh = aged(d, "grok-accounts/g1/sessions/%2Fhome%2Fx/s1/chat.jsonl", 3);
+        let old_grok = aged(d, "grok-accounts/g1/sessions/%2Fhome%2Fx/s0/chat.jsonl", 90);
+
+        let (idle, keep) = split_conversations(
+            vec![
+                row("s-active", kept, "2026-06-01T00:00:00+00:00"),
+                row("s-idle", gone, "2026-01-01T00:00:00+00:00"),
+            ],
+            "2026-03-01T00:00:00+00:00",
+        );
+        assert_eq!(idle, vec![("s-idle".to_string(), gone.to_string())]);
+
+        let stats = sweep_transcript_files(d, days_ago(60), &keep, false);
+        assert_eq!(
+            stats,
+            PruneStats {
+                files: 4,
+                bytes: 40
+            }
+        );
+        for gone in [&old, &old_claude, &old_sub, &old_grok] {
+            assert!(!gone.exists(), "{} should be deleted", gone.display());
+        }
+        assert!(
+            !old_sub.parent().unwrap().parent().unwrap().exists(),
+            "emptied folders go"
+        );
+        for stays in [
+            &auth,
+            &history,
+            &claude_keys,
+            &old_kept,
+            &kept_image,
+            &fresh,
+        ] {
+            assert!(stays.exists(), "{} must survive", stays.display());
+        }
+    }
+
+    #[tokio::test]
+    async fn file_sweep_resets_idle_sessions_before_deleting_and_leaves_active_ones() {
+        use crate::db::models::{NewFolder, NewSession};
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(tmp.path());
+        let d = state.config.data_dir.clone();
+        let now = Utc::now();
+        state
+            .db
+            .create_folder(NewFolder {
+                id: "f".into(),
+                name: "f".into(),
+                path: ".".into(),
+                created_at: now.to_rfc3339(),
+            })
+            .await
+            .unwrap();
+        let idle_conv = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let live_conv = "11111111-2222-3333-4444-555555555555";
+        for (id, conv, age_days) in [("idle", idle_conv, 90), ("live", live_conv, 1)] {
+            let at = (now - chrono::Duration::days(age_days)).to_rfc3339();
+            state
+                .db
+                .create_session(NewSession {
+                    id: id.into(),
+                    name: id.into(),
+                    folder_id: "f".into(),
+                    conversation_id: Some(conv.into()),
+                    created_at: at.clone(),
+                    last_activity: at,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        let idle_file = aged(
+            &d,
+            &format!("claude-accounts/a/projects/p/{idle_conv}.jsonl"),
+            90,
+        );
+        let live_file = aged(
+            &d,
+            &format!("claude-accounts/a/projects/p/{live_conv}.jsonl"),
+            90,
+        );
+        let image = aged(&d, "tool-images/idle/img", 90);
+
+        // All limits off: nothing happens.
+        let off = sweep_files(&state, &RetentionSettings::default(), false).await;
+        assert_eq!(off, FileSweepReport::default());
+
+        let settings = RetentionSettings {
+            tool_image_max_age_days: 30,
+            transcript_max_age_days: 60,
+            ..Default::default()
+        };
+        let preview = sweep_files(&state, &settings, true).await;
+        assert_eq!(preview.sessions_reset, 1);
+        assert_eq!(preview.transcripts.files, 1);
+        assert!(
+            idle_file.exists() && image.exists(),
+            "a preview deletes nothing"
+        );
+        let idle = state.db.get_session("idle").await.unwrap().unwrap();
+        assert_eq!(idle.conversation_id.as_deref(), Some(idle_conv));
+
+        let done = sweep_files(&state, &settings, false).await;
+        assert_eq!(done, preview);
+        assert!(!idle_file.exists() && !image.exists());
+        assert!(live_file.exists(), "an active session keeps its transcript");
+        let idle = state.db.get_session("idle").await.unwrap().unwrap();
+        assert_eq!(idle.conversation_id, None);
+        let live = state.db.get_session("live").await.unwrap().unwrap();
+        assert_eq!(live.conversation_id.as_deref(), Some(live_conv));
+        // The marker stops the event-log fallback re-serving the dead id.
+        let events = state.db.events_tail("idle", 5).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "conversation-reset"));
     }
 }

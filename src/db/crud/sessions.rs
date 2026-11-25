@@ -611,6 +611,25 @@ impl Db {
         .await
     }
 
+    /// `(id, conversation_id, last_activity)` of every session that still
+    /// points at a provider conversation. The transcript sweeper splits
+    /// these into "idle past the cutoff" (reset) and "keep its files".
+    pub async fn list_session_conversations(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        self.with_conn(move |conn| {
+            sessions::table
+                .filter(sessions::conversation_id.is_not_null())
+                .select((
+                    sessions::id,
+                    sessions::conversation_id.assume_not_null(),
+                    sessions::last_activity,
+                ))
+                .load(conn)
+                .map_err(Into::into)
+        })
+        .await
+    }
     /// Sessions with a handover parked (`handover_to_model` set) as of this
     /// call — used by startup reconciliation to abort any handover whose
     /// dispatch never got the chance to run before the last shutdown.

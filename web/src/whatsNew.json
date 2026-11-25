@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.1.166",
+    "date": "2026-11-25",
+    "highlights": [
+      "Free up disk space automatically: under Settings → Data → Data retention you can now set an age limit for browser runs, tool screenshots and saved agent conversations. All three are off until you turn them on.",
+      "Preview file cleanup shows how much each limit would delete before you save anything.",
+      "A session unused past the limit keeps its chat history; its agent just starts fresh the next time you write to it."
+    ]
+  },
+  {
     "version": "0.1.165",
     "date": "2026-11-25",
     "highlights": [

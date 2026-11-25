@@ -143,6 +143,7 @@ fn admin_router() -> Router<Arc<AppState>> {
             "/api/settings/retention",
             get(get_retention).put(set_retention),
         )
+        .route("/api/settings/retention/preview", post(preview_retention))
         .route(
             "/api/settings/memory",
             get(get_memory_settings).put(set_memory_settings),
@@ -760,6 +761,20 @@ pub struct RetentionSettings {
     /// Keep only the newest N report files overall. 0 = no count bound.
     #[serde(default)]
     pub report_max_count: u32,
+    /// Delete a recorded browser run once nothing in its folder was
+    /// written for this many days. 0 = keep forever.
+    #[serde(default)]
+    pub browser_run_max_age_days: u32,
+    /// Delete tool images (screenshots a tool returned) older than this
+    /// many days. The chat then shows "image expired". 0 = keep forever.
+    #[serde(default)]
+    pub tool_image_max_age_days: u32,
+    /// Delete provider CLI transcripts in Peckboard-managed account folders
+    /// once they are this many days old and no session active within that
+    /// time points at them; sessions idle that long start their next turn
+    /// in a fresh conversation. 0 = keep forever.
+    #[serde(default)]
+    pub transcript_max_age_days: u32,
 }
 
 impl RetentionSettings {
@@ -773,6 +788,9 @@ impl RetentionSettings {
             self.event_max_count_per_session,
             self.report_max_age_days,
             self.report_max_count,
+            self.browser_run_max_age_days,
+            self.tool_image_max_age_days,
+            self.transcript_max_age_days,
         ];
         if fields.iter().any(|&v| v > Self::MAX_BOUND) {
             return Err("retention values must be 36500 or less");
@@ -796,6 +814,23 @@ pub async fn retention_settings(state: &AppState) -> RetentionSettings {
     }
 }
 
+/// POST /api/settings/retention/preview → what the file-cleanup limits in
+/// the body would delete right now (files + bytes per kind, sessions that
+/// would start fresh). Deletes nothing.
+async fn preview_retention(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RetentionSettings>,
+) -> impl IntoResponse {
+    if let Err(msg) = body.validate() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        ));
+    }
+    Ok(Json(
+        crate::service::retention::sweep_files(&state, &body, true).await,
+    ))
+}
 /// GET /api/settings/retention → [`RetentionSettings`] as JSON.
 async fn get_retention(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(retention_settings(&state).await)
