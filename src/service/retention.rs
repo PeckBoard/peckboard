@@ -52,13 +52,14 @@ pub async fn run_sweep(state: &AppState) {
         Ok(n) => tracing::info!("Retention sweep: deleted {n} expired short-term memory notes"),
         Err(e) => tracing::warn!("Retention sweep: memory purge failed: {e:#}"),
     }
-    // Files on disk that only ever grow: browser runs, tool images, and
-    // provider CLI transcripts.
+    // Files on disk that only ever grow: browser runs, tool images, shared
+    // files, and provider CLI transcripts.
     let report = sweep_files(state, &settings, false).await;
     if report != FileSweepReport::default() {
         tracing::info!(
             browser_run_bytes = report.browser_runs.bytes,
             tool_image_bytes = report.tool_images.bytes,
+            shared_file_bytes = report.shared_files.bytes,
             transcript_bytes = report.transcripts.bytes,
             sessions_reset = report.sessions_reset,
             "Retention sweep: pruned old files"
@@ -268,6 +269,7 @@ pub struct PruneStats {
 pub struct FileSweepReport {
     pub browser_runs: PruneStats,
     pub tool_images: PruneStats,
+    pub shared_files: PruneStats,
     pub transcripts: PruneStats,
     /// Sessions idle past the transcript limit whose conversation pointer
     /// was (or would be) dropped, so their next turn starts fresh.
@@ -302,11 +304,12 @@ pub async fn sweep_files(
     let mut report = FileSweepReport::default();
     let data_dir = state.config.data_dir.clone();
 
-    let (run_days, image_days) = (
+    let (run_days, image_days, shared_days) = (
         settings.browser_run_max_age_days,
         settings.tool_image_max_age_days,
+        settings.shared_file_max_age_days,
     );
-    if run_days > 0 || image_days > 0 {
+    if run_days > 0 || image_days > 0 || shared_days > 0 {
         let dir = data_dir.clone();
         let done = tokio::task::spawn_blocking(move || {
             let runs = if run_days > 0 {
@@ -314,22 +317,32 @@ pub async fn sweep_files(
             } else {
                 PruneStats::default()
             };
-            let mut images = PruneStats::default();
-            if image_days > 0 {
-                prune_tree(
-                    &dir.join("tool-images"),
-                    days_ago(image_days),
-                    &|_| false,
-                    dry_run,
-                    &mut images,
-                );
-            }
-            (runs, images)
+            // Both are one folder per session holding plain files, and a
+            // chat that still shows one says it is gone (the routes 404).
+            let by_age = |name: &str, days: u32| {
+                let mut stats = PruneStats::default();
+                if days > 0 {
+                    prune_tree(
+                        &dir.join(name),
+                        days_ago(days),
+                        &|_| false,
+                        dry_run,
+                        &mut stats,
+                    );
+                }
+                stats
+            };
+            (
+                runs,
+                by_age("tool-images", image_days),
+                by_age("shared-files", shared_days),
+            )
         })
         .await;
-        if let Ok((runs, images)) = done {
+        if let Ok((runs, images, shared)) = done {
             report.browser_runs = runs;
             report.tool_images = images;
+            report.shared_files = shared;
         }
     }
 
@@ -575,6 +588,57 @@ fn prune_tree(
         }
     }
     empty
+}
+
+/// Disk used right now by each kind of file the sweep can prune, plus the
+/// database for scale. The body of the Settings size readout.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct UsageReport {
+    pub browser_runs: PruneStats,
+    pub tool_images: PruneStats,
+    pub shared_files: PruneStats,
+    pub transcripts: PruneStats,
+    /// `peckboard.db` and its write-ahead files. Never pruned by age.
+    pub database: PruneStats,
+}
+
+/// Measure [`UsageReport`] by walking the data dir. Read-only.
+pub async fn measure_usage(data_dir: &Path) -> UsageReport {
+    let dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let tree = |path: std::path::PathBuf| {
+            let mut stats = PruneStats::default();
+            measure_tree(&path, &mut stats, &mut None);
+            stats
+        };
+        let mut transcripts = PruneStats::default();
+        for (accounts, subdirs) in TRANSCRIPT_DIRS {
+            let Ok(entries) = std::fs::read_dir(dir.join(accounts)) else {
+                continue;
+            };
+            for account in entries.flatten() {
+                for sub in *subdirs {
+                    measure_tree(&account.path().join(sub), &mut transcripts, &mut None);
+                }
+            }
+        }
+        let mut database = PruneStats::default();
+        for name in ["peckboard.db", "peckboard.db-wal", "peckboard.db-shm"] {
+            if let Ok(meta) = std::fs::metadata(dir.join(name)) {
+                database.files += 1;
+                database.bytes += meta.len();
+            }
+        }
+        UsageReport {
+            browser_runs: tree(crate::service::browser_runs::runs_root(&dir)),
+            tool_images: tree(dir.join("tool-images")),
+            shared_files: tree(dir.join("shared-files")),
+            transcripts,
+            database,
+        }
+    })
+    .await
+    .unwrap_or_default()
 }
 #[cfg(test)]
 mod tests {
@@ -850,5 +914,36 @@ mod tests {
         // The marker stops the event-log fallback re-serving the dead id.
         let events = state.db.events_tail("idle", 5).await.unwrap();
         assert!(events.iter().any(|e| e.kind == "conversation-reset"));
+    }
+
+    #[tokio::test]
+    async fn shared_files_are_measured_and_pruned_by_age() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::auth::middleware::tests::test_state(tmp.path());
+        let d = state.config.data_dir.clone();
+        let old = aged(&d, "shared-files/s1/old", 40);
+        let old_meta = aged(&d, "shared-files/s1/old.meta", 40);
+        let fresh = aged(&d, "shared-files/s2/fresh", 1);
+
+        let usage = measure_usage(&d).await;
+        assert_eq!(usage.shared_files.files, 3);
+        assert_eq!(usage.tool_images, PruneStats::default());
+
+        let settings = RetentionSettings {
+            shared_file_max_age_days: 30,
+            ..Default::default()
+        };
+        let preview = sweep_files(&state, &settings, true).await;
+        assert_eq!(preview.shared_files.files, 2);
+        assert!(old.exists(), "a preview deletes nothing");
+
+        let done = sweep_files(&state, &settings, false).await;
+        assert_eq!(done, preview);
+        assert!(!old.exists() && !old_meta.exists());
+        assert!(fresh.exists(), "a recent shared file stays");
+        assert!(
+            !d.join("shared-files/s1").exists(),
+            "the emptied folder goes"
+        );
     }
 }

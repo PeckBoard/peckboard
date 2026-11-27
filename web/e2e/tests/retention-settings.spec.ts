@@ -61,6 +61,21 @@ async function openSettings(page: Page, token: string) {
   await expect(page.getByTestId('settings-page')).toBeVisible({ timeout: 10_000 })
 }
 
+// Must stay first: the tests below overwrite the stored limits.
+test('a new install starts with the recommended file cleanup limits', async ({ request }) => {
+  const { auth } = await authenticateAdmin(request)
+  const get = await request.get('/api/settings/retention', { headers: auth })
+  expect(get.ok()).toBeTruthy()
+  expect(await get.json()).toMatchObject({
+    browser_run_max_age_days: 7,
+    tool_image_max_age_days: 30,
+    shared_file_max_age_days: 30,
+    transcript_max_age_days: 30,
+    // Limits on sessions, events and reports stay off.
+    event_max_age_days: 0,
+    report_max_age_days: 0,
+  })
+})
 test('a non-admin is refused by the retention settings API', async ({ request }) => {
   const { auth: adminAuth } = await authenticateAdmin(request)
   const { auth } = await createNonAdmin(request, adminAuth, 'api')
@@ -169,6 +184,10 @@ test('an admin can preview the file cleanup without saving or deleting anything'
 }) => {
   const { token, auth } = await authenticateAdmin(request)
 
+  // All limits off, like an install that existed before the limits did.
+  const off = await request.put('/api/settings/retention', { headers: auth, data: {} })
+  expect(off.ok()).toBeTruthy()
+
   // An out-of-range limit is refused before anything is measured.
   const bad = await request.post('/api/settings/retention/preview', {
     headers: auth,
@@ -205,4 +224,26 @@ test('an admin can preview the file cleanup without saving or deleting anything'
   // Editing a limit drops the now-stale preview.
   await section.getByTestId('retention-input-browser_run_max_age_days').fill('31')
   await expect(preview).toHaveCount(0)
+
+  // The size readout lists every kind of file, and the database.
+  const usage = section.getByTestId('retention-usage')
+  await expect(usage.getByTestId('retention-usage-shared_files')).toContainText('Shared files:')
+  await expect(usage.getByTestId('retention-usage-database')).toContainText('Database')
+
+  // With every file limit off, a notice offers the recommended limits.
+  // Taking them fills the fields and previews; it does not save.
+  const notice = section.getByTestId('retention-off-notice')
+  await expect(notice).toHaveCount(0)
+  await section.getByTestId('retention-input-browser_run_max_age_days').fill('0')
+  await expect(notice).toContainText('kept forever')
+  // Only the file limits are filled in; a limit set elsewhere stays.
+  await section.getByTestId('retention-input-report_max_age_days').fill('12')
+  await section.getByTestId('retention-use-recommended').click()
+  await expect(section.getByTestId('retention-input-report_max_age_days')).toHaveValue('12')
+  await expect(section.getByTestId('retention-input-browser_run_max_age_days')).toHaveValue('7')
+  await expect(section.getByTestId('retention-input-shared_file_max_age_days')).toHaveValue('30')
+  await expect(preview).toContainText('Shared files: nothing is old enough yet.')
+  await expect(notice).toHaveCount(0)
+  const after = await request.get('/api/settings/retention', { headers: auth })
+  expect((await after.json()).shared_file_max_age_days).toBe(0)
 })

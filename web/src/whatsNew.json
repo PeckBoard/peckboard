@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.1.167",
+    "date": "2026-11-27",
+    "highlights": [
+      "Settings → Data → Data retention now shows how much disk space browser runs, tool screenshots, shared files, saved agent conversations and the database use.",
+      "If old files are kept forever on your server, a new \"Use recommended limits\" button fills in sensible age limits and shows what they would delete. Nothing changes until you press Save.",
+      "New age limit for files that agents shared into a chat. After it, the card stays in the chat and says the file is no longer stored.",
+      "New installs start with the recommended limits turned on. Existing servers keep their current settings."
+    ]
+  },
+  {
     "version": "0.1.166",
     "date": "2026-11-25",
     "highlights": [

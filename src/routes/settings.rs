@@ -144,6 +144,7 @@ fn admin_router() -> Router<Arc<AppState>> {
             get(get_retention).put(set_retention),
         )
         .route("/api/settings/retention/preview", post(preview_retention))
+        .route("/api/settings/retention/usage", get(retention_usage))
         .route(
             "/api/settings/memory",
             get(get_memory_settings).put(set_memory_settings),
@@ -734,8 +735,11 @@ pub async fn ensure_setup_state(db: &Db, fresh_install: bool) {
 
 /// Data-retention limits enforced by the periodic sweeper
 /// (`service::retention`). Every field is a count/day bound; `0` means
-/// "keep forever" — the default, so upgrading to this feature never starts
-/// deleting existing data until an admin opts in.
+/// "keep forever" — the default for an install that existed before a limit
+/// was added, so upgrading never starts deleting existing data until an
+/// admin opts in. A new install starts with the file limits of
+/// [`RetentionSettings::with_recommended_file_limits`] instead
+/// ([`ensure_retention_defaults`]).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct RetentionSettings {
     /// Delete a repeating-task run session once it's older than this many
@@ -775,10 +779,25 @@ pub struct RetentionSettings {
     /// in a fresh conversation. 0 = keep forever.
     #[serde(default)]
     pub transcript_max_age_days: u32,
+    /// Delete files agents shared into a chat (`shared-files`) once they
+    /// are this many days old. The chat keeps the card, which then says
+    /// the file is no longer stored. 0 = keep forever.
+    #[serde(default)]
+    pub shared_file_max_age_days: u32,
 }
 
 impl RetentionSettings {
     const MAX_BOUND: u32 = 36_500; // 100 years / 100k rows-ish — guards against fat-fingered input, not a real limit
+    /// The file-cleanup limits a new install starts with, and what the
+    /// "Use recommended limits" button in Settings fills in. The other
+    /// limits (sessions, events, reports) are left as they are.
+    pub fn with_recommended_file_limits(mut self) -> Self {
+        self.browser_run_max_age_days = 7;
+        self.tool_image_max_age_days = 30;
+        self.shared_file_max_age_days = 30;
+        self.transcript_max_age_days = 30;
+        self
+    }
 
     fn validate(&self) -> Result<(), &'static str> {
         let fields = [
@@ -791,6 +810,7 @@ impl RetentionSettings {
             self.browser_run_max_age_days,
             self.tool_image_max_age_days,
             self.transcript_max_age_days,
+            self.shared_file_max_age_days,
         ];
         if fields.iter().any(|&v| v > Self::MAX_BOUND) {
             return Err("retention values must be 36500 or less");
@@ -814,6 +834,43 @@ pub async fn retention_settings(state: &AppState) -> RetentionSettings {
     }
 }
 
+/// Startup: give a brand-new install (`fresh_install`, the same signal as
+/// [`ensure_setup_state`]) the recommended file-cleanup limits, once. An
+/// existing install is never touched: its files stay until an admin turns
+/// the limits on in Settings.
+pub async fn ensure_retention_defaults(db: &Db, fresh_install: bool) {
+    if !fresh_install {
+        return;
+    }
+    let db = db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        if db
+            .plugin_store_get_blocking(SETTINGS_NS, SETTINGS_COLLECTION, RETENTION_KEY)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let value =
+            serde_json::to_string(&RetentionSettings::default().with_recommended_file_limits())
+                .unwrap();
+        db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, RETENTION_KEY, &value)
+            .map(|_| ())
+    })
+    .await;
+    if let Ok(Err(e)) = res {
+        tracing::warn!("Failed to write the default retention limits: {e}");
+    }
+}
+
+/// GET /api/settings/retention/usage → how much disk each kind of prunable
+/// file uses right now, plus the recommended limits for the button that
+/// turns them on.
+async fn retention_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "usage": crate::service::retention::measure_usage(&state.config.data_dir).await,
+        "recommended": RetentionSettings::default().with_recommended_file_limits(),
+    }))
+}
 /// POST /api/settings/retention/preview → what the file-cleanup limits in
 /// the body would delete right now (files + bytes per kind, sessions that
 /// would start fresh). Deletes nothing.
@@ -2370,6 +2427,43 @@ mod tests {
             setup_completed(&state2.db).await,
             "an existing install must never see the wizard"
         );
+    }
+
+    /// Only a brand-new install gets the recommended file limits, and only
+    /// while nothing is stored: an existing install's files are never put
+    /// on a clock by an upgrade, and an admin's own choice is never reset.
+    #[tokio::test]
+    async fn retention_defaults_apply_to_a_new_install_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = test_state(dir.path());
+        ensure_retention_defaults(&existing.db, false).await;
+        assert_eq!(
+            retention_settings(&existing).await,
+            RetentionSettings::default()
+        );
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let fresh = test_state(dir2.path());
+        ensure_retention_defaults(&fresh.db, true).await;
+        let got = retention_settings(&fresh).await;
+        assert_eq!(got.browser_run_max_age_days, 7);
+        assert_eq!(got.shared_file_max_age_days, 30);
+        assert_eq!(got.event_max_age_days, 0);
+
+        let chosen = RetentionSettings {
+            report_max_count: 5,
+            ..Default::default()
+        };
+        let value = serde_json::to_string(&chosen).unwrap();
+        let db = fresh.db.clone();
+        tokio::task::spawn_blocking(move || {
+            db.plugin_store_put_blocking(SETTINGS_NS, SETTINGS_COLLECTION, RETENTION_KEY, &value)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        ensure_retention_defaults(&fresh.db, true).await;
+        assert_eq!(retention_settings(&fresh).await, chosen);
     }
 
     /// The wizard resumes from stored progress: the step reached only moves

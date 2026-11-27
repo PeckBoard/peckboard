@@ -12,7 +12,7 @@ import AudioPlayer from './AudioPlayer'
 import { CodePreview } from './ToolUseBlock'
 import type { SharedFile } from './chat/events'
 import { authedFetch } from '../store/auth'
-import { mintUrl } from '../lib/sharedFileUrl'
+import { FILE_GONE, mintUrl } from '../lib/sharedFileUrl'
 import { useMediaElementPlayback } from '../media/playback'
 import ModelViewer, { type ModelSource } from './ModelViewer'
 import {
@@ -381,23 +381,30 @@ function DownloadButton({
   file: SharedFile
   className?: string
 }) {
-  const [state, setState] = useState<'idle' | 'busy' | 'failed'>('idle')
+  const [state, setState] = useState<'idle' | 'busy' | 'failed' | 'gone'>('idle')
   return (
     <button
       type="button"
       className={className ?? 'btn-secondary shared-file-download'}
       data-testid="shared-file-download"
       aria-label={`Download ${file.filename}`}
-      disabled={state === 'busy'}
+      disabled={state === 'busy' || state === 'gone'}
+      title={state === 'gone' ? 'This file is no longer stored on the server.' : undefined}
       onClick={(e) => {
         e.stopPropagation()
         setState('busy')
         downloadSharedFile(sessionId, file)
           .then(() => setState('idle'))
-          .catch(() => setState('failed'))
+          .catch((err: Error) => setState(err.message === FILE_GONE ? 'gone' : 'failed'))
       }}
     >
-      {state === 'busy' ? 'Preparing…' : state === 'failed' ? 'Retry download' : 'Download'}
+      {state === 'busy'
+        ? 'Preparing…'
+        : state === 'gone'
+          ? 'No longer stored'
+          : state === 'failed'
+            ? 'Retry download'
+            : 'Download'}
     </button>
   )
 }

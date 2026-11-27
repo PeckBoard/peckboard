@@ -204,4 +204,14 @@ test('shared files render as cards with preview and download', async ({ request,
   // Minting requires auth.
   const anon = await request.post(`/api/sessions/${sessionId}/shared-files/${zipId}/url`)
   expect(anon.status()).toBe(401)
+
+  // A file the server no longer stores (data retention removed it): the
+  // card stays, and its Download button says so instead of offering a retry.
+  await page.route(`**/shared-files/${zipId}/url`, (route) =>
+    route.fulfill({ status: 404, json: { error: 'shared file not found' } }),
+  )
+  const gone = zipCard.getByTestId('shared-file-download')
+  await gone.click()
+  await expect(gone).toHaveText('No longer stored')
+  await expect(gone).toBeDisabled()
 })

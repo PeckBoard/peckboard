@@ -101,6 +101,9 @@ pub async fn run_server(
     // First-run setup wizard flag: only a fresh install (bootstrap admin
     // just created) should ever see it; existing installs read completed.
     crate::routes::settings::ensure_setup_state(&db, bootstrap_outcome.is_some()).await;
+    // A new install starts with the recommended file-cleanup limits; an
+    // existing one keeps whatever it has (off unless an admin set them).
+    crate::routes::settings::ensure_retention_defaults(&db, bootstrap_outcome.is_some()).await;
 
     // Startup state repair: fix dangling agent-starts from previous crash
     let interrupted_sessions = repair_dangling_sessions(&db).await?;
