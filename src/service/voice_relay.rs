@@ -613,6 +613,20 @@ pub fn format_scheduled(task_name: &str, prompt: &str) -> String {
     )
 }
 
+/// The relay turn that hands one assistant's task to another
+/// (`assistant_handoff`). Like a scheduled task it is the user's own wish,
+/// passed on by an assistant of the same server, so it is an instruction
+/// and not fenced; it is still flattened to one line with every structural
+/// marker neutralized, so the task text can't pose as a second relay.
+pub fn format_handoff(from: &str, task: &str) -> String {
+    format!(
+        "{RELAY_PREFIX}hand-off from assistant \"{}\": {} (The user asked {} to pass this to you. Do it as your own task, then tell the user the result.)",
+        title_text(from),
+        sanitize_untrusted(task),
+        title_text(from),
+    )
+}
+
 /// Record a voice → target link when a voice session hands another session
 /// work through a session tool. Called after every successful MCP tool
 /// call; returns immediately for any other tool.

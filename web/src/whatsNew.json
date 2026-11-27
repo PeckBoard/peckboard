@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.1.168",
+    "date": "2026-11-27",
+    "highlights": [
+      "Several assistants: on the Assistant page, add assistants with their own name, job, voice and conversation. Start from a ready-made one (Coder, Researcher, Project Manager, Ops, Daily Briefing) or write your own. Your current Assistant stays as it is.",
+      "Call them by name: say \"Hey Nova, …\" and Nova answers in her own voice. They can also pass a task to each other when you ask.",
+      "Each assistant keeps its own reminders and scheduled tasks, and the Upcoming list shows the ones of the assistant you are talking to.",
+      "Room mode (in the assistant menu): any assistant speaks up when it has news, and \"Everyone, …\" asks each of them in turn."
+    ]
+  },
+  {
     "version": "0.1.167",
     "date": "2026-11-27",
     "highlights": [

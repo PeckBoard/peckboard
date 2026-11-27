@@ -647,3 +647,32 @@ and is required to be idempotent.
   runs against a real hub binary that `scripts/build-local-release.sh`
   builds and `web/e2e/playwright.config.ts` starts
   (`PECKBOARD_TEAM_HUB_URL`), with the spec playing the other server.
+
+## Assistants
+
+- There can be several **named voice assistants** (`assistants` table,
+  `src/db/crud/assistants.rs`, `/api/assistants`). Each row owns one voice
+  session (`sessions.expert_kind = 'voice'`); topics, memory and the relay
+  queue hang off that session id. Exactly one row is the default: who
+  answers when no name is said, and who owns a scheduled task that names no
+  assistant.
+- **Never look for "the voice session".** Code that needs one holds an
+  `AssistantRef` (`src/service/assistants.rs`), obtainable only by resolving
+  an assistant id or the default. The old oldest-voice-session lookup was
+  deleted on purpose. The `/api/voice/*` routes take `?assistant=<id>`.
+- An assistant's prompt is the shared voice prompt plus its identity (name,
+  job, the other assistants): `voice_prompt::assistant_prompt`. An install
+  with only the unnamed default Assistant gets the shared prompt unchanged.
+  Call `apply_to_voice_session` after anything that changes the roster.
+- Assistant-target repeating tasks carry `repeating_tasks.assistant_id`
+  (`NULL` or a deleted assistant = the default one).
+- `assistant_handoff` (voice-only MCP tool) queues a task for another
+  assistant through the relay gate; the receiver reports to the user in its
+  own conversation.
+- Web: the voice store (`web/src/store/voice.ts`) talks to one assistant at
+  a time (`assistantId`, `switchAssistant`); `withAssistant`
+  (`web/src/voice/activeAssistant.ts`) adds `?assistant=` to voice-route
+  calls. Call by name is `addressedAssistant`
+  (`web/src/voice/assistantName.ts`), matched on the transcript in the
+  browser. Room mode (others take the floor when they start answering;
+  "everyone, …" asks each in turn) is client-side in the same store.

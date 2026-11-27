@@ -841,19 +841,21 @@ impl Cursor {
     }
 }
 
-/// Start after the existing voice session's last event: history is never
-/// re-posted.
+/// Start after the default assistant's last event: history is never
+/// re-posted. (The tap re-points the cursor at whichever assistant the
+/// user talks to next.)
 async fn discover(db: &Db) -> Cursor {
-    let Ok(Some(session)) = db.find_expert_session(VOICE_EXPERT_KIND).await else {
+    let Ok(Some(assistant)) = crate::service::assistants::resolve(db, None).await else {
         return Cursor::default();
     };
+    let session_id = assistant.session_id().to_string();
     let seq = db
-        .events_tail(&session.id, 1)
+        .events_tail(&session_id, 1)
         .await
         .ok()
         .and_then(|e| e.last().map(|e| e.seq))
         .unwrap_or(0);
-    Cursor::at(session.id, seq)
+    Cursor::at(session_id, seq)
 }
 
 async fn tap(weak: Weak<AssistantMirror>, mut rx: broadcast::Receiver<WsEvent>) {

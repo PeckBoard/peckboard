@@ -61,6 +61,7 @@ pub fn worker_hidden_tool_names() -> &'static [&'static str] {
         "voice_pronunciation",
         "assistant_topics",
         "assistant_memory",
+        "assistant_handoff",
         // The user's own screen and dashboards are not a card's business.
         "ui_open",
         "ui_tabs",
@@ -127,6 +128,7 @@ pub fn chat_hidden_tool_names() -> &'static [&'static str] {
         "voice_pronunciation",
         "assistant_topics",
         "assistant_memory",
+        "assistant_handoff",
         "voice_prompt",
     ]
 }
@@ -2416,6 +2418,19 @@ pub(super) fn tool_definitions() -> Vec<McpToolDef> {
                         "text": { "type": "string", "description": "append: text added on a new line at the end of the prompt." },
                         "note": { "type": "string", "description": "update/append: one line on why, shown in the prompt history, e.g. \"user asked for shorter answers\"." }
                     },
+                    "additionalProperties": false
+                }),
+            },
+            McpToolDef {
+                name: "assistant_handoff".into(),
+                description: "Voice assistant only: give a task to one of the user's other assistants (they are listed in your prompt under The Other Assistants). Use it when the user asks you to pass something on, or asks for work that is clearly another assistant's job. The other assistant gets the task in its own conversation at its next quiet moment and reports to the user there; you do not get the result back. Afterwards tell the user in one sentence that you passed it on.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "The other assistant's name, e.g. \"Nova\"." },
+                        "task": { "type": "string", "description": "What it should do, in plain sentences with everything it needs to know; at most 2000 chars." }
+                    },
+                    "required": ["name", "task"],
                     "additionalProperties": false
                 }),
             },

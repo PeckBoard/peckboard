@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { authedFetch } from './auth'
 import { useVoiceStore } from './voice'
 import { useWsStore } from './ws'
+import { withAssistant } from '../voice/activeAssistant'
 import type { AssistantTopic, AssistantTopicsState } from '../voice/assistantContract'
 
 /** `GET /api/voice/topics`, the `POST .../focus` reply, and the
@@ -57,7 +58,7 @@ export const useAssistantTopics = create<AssistantTopicsState>((set) => {
           ws.subscribe(info.session_id)
           subscribedTo = info.session_id
         }
-        const res = await authedFetch('/api/voice/topics')
+        const res = await authedFetch(withAssistant('/api/voice/topics'))
         if (!res.ok) {
           set({ error: await errorOf(res, "Couldn't load the Assistant's topics") })
           return
@@ -72,7 +73,7 @@ export const useAssistantTopics = create<AssistantTopicsState>((set) => {
 
     focus: async (id) => {
       try {
-        const res = await authedFetch('/api/voice/topics/focus', {
+        const res = await authedFetch(withAssistant('/api/voice/topics/focus'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id }),

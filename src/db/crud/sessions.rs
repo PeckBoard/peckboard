@@ -226,22 +226,6 @@ impl Db {
         })
         .await
     }
-    /// The instance's oldest expert session of `expert_kind`, whoever owns
-    /// it — the global singleton lookup behind `POST /api/voice/session`.
-    /// Oldest-first, so DBs from the per-user era converge on one row.
-    pub async fn find_expert_session(&self, expert_kind: &str) -> anyhow::Result<Option<Session>> {
-        let expert_kind = expert_kind.to_string();
-        self.with_conn(move |conn| {
-            sessions::table
-                .filter(sessions::expert_kind.eq(&expert_kind))
-                .select(Session::as_select())
-                .order((sessions::created_at.asc(), sessions::id.asc()))
-                .first(conn)
-                .optional()
-                .map_err(Into::into)
-        })
-        .await
-    }
     /// Count `parent_id`'s subagent sessions that have not yet reported
     /// back (`subagent_completed_at IS NULL`) — enforces the parent's
     /// concurrent-subagent cap in `spawn_subagent`.

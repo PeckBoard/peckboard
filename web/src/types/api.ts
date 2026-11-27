@@ -90,6 +90,9 @@ export interface RepeatingTask {
   timezone: string | null
   /** `'assistant'` = the Assistant performs each run; `null` = a fresh session. */
   target?: 'assistant' | null
+  /** With `target: 'assistant'`: which assistant performs it; `null` = the
+   *  default one. */
+  assistant_id?: string | null
 }
 
 /** Where a repeating task's runs happen (the `target` sent to the API). */

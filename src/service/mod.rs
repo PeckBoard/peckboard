@@ -3,6 +3,7 @@ pub mod askpass;
 pub mod assistant_memory;
 pub mod assistant_mirror;
 pub mod assistant_settings;
+pub mod assistants;
 pub mod backup;
 pub mod browser;
 pub mod browser_runs;

@@ -1300,3 +1300,115 @@
     transform: none !important;
   }
 }
+
+/* ── Several assistants: the switcher chip and the add / edit dialog ── */
+.assistant-switcher-dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: #7dd3e8;
+}
+.assistant-switcher-caret {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.assistant-template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-2);
+}
+.assistant-template {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  align-content: start;
+  gap: 2px var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.assistant-template:hover {
+  border-color: var(--ring);
+}
+.assistant-template:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
+}
+.assistant-template[aria-pressed='true'] {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+.assistant-template-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+}
+.assistant-template-title {
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+.assistant-template-summary {
+  grid-column: 1 / -1;
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  opacity: 0.75;
+}
+.assistant-voice-row {
+  display: flex;
+  gap: var(--space-2);
+}
+.assistant-voice-row select {
+  min-width: 0;
+  flex: 1;
+}
+.assistant-color-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.assistant-color-swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.assistant-color-swatch[aria-checked='true'] {
+  border-color: var(--surface);
+  box-shadow: 0 0 0 2px var(--ring);
+}
+.assistant-color-swatch:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 3px;
+}
+.assistant-default-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+  font-size: var(--text-sm);
+}
+.assistant-dialog-delete {
+  margin-right: auto;
+}
+
+/* Three chips fill a phone-width toolbar: drop the colour dot so the
+   switcher does not run under the status dot on the left. */
+@media (max-width: 767px) {
+  .assistant-switcher-dot {
+    display: none;
+  }
+}

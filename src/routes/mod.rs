@@ -3,6 +3,7 @@ pub mod admin_restart;
 pub mod agent_vars;
 pub mod askpass;
 pub mod assistant;
+pub mod assistants;
 pub mod attachments;
 pub mod auth;
 pub mod background;
@@ -132,6 +133,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(voice::router(state.clone()))
         .merge(voice_actions::router(state.clone()))
         .merge(voice_tts::router(state.clone()))
+        .merge(assistants::router(state.clone()))
         .merge(voice_prompt::router(state.clone()))
         .merge(voice_lexicon::router(state.clone()))
         .merge(agent_vars::router(state.clone()))

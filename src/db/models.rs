@@ -215,6 +215,10 @@ pub struct RepeatingTask {
     /// run is performed by the Assistant (the voice session). See
     /// [`crate::repeating::TARGET_ASSISTANT`].
     pub target: Option<String>,
+    /// Which assistant performs an Assistant-target task (`assistants.id`);
+    /// `None` = the default one. Set with
+    /// `Db::set_repeating_task_assistant`.
+    pub assistant_id: Option<String>,
 }
 
 #[derive(Insertable, Debug)]
@@ -1541,6 +1545,29 @@ pub struct VoiceTopic {
     pub updated_at: String,
 }
 
+// ── Assistants ────────────────────────────────────
+
+/// One named voice assistant (`db::crud::assistants`). `job` is its role
+/// and instructions, added to the shared voice rules; `voice` is a TTS
+/// voice id (`None` = the browser's chosen voice); `session_id` is the
+/// voice session holding its conversation, `None` until first opened.
+/// Exactly one row `is_default`: who answers when no name is said.
+#[derive(Queryable, Selectable, Insertable, Serialize, Debug, Clone, PartialEq, Eq)]
+#[diesel(table_name = assistants)]
+pub struct Assistant {
+    pub id: String,
+    pub name: String,
+    pub job: String,
+    pub voice: Option<String>,
+    pub color: Option<String>,
+    pub icon: Option<String>,
+    pub template: Option<String>,
+    pub session_id: Option<String>,
+    pub is_default: bool,
+    pub position: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
 // ── Assistant Memories ───────────────────────────
 
 /// One entry of the voice Assistant's temporary memory

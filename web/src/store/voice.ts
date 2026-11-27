@@ -52,6 +52,8 @@ import {
   type ThinkingOutput,
 } from '../voice/thinking'
 import { mediaAudible, pauseAllMedia } from '../media/playback'
+import { setActiveAssistantId } from '../voice/activeAssistant'
+import { addressedAssistant } from '../voice/assistantName'
 
 /** How long a stream stalled inside a pronunciation hint is waited on
  *  before the tail is spoken anyway (with the hint's bare word). */
@@ -147,6 +149,51 @@ export interface PendingUtterance {
 interface VoiceSessionInfo {
   session_id: string
   model: string
+  assistant_id: string
+}
+
+/** One named assistant (`GET /api/assistants`). */
+export interface AssistantInfo {
+  id: string
+  name: string
+  /** Its role and instructions; may be empty. */
+  job: string
+  /** TTS voice id; `null` = this browser's chosen voice. */
+  voice: string | null
+  color: string | null
+  icon: string | null
+  template: string | null
+  /** `null` until the assistant was first opened. */
+  session_id: string | null
+  is_default: boolean
+  position: number
+  model: string | null
+  /** Updates held for it: a scheduled task that came due, a hand-off,
+   *  news from a session it started. */
+  waiting: number
+  /** Its agent is running a turn right now. */
+  working: boolean
+}
+
+/** A ready-made assistant in the "Add assistant" gallery. */
+export interface AssistantTemplate {
+  id: string
+  title: string
+  summary: string
+  name: string
+  job: string
+  icon: string
+  color: string
+}
+
+/** What the add / edit dialog sends. */
+export interface AssistantDraft {
+  name: string
+  job: string
+  voice: string | null
+  color: string | null
+  template?: string | null
+  is_default?: boolean
 }
 
 /** A gated tool call parked server-side until the user confirms it. */
@@ -167,6 +214,26 @@ interface VoiceState {
   panelOpen: boolean
   sessionId: string | null
   model: string | null
+  /** Every assistant, in display order; empty until `loadAssistants`. */
+  assistants: AssistantInfo[]
+  assistantTemplates: AssistantTemplate[]
+  maxAssistants: number
+  /** The assistant being talked to; `null` until the first session call
+   *  says which one is the default. */
+  assistantId: string | null
+  loadAssistants: () => Promise<void>
+  /** Talk to another assistant: its own conversation, voice and model. */
+  switchAssistant: (id: string, opts?: { speakFromSeq?: number }) => Promise<void>
+  /** Create (`id` null) or change an assistant. Resolves to an error
+   *  message, or `null`. */
+  saveAssistant: (id: string | null, draft: AssistantDraft) => Promise<string | null>
+  /** Delete an assistant and its conversation. Error message, or `null`. */
+  deleteAssistant: (id: string) => Promise<string | null>
+  /** Room mode: every assistant is in the conversation. Whoever starts to
+   *  answer (a scheduled task, a hand-off) takes the floor once it is free,
+   *  and "everyone, …" asks each assistant in turn. Per browser. */
+  roomMode: boolean
+  setRoomMode: (on: boolean) => void
   /** What the assistant is doing. `listening` = mic open and nothing else
    *  going on; the mic also stays open while thinking / speaking (see
    *  `micOn`), so the user can barge in. */
@@ -215,6 +282,22 @@ interface VoiceState {
   unlockSpeech: () => void
 }
 
+// ── Room mode ─────────────────────────────────────────────────────────────
+/** Whether room mode is on, per browser (it is about this device's
+ *  speakers and microphone, like the other voice prefs). */
+const ROOM_MODE_KEY = 'peckboard_voice_room'
+function loadRoomMode(): boolean {
+  try {
+    return localStorage.getItem(ROOM_MODE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+/** Most assistants asked in one "everyone" round: each is a model call. */
+const MAX_ROOM_ASSISTANTS = 4
+/** An utterance addressed to all assistants: "everyone, …", "hey team …". */
+const EVERYONE =
+  /^(?:(?:hey|hi|hello|ok|okay)\s+)?(?:everyone|everybody|all of you|team)\b[\s,.:;!?-]*/i
 // ── Loop internals (module-level; not reactive state) ──────────────────────
 installKokoroEngine()
 const engine = () => getSpeechEngine()
@@ -351,6 +434,12 @@ function speakErrorMessage(code: string): string {
 }
 
 export const useVoiceStore = create<VoiceState>((set, get) => {
+  /** The voice replies are spoken in: the active assistant's own voice,
+   *  else this browser's chosen one. */
+  const activeVoice = () => {
+    const { assistants, assistantId, prefs } = get()
+    return assistants.find((a) => a.id === assistantId)?.voice || prefs.voiceURI
+  }
   const refreshStatus = () => {
     const status: VoiceStatus = speakingNow
       ? 'speaking'
@@ -462,7 +551,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     voiceLog('dequeue for speech:', JSON.stringify(next), `(${speakQueue.length} more queued)`)
     pauseAllMedia()
     engine().speak(next, {
-      voiceURI: prefs.voiceURI,
+      voiceURI: activeVoice(),
       rate: prefs.rate,
       pitch: prefs.pitch,
       onStart: () => {
@@ -491,7 +580,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     if (!(speakingNow || fillerNow) || head === undefined) return
     const { prefs } = get()
     engine().prefetch?.(head, {
-      voiceURI: prefs.voiceURI,
+      voiceURI: activeVoice(),
       rate: prefs.rate,
       pitch: prefs.pitch,
       onEnd: () => {},
@@ -499,7 +588,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   }
 
   const enqueue = (chunks: string[]) => {
-    const merge = isStudioVoice(get().prefs.voiceURI)
+    const merge = isStudioVoice(activeVoice())
     for (const c of chunks) {
       const spoken = stripForSpeech(c)
       if (!spoken) continue
@@ -585,7 +674,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     const out = thinkingOut()
     if (prefs.thinkingCue && out) startThinkingCue(out)
     if (prefs.thinkingFiller) {
-      prepareFillers(prefs.voiceURI, out)
+      prepareFillers(activeVoice(), out)
       fillerTimer = setTimeout(sayFiller, FILLER_DELAY_MS)
     }
   }
@@ -598,7 +687,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     if (!get().panelOpen || !awaitingReply || fillerUsed || fillerNow) return
     if (speakingNow || speakQueue.length > 0 || userCapturing()) return
     const out = thinkingOut()
-    const pick = thinkingOutputReady(out) ? pickFiller(get().prefs.voiceURI) : null
+    const pick = thinkingOutputReady(out) ? pickFiller(activeVoice()) : null
     if (!out || !pick) {
       voiceLog('thinking filler: none ready (needs a Kokoro voice with audio unlocked)')
       return
@@ -1074,7 +1163,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
 
   const onLiveEvent = (ev: Event) => {
     const { sessionId, pending } = get()
-    if (!sessionId || ev.session_id !== sessionId) return
+    if (!sessionId) return
+    if (ev.session_id !== sessionId) {
+      // Room mode: another assistant started to answer. It gets the floor
+      // as soon as nobody else has it.
+      if (get().roomMode && ev.kind === 'agent-start') noteRoomSpeaker(ev.session_id, ev.seq)
+      return
+    }
     set((s) => ({ events: mergeEvents(s.events, [ev]) }))
     if (ev.kind === 'user') {
       const text = typeof ev.data.text === 'string' ? ev.data.text : ''
@@ -1097,20 +1192,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   const loadHistory = async (sessionId: string) => {
     const reqId = ++historyRequestId
     let maxSeq = -1
+    let loaded: Event[] = []
     try {
       const res = await authedFetch(`/api/sessions/${sessionId}/events?limit=200`)
       if (res.ok) {
         const events = (await res.json()) as Event[]
         if (reqId !== historyRequestId || get().sessionId !== sessionId) return
         for (const e of events) maxSeq = Math.max(maxSeq, e.seq)
+        loaded = events
         set((s) => ({ events: mergeEvents(s.events, events) }))
       }
     } catch {
       /* transcript history is best-effort; live events still flow */
     }
     if (reqId !== historyRequestId || !get().panelOpen) return
-    speakAfterSeq = maxSeq
+    // Following a speaker in room mode: the reply that made us switch began
+    // just before this load, so it is spoken from its start.
+    const from = speakFromSeq
+    speakFromSeq = null
+    speakAfterSeq = from === null ? maxSeq : Math.min(maxSeq, from)
     historyReady = true
+    if (from !== null) {
+      for (const ev of [...loaded].sort((a, b) => a.seq - b.seq)) {
+        if (ev.seq > speakAfterSeq) speakEvent(ev)
+      }
+    }
     const held = heldEvents
     heldEvents = []
     for (const ev of held) if (ev.seq > speakAfterSeq) speakEvent(ev)
@@ -1139,7 +1245,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
   // A new Kokoro speed makes the cached fillers stale: re-synthesize them.
   useKokoroDevicePrefs.subscribe(() => {
     const { panelOpen, prefs } = get()
-    if (panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
+    if (panelOpen && prefs.thinkingFiller) prepareFillers(activeVoice(), thinkingOut())
   })
   // The voice session was cleared (by hand, or automatically after a topic
   // ended): its events are gone and seqs start over at 1. Drop the old
@@ -1155,6 +1261,170 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       spokenSeqs = new Set()
       set({ events: [] })
     })
+  }
+  // ── Room mode (every assistant in one conversation) ──
+  /** Set by a room-mode switch: speak the new assistant's events after this
+   *  seq even though they are already in its history. */
+  let speakFromSeq: number | null = null
+  /** Other assistants' sessions this browser listens to in room mode. */
+  const roomSubs = new Set<string>()
+  /** Assistants that started to answer and are waiting for the floor. */
+  let roomQueue: { id: string; fromSeq: number }[] = []
+  let roomTimer: ReturnType<typeof setInterval> | null = null
+  /** Bumped by every new utterance: ends an "everyone" round in progress. */
+  let everyoneRound = 0
+  let roundActive = false
+
+  /** Nobody is talking, thinking or being listened to. */
+  const floorIsFree = () =>
+    !speakingNow &&
+    !awaitingReply &&
+    !agentRunning &&
+    speakQueue.length === 0 &&
+    !get().heard &&
+    !get().interim
+
+  /** Listen to every other assistant's session while room mode is on. */
+  const syncRoomSubscriptions = () => {
+    const ws = useWsStore.getState()
+    const { roomMode, panelOpen, assistants, sessionId } = get()
+    const want = new Set<string>()
+    if (roomMode && panelOpen) {
+      for (const a of assistants) {
+        if (a.session_id && a.session_id !== sessionId) want.add(a.session_id)
+      }
+    }
+    for (const s of [...roomSubs]) {
+      if (!want.has(s)) {
+        ws.unsubscribe(s)
+        roomSubs.delete(s)
+      }
+    }
+    for (const s of want) {
+      if (!roomSubs.has(s)) {
+        ws.subscribe(s)
+        roomSubs.add(s)
+      }
+    }
+  }
+
+  /** Give the floor to the next assistant waiting for it, if it is free. */
+  const pumpRoom = () => {
+    if (!get().roomMode || roundActive || roomQueue.length === 0 || !floorIsFree()) return
+    const next = roomQueue.shift()!
+    void get().switchAssistant(next.id, { speakFromSeq: next.fromSeq })
+  }
+
+  const noteRoomSpeaker = (speakerSessionId: string, seq: number) => {
+    const speaker = get().assistants.find((a) => a.session_id === speakerSessionId)
+    if (!speaker) return
+    if (!roomQueue.some((q) => q.id === speaker.id)) {
+      roomQueue.push({ id: speaker.id, fromSeq: seq - 1 })
+    }
+    pumpRoom()
+  }
+
+  const startRoomTimer = () => {
+    if (roomTimer || !get().roomMode) return
+    roomTimer = setInterval(pumpRoom, 700)
+  }
+  const stopRoomTimer = () => {
+    if (roomTimer) clearInterval(roomTimer)
+    roomTimer = null
+    roomQueue = []
+  }
+
+  /** Send one utterance to the assistant being talked to. */
+  const sendNow = async (text: string, source: 'voice-mic' | 'voice-typed') => {
+    let { sessionId } = get()
+    if (!sessionId) {
+      const info = await get().ensureSession()
+      if (!info) return
+      sessionId = info.session_id
+    }
+    const tempId = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    // The utterance that talked over the assistant tells the model so:
+    // it must not restate the part of its reply the user never heard.
+    const interrupted = interruptPending
+    interruptPending = false
+    awaitingReply = true
+    startThinking()
+    reportActivity('sent')
+    set((s) => ({
+      pending: [...s.pending, { tempId, text, ts: Date.now() }],
+      interim: '',
+      error: null,
+    }))
+    refreshStatus()
+    try {
+      // After a barge-in, let the interrupt land first so this message
+      // starts a fresh turn instead of queueing behind the old one.
+      if (interruptInFlight) await interruptInFlight
+      const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: interrupted ? INTERRUPT_MARKER + text : text,
+          source,
+        }),
+      })
+      if (!res.ok) {
+        const err = (await res.json().catch(() => null)) as { error?: string } | null
+        throw new Error(err?.error ?? `Send failed (${res.status}).`)
+      }
+    } catch (e) {
+      awaitingReply = false
+      stopThinking('send failed')
+      set((s) => ({
+        pending: s.pending.filter((p) => p.tempId !== tempId),
+        error: e instanceof Error ? e.message : "Couldn't send that. Please try again.",
+      }))
+      refreshStatus()
+    }
+  }
+
+  /** Resolves once the assistant that was just asked has finished
+   *  answering (or the round was cancelled, or two minutes passed). */
+  const untilFloorFree = (round: number) =>
+    new Promise<void>((resolve) => {
+      const started = Date.now()
+      const timer = setInterval(() => {
+        const waited = Date.now() - started
+        if (
+          round !== everyoneRound ||
+          !get().roomMode ||
+          !get().panelOpen ||
+          (waited > 600 && floorIsFree()) ||
+          waited > 120_000
+        ) {
+          clearInterval(timer)
+          resolve()
+        }
+      }, 300)
+    })
+
+  /** "Everyone, …": ask each assistant in turn, the one being talked to
+   *  first, each answering in its own voice before the next is asked. Only
+   *  assistants that already have a conversation take part. */
+  const askEveryone = async (text: string, source: 'voice-mic' | 'voice-typed') => {
+    const round = ++everyoneRound
+    roundActive = true
+    try {
+      const { assistants, assistantId } = get()
+      const order = [
+        ...assistants.filter((a) => a.id === assistantId),
+        ...assistants.filter((a) => a.id !== assistantId && a.session_id),
+      ].slice(0, MAX_ROOM_ASSISTANTS)
+      for (const a of order) {
+        if (round !== everyoneRound || !get().roomMode) return
+        if (get().assistantId !== a.id) await get().switchAssistant(a.id)
+        if (round !== everyoneRound || get().assistantId !== a.id) return
+        await sendNow(text, source)
+        await untilFloorFree(round)
+      }
+    } finally {
+      if (round === everyoneRound) roundActive = false
+    }
   }
   // ── Pending actions (gated tool calls waiting on the user) ──
   const onActionEvent = () => {
@@ -1201,12 +1471,33 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       const prefs = { ...get().prefs, ...patch }
       savePrefs(prefs)
       set({ prefs })
-      if (get().panelOpen && prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
+      if (get().panelOpen && prefs.thinkingFiller) prepareFillers(activeVoice(), thinkingOut())
     },
     recognitionSupported: engine().supportsRecognition(),
     panelOpen: false,
     sessionId: null,
     model: null,
+    assistants: [],
+    assistantTemplates: [],
+    maxAssistants: 8,
+    assistantId: null,
+    roomMode: loadRoomMode(),
+    setRoomMode: (on) => {
+      try {
+        localStorage.setItem(ROOM_MODE_KEY, on ? '1' : '0')
+      } catch {
+        /* private mode: the choice lasts for this page */
+      }
+      set({ roomMode: on })
+      syncRoomSubscriptions()
+      if (on) {
+        if (get().panelOpen) startRoomTimer()
+      } else {
+        stopRoomTimer()
+        everyoneRound++
+        roundActive = false
+      }
+    },
     status: 'idle',
     micOn: false,
     interim: '',
@@ -1223,7 +1514,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         const res = await authedFetch('/api/voice/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(model ? { model } : {}),
+          body: JSON.stringify({
+            ...(model ? { model } : {}),
+            ...(get().assistantId ? { assistant: get().assistantId } : {}),
+          }),
         })
         if (!res.ok) {
           const err = (await res.json().catch(() => null)) as { error?: string } | null
@@ -1231,9 +1525,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
           return null
         }
         const info = (await res.json()) as VoiceSessionInfo
+        setActiveAssistantId(info.assistant_id)
         set((s) => ({
           sessionId: info.session_id,
           model: info.model,
+          assistantId: info.assistant_id,
           // A different session id means a fresh transcript.
           events: s.sessionId === info.session_id ? s.events : [],
           pending: s.sessionId === info.session_id ? s.pending : [],
@@ -1248,6 +1544,96 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       await get().ensureSession(model)
     },
 
+    loadAssistants: async () => {
+      try {
+        const res = await authedFetch('/api/assistants')
+        if (!res.ok) return
+        const body = (await res.json()) as {
+          assistants: AssistantInfo[]
+          max: number
+          templates: AssistantTemplate[]
+        }
+        set({
+          assistants: body.assistants,
+          assistantTemplates: body.templates,
+          maxAssistants: body.max,
+        })
+        syncRoomSubscriptions()
+      } catch {
+        // The page still works with the default assistant.
+      }
+    },
+
+    switchAssistant: async (id, opts) => {
+      const { assistantId, sessionId, panelOpen } = get()
+      if (id === assistantId) return
+      // The other assistant's reply must not keep talking over this one.
+      resetLoop()
+      speakFromSeq = opts?.speakFromSeq ?? null
+      historyRequestId++
+      setActiveAssistantId(id)
+      set({ assistantId: id, events: [], pending: [], interim: '', error: null, actions: [] })
+      refreshStatus()
+      const info = await get().ensureSession()
+      if (!info || get().assistantId !== id) return
+      if (get().panelOpen && panelOpen) {
+        const ws = useWsStore.getState()
+        if (sessionId !== info.session_id) {
+          if (sessionId) ws.unsubscribe(sessionId)
+          ws.subscribe(info.session_id)
+        }
+        if (get().prefs.thinkingFiller) prepareFillers(activeVoice(), thinkingOut())
+        void get().refreshActions()
+        await loadHistory(info.session_id)
+      }
+      syncRoomSubscriptions()
+      void get().loadAssistants()
+    },
+
+    saveAssistant: async (id, draft) => {
+      try {
+        const res = await authedFetch(
+          id ? `/api/assistants/${encodeURIComponent(id)}` : '/api/assistants',
+          {
+            method: id ? 'PATCH' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(draft),
+          },
+        )
+        if (!res.ok) {
+          const err = (await res.json().catch(() => null)) as { error?: string } | null
+          return err?.error ?? `Couldn't save the assistant (${res.status}).`
+        }
+        const saved = (await res.json()) as AssistantInfo
+        await get().loadAssistants()
+        // A new assistant is the one the user wants to talk to next.
+        if (!id) await get().switchAssistant(saved.id)
+        return null
+      } catch {
+        return "Couldn't reach the server to save the assistant."
+      }
+    },
+
+    deleteAssistant: async (id) => {
+      try {
+        if (get().assistantId === id) {
+          const fallback = get().assistants.find((a) => a.is_default && a.id !== id)
+          if (fallback) await get().switchAssistant(fallback.id)
+        }
+        const res = await authedFetch(`/api/assistants/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        })
+        if (!res.ok) {
+          const err = (await res.json().catch(() => null)) as { error?: string } | null
+          return err?.error ?? `Couldn't delete the assistant (${res.status}).`
+        }
+        await get().loadAssistants()
+        return null
+      } catch {
+        return "Couldn't reach the server to delete the assistant."
+      }
+    },
+
     openPanel: async () => {
       if (get().panelOpen) return
       // Still inside the click that opened the panel: unlock speech output
@@ -1256,7 +1642,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       engine().unlockSynthesis()
       set({ panelOpen: true, error: null })
       const { prefs, recognitionSupported } = get()
-      if (prefs.thinkingFiller) prepareFillers(prefs.voiceURI, thinkingOut())
+      if (prefs.thinkingFiller) prepareFillers(activeVoice(), thinkingOut())
       if (prefs.autoListen && recognitionSupported) setMic(true)
       else refreshStatus()
       const info = await get().ensureSession()
@@ -1270,6 +1656,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       window.removeEventListener('peckboard:voice-action', onActionEvent)
       window.addEventListener('peckboard:voice-action', onActionEvent)
       startPresence()
+      // Names to listen for (call by name), wherever the panel was opened.
+      void get().loadAssistants()
+      startRoomTimer()
       void get().refreshActions()
       await loadHistory(info.session_id)
     },
@@ -1290,6 +1679,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       stopPresence()
       if (sessionId) ws.unsubscribe(sessionId)
       set({ panelOpen: false, micOn: false, status: 'idle', interim: '' })
+      syncRoomSubscriptions()
+      stopRoomTimer()
     },
 
     toggleMic: () => {
@@ -1314,53 +1705,30 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     },
 
     sendText: async (raw, source = 'voice-typed') => {
-      const text = raw.trim()
+      let text = raw.trim()
       if (!text) return
-      let { sessionId } = get()
-      if (!sessionId) {
-        const info = await get().ensureSession()
-        if (!info) return
-        sessionId = info.session_id
-      }
-      const tempId = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      // The utterance that talked over the assistant tells the model so:
-      // it must not restate the part of its reply the user never heard.
-      const interrupted = interruptPending
-      interruptPending = false
-      awaitingReply = true
-      startThinking()
-      reportActivity('sent')
-      set((s) => ({
-        pending: [...s.pending, { tempId, text, ts: Date.now() }],
-        interim: '',
-        error: null,
-      }))
-      refreshStatus()
-      try {
-        // After a barge-in, let the interrupt land first so this message
-        // starts a fresh turn instead of queueing behind the old one.
-        if (interruptInFlight) await interruptInFlight
-        const res = await authedFetch(`/api/sessions/${sessionId}/message`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: interrupted ? INTERRUPT_MARKER + text : text,
-            source,
-          }),
-        })
-        if (!res.ok) {
-          const err = (await res.json().catch(() => null)) as { error?: string } | null
-          throw new Error(err?.error ?? `Send failed (${res.status}).`)
+      // A new utterance ends an "everyone" round in progress.
+      everyoneRound++
+      roundActive = false
+      if (get().roomMode) {
+        const all = EVERYONE.exec(text)
+        const rest = all ? text.slice(all[0].length).trim() : ''
+        if (rest) {
+          await askEveryone(rest, source)
+          return
         }
-      } catch (e) {
-        awaitingReply = false
-        stopThinking('send failed')
-        set((s) => ({
-          pending: s.pending.filter((p) => p.tempId !== tempId),
-          error: e instanceof Error ? e.message : "Couldn't send that. Please try again.",
-        }))
-        refreshStatus()
       }
+      // Call by name: "Hey Nova, …" goes to Nova, in Nova's conversation.
+      // Naming the assistant already being talked to changes nothing.
+      const called = addressedAssistant(text, get().assistants)
+      if (called && called.id !== get().assistantId) {
+        await get().switchAssistant(called.id)
+        if (get().assistantId !== called.id) return
+        // Only the name was said: that assistant is listening now.
+        if (!called.rest) return
+        text = called.rest
+      }
+      await sendNow(text, source)
     },
 
     testVoice: () => {

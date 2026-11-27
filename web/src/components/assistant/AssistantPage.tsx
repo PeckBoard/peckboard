@@ -10,6 +10,7 @@ import { audioLevels, useOrbState } from '../../voice/levels'
 import '../../styles/assistant.css'
 import ModelPicker from '../ModelPicker'
 import AssistantActivity from './AssistantActivity'
+import AssistantSwitcher from './AssistantSwitcher'
 import AssistantCaptions from './AssistantCaptions'
 import AssistantOrb from './AssistantOrb'
 import AssistantEmbedCard from './AssistantEmbedCard'
@@ -18,6 +19,7 @@ import AssistantTranscriptDrawer from './AssistantTranscriptDrawer'
 import AssistantUpcoming from './AssistantUpcoming'
 import TopicRing from './TopicRing'
 import { upcomingAssistantTasks } from './upcoming'
+import { useActiveTaskOwner } from './useActiveTaskOwner'
 import { useAbsorbAnimation } from './useAbsorbAnimation'
 
 const STATUS_LABEL: Record<OrbState, string> = {
@@ -59,6 +61,7 @@ export default function AssistantPage() {
   const openPanel = useVoiceStore((state) => state.openPanel)
   const toggleMic = useVoiceStore((state) => state.toggleMic)
   const unlockSpeech = useVoiceStore((state) => state.unlockSpeech)
+  const assistantId = useVoiceStore((state) => state.assistantId)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
   const [upcomingOpen, setUpcomingOpen] = useState(false)
   const model = useVoiceStore((state) => state.model)
@@ -66,7 +69,8 @@ export default function AssistantPage() {
   const models = useResourcesStore((state) => state.models)
   const fetchModels = useResourcesStore((state) => state.fetchModels)
   const tasks = useRepeatingTasksStore((state) => state.tasks)
-  const upcomingCount = useMemo(() => upcomingAssistantTasks(tasks).length, [tasks])
+  const owner = useActiveTaskOwner()
+  const upcomingCount = useMemo(() => upcomingAssistantTasks(tasks, owner).length, [tasks, owner])
 
   const { absorbing, displayedId, durationMs } = useAbsorbAnimation(topics, currentId)
   const displayedTopic = useMemo(
@@ -83,6 +87,15 @@ export default function AssistantPage() {
       .catch(() => undefined)
     return useAssistantActivity.getState().start()
   }, [])
+
+  // Talking to another assistant: its own topics, held updates and linked
+  // sessions replace the previous one's.
+  useEffect(() => {
+    if (!assistantId) return
+    void useAssistantTopics.getState().load()
+    void useAssistantActivity.getState().loadQueue()
+    void useAssistantActivity.getState().loadLinked()
+  }, [assistantId])
 
   useEffect(() => {
     if (models.length === 0) void fetchModels()
@@ -122,6 +135,7 @@ export default function AssistantPage() {
       <AssistantActivity />
 
       <div className="assistant-toolbar">
+        <AssistantSwitcher />
         <ModelPicker
           value={model ?? ''}
           onChange={(id) => {

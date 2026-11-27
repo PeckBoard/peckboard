@@ -17,12 +17,11 @@ use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
 use crate::db::Db;
-use crate::db::models::VoicePromptVersion;
+use crate::db::models::{Assistant, VoicePromptVersion};
 use crate::provider::registry::ProviderRegistry;
 use crate::service::assistant_memory::RECENT_MEMORY_HEADING;
 use crate::service::voice_relay::{
-    VOICE_AUTO_SHOW_RULES, VOICE_CORE_RULES, VOICE_EXPERT_KIND, VOICE_SYSTEM_PROMPT,
-    VOICE_TOPIC_RING_RULES,
+    VOICE_AUTO_SHOW_RULES, VOICE_CORE_RULES, VOICE_SYSTEM_PROMPT, VOICE_TOPIC_RING_RULES,
 };
 
 pub const SOURCE_DEFAULT: &str = "default";
@@ -358,10 +357,29 @@ pub fn with_memory_snapshot(prompt: String, snapshot: Option<&str>) -> String {
     }
 }
 
-/// Bring the voice session's stored prompt in line with the active one. With
-/// a `registry`, a changed prompt also winds the session's live agent down
+/// The prompt one assistant runs with, before its memory snapshot: the
+/// shared prompt ([`session_prompt`]) plus who it is — its name, its job and
+/// the other assistants (`service::assistants::identity_section`). An
+/// install with only the unnamed default Assistant gets the shared prompt
+/// unchanged.
+pub async fn assistant_prompt(
+    db: &Db,
+    me: &Assistant,
+    roster: &[Assistant],
+) -> anyhow::Result<String> {
+    let base = session_prompt(db).await?;
+    let identity = crate::service::assistants::identity_section(me, roster);
+    Ok(if identity.is_empty() {
+        base
+    } else {
+        format!("{base}\n{}", identity.trim_end())
+    })
+}
+
+/// Bring every assistant's stored prompt in line with the active one. With
+/// a `registry`, a changed prompt also winds that session's live agent down
 /// after its current turn so the next turn spawns with the new prompt.
-/// Returns true when the session's prompt was rewritten.
+/// Returns true when any session's prompt was rewritten.
 ///
 /// The stored Recent Memory snapshot is carried over unchanged: memory
 /// writes must not restart the agent, so the snapshot only moves at a
@@ -370,28 +388,48 @@ pub async fn apply_to_voice_session(
     db: &Db,
     registry: Option<&ProviderRegistry>,
 ) -> anyhow::Result<bool> {
-    let Some(session) = db.find_expert_session(VOICE_EXPERT_KIND).await? else {
-        return Ok(false);
-    };
-    let snapshot = session.system_prompt.as_deref().and_then(memory_snapshot);
-    let content = with_memory_snapshot(session_prompt(db).await?, snapshot);
-    store_if_changed(db, registry, &session, content).await
+    let roster = db.list_assistants().await?;
+    let mut changed = false;
+    for a in crate::service::assistants::all(db).await? {
+        let snapshot = a
+            .session()
+            .system_prompt
+            .as_deref()
+            .and_then(memory_snapshot);
+        let content = with_memory_snapshot(
+            assistant_prompt(db, a.assistant(), &roster).await?,
+            snapshot,
+        );
+        changed |= store_if_changed(db, registry, a.session(), content).await?;
+    }
+    Ok(changed)
 }
 
-/// Rebuild the voice session's prompt with a fresh Recent Memory snapshot
-/// (unexpired entries at `now`). Only the auto-clear and boot call this:
-/// both happen with no agent mid-conversation. Returns true when rewritten.
+/// Rebuild a voice session's prompt with a fresh Recent Memory snapshot
+/// (unexpired entries at `now`): the one in `session_id`, or every
+/// assistant's for `None`. Only the auto-clear, a user deleting memory and
+/// boot call this. Returns true when any prompt was rewritten.
 pub async fn refresh_memory_snapshot(
     db: &Db,
     registry: Option<&ProviderRegistry>,
+    session_id: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<bool> {
-    let Some(session) = db.find_expert_session(VOICE_EXPERT_KIND).await? else {
-        return Ok(false);
-    };
-    let block = crate::service::assistant_memory::current_block(db, &session.id, now).await?;
-    let content = with_memory_snapshot(session_prompt(db).await?, block.as_deref());
-    store_if_changed(db, registry, &session, content).await
+    let roster = db.list_assistants().await?;
+    let mut changed = false;
+    for a in crate::service::assistants::all(db).await? {
+        if session_id.is_some_and(|s| s != a.session_id()) {
+            continue;
+        }
+        let block =
+            crate::service::assistant_memory::current_block(db, a.session_id(), now).await?;
+        let content = with_memory_snapshot(
+            assistant_prompt(db, a.assistant(), &roster).await?,
+            block.as_deref(),
+        );
+        changed |= store_if_changed(db, registry, a.session(), content).await?;
+    }
+    Ok(changed)
 }
 
 async fn store_if_changed(
@@ -415,6 +453,7 @@ async fn store_if_changed(
 mod tests {
     use super::*;
     use crate::db::models::{NewFolder, NewSession};
+    use crate::service::voice_relay::VOICE_EXPERT_KIND;
 
     async fn voice_db() -> Db {
         let db = Db::in_memory().unwrap();

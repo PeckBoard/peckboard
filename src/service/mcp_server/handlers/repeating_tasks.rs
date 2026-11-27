@@ -219,6 +219,7 @@ impl McpToolRegistry {
             updated_at: now.clone(),
             timezone: timezone.clone(),
             target: target.clone(),
+            assistant_id: None,
         };
         let next_run_at = if enabled {
             initial_next_run_at(&draft)
@@ -226,7 +227,7 @@ impl McpToolRegistry {
             None
         };
 
-        let task = ctx
+        let mut task = ctx
             .db
             .create_repeating_task(NewRepeatingTask {
                 id,
@@ -247,6 +248,17 @@ impl McpToolRegistry {
                 target,
             })
             .await?;
+        // A task an assistant sets for itself belongs to that assistant:
+        // it is the one that speaks up when the task is due.
+        if task.target.as_deref() == Some(TARGET_ASSISTANT)
+            && let Some(me) =
+                crate::service::assistants::for_session(&ctx.db, &ctx.session_id).await?
+        {
+            ctx.db
+                .set_repeating_task_assistant(&task.id, Some(&me.assistant().id))
+                .await?;
+            task.assistant_id = Some(me.assistant().id.clone());
+        }
 
         ctx.broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
             event_type: "repeating-task-changed".into(),
@@ -350,6 +362,7 @@ impl McpToolRegistry {
                 updated_at: now.clone(),
                 timezone: timezone.clone().unwrap_or(existing.timezone.clone()),
                 target: existing.target.clone(),
+                assistant_id: existing.assistant_id.clone(),
             };
             if draft.enabled {
                 Some(initial_next_run_at(&draft))
@@ -681,6 +694,11 @@ mod tests {
             .unwrap();
         assert_eq!(task.target.as_deref(), Some(TARGET_ASSISTANT));
         assert_eq!(task.timezone.as_deref(), Some("Europe/Berlin"));
+        // It belongs to the assistant that set it.
+        let me = db.default_assistant().await.unwrap();
+        assert_eq!(me.session_id.as_deref(), Some("v1"));
+        assert_eq!(task.assistant_id.as_deref(), Some(me.id.as_str()));
+        assert_eq!(made["task"]["assistant_id"], me.id.as_str());
         // 17:00 in Berlin (CET, winter) is 16:00 UTC.
         assert!(
             task.next_run_at

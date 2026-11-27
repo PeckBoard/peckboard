@@ -5,6 +5,7 @@ mod account_refs;
 mod agent_vars;
 mod announcements;
 mod assistant_memories;
+pub mod assistants;
 mod auth_sessions;
 mod card_sessions;
 mod cards;

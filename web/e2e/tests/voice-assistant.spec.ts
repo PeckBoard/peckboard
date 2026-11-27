@@ -318,6 +318,138 @@ test('typed fallback sends without the microphone', async ({ request, page }) =>
     .toBe(true)
 })
 
+test('saying another assistant’s name talks to that assistant, in its own conversation', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const headers = { Authorization: `Bearer ${token}` }
+  const first = await setVoiceModel(request, token, 'mock:echo')
+
+  // A second assistant, Nova, on the echo model too.
+  const listed = await request.get('/api/assistants', { headers })
+  const existing = ((await listed.json()) as { assistants: { id: string; name: string }[] })
+    .assistants
+  for (const a of existing.filter((a) => a.name === 'Nova')) {
+    await request.delete(`/api/assistants/${a.id}`, { headers })
+  }
+  const created = await request.post('/api/assistants', {
+    headers,
+    data: { name: 'Nova', job: 'Answers questions about the build.' },
+  })
+  expect(created.status(), await created.text()).toBe(201)
+  const novaId = ((await created.json()) as { id: string }).id
+  const opened = await request.post('/api/voice/session', {
+    headers,
+    data: { assistant: novaId, model: 'mock:echo' },
+  })
+  expect(opened.ok(), await opened.text()).toBeTruthy()
+  const novaSession = ((await opened.json()) as { session_id: string }).session_id
+  expect(novaSession).not.toBe(first.session_id)
+
+  await primePage(page, token)
+  await page.goto('/')
+  const panel = await openVoicePanel(page)
+  const title = panel.getByTestId('voice-panel-title')
+  await expect(title).toHaveText('Assistant')
+
+  // The name is dropped from what is sent; the rest goes to Nova.
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceSay('Hey Nova, is the build green'),
+  )
+  await expect(title).toHaveText('Nova')
+  await expect(page.getByTestId('voice-line-user').last()).toHaveText('is the build green')
+  await expect(page.getByTestId('voice-line-assistant').last()).toContainText(
+    'is the build green',
+    { timeout: 15_000 },
+  )
+  const userTexts = async (sessionId: string) =>
+    (await sessionEvents(request, token, sessionId))
+      .filter((e) => e.kind === 'user')
+      .map((e) => String(e.data.text ?? ''))
+  expect(await userTexts(novaSession)).toContain('is the build green')
+  expect((await userTexts(first.session_id)).join('\n')).not.toContain('build green')
+
+  // Without a name the conversation stays with Nova; naming the default
+  // assistant goes back to it.
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening', { timeout: 10_000 })
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('and the tests'))
+  await expect.poll(async () => userTexts(novaSession)).toContain('and the tests')
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening', { timeout: 10_000 })
+  await page.evaluate(() =>
+    (window as unknown as StubWindow).__voiceSay('Assistant, what time is it'),
+  )
+  await expect(title).toHaveText('Assistant')
+  await expect.poll(async () => userTexts(first.session_id)).toContain('what time is it')
+
+  await request.delete(`/api/assistants/${novaId}`, { headers })
+})
+
+test('room mode: an assistant that starts answering takes the floor, and “everyone” asks each in turn', async ({
+  request,
+  page,
+}) => {
+  const token = await authenticate(request)
+  const headers = { Authorization: `Bearer ${token}` }
+  const first = await setVoiceModel(request, token, 'mock:echo')
+  const listed = await request.get('/api/assistants', { headers })
+  const existing = ((await listed.json()) as { assistants: { id: string; name: string }[] })
+    .assistants
+  for (const a of existing.filter((a) => a.name === 'Nova')) {
+    await request.delete(`/api/assistants/${a.id}`, { headers })
+  }
+  const created = await request.post('/api/assistants', { headers, data: { name: 'Nova' } })
+  expect(created.status(), await created.text()).toBe(201)
+  const novaId = ((await created.json()) as { id: string }).id
+  const opened = await request.post('/api/voice/session', {
+    headers,
+    data: { assistant: novaId, model: 'mock:echo' },
+  })
+  expect(opened.ok(), await opened.text()).toBeTruthy()
+  const novaSession = ((await opened.json()) as { session_id: string }).session_id
+
+  await primePage(page, token)
+  await page.addInitScript(() => localStorage.setItem('peckboard_voice_room', '1'))
+  await page.goto('/')
+  const roster = page.waitForResponse((r) => r.url().endsWith('/api/assistants') && r.ok())
+  const panel = await openVoicePanel(page)
+  const title = panel.getByTestId('voice-panel-title')
+  await expect(title).toHaveText('Assistant')
+  await roster
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening')
+
+  // Nova is given something to say from elsewhere, the way a scheduled task
+  // or a hand-off reaches her. Nobody is talking, so she takes the floor
+  // and her reply is heard from its start.
+  const nudge = await request.post(`/api/sessions/${novaSession}/message`, {
+    headers,
+    data: { text: 'nova has news about the build' },
+  })
+  expect(nudge.ok(), await nudge.text()).toBeTruthy()
+  await expect(title).toHaveText('Nova', { timeout: 15_000 })
+  await expect
+    .poll(async () => (await spoken(page)).some((s) => s.includes('nova has news')), {
+      timeout: 15_000,
+    })
+    .toBe(true)
+
+  // "Everyone, …" goes to each assistant in turn, the one talking first.
+  const userTexts = async (sessionId: string) =>
+    (await sessionEvents(request, token, sessionId))
+      .filter((e) => e.kind === 'user')
+      .map((e) => String(e.data.text ?? ''))
+  await expect(page.getByTestId('voice-status')).toHaveText('Listening', { timeout: 10_000 })
+  await page.evaluate(() => (window as unknown as StubWindow).__voiceSay('Everyone, say your name'))
+  await expect
+    .poll(async () => userTexts(novaSession), { timeout: 20_000 })
+    .toContain('say your name')
+  await expect
+    .poll(async () => userTexts(first.session_id), { timeout: 30_000 })
+    .toContain('say your name')
+  await expect(title).toHaveText('Assistant')
+
+  await request.delete(`/api/assistants/${novaId}`, { headers })
+})
 test('relayed updates render muted and are not spoken; the reply to them is', async ({
   request,
   page,

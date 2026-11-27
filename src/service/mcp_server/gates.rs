@@ -131,6 +131,7 @@ impl ToolGate {
                 | "voice_prompt"
                 | "assistant_topics"
                 | "assistant_memory"
+                | "assistant_handoff"
         ) {
             return self.voice;
         }
@@ -200,6 +201,9 @@ impl ToolGate {
         }
         if name == "assistant_memory" && !self.voice {
             return Some("tool 'assistant_memory' is blocked: only the voice assistant session has a temporary memory.".to_string());
+        }
+        if name == "assistant_handoff" && !self.voice {
+            return Some("tool 'assistant_handoff' is blocked: only a voice assistant session hands tasks to another assistant.".to_string());
         }
         if matches!(name, "get_model_guidance" | "switch_session_model") && !self.autoswitch_on {
             return Some(format!(

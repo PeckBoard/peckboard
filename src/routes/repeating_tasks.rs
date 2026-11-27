@@ -45,6 +45,10 @@ pub struct CreateRepeatingTaskRequest {
     /// `"session"` (default) or `"assistant"`: where each run happens.
     #[serde(default)]
     pub target: Option<String>,
+    /// With `target: "assistant"`: which assistant performs it
+    /// (`assistants.id`). Absent = the default assistant.
+    #[serde(default)]
+    pub assistant_id: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -197,6 +201,29 @@ async fn create_repeating_task(
     let schedule_value = validate_schedule(&body.schedule_kind, &body.schedule_value)?;
     let timezone = validate_timezone(body.timezone.as_deref())?;
     let target = validate_target(body.target.as_deref())?;
+    let assistant_id = match body
+        .assistant_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        Some(_) if target.as_deref() != Some(TARGET_ASSISTANT) => {
+            return Err(bad_request("assistant_id needs target \"assistant\""));
+        }
+        Some(id) => {
+            if state
+                .db
+                .get_assistant(id)
+                .await
+                .map_err(internal_error)?
+                .is_none()
+            {
+                return Err(bad_request("assistant not found"));
+            }
+            Some(id.to_string())
+        }
+        None => None,
+    };
     crate::routes::settings::check_model_or_400(body.model.as_deref())?;
 
     // Verify folder exists; without this the task row would reference a
@@ -233,6 +260,7 @@ async fn create_repeating_task(
         updated_at: now.clone(),
         timezone: timezone.clone(),
         target: target.clone(),
+        assistant_id: None,
     };
     // Disabled tasks must not surface in the due-task scan, so leave
     // next_run_at empty until the task is enabled.
@@ -242,7 +270,7 @@ async fn create_repeating_task(
         None
     };
 
-    let task = state
+    let mut task = state
         .db
         .create_repeating_task(NewRepeatingTask {
             id,
@@ -264,6 +292,14 @@ async fn create_repeating_task(
         })
         .await
         .map_err(internal_error)?;
+    if let Some(id) = assistant_id.as_deref() {
+        state
+            .db
+            .set_repeating_task_assistant(&task.id, Some(id))
+            .await
+            .map_err(internal_error)?;
+        task.assistant_id = assistant_id.clone();
+    }
 
     state
         .broadcaster
@@ -401,6 +437,7 @@ async fn update_repeating_task(
             updated_at: now.clone(),
             timezone: timezone.clone().unwrap_or(existing.timezone.clone()),
             target: existing.target.clone(),
+            assistant_id: existing.assistant_id.clone(),
         };
         if draft.enabled {
             next_run_at_update = Some(initial_next_run_at(&draft));
@@ -612,11 +649,10 @@ async fn create_morning_briefing(
         Some(z) => Some(z),
         None => server_timezone(),
     };
-    let voice = state
-        .db
-        .find_expert_session(crate::service::voice_relay::VOICE_EXPERT_KIND)
+    let voice = crate::service::assistants::resolve(&state.db, None)
         .await
         .map_err(internal_error)?
+        .map(|a| a.session().clone())
         .ok_or_else(|| {
             (
                 StatusCode::CONFLICT,
@@ -655,6 +691,7 @@ async fn create_morning_briefing(
         updated_at: now.clone(),
         timezone: timezone.clone(),
         target: Some(TARGET_ASSISTANT.to_string()),
+        assistant_id: None,
     };
     let task = state
         .db

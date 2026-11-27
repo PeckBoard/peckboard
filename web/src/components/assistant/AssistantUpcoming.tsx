@@ -7,6 +7,7 @@ import type { MenuItem } from '../Dropdown'
 import List from '../List'
 import { openInApp } from './openInApp'
 import { upcomingAssistantTasks } from './upcoming'
+import { useActiveTaskOwner } from './useActiveTaskOwner'
 
 /** Relative times re-render this often. */
 const CLOCK_TICK_MS = 30_000
@@ -80,7 +81,8 @@ export default function AssistantUpcoming({
     return () => clearInterval(t)
   }, [open])
 
-  const upcoming = useMemo(() => upcomingAssistantTasks(tasks), [tasks])
+  const owner = useActiveTaskOwner()
+  const upcoming = useMemo(() => upcomingAssistantTasks(tasks, owner), [tasks, owner])
 
   const act = async (what: string, run: () => Promise<unknown>) => {
     setStatus(null)

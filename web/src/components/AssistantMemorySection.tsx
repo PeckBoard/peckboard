@@ -5,6 +5,7 @@ import {
   useAssistantSettings,
   type AssistantSettings,
 } from '../store/assistantSettings'
+import { useVoiceStore } from '../store/voice'
 import ConfirmDialog from './ConfirmDialog'
 import FieldError from './FieldError'
 import List from './List'
@@ -118,6 +119,13 @@ export default function AssistantMemorySection() {
   const [now, setNow] = useState(() => Date.now())
   const [version, setVersion] = useState(0)
   const refresh = useCallback(() => setVersion((v) => v + 1), [])
+  // Each assistant has its own memory; '' = the default assistant.
+  const assistants = useVoiceStore((s) => s.assistants)
+  const [who, setWho] = useState('')
+  const query = who ? `?assistant=${encodeURIComponent(who)}` : ''
+  useEffect(() => {
+    void useVoiceStore.getState().loadAssistants()
+  }, [])
 
   useEffect(() => {
     if (!settings) void loadSettings()
@@ -128,7 +136,10 @@ export default function AssistantMemorySection() {
   useEffect(() => {
     let cancelled = false
     const fetchAll = () =>
-      Promise.all([authedFetch('/api/voice/memory'), authedFetch('/api/voice/memory/status')])
+      Promise.all([
+        authedFetch(`/api/voice/memory${query}`),
+        authedFetch(`/api/voice/memory/status${query}`),
+      ])
         .then(async ([memRes, stRes]) => {
           if (!memRes.ok) throw new Error(await errorOf(memRes, "Couldn't load memory"))
           const mem = (await memRes.json()) as { entries: MemoryEntry[] }
@@ -152,7 +163,7 @@ export default function AssistantMemorySection() {
       window.clearInterval(poll)
       window.clearInterval(tick)
     }
-  }, [version])
+  }, [version, query])
 
   const fieldValue = (key: NumberField) => drafts[key] ?? (settings ? String(settings[key]) : '')
 
@@ -171,7 +182,7 @@ export default function AssistantMemorySection() {
   const deleteEntry = async (e: MemoryEntry) => {
     setActionError(null)
     try {
-      const res = await authedFetch(`/api/voice/memory/${encodeURIComponent(e.id)}`, {
+      const res = await authedFetch(`/api/voice/memory/${encodeURIComponent(e.id)}${query}`, {
         method: 'DELETE',
       })
       if (!res.ok && res.status !== 404) throw new Error(await errorOf(res, "Couldn't delete"))
@@ -185,7 +196,7 @@ export default function AssistantMemorySection() {
     setClearing(true)
     setClearError(null)
     try {
-      const res = await authedFetch('/api/voice/memory', { method: 'DELETE' })
+      const res = await authedFetch(`/api/voice/memory${query}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(await errorOf(res, "Couldn't clear"))
       setConfirmClear(false)
       refresh()
@@ -215,6 +226,21 @@ export default function AssistantMemorySection() {
     >
       <div className="settings-section-head">
         <h3>Memory</h3>
+        {assistants.length > 1 && (
+          <select
+            className="form-input voice-settings-select"
+            aria-label="Whose memory"
+            value={who}
+            onChange={(e) => setWho(e.target.value)}
+            data-testid="voice-memory-assistant"
+          >
+            {assistants.map((a) => (
+              <option key={a.id} value={a.is_default ? '' : a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        )}
         <button
           type="button"
           className="btn-secondary btn-sm"

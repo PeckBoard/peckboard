@@ -69,6 +69,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_sessions_is_temp_column(conn)?;
     ensure_repeating_tasks_timezone_column(conn)?;
     ensure_repeating_tasks_target_column(conn)?;
+    ensure_repeating_tasks_assistant_id_column(conn)?;
     ensure_repeating_task_runs_table(conn)?;
     ensure_env_vars_table(conn)?;
     ensure_agent_vars_table(conn)?;
@@ -82,6 +83,7 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_pending_actions_table(conn)?;
     ensure_voice_topics_table(conn)?;
     ensure_assistant_memories_table(conn)?;
+    ensure_assistants_table(conn)?;
     ensure_remote_devices_table(conn)?;
     ensure_remote_device_enrollments_table(conn)?;
     ensure_auth_sessions_remote_device_column(conn)?;
@@ -555,6 +557,46 @@ fn ensure_voice_topics_table(conn: &mut SqliteConnection) -> anyhow::Result<()> 
     sql_query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_topics_one_current \
          ON voice_topics (session_id) WHERE is_current = 1",
+    )
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1795796913_assistants`. `CREATE TABLE IF NOT
+/// EXISTS` is idempotent so this is safe on a fully-migrated DB and only does
+/// work on one that lacks the table. DDL mirrors the migration.
+fn ensure_assistants_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "assistants")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS assistants (
+            id          TEXT PRIMARY KEY NOT NULL,
+            name        TEXT NOT NULL,
+            job         TEXT NOT NULL DEFAULT '',
+            voice       TEXT,
+            color       TEXT,
+            icon        TEXT,
+            template    TEXT,
+            session_id  TEXT,
+            is_default  BOOLEAN NOT NULL DEFAULT 0,
+            position    INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistants_name \
+         ON assistants (name COLLATE NOCASE)",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistants_one_default \
+         ON assistants (is_default) WHERE is_default = 1",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistants_session \
+         ON assistants (session_id) WHERE session_id IS NOT NULL",
     )
     .execute(conn)?;
     Ok(())
@@ -2151,6 +2193,22 @@ fn ensure_repeating_tasks_target_column(conn: &mut SqliteConnection) -> anyhow::
              CHECK (target IS NULL OR target = 'assistant')",
         )
         .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Heal DBs that predate `1795800044_repeating_task_assistant`, whose
+/// `ALTER TABLE … ADD COLUMN` can't be made idempotent. Same plain nullable
+/// column as the migration.
+fn ensure_repeating_tasks_assistant_id_column(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let rows: Vec<PragmaColumn> = sql_query("PRAGMA table_info(repeating_tasks)").load(conn)?;
+    let existing: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !existing.iter().any(|c| c == "assistant_id") {
+        tracing::info!("Repairing schema: adding repeating_tasks.assistant_id");
+        sql_query("ALTER TABLE repeating_tasks ADD COLUMN assistant_id TEXT").execute(conn)?;
     }
     Ok(())
 }

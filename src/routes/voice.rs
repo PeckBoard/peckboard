@@ -1,8 +1,9 @@
-//! Voice assistant route: `POST /api/voice/session` gets or creates the
-//! instance's single, global voice session (see `service::voice_relay`).
-//! Utterances go through the ordinary `POST /api/sessions/:id/message` route
-//! and replies stream over the normal WS — there is no voice-specific send
-//! path.
+//! Voice assistant routes. `POST /api/voice/session` gets or creates the
+//! voice session of one assistant (`service::assistants`): the one named in
+//! the body, or the default. Utterances go through the ordinary
+//! `POST /api/sessions/:id/message` route and replies stream over the normal
+//! WS — there is no voice-specific send path. The other `/api/voice/*`
+//! routes take `?assistant=<id>` and act on the default one without it.
 //!
 //! The voice session may act on every session in every folder, so it is an
 //! admin surface: non-admins get 403.
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     middleware,
     routing::{get, post},
@@ -21,7 +22,7 @@ use serde::Deserialize;
 
 use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::models::{NewSession, Session, UpdateSession};
-use crate::service::voice_relay::{VOICE_EXPERT_KIND, VOICE_SESSION_TITLE};
+use crate::service::voice_relay::VOICE_EXPERT_KIND;
 use crate::state::AppState;
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -31,6 +32,9 @@ struct VoiceSessionRequest {
     /// Switch the voice session to this model (provider-prefixed id).
     #[serde(default)]
     model: Option<String>,
+    /// Which assistant; absent = the default one.
+    #[serde(default)]
+    assistant: Option<String>,
 }
 #[derive(Deserialize)]
 struct VoiceActivityRequest {
@@ -39,6 +43,13 @@ struct VoiceActivityRequest {
     state: String,
 }
 
+/// `?assistant=<id>` on the `/api/voice/*` routes: which assistant the call
+/// is about. Absent = the default one.
+#[derive(Deserialize, Default)]
+struct WhichAssistant {
+    #[serde(default)]
+    assistant: Option<String>,
+}
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/voice/session", post(voice_session))
@@ -138,6 +149,7 @@ async fn put_assistant_settings(
 async fn list_memory(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use crate::service::assistant_memory;
     if !user.is_admin() {
@@ -146,7 +158,7 @@ async fn list_memory(
     let enabled = crate::service::assistant_settings::load(&state.db)
         .await
         .memory_enabled;
-    let Some(voice_id) = voice_session_id(&state).await? else {
+    let Some(voice_id) = voice_session_id(&state, &which).await? else {
         return Ok(Json(
             serde_json::json!({ "enabled": enabled, "entries": [] }),
         ));
@@ -168,12 +180,13 @@ async fn list_memory(
 async fn delete_memory_entry(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<StatusCode, ApiError> {
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
     }
-    let voice_id = voice_session_id(&state)
+    let voice_id = voice_session_id(&state, &which)
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "memory not found"))?;
     if !state
@@ -185,16 +198,17 @@ async fn delete_memory_entry(
         return Err(err(StatusCode::NOT_FOUND, "memory not found"));
     }
     tracing::info!(voice_session = %voice_id, memory = %id, user_id = %user.user_id, "assistant memory: deleted by user");
-    forget_in_prompt(&state).await?;
+    forget_in_prompt(&state, &voice_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// The user deleted memory: drop it from the prompt's Recent Memory
 /// snapshot too (the live agent picks that up after its current turn).
-async fn forget_in_prompt(state: &Arc<AppState>) -> Result<(), ApiError> {
+async fn forget_in_prompt(state: &Arc<AppState>, voice_id: &str) -> Result<(), ApiError> {
     crate::service::voice_prompt::refresh_memory_snapshot(
         &state.db,
         Some(&state.provider_registry),
+        Some(voice_id),
         chrono::Utc::now(),
     )
     .await
@@ -206,11 +220,12 @@ async fn forget_in_prompt(state: &Arc<AppState>) -> Result<(), ApiError> {
 async fn clear_memory(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
     }
-    let deleted = match voice_session_id(&state).await? {
+    let deleted = match voice_session_id(&state, &which).await? {
         Some(voice_id) => {
             let n = state
                 .db
@@ -218,7 +233,7 @@ async fn clear_memory(
                 .await
                 .map_err(internal)?;
             tracing::info!(voice_session = %voice_id, deleted = n, user_id = %user.user_id, "assistant memory: all deleted by user");
-            forget_in_prompt(&state).await?;
+            forget_in_prompt(&state, &voice_id).await?;
             n
         }
         None => 0,
@@ -232,11 +247,12 @@ async fn clear_memory(
 async fn memory_status(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
     }
-    Ok(Json(match voice_session_id(&state).await? {
+    Ok(Json(match voice_session_id(&state, &which).await? {
         Some(voice_id) => crate::service::assistant_memory::lifecycle::status(&voice_id),
         None => serde_json::json!({ "pending": null, "last_clear": null }),
     }))
@@ -250,11 +266,12 @@ async fn memory_status(
 async fn linked_activity(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
     }
-    let Some(voice_id) = voice_session_id(&state).await? else {
+    let Some(voice_id) = voice_session_id(&state, &which).await? else {
         return Ok(Json(serde_json::json!({ "working": 0, "sessions": [] })));
     };
     let mut sessions: Vec<(bool, Session)> = Vec::new();
@@ -298,11 +315,12 @@ async fn linked_activity(
 async fn list_queue(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
     }
-    Ok(Json(match voice_session_id(&state).await? {
+    Ok(Json(match voice_session_id(&state, &which).await? {
         Some(voice_id) => crate::service::voice_gate::queue_payload(&voice_id),
         None => serde_json::json!({ "count": 0, "items": [] }),
     }))
@@ -314,12 +332,13 @@ async fn list_queue(
 async fn release_queue_next(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use crate::service::voice_gate;
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, ADMIN_ONLY));
     }
-    let voice_id = voice_session_id(&state)
+    let voice_id = voice_session_id(&state, &which)
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "no Assistant session yet"))?;
     let dispatcher = crate::service::mcp_server::AppExpertDispatcher::new(state.clone());
@@ -347,6 +366,7 @@ struct SnoozeRequest {
 async fn snooze_question(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
     Json(body): Json<SnoozeRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     use crate::db::models::{NewRepeatingTask, RepeatingTask};
@@ -360,12 +380,11 @@ async fn snooze_question(
             "minutes must be between 1 and 10080",
         ));
     }
-    let voice = state
-        .db
-        .find_expert_session(VOICE_EXPERT_KIND)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no Assistant session yet"))?;
+    let voice = voice_ref(&state, &which)
+        .await?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no Assistant session yet"))?
+        .session()
+        .clone();
     let source = state
         .db
         .get_session(&body.session_id)
@@ -421,9 +440,10 @@ async fn snooze_question(
         updated_at: now.clone(),
         timezone: None,
         target: target.clone(),
+        assistant_id: None,
     };
     let next_run_at = crate::repeating::initial_next_run_at(&draft);
-    let task = state
+    let mut task = state
         .db
         .create_repeating_task(NewRepeatingTask {
             id,
@@ -445,6 +465,19 @@ async fn snooze_question(
         })
         .await
         .map_err(internal)?;
+    // The assistant that was asked raises the question again, not whichever
+    // one is the default by then.
+    if let Some(owner) = crate::service::assistants::for_session(&state.db, &voice.id)
+        .await
+        .map_err(internal)?
+    {
+        state
+            .db
+            .set_repeating_task_assistant(&task.id, Some(&owner.assistant().id))
+            .await
+            .map_err(internal)?;
+        task.assistant_id = Some(owner.assistant().id.clone());
+    }
     state
         .broadcaster
         .broadcast(crate::ws::broadcaster::WsEvent {
@@ -515,14 +548,25 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
     err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// The voice session's id, or `None` before it was first created.
-async fn voice_session_id(state: &Arc<AppState>) -> Result<Option<String>, ApiError> {
-    Ok(state
-        .db
-        .find_expert_session(VOICE_EXPERT_KIND)
+/// The assistant a call is about, with its voice session; `None` before
+/// that session was first created, or for an unknown assistant id.
+async fn voice_ref(
+    state: &Arc<AppState>,
+    which: &WhichAssistant,
+) -> Result<Option<crate::service::assistants::AssistantRef>, ApiError> {
+    crate::service::assistants::resolve(&state.db, which.assistant.as_deref())
         .await
-        .map_err(internal)?
-        .map(|s| s.id))
+        .map_err(internal)
+}
+
+/// [`voice_ref`]'s session id.
+async fn voice_session_id(
+    state: &Arc<AppState>,
+    which: &WhichAssistant,
+) -> Result<Option<String>, ApiError> {
+    Ok(voice_ref(state, which)
+        .await?
+        .map(|a| a.session_id().to_string()))
 }
 
 /// GET /api/voice/topics → `{currentId, topics: [AssistantTopic]}`: the
@@ -532,11 +576,12 @@ async fn voice_session_id(state: &Arc<AppState>) -> Result<Option<String>, ApiEr
 async fn list_topics(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, "the Assistant is admin-only"));
     }
-    let Some(voice_id) = voice_session_id(&state).await? else {
+    let Some(voice_id) = voice_session_id(&state, &which).await? else {
         return Ok(Json(serde_json::json!({ "currentId": null, "topics": [] })));
     };
     crate::service::voice_topics::payload(&state.db, &voice_id)
@@ -558,13 +603,14 @@ struct FocusTopicRequest {
 async fn focus_topic(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(which): Query<WhichAssistant>,
     Json(body): Json<FocusTopicRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use crate::service::{voice_gate, voice_topics};
     if !user.is_admin() {
         return Err(err(StatusCode::FORBIDDEN, "the Assistant is admin-only"));
     }
-    let voice_id = voice_session_id(&state)
+    let voice_id = voice_session_id(&state, &which)
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "no Assistant session yet"))?;
     let topic = state
@@ -592,8 +638,10 @@ async fn focus_topic(
         .map_err(internal)
 }
 
-/// POST /api/voice/session — body `{}` or `{"model": "<id>"}` →
-/// `{"session_id", "model"}`. Idempotent.
+/// POST /api/voice/session — body `{}`, `{"model": "<id>"}` and/or
+/// `{"assistant": "<id>"}` → `{"session_id", "model", "assistant_id"}`.
+/// Gets or creates that assistant's voice session (the default assistant's
+/// without `assistant`). Idempotent.
 async fn voice_session(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -619,14 +667,26 @@ async fn voice_session(
     crate::routes::settings::check_model_or_400(requested.as_deref())?;
 
     let _guard = GET_OR_CREATE.lock().await;
-    let existing = state
-        .db
-        .find_expert_session(VOICE_EXPERT_KIND)
+    let assistant = match body
+        .assistant
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        Some(id) => state
+            .db
+            .get_assistant(id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such assistant"))?,
+        None => state.db.default_assistant().await.map_err(internal)?,
+    };
+    let existing = crate::service::assistants::resolve(&state.db, Some(&assistant.id))
         .await
         .map_err(internal)?;
 
     let session = match existing {
-        Some(session) => {
+        Some(existing) => {
             // Keep the persona current: the active prompt (the built-in
             // default across upgrades, or the user's edited one).
             crate::service::voice_prompt::apply_to_voice_session(
@@ -637,10 +697,10 @@ async fn voice_session(
             .map_err(internal)?;
             let session = state
                 .db
-                .get_session(&session.id)
+                .get_session(existing.session_id())
                 .await
                 .map_err(internal)?
-                .unwrap_or(session);
+                .unwrap_or_else(|| existing.session().clone());
             match requested {
                 Some(model) if session.model.as_deref() != Some(model.as_str()) => {
                     switch_model(&state, &session, &model).await?
@@ -650,19 +710,21 @@ async fn voice_session(
         }
         None => {
             let folder_id = pick_folder(&state, &user.user_id).await?;
-            let prompt = crate::service::voice_prompt::session_prompt(&state.db)
-                .await
-                .map_err(internal)?;
+            let roster = state.db.list_assistants().await.map_err(internal)?;
+            let prompt =
+                crate::service::voice_prompt::assistant_prompt(&state.db, &assistant, &roster)
+                    .await
+                    .map_err(internal)?;
             let model = match requested {
                 Some(m) => Some(m),
                 None => default_voice_model(&state).await,
             };
             let now = chrono::Utc::now().to_rfc3339();
-            state
+            let session = state
                 .db
                 .create_session(NewSession {
                     id: uuid::Uuid::new_v4().to_string(),
-                    name: VOICE_SESSION_TITLE.to_string(),
+                    name: assistant.name.clone(),
                     folder_id,
                     model,
                     created_at: now.clone(),
@@ -675,7 +737,13 @@ async fn voice_session(
                     ..Default::default()
                 })
                 .await
-                .map_err(internal)?
+                .map_err(internal)?;
+            state
+                .db
+                .set_assistant_session(&assistant.id, Some(&session.id))
+                .await
+                .map_err(internal)?;
+            session
         }
     };
     grant_cross_folder_control(&state, &session.id).await?;
@@ -689,6 +757,7 @@ async fn voice_session(
     Ok(Json(serde_json::json!({
         "session_id": session.id,
         "model": model,
+        "assistant_id": assistant.id,
     })))
 }
 
@@ -842,7 +911,7 @@ mod tests {
         seed_authenticated_user, seed_authenticated_user_with_suffix, test_state,
     };
     use crate::db::models::NewFolder;
-    use crate::service::voice_relay::VOICE_SYSTEM_PROMPT;
+    use crate::service::voice_relay::{VOICE_SESSION_TITLE, VOICE_SYSTEM_PROMPT};
     use axum::body::Body;
     use axum::http::{Request, header};
     use tower::ServiceExt;

@@ -94,6 +94,7 @@ impl McpToolRegistry {
             "voice_pronunciation" => self.handle_voice_pronunciation(args, ctx).await,
             "assistant_memory" => self.handle_assistant_memory(args, ctx).await,
             "assistant_topics" => self.handle_assistant_topics(args, ctx).await,
+            "assistant_handoff" => self.handle_assistant_handoff(args, ctx).await,
             "voice_prompt" => self.handle_voice_prompt(args, ctx).await,
             "wont_do_card" => self.handle_wont_do_card(args, ctx).await,
             "ask_user" => self.handle_ask_user(args, ctx).await,
@@ -707,7 +708,7 @@ mod tests {
         for t in handlers::SKILL_TOOL_NAMES {
             assert!(names.contains(t), "{t}");
         }
-        assert_eq!(names.len(), 149);
+        assert_eq!(names.len(), 150);
     }
 
     #[test]

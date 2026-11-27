@@ -727,11 +727,20 @@ impl RepeatingTaskManager {
         ctx: &RunContext<'_>,
         trigger: RunTrigger,
     ) -> anyhow::Result<StartOutcome> {
-        use crate::service::voice_relay::{VOICE_EXPERT_KIND, format_scheduled};
+        use crate::service::voice_relay::format_scheduled;
         let db = ctx.db;
         let now_dt = Utc::now();
         let now = now_dt.to_rfc3339();
-        let voice = db.find_expert_session(VOICE_EXPERT_KIND).await?;
+        // The assistant the task belongs to; a task with none, or whose
+        // assistant was deleted since, is the default assistant's.
+        let mut voice = None;
+        if let Some(id) = task.assistant_id.as_deref() {
+            voice = crate::service::assistants::resolve(db, Some(id)).await?;
+        }
+        if voice.is_none() {
+            voice = crate::service::assistants::resolve(db, None).await?;
+        }
+        let voice = voice.map(|a| a.session().clone());
 
         // Advance the schedule whether or not the Assistant exists, like a
         // failed dispatch: otherwise a missing voice session would re-fire
@@ -1735,6 +1744,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             timezone: None,
             target: None,
+            assistant_id: None,
         }
     }
 

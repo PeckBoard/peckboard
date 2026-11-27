@@ -19,6 +19,23 @@ impl Db {
         .await
     }
 
+    /// Say which assistant performs an Assistant-target task (`None` = the
+    /// default one). False when there is no such task.
+    pub async fn set_repeating_task_assistant(
+        &self,
+        id: &str,
+        assistant_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let (id, assistant_id) = (id.to_string(), assistant_id.map(str::to_string));
+        self.with_conn(move |conn| {
+            let n = diesel::update(repeating_tasks::table.find(&id))
+                .set(repeating_tasks::assistant_id.eq(&assistant_id))
+                .execute(conn)?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     pub async fn get_repeating_task(&self, id: &str) -> anyhow::Result<Option<RepeatingTask>> {
         let id = id.to_string();
         self.with_conn(move |conn| {

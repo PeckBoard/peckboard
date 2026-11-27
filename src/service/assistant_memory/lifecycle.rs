@@ -29,7 +29,6 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use crate::service::assistant_settings::{self, AssistantSettings, AutoClear};
-use crate::service::voice_relay::VOICE_EXPERT_KIND;
 use crate::state::AppState;
 
 /// How often pending clears and idle topics are evaluated.
@@ -289,12 +288,18 @@ pub async fn end_topic(
     topic_ended_at(voice_id, topic, reason, settings, now);
 }
 
-/// Evaluate the voice session's idle boundary and pending clear at `now`.
+/// Evaluate every assistant's idle boundary and pending clear at `now`.
 pub async fn tick_at(state: &Arc<AppState>, now: DateTime<Utc>) {
-    let Ok(Some(voice)) = state.db.find_expert_session(VOICE_EXPERT_KIND).await else {
+    let Ok(all) = crate::service::assistants::all(&state.db).await else {
         return;
     };
-    let voice_id = voice.id.as_str();
+    for assistant in all {
+        tick_one(state, assistant.session_id(), now).await;
+    }
+}
+
+/// One voice session's idle boundary and pending clear at `now`.
+async fn tick_one(state: &Arc<AppState>, voice_id: &str, now: DateTime<Utc>) {
     let settings = assistant_settings::load(&state.db).await;
 
     // Idle boundary.
@@ -419,6 +424,7 @@ pub async fn fire(
     crate::service::voice_prompt::refresh_memory_snapshot(
         &state.db,
         Some(&state.provider_registry),
+        Some(voice_id),
         now,
     )
     .await?;
@@ -483,6 +489,7 @@ pub fn spawn(state: Arc<AppState>) {
         if let Err(e) = crate::service::voice_prompt::refresh_memory_snapshot(
             &state.db,
             Some(&state.provider_registry),
+            None,
             Utc::now(),
         )
         .await

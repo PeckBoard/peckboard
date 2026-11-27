@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { authedFetch } from './auth'
+import { withAssistant } from '../voice/activeAssistant'
 
 /** One relay the server's gate is holding back for the Assistant
  *  (`GET /api/voice/queue`, the `voice-queue` WS event). */
@@ -90,7 +91,7 @@ export const useAssistantActivity = create<AssistantActivityState>((set, get) =>
 
     loadQueue: async () => {
       try {
-        const res = await authedFetch('/api/voice/queue')
+        const res = await authedFetch(withAssistant('/api/voice/queue'))
         if (res.ok) applyQueue((await res.json()) as QueuePayload)
       } catch {
         /* best-effort; the next voice-queue push refreshes it */
@@ -99,7 +100,7 @@ export const useAssistantActivity = create<AssistantActivityState>((set, get) =>
 
     loadLinked: async () => {
       try {
-        const res = await authedFetch('/api/voice/linked')
+        const res = await authedFetch(withAssistant('/api/voice/linked'))
         if (!res.ok) return
         const body = (await res.json()) as { sessions: LinkedSession[] }
         set({ linked: Array.isArray(body.sessions) ? body.sessions : [] })
@@ -112,7 +113,7 @@ export const useAssistantActivity = create<AssistantActivityState>((set, get) =>
       if (get().busy) return
       set({ busy: true, error: null })
       try {
-        const res = await authedFetch('/api/voice/queue/next', { method: 'POST' })
+        const res = await authedFetch(withAssistant('/api/voice/queue/next'), { method: 'POST' })
         if (!res.ok) {
           set({ error: await errorOf(res, "Couldn't hand over the next update") })
           return
@@ -128,7 +129,7 @@ export const useAssistantActivity = create<AssistantActivityState>((set, get) =>
     snooze: async (sessionId, questionId, minutes) => {
       set({ busy: true, error: null })
       try {
-        const res = await authedFetch('/api/voice/snooze', {
+        const res = await authedFetch(withAssistant('/api/voice/snooze'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: sessionId, question_id: questionId, minutes }),

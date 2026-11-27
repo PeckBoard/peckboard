@@ -142,6 +142,10 @@ export default function VoiceDock({
   const supported = useVoiceStore((s) => s.recognitionSupported)
   const panelOpen = useVoiceStore((s) => s.panelOpen)
   const status = useVoiceStore((s) => s.status)
+  // Who is being talked to; "Assistant" until the list has loaded.
+  const assistantName = useVoiceStore(
+    (s) => s.assistants.find((a) => a.id === s.assistantId)?.name ?? 'Assistant',
+  )
   const micOn = useVoiceStore((s) => s.micOn)
   const interim = useVoiceStore((s) => s.interim)
   const heard = useVoiceStore((s) => s.heard)
@@ -197,7 +201,9 @@ export default function VoiceDock({
       onPointerDown={unlockSpeech}
     >
       <header className="voice-panel-header">
-        <h2 className="voice-panel-title">Assistant</h2>
+        <h2 className="voice-panel-title" data-testid="voice-panel-title">
+          {assistantName}
+        </h2>
         <span
           className={`voice-status voice-status-${status}`}
           data-testid="voice-status"

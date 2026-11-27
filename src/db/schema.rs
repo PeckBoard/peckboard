@@ -67,6 +67,7 @@ diesel::table! {
         updated_at -> Text,
         timezone -> Nullable<Text>,
         target -> Nullable<Text>,
+        assistant_id -> Nullable<Text>,
     }
 }
 
@@ -653,6 +654,22 @@ diesel::table! {
     }
 }
 diesel::table! {
+    assistants (id) {
+        id -> Text,
+        name -> Text,
+        job -> Text,
+        voice -> Nullable<Text>,
+        color -> Nullable<Text>,
+        icon -> Nullable<Text>,
+        template -> Nullable<Text>,
+        session_id -> Nullable<Text>,
+        is_default -> Bool,
+        position -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+diesel::table! {
     assistant_memories (id) {
         id -> Text,
         voice_session_id -> Text,
@@ -1124,6 +1141,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     tts_unknown_words,
     pending_actions,
     assistant_memories,
+    assistants,
     voice_topics,
     voice_prompt_versions,
     session_view_nodes,

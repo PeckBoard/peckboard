@@ -97,6 +97,7 @@ async fn seed_task(db: &Db, id: &str, folder_id: &str, prompt: &str, model: Opti
         updated_at: ts.clone(),
         timezone: None,
         target: None,
+        assistant_id: None,
     };
     let next = initial_next_run_at(&draft);
     db.create_repeating_task(NewRepeatingTask {
@@ -820,6 +821,7 @@ async fn seed_once_task(db: &Db, id: &str, folder_id: &str, days_ahead: i64) {
         updated_at: ts.clone(),
         timezone: None,
         target: None,
+        assistant_id: None,
     };
     let next = initial_next_run_at(&draft);
     db.create_repeating_task(NewRepeatingTask {
@@ -1055,6 +1057,15 @@ async fn assistant_target_task_queues_into_the_voice_gate_without_a_session() {
         })
         .await
         .unwrap();
+    // The default assistant already exists (the failed run above made it),
+    // so the session becomes its conversation the way the voice route does.
+    let default = env.db.default_assistant().await.unwrap();
+    assert!(
+        env.db
+            .set_assistant_session(&default.id, Some("voice"))
+            .await
+            .unwrap()
+    );
     let out = env
         .rtm
         .try_run_now("t-a", env.run_ctx(), false)
