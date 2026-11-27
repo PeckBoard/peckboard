@@ -136,4 +136,31 @@ impl Db {
             .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
         f(&mut *guard)
     }
+
+    /// Run a read-only closure on its own short-lived connection, so a slow
+    /// read (a whole-file integrity check, counting every table) does not hold
+    /// the shared connection's mutex and stall the app. WAL lets it read
+    /// while the main connection writes. `PRAGMA query_only` makes a write
+    /// through it an error. An in-memory database has no second connection
+    /// to open, so there it falls back to [`Db::with_conn`].
+    pub async fn with_read_conn<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let Some(dir) = self.data_dir.clone() else {
+            return self.with_conn(f).await;
+        };
+        tokio::task::spawn_blocking(move || {
+            let url = dir.join("peckboard.db").to_string_lossy().to_string();
+            let mut conn = SqliteConnection::establish(&url)
+                .map_err(|e| anyhow::anyhow!("failed to open database for reading: {e}"))?;
+            diesel::sql_query("PRAGMA query_only=ON;").execute(&mut conn)?;
+            diesel::sql_query("PRAGMA busy_timeout=5000;")
+                .execute(&mut conn)
+                .ok();
+            f(&mut conn)
+        })
+        .await?
+    }
 }

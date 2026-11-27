@@ -93,6 +93,112 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     backfill_session_owners(conn)?;
     ensure_session_view_nodes_terminal_column(conn)?;
     ensure_dashboard_widgets_filters_column(conn)?;
+    ensure_lookup_indexes(conn)?;
+    Ok(())
+}
+
+/// The indexes of `1795810000_lookup_indexes`: `(name, table, columns the
+/// index reads, rest of the DDL after the table name)`. One list so the
+/// repair below and the test that checks the planner uses them agree.
+pub(crate) const LOOKUP_INDEXES: &[(&str, &str, &[&str], &str)] = &[
+    (
+        "idx_usage_events_event",
+        "usage_events",
+        &["event_id"],
+        "(event_id)",
+    ),
+    ("idx_usage_events_ts", "usage_events", &["ts"], "(ts)"),
+    (
+        "idx_cards_project",
+        "cards",
+        &["project_id", "priority", "created_at"],
+        "(project_id, priority, created_at)",
+    ),
+    (
+        "idx_cards_worker_session",
+        "cards",
+        &["worker_session_id"],
+        "(worker_session_id)",
+    ),
+    (
+        "idx_cards_last_worker_session",
+        "cards",
+        &["last_worker_session_id"],
+        "(last_worker_session_id)",
+    ),
+    (
+        "idx_sessions_card",
+        "sessions",
+        &["card_id", "last_activity"],
+        "(card_id, last_activity)",
+    ),
+    (
+        "idx_sessions_project",
+        "sessions",
+        &["project_id"],
+        "(project_id)",
+    ),
+    (
+        "idx_chat_focus_queue_source",
+        "chat_focus_queue",
+        &["source_session_id"],
+        "(source_session_id)",
+    ),
+    (
+        "idx_voice_relay_queue_source",
+        "voice_relay_queue",
+        &["source_session_id"],
+        "(source_session_id)",
+    ),
+    (
+        "idx_session_view_nodes_session",
+        "session_view_nodes",
+        &["session_id"],
+        "(session_id)",
+    ),
+    (
+        "idx_dashboard_widgets_session",
+        "dashboard_widgets",
+        &["session_id"],
+        "(session_id)",
+    ),
+    (
+        "idx_session_skills_session",
+        "session_skills",
+        &["session_id"],
+        "(session_id)",
+    ),
+    (
+        "idx_events_todo",
+        "events",
+        &["session_id", "seq", "kind"],
+        "(session_id, seq) WHERE kind = 'todo'",
+    ),
+    (
+        "idx_events_agent_usage",
+        "events",
+        &["id", "kind"],
+        "(id) WHERE kind = 'agent-usage'",
+    ),
+];
+
+/// Mirror of `1795810000_lookup_indexes` for a DB that skipped it. `CREATE
+/// INDEX IF NOT EXISTS` is a no-op on a healthy DB. An index is skipped when
+/// its table or one of its columns is missing (the minimal schemas the repair
+/// tests build). The migration's `DROP INDEX idx_events_session` is not
+/// repeated here: a duplicate index costs write time, never correctness.
+fn ensure_lookup_indexes(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    for (name, table, columns, ddl) in LOOKUP_INDEXES {
+        let rows: Vec<PragmaColumn> =
+            sql_query(format!("PRAGMA table_info({table})")).load(conn)?;
+        if !columns.iter().all(|c| rows.iter().any(|r| r.name == *c)) {
+            continue;
+        }
+        sql_query(format!(
+            "CREATE INDEX IF NOT EXISTS {name} ON {table} {ddl}"
+        ))
+        .execute(conn)?;
+    }
     Ok(())
 }
 

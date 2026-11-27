@@ -1,0 +1,15 @@
+CREATE INDEX IF NOT EXISTS idx_events_session ON events (session_id, seq);
+DROP INDEX IF EXISTS idx_events_agent_usage;
+DROP INDEX IF EXISTS idx_events_todo;
+DROP INDEX IF EXISTS idx_session_skills_session;
+DROP INDEX IF EXISTS idx_dashboard_widgets_session;
+DROP INDEX IF EXISTS idx_session_view_nodes_session;
+DROP INDEX IF EXISTS idx_voice_relay_queue_source;
+DROP INDEX IF EXISTS idx_chat_focus_queue_source;
+DROP INDEX IF EXISTS idx_sessions_project;
+DROP INDEX IF EXISTS idx_sessions_card;
+DROP INDEX IF EXISTS idx_cards_last_worker_session;
+DROP INDEX IF EXISTS idx_cards_worker_session;
+DROP INDEX IF EXISTS idx_cards_project;
+DROP INDEX IF EXISTS idx_usage_events_ts;
+DROP INDEX IF EXISTS idx_usage_events_event;

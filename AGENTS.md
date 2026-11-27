@@ -676,3 +676,24 @@ and is required to be idempotent.
   (`web/src/voice/assistantName.ts`), matched on the transcript in the
   browser. Room mode (others take the floor when they start answering;
   "everyone, …" asks each in turn) is client-side in the same store.
+
+## Database Upkeep
+
+- Settings → Data → Database (`web/src/components/DatabaseMaintenanceSection.tsx`,
+  routes `/api/settings/database/*`, admin only) is backed by
+  `src/service/db_maintenance.rs`: size readout, cleanup, compact
+  (`VACUUM`), integrity check.
+- The cleanup is a fixed list of `Rule`s (one table + one SQL condition).
+  Preview and delete are built from the same pair, so they cannot disagree.
+  **A new table with no foreign key onto its parent needs a rule there** —
+  and, better, a delete in the parent's delete path. Never add a rule for
+  `usage_events`, `card_sessions` or `pending_actions`: they outlive their
+  parents on purpose.
+- Rules marked `hourly` (expired logins and tokens) also run from the
+  retention sweeper, followed by `PRAGMA optimize`.
+- Slow reads (integrity check, counting every table) go through
+  `Db::with_read_conn`, a separate read-only connection, so they do not hold
+  the shared connection's mutex. Writes and `VACUUM` stay on `with_conn`.
+- An index added by a migration also goes into `LOOKUP_INDEXES` in
+  `src/db/repair.rs`, with a case in the `the_planner_uses_the_lookup_indexes`
+  test that proves SQLite picks it for the query it was added for.

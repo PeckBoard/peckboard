@@ -145,6 +145,14 @@ fn admin_router() -> Router<Arc<AppState>> {
         )
         .route("/api/settings/retention/preview", post(preview_retention))
         .route("/api/settings/retention/usage", get(retention_usage))
+        .route("/api/settings/database/stats", get(database_stats))
+        .route(
+            "/api/settings/database/cleanup/preview",
+            post(database_cleanup_preview),
+        )
+        .route("/api/settings/database/cleanup", post(database_cleanup))
+        .route("/api/settings/database/compact", post(database_compact))
+        .route("/api/settings/database/check", post(database_check))
         .route(
             "/api/settings/memory",
             get(get_memory_settings).put(set_memory_settings),
@@ -784,6 +792,10 @@ pub struct RetentionSettings {
     /// the file is no longer stored. 0 = keep forever.
     #[serde(default)]
     pub shared_file_max_age_days: u32,
+    /// Delete device activity log rows (what a paired device was asked to
+    /// do) older than this many days. 0 = keep forever.
+    #[serde(default)]
+    pub device_activity_max_age_days: u32,
 }
 
 impl RetentionSettings {
@@ -810,6 +822,7 @@ impl RetentionSettings {
             self.browser_run_max_age_days,
             self.tool_image_max_age_days,
             self.transcript_max_age_days,
+            self.device_activity_max_age_days,
             self.shared_file_max_age_days,
         ];
         if fields.iter().any(|&v| v > Self::MAX_BOUND) {
@@ -887,6 +900,64 @@ async fn preview_retention(
     Ok(Json(
         crate::service::retention::sweep_files(&state, &body, true).await,
     ))
+}
+
+/// 500 with the error text, for the database upkeep routes.
+fn upkeep_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": e.to_string() })),
+    )
+}
+
+/// GET /api/settings/database/stats → file size, reclaimable bytes and row
+/// counts per table.
+async fn database_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    crate::service::db_maintenance::stats(&state)
+        .await
+        .map(Json)
+        .map_err(upkeep_error)
+}
+
+/// POST /api/settings/database/cleanup/preview → what a cleanup would remove
+/// right now, per kind. Deletes nothing.
+async fn database_cleanup_preview(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    crate::service::db_maintenance::preview_cleanup(&state)
+        .await
+        .map(Json)
+        .map_err(upkeep_error)
+}
+
+/// POST /api/settings/database/cleanup → removes leftover and expired rows
+/// and reports what went, per kind.
+async fn database_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    crate::service::db_maintenance::run_cleanup(&state)
+        .await
+        .map(Json)
+        .map_err(upkeep_error)
+}
+
+/// POST /api/settings/database/compact → file size before and after. 507
+/// when the disk has no room for the temporary copy.
+async fn database_compact(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use crate::service::db_maintenance::CompactError;
+    match crate::service::db_maintenance::compact(&state).await {
+        Ok(report) => Ok(Json(report)),
+        Err(e @ CompactError::NotEnoughSpace { .. }) => Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+        Err(e) => Err(upkeep_error(e)),
+    }
+}
+
+/// POST /api/settings/database/check → `{ok, problems}` from SQLite's
+/// integrity check.
+async fn database_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    crate::service::db_maintenance::check(&state)
+        .await
+        .map(Json)
+        .map_err(upkeep_error)
 }
 /// GET /api/settings/retention → [`RetentionSettings`] as JSON.
 async fn get_retention(State(state): State<Arc<AppState>>) -> impl IntoResponse {

@@ -52,6 +52,19 @@ pub async fn run_sweep(state: &AppState) {
         Ok(n) => tracing::info!("Retention sweep: deleted {n} expired short-term memory notes"),
         Err(e) => tracing::warn!("Retention sweep: memory purge failed: {e:#}"),
     }
+    // Expired logins and tokens (they were only purged at boot or never),
+    // then SQLite's own statistics upkeep.
+    crate::service::db_maintenance::hourly_upkeep(&state.db).await;
+    match crate::service::db_maintenance::prune_device_activity(
+        &state.db,
+        settings.device_activity_max_age_days,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Retention sweep: deleted {n} old device activity rows"),
+        Err(e) => tracing::warn!("Retention sweep: device activity prune failed: {e:#}"),
+    }
     // Files on disk that only ever grow: browser runs, tool images, shared
     // files, and provider CLI transcripts.
     let report = sweep_files(state, &settings, false).await;

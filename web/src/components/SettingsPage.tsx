@@ -56,6 +56,7 @@ import PluginRegistryPanel from './PluginRegistryPanel'
 import McpServersSection from './McpServersSection'
 import MemorySettingsSection from './MemorySettingsSection'
 import RetentionSettingsSection from './RetentionSettingsSection'
+import DatabaseMaintenanceSection from './DatabaseMaintenanceSection'
 import LinkPreviewSettingsSection from './LinkPreviewSettingsSection'
 import TlsSettingsSection from './TlsSettingsSection'
 import EnvVarsSection from './EnvVarsSection'
@@ -572,6 +573,12 @@ const SECTION_INDEX: { page: SubPage; section: string; anchor: string; keywords:
     section: 'Retention',
     anchor: 'retention',
     keywords: 'cleanup sweep age sessions events reports',
+  },
+  {
+    page: 'data',
+    section: 'Database',
+    anchor: 'database',
+    keywords: 'cleanup compact vacuum size check integrity leftover expired',
   },
   {
     page: 'tls',
@@ -1852,6 +1859,9 @@ export default function SettingsPage({ onBack, initialSubPage = null }: Props) {
 
             <div data-settings-anchor="retention">
               <RetentionSettingsSection />
+            </div>
+            <div data-settings-anchor="database">
+              <DatabaseMaintenanceSection />
             </div>
           </>
         )}

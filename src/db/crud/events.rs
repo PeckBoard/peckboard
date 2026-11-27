@@ -73,8 +73,8 @@ impl Db {
     /// This is the "load older" path for the chat view: default fetch
     /// pulls the latest N events; subsequent calls use the lowest seq
     /// from the loaded list as `before_seq` to walk backwards through
-    /// history a page at a time. Uses the existing `idx_events_session`
-    /// `(session_id, seq)` index — no new index required.
+    /// history a page at a time. Uses the index behind the table's
+    /// `UNIQUE (session_id, seq)` — no new index required.
     pub async fn list_events_by_session_before(
         &self,
         session_id: &str,

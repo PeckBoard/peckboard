@@ -105,6 +105,14 @@ impl Db {
                 diesel::delete(queued_messages::table.filter(queued_messages::session_id.eq(sid)))
                     .execute(conn)?;
                 diesel::delete(todos::table.filter(todos::session_id.eq(sid))).execute(conn)?;
+                // `user_tabs` is polymorphic with no FK: without this the
+                // tab strip keeps a chip for every session that just went.
+                diesel::delete(
+                    user_tabs::table
+                        .filter(user_tabs::item_type.eq("session"))
+                        .filter(user_tabs::item_id.eq(sid)),
+                )
+                .execute(conn)?;
             }
             let sessions_deleted =
                 diesel::delete(sessions::table.filter(sessions::folder_id.eq(&id)))

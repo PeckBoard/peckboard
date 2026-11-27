@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.1.169",
+    "date": "2026-11-27",
+    "highlights": [
+      "Settings → Data has a new Database section: see how big the database is and which tables hold the most rows.",
+      "\"Preview cleanup\" lists leftovers of deleted sessions and expired logins; \"Clean up\" removes them after you confirm. Usage history and card history are never touched.",
+      "\"Compact database\" gives unused space back to the disk, and \"Check database\" looks for damage in the file.",
+      "Faster on large installs: deleting or clearing sessions, the project board and server start no longer slow down as history grows.",
+      "Expired logins are now removed every hour, and there is a new age limit for the device activity log."
+    ]
+  },
+  {
     "version": "0.1.168",
     "date": "2026-11-27",
     "highlights": [

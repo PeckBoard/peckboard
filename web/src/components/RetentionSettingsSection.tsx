@@ -12,6 +12,7 @@ interface RetentionSettings {
   tool_image_max_age_days: number
   shared_file_max_age_days: number
   transcript_max_age_days: number
+  device_activity_max_age_days: number
 }
 
 const DEFAULTS: RetentionSettings = {
@@ -25,6 +26,7 @@ const DEFAULTS: RetentionSettings = {
   tool_image_max_age_days: 0,
   shared_file_max_age_days: 0,
   transcript_max_age_days: 0,
+  device_activity_max_age_days: 0,
 }
 
 const FIELDS: Array<{
@@ -81,6 +83,11 @@ const FIELDS: Array<{
     key: 'transcript_max_age_days',
     label: 'Agent transcripts — max age (days)',
     hint: 'Delete the saved conversations of the Claude, Codex and Grok accounts managed here once they are this old. A session unused for that long keeps its chat history, but its agent starts fresh and no longer remembers it.',
+  },
+  {
+    key: 'device_activity_max_age_days',
+    label: 'Device activity log — max age (days)',
+    hint: 'Delete entries of the log of what paired devices were asked to do once they are this old.',
   },
 ]
 
