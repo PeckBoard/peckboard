@@ -127,6 +127,20 @@ export interface LimitWait {
   /** The provider's own notice. */
   reason: string
 }
+/** One pause or resume of a project, and who made it. */
+export interface ProjectStatusEntry {
+  id: string
+  project_id: string
+  action: 'paused' | 'resumed'
+  /** A signed-in person, an agent session, or the server itself. */
+  actor_kind: 'user' | 'session' | 'system'
+  /** User id or session id; null for the system. */
+  actor_id: string | null
+  /** Username or session name as it was at the time. */
+  actor_name: string
+  /** RFC 3339 UTC. */
+  at: string
+}
 export interface Project {
   id: string
   name: string
@@ -156,6 +170,9 @@ export interface Project {
   /** Cards the orchestrator is holding back until a provider usage limit
    *  resets. Older servers omit it. */
   limit_waits?: LimitWait[]
+  /** The newest pause or resume and who made it. Null for a project whose
+   *  status never changed since this was recorded; older servers omit it. */
+  last_status_change?: ProjectStatusEntry | null
   /** Cards pass through a `review` step — a fresh session verifies the
    *  work — before landing in Done. */
   review_enabled: boolean

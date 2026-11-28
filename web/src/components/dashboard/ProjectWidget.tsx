@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { authedFetch } from '../../store/auth'
 import { useProjectsStore } from '../../store/projects'
 import { formatRelativeTime } from '../../lib/review'
+import type { Project, ProjectStatusEntry } from '../../types/api'
+import { pauseReasonNote, pausedByLabel } from '../kanban/utils'
 import { MenuButton, type MenuItem } from '../Dropdown'
 import WidgetFrame from './WidgetFrame'
 import type { WidgetContext } from './WidgetGrid'
@@ -12,6 +14,10 @@ export interface ProjectSummary {
   name: string
   status: string
   pause_reason: string | null
+  /** Who last paused or resumed the project. The summary route does not
+   *  carry it yet, so the widget reads it from the project itself when the
+   *  project is paused (see `useProjectSummary`). */
+  last_status_change?: ProjectStatusEntry | null
   workflow: string
   steps: { step: string; count: number }[]
   total_cards: number
@@ -62,6 +68,11 @@ function useProjectSummary(projectId: string) {
         )
       }
       const json = (await res.json()) as ProjectSummary
+      if (json.status === 'paused' && json.last_status_change === undefined) {
+        const full = await authedFetch(`/api/projects/${encodeURIComponent(projectId)}`)
+        const body = full.ok ? ((await full.json()) as { project?: Project }) : null
+        json.last_status_change = body?.project?.last_status_change ?? null
+      }
       if (mine !== seq.current) return
       setData(json)
       setError(null)
@@ -263,6 +274,16 @@ export default function ProjectWidget({
     const t = window.setInterval(() => tick((n) => n + 1), 60_000)
     return () => window.clearInterval(t)
   }, [])
+  // "Paused by <who>", plus the reason when one was given.
+  const pauseNote =
+    data?.status === 'paused'
+      ? [
+          pausedByLabel(data.last_status_change),
+          pauseReasonNote(data.pause_reason, data.last_status_change),
+        ]
+          .filter(Boolean)
+          .join(' — ') || null
+      : null
 
   let body: ReactNode
   if (error?.notFound) {
@@ -290,9 +311,9 @@ export default function ProjectWidget({
   } else {
     body = (
       <div className="project-widget" data-testid="project-widget" data-project-id={projectId}>
-        {data.status === 'paused' && data.pause_reason && (
+        {pauseNote && (
           <p className="project-widget-reason" data-testid="project-widget-pause-reason">
-            {data.pause_reason}
+            {pauseNote}
           </p>
         )}
         <div className="project-widget-stats">
@@ -364,7 +385,7 @@ export default function ProjectWidget({
       title={name}
       onTitleClick={() => onOpenProject(projectId)}
       titleTestId="project-widget-title"
-      statusSlot={data && <StatusPill status={data.status} reason={data.pause_reason} />}
+      statusSlot={data && <StatusPill status={data.status} reason={pauseNote} />}
       menuItems={menuItems}
       ctx={ctx}
       dataAttrs={{ 'data-project-id': projectId }}

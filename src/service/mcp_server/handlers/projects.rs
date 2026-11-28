@@ -164,6 +164,16 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: update_project");
 
+        // A status change is a pause or a resume: it takes that path (stop
+        // workers, record which session did it, tell the board) instead of
+        // being written like any other field.
+        let requested_status = args.get("status").and_then(|v| v.as_str());
+        if let Some(status) = requested_status
+            && !matches!(status, "active" | "paused")
+        {
+            anyhow::bail!("status must be 'active' or 'paused'");
+        }
+
         let update = UpdateProject {
             name: args
                 .get("name")
@@ -177,19 +187,45 @@ impl McpToolRegistry {
                 .get("worker_count")
                 .and_then(|v| v.as_i64())
                 .map(|n| n.clamp(0, i32::MAX as i64) as i32),
-            status: args
-                .get("status")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
             last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
             ..Default::default()
         };
 
-        let project = ctx
+        let mut project = ctx
             .db
             .update_project(project_id, update)
             .await?
             .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+
+        if let Some(status) = requested_status
+            && status != project.status
+        {
+            let actor =
+                crate::routes::projects::StatusActor::session(&ctx.db, &ctx.session_id).await;
+            let changed = if status == "paused" {
+                crate::routes::projects::pause_project_with(
+                    &ctx.db,
+                    &ctx.broadcaster,
+                    ctx.provider_registry.as_deref(),
+                    project_id,
+                    None,
+                    "manual",
+                    &actor,
+                )
+                .await?
+            } else {
+                crate::routes::projects::resume_project_with(
+                    &ctx.db,
+                    &ctx.broadcaster,
+                    project_id,
+                    &actor,
+                )
+                .await?
+            };
+            if let Some(p) = changed {
+                project = p;
+            }
+        }
 
         Ok(serde_json::json!({
             "status": "ok",
@@ -217,8 +253,11 @@ impl McpToolRegistry {
         // Same path as the HTTP /pause route: sets status + reason, drops
         // queued messages, cancels in-flight workers (pause means stop,
         // not "let the current turn finish and advance the card"),
-        // broadcasts the project-update, and fires `project.paused` with
-        // source "manual" — a chat session pausing is the user's call.
+        // broadcasts the project-update, and fires `project.paused`. An
+        // agent may pause, but it is recorded as this session's doing and
+        // the project says so ("Paused by agent session …"), never as the
+        // owner's.
+        let actor = crate::routes::projects::StatusActor::session(&ctx.db, &ctx.session_id).await;
         let project = crate::routes::projects::pause_project_with(
             &ctx.db,
             &ctx.broadcaster,
@@ -226,6 +265,7 @@ impl McpToolRegistry {
             project_id,
             None,
             "manual",
+            &actor,
         )
         .await?
         .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
@@ -252,27 +292,18 @@ impl McpToolRegistry {
 
         tracing::info!(session_id = %ctx.session_id, project_id = %project_id, "MCP tool: resume_project");
 
-        // Mirror `/api/projects/:id/resume`: clear pause_reason so a stale
-        // auto-pause message doesn't linger on the project page, and
-        // append the auto-pause counter reset marker so the next crash
-        // gets its full retry budget.
-        let update = UpdateProject {
-            status: Some("active".to_string()),
-            last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
-            pause_reason: Some(None),
-            ..Default::default()
-        };
-
-        let project = ctx
-            .db
-            .update_project(project_id, update)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
-
-        if let Err(e) = crate::worker::orchestrator::mark_project_resumed(&ctx.db, project_id).await
-        {
-            tracing::warn!(project_id = %project_id, "Failed to mark resume sentinel: {e}");
-        }
+        // The same path as `/api/projects/:id/resume`: clears pause_reason,
+        // resets every card's retry budget, records which session resumed,
+        // and broadcasts the update so the board stops showing "paused".
+        let actor = crate::routes::projects::StatusActor::session(&ctx.db, &ctx.session_id).await;
+        let project = crate::routes::projects::resume_project_with(
+            &ctx.db,
+            &ctx.broadcaster,
+            project_id,
+            &actor,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
 
         Ok(serde_json::json!({
             "status": "ok",

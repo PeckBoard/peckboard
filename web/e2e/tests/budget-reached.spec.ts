@@ -79,7 +79,7 @@ test('reached budget stops new workers without pausing the project', async ({
   await expect(banner).toContainText('Budget reached')
   // The board only shows a status badge for a non-active project.
   await expect(page.locator('.status-badge.status-paused')).toHaveCount(0)
-  await expect(page.getByTestId('project-pause-banner')).toHaveCount(0)
+  await expect(page.getByTestId('project-paused-banner')).toHaveCount(0)
 
   // Give the orchestrator more than one tick (~5s): the card must not be
   // picked up, and the project must stay active.

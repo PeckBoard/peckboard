@@ -367,7 +367,8 @@ async fn resume_auth_paused_projects(state: &Arc<AppState>, provider_id: &str, a
         if !paused_on_auth(state, &project.id, provider_id, account_id).await {
             continue;
         }
-        match crate::routes::projects::resume_project_inner(state, &project.id).await {
+        let actor = crate::routes::projects::StatusActor::system("Login recovery");
+        match crate::routes::projects::resume_project_inner(state, &project.id, &actor).await {
             Ok(Some(_)) => tracing::info!(
                 project_id = %project.id,
                 account = %account_id,

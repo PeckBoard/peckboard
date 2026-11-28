@@ -33,6 +33,7 @@ mod plugin_approvals;
 mod plugin_data;
 mod plugin_repositories;
 mod plugin_settings;
+mod project_status_log;
 mod projects;
 mod push;
 mod queued;
@@ -74,6 +75,7 @@ pub use folder_memories::{
 pub use folders::{MoveFolderOutcome, ProjectMoveReport, RepeatingTaskMoveReport};
 pub use oauth_clients::{EXTERNAL_MCP_SEAL_REASON, OAuthClientView, oauth_ts};
 pub use plugin_approvals::{APPROVAL_APPROVED, APPROVAL_DENIED};
+pub use project_status_log::ProjectStatusEntry;
 pub use remote_device_enrollments::{
     ActivateAttempt, EnrollAttempt, EnrollOutcome, EnrollRefusal, rfc3339_after,
 };

@@ -95,7 +95,7 @@ test('crashing worker blocks its card and the project keeps running', async ({
   // The project is untouched: no pause banner and no paused status badge
   // (the board only shows a badge for a non-active project), and the
   // server agrees.
-  await expect(page.getByTestId('project-pause-banner')).toHaveCount(0)
+  await expect(page.getByTestId('project-paused-banner')).toHaveCount(0)
   await expect(page.locator('.status-badge.status-paused')).toHaveCount(0)
 
   const projRes = await request.get(`/api/projects/${project.id}`, { headers: auth })

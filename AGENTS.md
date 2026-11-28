@@ -724,10 +724,10 @@ and is required to be idempotent.
   out of quota answers with one line ("You've hit your weekly limit ·
   resets 8am (UTC)") and a clean result. `PluginProviderRuntime::stamp_limit_stop`
   (`src/provider/plugin_provider.rs`) stamps that `Completed` with `error`
-  - `errorKind: rate_limit` before it is persisted, so every consumer sees
-    an ordinary errored result. The matcher is `rate_limits::is_limit_stop`:
-    short, one line, anchored on the limit wording — keep it strict, an
-    answer that quotes a notice must not match.
+  and `errorKind: rate_limit` before it is persisted, so every consumer sees
+  an ordinary errored result. The matcher is `rate_limits::is_limit_stop`:
+  short, one line, anchored on the limit wording — keep it strict, an
+  answer that quotes a notice must not match.
 - **Holds** live in `src/provider/rate_limits.rs` (`RateLimits` on the
   provider registry): per account, and per account + model for Claude
   (its weekly caps are per model family). The reset time is read in the
@@ -750,6 +750,14 @@ and is required to be idempotent.
 - **Pausing a project is never automatic.** Nothing in the orchestrator,
   budget, crash guard or limit handling pauses a project; they hold or
   block cards. Keep it that way.
+- **Every pause and resume records who made it** (`project_status_log`,
+  `StatusActor` in `src/routes/projects/mod.rs`). An agent session may
+  pause a project, but the project then says so ("Paused by agent session
+  …") and `last_status_change` on the project JSON names it. A project's
+  `status` is only ever changed through `pause_project_with` /
+  `resume_project_with`: `PUT /api/projects/:id` and the MCP
+  `update_project` tool route a `status` field there instead of writing
+  it. Do not add another path that sets `status` directly.
 - A bookkeeping event appended to a session (`auto-pause-cleared`,
   `worker-no-progress`, `limit-*`) must never be read as "the last thing
   that happened in the conversation": look for the last `user` /

@@ -37,6 +37,7 @@ import {
 import { formatLimitReset } from './chat/events'
 import { useVoiceNavStore } from '../voice/navigation'
 import PriorityChevron from './kanban/PriorityChevron'
+import ProjectPausedBanner from './kanban/ProjectPausedBanner'
 
 const verdictLabel = (v: ReviewVerdict) => (v === 'pass' ? 'Passed' : 'Changes requested')
 interface KanbanBoardProps {
@@ -971,11 +972,7 @@ export default function KanbanBoard({
       </div>
 
       <div className="kanban-board-scroll">
-        {project?.pause_reason && (
-          <div className="project-pause-banner" role="status" data-testid="project-pause-banner">
-            <strong>Project paused.</strong> {project.pause_reason}
-          </div>
-        )}
+        {project?.status === 'paused' && <ProjectPausedBanner project={project} />}
         {project?.budget_exhausted && (
           <div className="project-pause-banner" role="status" data-testid="project-budget-banner">
             <strong>Budget reached.</strong> No new workers start until the budget window resets or

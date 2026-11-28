@@ -95,6 +95,31 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_dashboard_widgets_filters_column(conn)?;
     ensure_lookup_indexes(conn)?;
     ensure_provider_limits_table(conn)?;
+    ensure_project_status_log_table(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1795836000_project_status_log`. Idempotent CREATE
+/// TABLE / INDEX IF NOT EXISTS; DDL mirrors the migration.
+fn ensure_project_status_log_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "project_status_log")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS project_status_log (
+            id          TEXT PRIMARY KEY NOT NULL,
+            project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            action      TEXT NOT NULL CHECK (action IN ('paused', 'resumed')),
+            actor_kind  TEXT NOT NULL CHECK (actor_kind IN ('user', 'session', 'system')),
+            actor_id    TEXT,
+            actor_name  TEXT NOT NULL,
+            at          TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
+    sql_query(
+        "CREATE INDEX IF NOT EXISTS idx_project_status_log_project \
+         ON project_status_log (project_id, at)",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

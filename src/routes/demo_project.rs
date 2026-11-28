@@ -269,9 +269,15 @@ async fn delete_demo(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         ));
     };
     // Cancel in-flight helpers before their sessions are deleted.
-    crate::routes::projects::pause_project_inner(&state, &project.id, None, "demo-delete")
-        .await
-        .map_err(internal)?;
+    crate::routes::projects::pause_project_inner(
+        &state,
+        &project.id,
+        None,
+        "demo-delete",
+        &crate::routes::projects::StatusActor::system("Demo cleanup"),
+    )
+    .await
+    .map_err(internal)?;
     state
         .db
         .delete_project_cascade(&project.id)

@@ -4,6 +4,37 @@ use super::super::McpToolRegistry;
 use crate::db::models::Event;
 use crate::service::mcp_server::context::ToolCallContext;
 
+/// Event kinds that are bookkeeping for the server, not something a reader
+/// of a transcript needs the payload of.
+const MARKER_KINDS: &[&str] = &[
+    "agent-usage",
+    "session-read",
+    "todo",
+    "model-switch",
+    "auto-pause-cleared",
+    "plan-proposed",
+    "plan-deleted",
+];
+
+/// `value` if it is short, otherwise its first `max` characters and a note
+/// of how much was cut. Keeps one huge payload (a handover transcript, a
+/// diff) from filling the reader's whole window.
+fn clipped(value: &Value, max: usize) -> Value {
+    let text = match value {
+        Value::Null => return Value::Null,
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if text.chars().count() <= max {
+        return value.clone();
+    }
+    let head: String = text.chars().take(max).collect();
+    Value::String(format!(
+        "{head}… [{} more characters]",
+        text.chars().count() - max
+    ))
+}
+
 /// Condense one stored event into the compact shape returned by
 /// `read_worker_session` / `search_worker_session`. Keeps the
 /// debug-relevant fields per kind and drops the rest so a reader doesn't
@@ -24,8 +55,10 @@ pub(crate) fn summarize_event(e: &Event) -> Value {
             entry["input"] = data.get("input").cloned().unwrap_or_default();
         }
         "agent-tool-end" => {
-            entry["tool"] = data.get("name").cloned().unwrap_or_default();
+            // The end event carries no tool name (the start does); what a
+            // reader needs here is whether it failed and what came back.
             entry["error"] = data.get("error").cloned().unwrap_or_default();
+            entry["output"] = clipped(data.get("output").unwrap_or(&Value::Null), 400);
         }
         "agent-start" => {
             entry["model"] = data.get("model").cloned().unwrap_or_default();
@@ -33,6 +66,10 @@ pub(crate) fn summarize_event(e: &Event) -> Value {
         "agent-end" => {
             entry["status"] = data.get("status").cloned().unwrap_or_default();
             entry["reason"] = data.get("reason").cloned().unwrap_or_default();
+            // A run can end `complete` and still have failed (an expired
+            // login, a usage limit): the error and its kind say so.
+            entry["error"] = data.get("error").cloned().unwrap_or_default();
+            entry["errorKind"] = data.get("errorKind").cloned().unwrap_or_default();
         }
         "agent-thinking" => {
             // Reasoning text can be huge; workers only need that it happened.
@@ -43,29 +80,58 @@ pub(crate) fn summarize_event(e: &Event) -> Value {
                     .unwrap_or(0)
             );
         }
+        k if MARKER_KINDS.contains(&k) => {}
         _ => {
-            entry["data"] = data;
+            entry["data"] = clipped(&data, 1200);
         }
     }
     entry
 }
 
+/// Every kind [`event_is_error`] can say yes to: the `errors_only` search
+/// asks the database for just these.
+const ERROR_KINDS: &[&str] = &[
+    "error",
+    "agent-tool-end",
+    "agent-end",
+    "handover-aborted",
+    "context-overflow-stuck",
+    "worktree-downgrade",
+    "worktree-done",
+];
+
 /// True if an event represents an error/failure: a top-level `error`
-/// event, a tool call that returned a non-null `error`, or an agent run
-/// that ended `crashed`. Used by `search_worker_session`'s `errors_only`
-/// filter so a reader can pull just the failures out of a long session.
+/// event, a tool call that returned a non-null `error`, an agent run that
+/// ended `crashed` or ended `complete` with an error (an expired login, a
+/// usage limit), a handover aborted for a stated reason, a context overflow that
+/// survived its retry, a worktree that could not be created, or a merge
+/// that failed. Used by the `errors_only` filter so a reader can pull just
+/// the failures out of a long session.
 fn event_is_error(e: &Event) -> bool {
-    if e.kind == "error" {
+    if matches!(
+        e.kind.as_str(),
+        "error" | "context-overflow-stuck" | "worktree-downgrade"
+    ) {
         return true;
     }
     let data: Value = serde_json::from_str(&e.data).unwrap_or_default();
+    let present = |key: &str| {
+        data.get(key)
+            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+    };
     match e.kind.as_str() {
-        "agent-tool-end" => data.get("error").map(|v| !v.is_null()).unwrap_or(false),
-        "agent-end" => data
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(|s| s.eq_ignore_ascii_case("crashed") || s.eq_ignore_ascii_case("error"))
-            .unwrap_or(false),
+        "agent-tool-end" => present("error"),
+        "agent-end" => {
+            present("error")
+                || data
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| {
+                        s.eq_ignore_ascii_case("crashed") || s.eq_ignore_ascii_case("error")
+                    })
+        }
+        "handover-aborted" => present("reason"),
+        "worktree-done" => data.get("merged").and_then(|v| v.as_bool()) == Some(false),
         _ => false,
     }
 }
@@ -606,15 +672,9 @@ impl McpToolRegistry {
         // Push the kind filter to SQL. When only `errors_only` is set,
         // restrict to the kinds that can carry an error so the scan window
         // covers more failures.
-        let sql_kinds = kinds.clone().or_else(|| {
-            errors_only.then(|| {
-                vec![
-                    "error".to_string(),
-                    "agent-tool-end".to_string(),
-                    "agent-end".to_string(),
-                ]
-            })
-        });
+        let sql_kinds = kinds
+            .clone()
+            .or_else(|| errors_only.then(|| ERROR_KINDS.iter().map(|k| k.to_string()).collect()));
 
         let events = ctx
             .db

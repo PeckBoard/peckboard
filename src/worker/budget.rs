@@ -76,12 +76,13 @@ pub async fn budget_exhausted(
     Ok(spend_usd * 100.0 >= budget_cents as f64)
 }
 
-/// Project JSON as the UI receives it: the stored row plus two derived
-/// fields computed at read time and never stored. `budget_exhausted` keeps
+/// Project JSON as the UI receives it: the stored row plus derived fields
+/// computed at read time and never stored on it. `budget_exhausted` keeps
 /// the board's "budget reached" banner across reloads and unrelated
 /// updates; `limit_waits` lists the cards the orchestrator is holding back
 /// until a provider usage limit resets (`card_id`, `model`, `until`,
-/// `reason`). Used by the project routes and every `project-update`
+/// `reason`); `last_status_change` is the newest pause or resume and who
+/// made it. Used by the project routes and every `project-update`
 /// broadcast.
 pub async fn project_json(
     db: &crate::db::Db,
@@ -93,6 +94,9 @@ pub async fn project_json(
             tracing::warn!(project_id = %project.id, "Failed to compute budget state: {e}");
             false
         });
+    // Who last paused or resumed the project, so the board can always say
+    // who did it (`{action, actor_kind, actor_id, actor_name, at}`).
+    let last_change = db.last_project_status(&project.id).await.unwrap_or(None);
     let mut value = serde_json::json!(project);
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
@@ -107,6 +111,7 @@ pub async fn project_json(
                 Utc::now()
             )),
         );
+        obj.insert("last_status_change".into(), serde_json::json!(last_change));
     }
     value
 }

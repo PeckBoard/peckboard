@@ -1180,6 +1180,15 @@ impl McpToolRegistry {
             .await?
             .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
 
+        // Unblocking is a fresh start, as it is through the UI: reset the
+        // card's crash / no-progress counters, or the very next stumble
+        // blocks it again.
+        if blocked == Some(false)
+            && let Err(e) = crate::worker::orchestrator::mark_card_unblocked(&ctx.db, card_id).await
+        {
+            tracing::warn!(card_id = %card_id, "Failed to reset counters on unblock: {e}");
+        }
+
         // Persist the already-validated dependency replacement, if one was
         // requested. Validation ran before the field update, so this can't
         // fail on a bad set.

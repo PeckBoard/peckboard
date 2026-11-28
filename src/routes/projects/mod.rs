@@ -6,7 +6,7 @@
 mod cards;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
@@ -16,7 +16,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{AuthUser, require_auth};
 use crate::db::models::{Card, NewProject, UpdateProject};
 use crate::routes::misc::explicit_null;
 use crate::state::AppState;
@@ -242,6 +242,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/projects/{id}/pause", post(pause_project))
         .route("/api/projects/{id}/resume", post(resume_project))
         .route("/api/projects/{id}/spend", get(get_project_spend))
+        .route(
+            "/api/projects/{id}/status-log",
+            get(list_project_status_log),
+        )
         .route("/api/projects/{id}/summary", get(get_project_summary))
         .route(
             "/api/projects/{id}/cards",
@@ -481,10 +485,20 @@ async fn get_project(
 /// PUT /api/projects/:id
 async fn update_project(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(body): Json<UpdateProjectRequest>,
 ) -> impl IntoResponse {
     tracing::info!(project_id = %id, "Updating project");
+    // A status change is a pause or a resume, and takes that path below
+    // (stop workers, record who did it, tell the board) instead of being
+    // written like any other field.
+    if let Some(status) = body.status.as_deref()
+        && !matches!(status, "active" | "paused")
+    {
+        return Err(bad_request("status must be 'active' or 'paused'"));
+    }
+    let requested_status = body.status.clone();
 
     // A project's workflow is required (NOT NULL). Omitting the field
     // is fine — other updates can land without touching the workflow.
@@ -513,17 +527,11 @@ async fn update_project(
         validate_budget_period(p)?;
     }
 
-    // Generic PUT is also the path the KanbanBoard's "Resume" menu hits
-    // (it sends `{status: "active"}`). Treat any status flip to active as
-    // an implicit "I've acknowledged the auto-pause reason" and clear the
-    // banner so a stale message doesn't linger forever.
-    let clear_pause_reason = body.status.as_deref() == Some("active");
-
     let update = UpdateProject {
         name: body.name,
         context: body.context,
         worker_count: body.worker_count,
-        status: body.status,
+        status: None,
         workflow,
         model: body.model,
         effort: body.effort,
@@ -532,7 +540,7 @@ async fn update_project(
         worker_communication: body.worker_communication,
         worktree_isolation: body.worktree_isolation,
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
-        pause_reason: if clear_pause_reason { Some(None) } else { None },
+        pause_reason: None,
         budget_usd_cents: body.budget_usd_cents,
         budget_period: body.budget_period,
         review_enabled: body.review_enabled,
@@ -546,16 +554,38 @@ async fn update_project(
             Json(serde_json::json!({ "error": e.to_string() })),
         )
     })?;
-
-    match project {
-        Some(p) => Ok(Json(
-            crate::worker::budget::project_json(&state.db, &p).await,
-        )),
-        None => Err((
+    let Some(mut project) = project else {
+        return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "project not found" })),
-        )),
+        ));
+    };
+
+    // The KanbanBoard's "Resume" menu sends `{status: "active"}` here.
+    if let Some(status) = requested_status
+        && status != project.status
+    {
+        let actor = StatusActor::user(&state.db, &user).await;
+        let changed = if status == "paused" {
+            pause_project_inner(&state, &id, None, "manual", &actor).await
+        } else {
+            resume_project_inner(&state, &id, &actor).await
+        };
+        match changed {
+            Ok(Some(p)) => project = p,
+            Ok(None) => {}
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                ));
+            }
+        }
     }
+
+    Ok(Json(
+        crate::worker::budget::project_json(&state.db, &project).await,
+    ))
 }
 
 /// DELETE /api/projects/:id
@@ -591,17 +621,81 @@ async fn delete_project(
     Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
 }
 
+/// Who is pausing or resuming a project. Every status change is recorded
+/// with one (`project_status_log`), so the board can always say who did it.
+#[derive(Debug, Clone)]
+pub(crate) struct StatusActor {
+    /// `user`, `session` (an agent) or `system`.
+    pub kind: &'static str,
+    pub id: Option<String>,
+    pub name: String,
+}
+
+impl StatusActor {
+    /// The signed-in person behind an HTTP request.
+    pub(crate) async fn user(db: &crate::db::Db, user: &AuthUser) -> Self {
+        let name = match db.get_user(&user.user_id).await {
+            Ok(Some(u)) => u.username,
+            _ => "a user".to_string(),
+        };
+        Self {
+            kind: "user",
+            id: Some(user.user_id.clone()),
+            name,
+        }
+    }
+
+    /// The agent session calling an MCP tool.
+    pub(crate) async fn session(db: &crate::db::Db, session_id: &str) -> Self {
+        let name = match db.get_session(session_id).await {
+            Ok(Some(s)) => s.name,
+            _ => "an agent session".to_string(),
+        };
+        Self {
+            kind: "session",
+            id: Some(session_id.to_string()),
+            name,
+        }
+    }
+
+    /// The server itself, e.g. recovery after a login was fixed.
+    pub(crate) fn system(name: &str) -> Self {
+        Self {
+            kind: "system",
+            id: None,
+            name: name.to_string(),
+        }
+    }
+
+    async fn record(&self, db: &crate::db::Db, project_id: &str, action: &'static str) {
+        if let Err(e) = db
+            .log_project_status(
+                project_id,
+                action,
+                self.kind,
+                self.id.as_deref(),
+                &self.name,
+            )
+            .await
+        {
+            tracing::warn!(project_id = %project_id, "Failed to record who {action} the project: {e}");
+        }
+    }
+}
+
 /// Shared pause logic used by the manual route and the MCP `pause_project`
-/// tool — pausing is user-only; nothing in the orchestrator pauses a
-/// project automatically. Sets status=paused, sets pause_reason, cancels
-/// in-flight workers, clears queued messages, broadcasts a project-update,
-/// and fires the project.paused hook.
+/// tool. Nothing in the orchestrator pauses a project automatically; a
+/// pause is always someone's decision, and `actor` says whose. Sets
+/// status=paused, sets pause_reason, cancels in-flight workers, clears
+/// queued messages, records the actor, broadcasts a project-update, and
+/// fires the project.paused hook.
 /// Returns `Ok(None)` when the project doesn't exist.
 pub(crate) async fn pause_project_inner(
     state: &Arc<AppState>,
     id: &str,
     pause_reason: Option<String>,
     source: &str,
+    actor: &StatusActor,
 ) -> anyhow::Result<Option<crate::db::models::Project>> {
     pause_project_with(
         &state.db,
@@ -610,6 +704,7 @@ pub(crate) async fn pause_project_inner(
         id,
         pause_reason,
         source,
+        actor,
     )
     .await
 }
@@ -625,7 +720,13 @@ pub(crate) async fn pause_project_with(
     id: &str,
     pause_reason: Option<String>,
     source: &str,
+    actor: &StatusActor,
 ) -> anyhow::Result<Option<crate::db::models::Project>> {
+    // An agent pausing a project is allowed, but must never look like the
+    // owner did it: say so on the project itself.
+    let pause_reason = pause_reason.or_else(|| {
+        (actor.kind == "session").then(|| format!("Paused by agent session \"{}\".", actor.name))
+    });
     let update = UpdateProject {
         status: Some("paused".to_string()),
         last_accessed_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -638,6 +739,7 @@ pub(crate) async fn pause_project_with(
         Some(p) => p,
         None => return Ok(None),
     };
+    actor.record(db, id, "paused").await;
 
     // Drop queued messages first so the cancel's completion listener
     // can't drain a buffered message into a fresh agent run.
@@ -692,10 +794,12 @@ pub(crate) async fn pause_project_with(
 /// POST /api/projects/:id/pause
 async fn pause_project(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     tracing::info!(project_id = %id, "Pausing project");
-    match pause_project_inner(&state, &id, None, "manual").await {
+    let actor = StatusActor::user(&state.db, &user).await;
+    match pause_project_inner(&state, &id, None, "manual", &actor).await {
         Ok(Some(project)) => Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
             crate::worker::budget::project_json(&state.db, &project).await,
         )),
@@ -710,8 +814,8 @@ async fn pause_project(
     }
 }
 /// Flip a project back to `active`: clears `pause_reason`, appends the
-/// crash-counter reset sentinel to every card, and broadcasts the update.
-/// Returns `Ok(None)` when the project doesn't exist.
+/// crash-counter reset sentinel to every card, records who resumed it, and
+/// broadcasts the update. Returns `Ok(None)` when the project doesn't exist.
 ///
 /// Shared by the `/resume` route and [`crate::provider::auth_recovery`],
 /// which resumes a project that auto-paused on expired credentials as soon
@@ -719,6 +823,18 @@ async fn pause_project(
 pub(crate) async fn resume_project_inner(
     state: &Arc<AppState>,
     id: &str,
+    actor: &StatusActor,
+) -> anyhow::Result<Option<crate::db::models::Project>> {
+    resume_project_with(&state.db, &state.broadcaster, id, actor).await
+}
+
+/// [`resume_project_inner`] for callers that carry only the db and the
+/// broadcaster — the MCP `resume_project` tool.
+pub(crate) async fn resume_project_with(
+    db: &crate::db::Db,
+    broadcaster: &crate::ws::broadcaster::Broadcaster,
+    id: &str,
+    actor: &StatusActor,
 ) -> anyhow::Result<Option<crate::db::models::Project>> {
     // Clearing `pause_reason` is deliberately not left to the auto-pause
     // path: it only fires when `project.status == "active"`, so a stale
@@ -735,29 +851,30 @@ pub(crate) async fn resume_project_inner(
     // about to retry. Without this, the next crash hits the threshold
     // immediately (the old crash events are still on disk) and the
     // user's manual retry budget collapses to one attempt.
-    if let Err(e) = crate::worker::orchestrator::mark_project_resumed(&state.db, id).await {
+    if let Err(e) = crate::worker::orchestrator::mark_project_resumed(db, id).await {
         tracing::warn!(project_id = %id, "Failed to mark resume sentinel: {e}");
     }
 
-    let Some(project) = state.db.update_project(id, update).await? else {
+    let Some(project) = db.update_project(id, update).await? else {
         return Ok(None);
     };
-    state
-        .broadcaster
-        .broadcast(crate::ws::broadcaster::WsEvent {
-            event_type: "project-update".into(),
-            session_id: id.to_string(),
-            data: serde_json::json!({ "project": crate::worker::budget::project_json(&state.db, &project).await }),
-        });
+    actor.record(db, id, "resumed").await;
+    broadcaster.broadcast(crate::ws::broadcaster::WsEvent {
+        event_type: "project-update".into(),
+        session_id: id.to_string(),
+        data: serde_json::json!({ "project": crate::worker::budget::project_json(db, &project).await }),
+    });
     Ok(Some(project))
 }
 
 /// POST /api/projects/:id/resume
 async fn resume_project(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match resume_project_inner(&state, &id).await {
+    let actor = StatusActor::user(&state.db, &user).await;
+    match resume_project_inner(&state, &id, &actor).await {
         Ok(Some(p)) => Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
             crate::worker::budget::project_json(&state.db, &p).await,
         )),
@@ -765,6 +882,21 @@ async fn resume_project(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "project not found" })),
         )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+/// GET /api/projects/:id/status-log → the last pauses and resumes of the
+/// project, newest first: `[{action, actor_kind, actor_id, actor_name, at}]`.
+async fn list_project_status_log(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.db.list_project_status(&id, 20).await {
+        Ok(entries) => Ok(Json(serde_json::json!({ "entries": entries }))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -1007,6 +1139,82 @@ mod tests {
         let e = edges(&[("a", "z"), ("b", "z")]);
         assert!(!would_create_cycle(&e, "a", &["b".to_string()]));
     }
+
+    /// An agent session may pause a project, but it never looks like the
+    /// owner did it: the project says which session, and every pause and
+    /// resume is in the log with who made it.
+    #[tokio::test]
+    async fn a_pause_and_a_resume_record_who_made_them() {
+        use super::{StatusActor, pause_project_with, resume_project_with};
+        use diesel::prelude::*;
+
+        let db = crate::db::Db::in_memory().unwrap();
+        let broadcaster = crate::ws::broadcaster::Broadcaster::new();
+        db.with_conn(|conn| {
+            for sql in [
+                "INSERT INTO folders (id, name, path, created_at) VALUES ('f', 'f', '.', 'now')",
+                "INSERT INTO projects (id, name, folder_id, created_at, last_accessed_at, workflow) \
+                 VALUES ('p', 'Board', 'f', 'now', 'now', 'task')",
+                "INSERT INTO sessions (id, name, folder_id, created_at, last_activity) \
+                 VALUES ('s', 'DataStream', 'f', 'now', 'now')",
+            ] {
+                diesel::sql_query(sql).execute(conn)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let agent = StatusActor::session(&db, "s").await;
+        let paused = pause_project_with(&db, &broadcaster, None, "p", None, "manual", &agent)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paused.status, "paused");
+        assert_eq!(
+            paused.pause_reason.as_deref(),
+            Some("Paused by agent session \"DataStream\".")
+        );
+        let json = crate::worker::budget::project_json(&db, &paused).await;
+        assert_eq!(json["last_status_change"]["action"], "paused");
+        assert_eq!(json["last_status_change"]["actor_kind"], "session");
+        assert_eq!(json["last_status_change"]["actor_name"], "DataStream");
+
+        let owner = StatusActor {
+            kind: "user",
+            id: Some("u".into()),
+            name: "owner".into(),
+        };
+        let resumed = resume_project_with(&db, &broadcaster, "p", &owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.status, "active");
+        assert_eq!(resumed.pause_reason, None);
+
+        let log = db.list_project_status("p", 10).await.unwrap();
+        let seen: Vec<(&str, &str, &str)> = log
+            .iter()
+            .map(|e| {
+                (
+                    e.action.as_str(),
+                    e.actor_kind.as_str(),
+                    e.actor_name.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("resumed", "user", "owner"),
+                ("paused", "session", "DataStream"),
+            ]
+        );
+
+        // The log goes with its project.
+        db.delete_project_cascade("p").await.unwrap();
+        assert!(db.list_project_status("p", 10).await.unwrap().is_empty());
+    }
 }
 
 /// GET /api/projects/:id/spend
@@ -1122,12 +1330,16 @@ async fn get_project_summary(
         .project_cost_in_window(&id, today.timestamp_millis())
         .await
         .map_err(internal_error)?;
+    // Who last paused or resumed it, so a widget can say "Paused by …"
+    // without a second request.
+    let last_status_change = state.db.last_project_status(&id).await.unwrap_or(None);
 
     Ok::<_, RouteError>(Json(serde_json::json!({
         "id": project.id,
         "name": project.name,
         "status": project.status,
         "pause_reason": project.pause_reason,
+        "last_status_change": last_status_change,
         "workflow": project.workflow,
         "steps": steps
             .iter()

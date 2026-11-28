@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.1.173",
+    "date": "2026-11-28",
+    "highlights": [
+      "A paused project now says who paused it and when: you, or the agent session that did it. A History link lists the recent pauses and resumes.",
+      "When an agent resumes a project, the board updates right away instead of still showing \"paused\".",
+      "Unblocking a card through an agent gives it a fresh set of retries, the same as unblocking it on the board."
+    ]
+  },
+  {
     "version": "0.1.172",
     "date": "2026-11-28",
     "highlights": [

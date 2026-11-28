@@ -1,5 +1,5 @@
 import type { CardReport, PendingQuestion } from '../../store/projects'
-import type { Card, Event } from '../../types/api'
+import type { Card, Event, ProjectStatusEntry } from '../../types/api'
 import { getCommandLine, getToolLabel } from '../chat/toolDisplay'
 
 // How long a thought bubble lingers after its event before fading out,
@@ -146,4 +146,46 @@ export function priorityBadge(priority: number, priorities: PriorityInfo[]) {
           ? 'priority-medium'
           : 'priority-low'
   return <span className={`priority-badge ${className}`}>{label}</span>
+}
+
+/** Who made a pause or resume, as the board and the dashboard word it. */
+export function statusActorLabel(entry: ProjectStatusEntry): string {
+  switch (entry.actor_kind) {
+    case 'session':
+      return `agent session "${entry.actor_name}"`
+    case 'system':
+      return `Peckboard (${entry.actor_name})`
+    default:
+      return entry.actor_name
+  }
+}
+
+/** "Paused by e2e-user" / "Resumed by agent session "Driver bot"". */
+export function statusEntryLabel(entry: ProjectStatusEntry): string {
+  return `${entry.action === 'paused' ? 'Paused' : 'Resumed'} by ${statusActorLabel(entry)}`
+}
+
+/** "Paused by <who>" for a paused project, or null when nobody is on record
+ *  (paused before pauses were recorded, or the last entry is a resume). */
+export function pausedByLabel(change: ProjectStatusEntry | null | undefined): string | null {
+  return change?.action === 'paused' ? statusEntryLabel(change) : null
+}
+
+/** The pause reason worth showing next to "Paused by <who>": the server
+ *  writes `Paused by agent session "<name>".` as the reason of an agent's
+ *  pause, which only repeats the first line. */
+export function pauseReasonNote(
+  reason: string | null | undefined,
+  change: ProjectStatusEntry | null | undefined,
+): string | null {
+  const text = reason?.trim()
+  if (!text) return null
+  if (
+    change?.action === 'paused' &&
+    change.actor_kind === 'session' &&
+    /^Paused by agent session ".*"\.$/.test(text)
+  ) {
+    return null
+  }
+  return text
 }
