@@ -94,6 +94,24 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure_session_view_nodes_terminal_column(conn)?;
     ensure_dashboard_widgets_filters_column(conn)?;
     ensure_lookup_indexes(conn)?;
+    ensure_provider_limits_table(conn)?;
+    Ok(())
+}
+
+/// Heal DBs that predate `1795833000_provider_limits`. Idempotent CREATE
+/// TABLE IF NOT EXISTS; DDL mirrors the migration.
+fn ensure_provider_limits_table(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    log_if_healing_table(conn, "provider_limits")?;
+    sql_query(
+        "CREATE TABLE IF NOT EXISTS provider_limits (
+            key           TEXT PRIMARY KEY NOT NULL,
+            model         TEXT NOT NULL,
+            limited_until TEXT NOT NULL,
+            reason        TEXT NOT NULL,
+            noted_at      TEXT NOT NULL
+        )",
+    )
+    .execute(conn)?;
     Ok(())
 }
 

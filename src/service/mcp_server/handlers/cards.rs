@@ -906,6 +906,15 @@ impl McpToolRegistry {
                     "effort": c.effort,
                     "worker_session_id": c.worker_session_id,
                     "has_worker": c.worker_session_id.is_some(),
+                    // Set while the orchestrator holds the card back
+                    // because its model's account is out of quota:
+                    // `{model, until, reason}`. No worker will start before
+                    // `until`; moving the card or re-queuing it won't help.
+                    "waiting_on_limit": crate::provider::rate_limits::card_wait(
+                        &ctx.db,
+                        &c.id,
+                        chrono::Utc::now(),
+                    ),
                     "depends_on": deps,
                     "dependencies_met": dependencies_met,
                 })

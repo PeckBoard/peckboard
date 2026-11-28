@@ -321,6 +321,11 @@ pub struct PluginProviderRuntime {
     /// session_id -> generated-image import state for an in-flight Codex /
     /// Grok turn (see [`generated_images`]).
     gen_images: std::sync::Mutex<HashMap<String, generated_images::Watch>>,
+    /// session_id -> the assistant's top-level text since the last tool
+    /// call of the turn in flight, capped. Read once, when the turn
+    /// completes, to tell a usage-limit notice from a real answer (see
+    /// [`PluginProviderRuntime::stamp_limit_stop`]).
+    reply_tails: std::sync::Mutex<HashMap<String, String>>,
 }
 
 /// One host-owned CLI child a plugin spawned for an in-flight turn.
@@ -1047,6 +1052,68 @@ impl PluginProviderRuntime {
         out.to_string()
     }
 
+    /// Turn a usage-limit notice into a failed turn.
+    ///
+    /// A CLI whose account is out of quota does not fail: it answers with
+    /// one line ("You've hit your weekly limit · resets 8am (UTC)") and
+    /// reports a clean result. Left alone that is a completed turn, so a
+    /// worker's card was counted as "finished without progress", backed off
+    /// and blocked, and nothing ever waited for the reset. When the reply
+    /// that closes a turn is such a notice, the `Completed` event gets
+    /// `error` + `errorKind: rate_limit` here, before it is persisted and
+    /// before the turn's terminal state is derived from it — the same shape
+    /// as any other errored result, which every consumer (crash counter,
+    /// account hold, recovery) already understands.
+    fn stamp_limit_stop(&self, session_id: &str, event: &mut ProviderEvent) {
+        /// A notice is one short line; stop collecting long before a real
+        /// answer could be mistaken for one.
+        const TAIL_CAP: usize = 400;
+        let Ok(mut tails) = self.reply_tails.lock() else {
+            return;
+        };
+        match event {
+            ProviderEvent::Text {
+                text,
+                parent_tool_use_id: None,
+            } => {
+                let tail = tails.entry(session_id.to_string()).or_default();
+                // The notice is its own message: when a chunk opens with
+                // one, whatever the model said before it is not part of it.
+                if crate::provider::rate_limits::is_limit_stop(text) {
+                    tail.clear();
+                }
+                if tail.len() <= TAIL_CAP {
+                    tail.push_str(text);
+                }
+            }
+            ProviderEvent::ToolStart { .. }
+            | ProviderEvent::ToolEnd { .. }
+            | ProviderEvent::Crashed { .. } => {
+                tails.remove(session_id);
+            }
+            ProviderEvent::Completed { result_meta, .. } => {
+                let tail = tails.remove(session_id).unwrap_or_default();
+                let errored = result_meta
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .is_some_and(|e| !e.trim().is_empty());
+                if errored || !crate::provider::rate_limits::is_limit_stop(&tail) {
+                    return;
+                }
+                if !result_meta.is_object() {
+                    *result_meta = serde_json::json!({});
+                }
+                if let Some(meta) = result_meta.as_object_mut() {
+                    meta.insert("error".into(), serde_json::json!(tail.trim()));
+                    meta.insert(
+                        "errorKind".into(),
+                        serde_json::json!(CrashKind::RateLimit.as_str()),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
     /// `peckboard_emit_provider_event {session_id, event}` — validate the
     /// caller owns the session's active turn, then feed the event through the
     /// shared `emit_event` path (DB + usage + WS). Records Completed/Crashed
@@ -1072,10 +1139,11 @@ impl PluginProviderRuntime {
             Ok(t) => t,
             Err(e) => return error_json(e),
         };
-        let event: ProviderEvent = match serde_json::from_value(req.event) {
+        let mut event: ProviderEvent = match serde_json::from_value(req.event) {
             Ok(ev) => ev,
             Err(e) => return error_json(format!("invalid provider event: {e}")),
         };
+        self.stamp_limit_stop(&req.session_id, &mut event);
         {
             let Ok(mut terminal) = turn.terminal.lock() else {
                 return error_json("turn state poisoned");
@@ -2673,6 +2741,78 @@ mod tests {
         rt
     }
 
+    /// A CLI out of quota answers with a one-line notice and a clean result.
+    /// That must end the turn as a rate-limit stop, not as a completed one,
+    /// or a worker's card is counted as "finished without progress".
+    #[test]
+    fn a_usage_limit_notice_ends_the_turn_as_a_rate_limit_stop() {
+        let emit = |runtime: &PluginProviderRuntime, ev: ProviderEvent| {
+            let out = runtime.emit_from_plugin(
+                "p1",
+                &serde_json::json!({ "session_id": "s1", "event": ev }).to_string(),
+            );
+            assert!(out.contains("ok"), "{out}");
+        };
+        let text = |t: &str| ProviderEvent::Text {
+            text: t.into(),
+            parent_tool_use_id: None,
+        };
+        let completed = || ProviderEvent::Completed {
+            conversation_id: None,
+            result_meta: serde_json::Value::Null,
+        };
+        let notice = "You've hit your weekly limit \u{00b7} resets 8am (UTC)";
+
+        // The notice is the whole reply.
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, ".");
+        emit(&runtime, text(notice));
+        emit(&runtime, completed());
+        match runtime.end_turn_full("s1").terminal {
+            Some(Terminal::Crashed { reason, kind }) => {
+                assert_eq!(kind, CrashKind::RateLimit);
+                assert_eq!(reason, notice);
+            }
+            other => panic!("expected a rate-limit stop, got {other:?}"),
+        }
+
+        // Mid-task: the model talked and used a tool, then the limit hit.
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, ".");
+        emit(&runtime, text("Running the tests now."));
+        emit(
+            &runtime,
+            ProviderEvent::ToolStart {
+                tool_use_id: "t1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({}),
+                parent_tool_use_id: None,
+            },
+        );
+        emit(&runtime, text("Almost there."));
+        emit(&runtime, text(notice));
+        emit(&runtime, completed());
+        assert!(matches!(
+            runtime.end_turn_full("s1").terminal,
+            Some(Terminal::Crashed {
+                kind: CrashKind::RateLimit,
+                ..
+            })
+        ));
+
+        // An answer that talks about a limit is still an answer.
+        let runtime = PluginProviderRuntime::new();
+        let _rt = begin_test_turn(&runtime, ".");
+        emit(
+            &runtime,
+            text("The worker stopped with \"You've hit your weekly limit\"; I moved it to Fable."),
+        );
+        emit(&runtime, completed());
+        assert!(matches!(
+            runtime.end_turn_full("s1").terminal,
+            Some(Terminal::Completed)
+        ));
+    }
     /// cursor-agent only reads `.cursor/mcp.json` at the git root, so that one
     /// file can resolve there from a session folder below it.
     #[test]

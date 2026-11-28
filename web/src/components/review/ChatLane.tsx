@@ -108,9 +108,7 @@ function useAutoResize(value: string) {
 
 /** A revision landed: the doc pane already re-rendered, so the lane only
  *  owes the reader a one-line receipt. */
-function RevisionRow({ data }: { data: Record<string, unknown> }) {
-  const version = typeof data.version === 'number' ? data.version : null
-  const note = typeof data.note === 'string' ? data.note : ''
+function RevisionRow({ version, note }: { version: number | null; note: string }) {
   return (
     <div className="review-chat__system" data-testid="review-chat-revision">
       <span className="review-chat__system-label">revised → v{version ?? '?'}</span>
@@ -210,7 +208,7 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
           it.type === 'question' ||
           it.type === 'question-resolved' ||
           it.type === 'agent-crashed' ||
-          (it.type === 'unknown' && it.kind === 'doc-review-revision'),
+          it.type === 'doc-revision',
       ),
     [items],
   )
@@ -334,8 +332,8 @@ export default function ChatLane({ reviewId, sessionId, status, model, onSent }:
             The reviewer stopped: {item.reason}
           </p>
         )
-      case 'unknown':
-        return <RevisionRow key={item.key} data={item.data} />
+      case 'doc-revision':
+        return <RevisionRow key={item.key} version={item.version} note={item.note} />
       default:
         return null
     }

@@ -60,7 +60,7 @@ export function summarizeEvent(event: Event): string {
     case 'agent-end':
       return (d.status as string) === 'crashed' ? 'Crashed' : 'Done'
     case 'step-change':
-      return `Step: ${truncate((d.step as string) ?? (d.label as string) ?? 'next', 40)}`
+      return `Step: ${truncate((d.to as string) ?? (d.step as string) ?? (d.label as string) ?? 'next', 40)}`
     case 'question':
       return 'Needs your input'
     case 'interrupt':

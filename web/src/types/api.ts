@@ -116,6 +116,17 @@ export interface RepeatingTaskRun {
   trigger: RepeatingTaskRunTrigger
   detail: string | null
 }
+
+/** A card waiting for a provider usage limit to reset. */
+export interface LimitWait {
+  card_id: string
+  /** The model id the hold stops. */
+  model: string
+  /** RFC 3339 UTC reset time. */
+  until: string
+  /** The provider's own notice. */
+  reason: string
+}
 export interface Project {
   id: string
   name: string
@@ -142,6 +153,9 @@ export interface Project {
    *  window, so no new workers start (running ones finish). The project
    *  itself stays active. */
   budget_exhausted?: boolean
+  /** Cards the orchestrator is holding back until a provider usage limit
+   *  resets. Older servers omit it. */
+  limit_waits?: LimitWait[]
   /** Cards pass through a `review` step — a fresh session verifies the
    *  work — before landing in Done. */
   review_enabled: boolean

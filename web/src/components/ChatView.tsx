@@ -76,6 +76,7 @@ import {
   createDisplayItemsFolder,
   deriveAgentStatus,
   displayItemSearchText,
+  formatLimitReset,
   formatTime,
   getStatusDotClass,
   getStatusLabel,
@@ -368,6 +369,70 @@ function AuthFailureRemedy({ sessionId }: { sessionId: string }) {
 }
 
 /**
+ * A turn parked on a provider usage limit (`limit-parked`).
+ *
+ * The server sends the message again by itself at the reset, so the line
+ * says when. "Retry now" is for a limit the user knows is already over (a
+ * plan upgrade, a reset Peckboard misread); it shows only while no
+ * `limit-resumed` followed, and a 409 just means nothing was parked any
+ * more.
+ */
+function LimitParkedRow({
+  item,
+  sessionId,
+}: {
+  item: Extract<DisplayItem, { type: 'limit-parked' }>
+  sessionId: string
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const retry = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await authedFetch(`/api/sessions/${sessionId}/retry-limit`, { method: 'POST' })
+      if (!res.ok && res.status !== 409) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(data?.error || `HTTP ${res.status}`)
+      }
+    } catch (e) {
+      setError(describeActionError(e, 'Failed to retry'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const when = formatLimitReset(item.until)
+  return (
+    <div className="chat-row chat-row-system">
+      <div
+        className="chat-handover-failed chat-limit-parked"
+        role="status"
+        data-testid="chat-limit-parked"
+        title={item.reason || undefined}
+      >
+        <span>
+          Usage limit reached. This message will be sent again when the limit resets
+          {when ? ` at ${when}` : ''}.
+        </span>
+        {item.active && (
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={() => void retry()}
+            disabled={busy}
+            data-testid="chat-limit-retry"
+          >
+            {busy ? 'Retrying…' : 'Retry now'}
+          </button>
+        )}
+        {error && <span className="chat-handover-failed-reason">{error}</span>}
+      </div>
+    </div>
+  )
+}
+/**
  * One feed row. Memoized: the incremental fold keeps item identity stable
  * for untouched history, so a streamed token chunk re-renders only the
  * growing bubble instead of every mounted row.
@@ -499,14 +564,24 @@ export const ChatRow = memo(function ChatRow({
       // remediation line pointing at Settings → Providers & Accounts.
       const hasStderr = typeof item.stderr === 'string' && item.stderr !== ''
       const authFailure = item.errorKind === 'auth_expired'
+      // A usage-limit stop is a wait, not a crash: neutral label, and the
+      // `limit-parked` line below it says when the turn runs again.
+      const limitStop = item.errorKind === 'rate_limit'
       return (
         <div className="chat-row chat-row-system">
-          <div className="chat-crash-row">
+          <div
+            className={`chat-crash-row${limitStop ? ' chat-worktree-row-ok' : ''}`}
+            data-testid={limitStop ? 'chat-limit-stop' : undefined}
+          >
             <div className="chat-agent-start">
               <span className="chat-agent-start-label">
-                {item.crashed === false ? 'Agent failed' : 'Agent crashed'}
+                {limitStop
+                  ? 'Stopped: usage limit reached'
+                  : item.crashed === false
+                    ? 'Agent failed'
+                    : 'Agent crashed'}
               </span>
-              <span className="chat-agent-start-detail chat-crash-reason">
+              <span className={`chat-agent-start-detail${limitStop ? '' : ' chat-crash-reason'}`}>
                 {item.reason}
                 {item.exitCode !== undefined ? ` (exit ${item.exitCode})` : ''}
               </span>
@@ -739,8 +814,20 @@ export const ChatRow = memo(function ChatRow({
               </summary>
               <pre className="chat-unknown-json">{JSON.stringify(item.detail, null, 2)}</pre>
             </details>
+          ) : item.detailText ? (
+            // Plain-language notice with the technical reason one click away.
+            <div className="chat-crash-row chat-worktree-row-ok" data-testid={item.testId}>
+              <div className="chat-system-notice">
+                <span className="chat-system-notice-icon">{'ℹ️'}</span>
+                <span>{item.text}</span>
+              </div>
+              <details className="chat-crash-details">
+                <summary>Details</summary>
+                <pre className="tool-pre">{item.detailText}</pre>
+              </details>
+            </div>
           ) : (
-            <div className="chat-system-notice">
+            <div className="chat-system-notice" data-testid={item.testId}>
               <span className="chat-system-notice-icon">{'ℹ️'}</span>
               <span>{item.text}</span>
               {(item.count ?? 1) > 1 && (
@@ -748,6 +835,22 @@ export const ChatRow = memo(function ChatRow({
               )}
             </div>
           )}
+        </div>
+      )
+    case 'limit-parked':
+      return <LimitParkedRow item={item} sessionId={sessionId} />
+    case 'doc-revision':
+      return (
+        <div className="chat-row chat-row-system">
+          <div className="chat-system-notice" data-testid="chat-doc-revision">
+            <span className="chat-system-notice-icon">{'ℹ️'}</span>
+            <span>
+              {item.version !== null
+                ? `Document updated to version ${item.version}.`
+                : 'Document updated.'}
+              {item.note ? ` ${item.note}` : ''}
+            </span>
+          </div>
         </div>
       )
     case 'step':
@@ -1574,6 +1677,13 @@ export default function ChatView({
     [sessionId],
   )
   const queuedTexts = useMemo(() => new Set(queuedMessages.map((m) => m.text)), [queuedMessages])
+  // A turn parked on a usage limit sits in the same queue, but it is not
+  // waiting for the agent: the limit line above it says when it goes out,
+  // and its "Retry now" is the way to send it sooner.
+  const limitParked = useMemo(
+    () => displayItems.some((i) => i.type === 'limit-parked' && i.active),
+    [displayItems],
+  )
 
   // Focus mode: messages other sessions sent this chat while the user was
   // talking to it are held server-side (`service::chat_focus`) and released
@@ -2674,16 +2784,22 @@ export default function ChatView({
             <div className="chat-queued-chip" data-testid="chat-queued-chip" title={q.text}>
               <span className="chat-queued-dot" aria-hidden="true" />
               <span className="chat-queued-text">{q.text}</span>
-              <span className="chat-queued-hint">Queued — sends when the agent finishes</span>
-              <button
-                type="button"
-                className="chat-queued-send"
-                data-testid="chat-queued-force"
-                title="Send now — interrupts what the agent is working on"
-                onClick={() => forceQueuedMessage(q.id)}
-              >
-                Send now
-              </button>
+              <span className="chat-queued-hint">
+                {limitParked
+                  ? 'Queued — sends when the usage limit resets'
+                  : 'Queued — sends when the agent finishes'}
+              </span>
+              {!limitParked && (
+                <button
+                  type="button"
+                  className="chat-queued-send"
+                  data-testid="chat-queued-force"
+                  title="Send now — interrupts what the agent is working on"
+                  onClick={() => forceQueuedMessage(q.id)}
+                >
+                  Send now
+                </button>
+              )}
               <button
                 type="button"
                 className="chat-queued-remove"

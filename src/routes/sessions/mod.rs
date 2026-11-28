@@ -151,6 +151,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/sessions/{id}/retry-auth", post(dispatch::retry_auth))
         .route(
+            "/api/sessions/{id}/retry-limit",
+            post(dispatch::retry_limit),
+        )
+        .route(
             "/api/sessions/{id}/prehatch-cancel",
             post(dispatch::cancel_pre_hatch),
         )

@@ -26,7 +26,47 @@ fn broadcast_project_update(state: &AppState, project_id: &str) {
         }
     });
 }
+/// Mark `card` as waiting for a usage limit to reset, and tell the board
+/// once per wait rather than on every tick that defers it.
+fn defer_for_limit(
+    state: &AppState,
+    project_id: &str,
+    card: &Card,
+    hold: &crate::provider::rate_limits::Hold,
+) {
+    if crate::provider::rate_limits::note_card_wait(
+        &state.db,
+        &card.id,
+        project_id,
+        hold,
+        chrono::Utc::now(),
+    ) {
+        tracing::info!(
+            card_id = %card.id,
+            model = %hold.model,
+            until = %hold.until,
+            "Card is waiting for a usage limit to reset"
+        );
+        broadcast_project_update(state, project_id);
+    }
+}
 
+/// What a resumed worker is told first when its previous turn was cut short
+/// from outside: by a server restart, or by its account running out of
+/// quota. `None` for an ordinary resume.
+async fn resume_preamble(state: &AppState, session_id: &str) -> Option<&'static str> {
+    let events = state.db.events_tail(session_id, 40).await.ok()?;
+    let last_end = events.iter().rev().find(|e| e.kind == "agent-end")?;
+    let data: serde_json::Value = serde_json::from_str(&last_end.data).ok()?;
+    if data.get("reason").and_then(|r| r.as_str()) == Some("server-shutdown") {
+        return Some(crate::restart_resume::CONTINUE_TEXT);
+    }
+    crate::provider::limit_recovery::last_turn_hit_limit(&events).then_some(
+        "[system] Your last turn was stopped because the account's usage limit was reached. \
+         The limit has reset. Continue where you left off; re-run any command that was \
+         interrupted (its output was lost).",
+    )
+}
 /// Project ids the orchestrator last saw at or over their spend cap.
 /// In-memory on purpose: it only exists to broadcast a `project-update`
 /// once per flip instead of every tick; after a restart the first tick
@@ -374,8 +414,17 @@ pub async fn check_and_spawn_workers_at(state: &Arc<AppState>, now: chrono::Date
                     continue;
                 }
 
-                let last = &events[events.len() - 1];
-                // If last event is a worker-communication user message, the agent
+                // Bookkeeping markers appended after the message (a resume
+                // writes `auto-pause-cleared` to every card's last worker
+                // session, a limit stop writes its own) say nothing about
+                // whether the agent answered: look past them to the last
+                // event that is part of the conversation.
+                let Some(last) = events.iter().rev().find(|e| {
+                    e.kind == "user" || e.kind == "interrupt" || e.kind.starts_with("agent-")
+                }) else {
+                    continue;
+                };
+                // If that is a worker-communication user message, the agent
                 // never got a chance to respond — re-spawn it
                 if last.kind != "user" {
                     continue;
@@ -726,14 +775,15 @@ async fn spawn_worker_for_card(
     // A worker pinned to an out-of-quota account waits for the reset
     // instead of spawning a run that dies within a second.
     if let Some(prev) = resume_session.as_ref().or(reusable_dead_session.as_ref())
-        && let Some(until) = limits.limited_until(prev.model.as_deref(), now_utc)
+        && let Some(hold) = limits.hold_for(prev.model.as_deref(), now_utc)
     {
         tracing::debug!(
             card_id = %card.id,
             session_id = %prev.id,
-            until = %until,
+            until = %hold.until,
             "Worker's account is rate-limited; deferring spawn"
         );
+        defer_for_limit(state, &project.id, card, &hold);
         return Ok(());
     }
 
@@ -824,12 +874,13 @@ async fn spawn_worker_for_card(
                 // Every candidate account is out of quota (or the card is
                 // pinned to one): wait for the reset rather than mint a
                 // session that crashes on its first turn.
-                if let Some(until) = limits.limited_until(model.as_deref(), now_utc) {
+                if let Some(hold) = limits.hold_for(model.as_deref(), now_utc) {
                     tracing::debug!(
                         card_id = %card.id,
-                        until = %until,
+                        until = %hold.until,
                         "Worker model's account is rate-limited; deferring spawn"
                     );
+                    defer_for_limit(state, &project.id, card, &hold);
                     return Ok(());
                 }
                 let session = state
@@ -941,6 +992,10 @@ async fn spawn_worker_for_card(
         }
         return Ok(());
     }
+    // The card is being dispatched: whatever limit it was waiting on is over.
+    if crate::provider::rate_limits::clear_card_wait(&state.db, &card.id) {
+        broadcast_project_update(state, &project.id);
+    }
     // Any exit between here and a successful dispatch must release the
     // claim, or the card points at a session that never ran an agent and
     // is skipped by every future tick.
@@ -1040,7 +1095,13 @@ async fn spawn_worker_for_card(
     // instead — the full assignment prompt is already in its restored
     // conversation, so we skip the instruction lookup + codebase scan too.
     let prompt = if is_resume {
-        pipeline::build_worker_resume_prompt(card, &effective_step)
+        let base = pipeline::build_worker_resume_prompt(card, &effective_step);
+        // Tell the agent why its last turn ended when it was not its own
+        // doing: commands it had running are gone and it cannot know.
+        match resume_preamble(state, &session_id).await {
+            Some(preamble) => format!("{preamble}\n\n{base}"),
+            None => base,
+        }
     } else {
         // Per-project additional step instructions, if the user set any in
         // the edit-project modal. A lookup failure must not block the spawn;
@@ -1861,6 +1922,17 @@ pub async fn drain_queue_for_session(
         return Ok(());
     }
 
+    // Limit-parked: the session's last turn ran out of quota and its
+    // message is held until the provider's reset. `is_holding` lifts the
+    // park itself once the hold has ended, so this drain then delivers.
+    if crate::provider::limit_recovery::is_holding(state, session_id).await {
+        tracing::debug!(
+            session_id = %session_id,
+            "drain_queue_for_session: holding a turn parked on a usage limit"
+        );
+        return Ok(());
+    }
+
     // Peek at the queue so we can use the model/effort the user picked
     // when they enqueued, if any. The whole backlog drains as one turn,
     // so the newest row that set a model (and, separately, the newest
@@ -2169,6 +2241,48 @@ pub async fn clear_crash_block(state: &Arc<AppState>, card: &Card) -> bool {
     }
     if let Err(e) = mark_card_unblocked(&state.db, &card.id).await {
         tracing::warn!(card_id = %card.id, "Failed to reset crash counter on unblock: {e}");
+    }
+    broadcast_card_update(state, &card.id, &card.project_id);
+    true
+}
+
+/// Whether `reason` is the one the no-progress guard writes when a worker
+/// ends turn after turn without advancing its card.
+pub(crate) fn is_no_progress_block_reason(reason: &str) -> bool {
+    reason.starts_with("Worker for \"")
+        && reason.contains(" turns in a row without advancing the card")
+}
+
+/// [`clear_crash_block`] for either automatic block: the crash guard's or
+/// the no-progress guard's. Used when the failure behind the block turns
+/// out to be one that lifts by itself (a usage limit). A block a person
+/// set is never touched. Returns true iff the card was unblocked.
+pub async fn clear_automatic_block(state: &Arc<AppState>, card: &Card) -> bool {
+    let automatic = card
+        .block_reason
+        .as_deref()
+        .is_some_and(|r| is_crash_block_reason(r) || is_no_progress_block_reason(r));
+    if !card.blocked || !automatic {
+        return false;
+    }
+    let updated = state
+        .db
+        .update_card(
+            &card.id,
+            UpdateCard {
+                blocked: Some(false),
+                block_reason: Some(None),
+                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await;
+    if let Err(e) = updated {
+        tracing::warn!(card_id = %card.id, "Failed to clear an automatic block: {e}");
+        return false;
+    }
+    if let Err(e) = mark_card_unblocked(&state.db, &card.id).await {
+        tracing::warn!(card_id = %card.id, "Failed to reset counters on unblock: {e}");
     }
     broadcast_card_update(state, &card.id, &card.project_id);
     true
@@ -3050,6 +3164,13 @@ mod crash_block_tests {
         assert_eq!(workers(state.clone()).await.len(), 1);
         let card = state.db.get_card("c1").await.unwrap().unwrap();
         assert!(card.worker_session_id.is_none());
+        // The wait is visible: the project names the card, its model and
+        // when the limit resets, so the board can say why nothing runs.
+        let project = state.db.get_project("p1").await.unwrap().unwrap();
+        let json = crate::worker::budget::project_json(&state.db, &project).await;
+        assert_eq!(json["limit_waits"][0]["card_id"], "c1", "{json}");
+        assert_eq!(json["limit_waits"][0]["model"], sol_c1);
+        assert!(json["limit_waits"][0]["until"].is_string());
 
         // Auto-switch ON: a fresh session on the other codex account.
         set_card_model(&state, sol_c1, Some(true)).await;
@@ -3061,5 +3182,9 @@ mod crash_block_tests {
             .collect();
         assert_eq!(fresh.len(), 1, "dead session not reused");
         assert_eq!(fresh[0].model.as_deref(), Some("codex:gpt-5.6-sol@c2"));
+        // Dispatched: it waits no more.
+        let project = state.db.get_project("p1").await.unwrap().unwrap();
+        let json = crate::worker::budget::project_json(&state.db, &project).await;
+        assert_eq!(json["limit_waits"], serde_json::json!([]));
     }
 }

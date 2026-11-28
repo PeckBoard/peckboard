@@ -158,6 +158,14 @@
   color: var(--accent);
 }
 
+/* Turn parked on a provider usage limit: same shape as the failed-handover
+   box, amber instead of red because it is a wait that ends by itself. */
+.chat-handover-failed.chat-limit-parked {
+  align-items: center;
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+}
+
 /* Worktree merge notice: the way forward for an unmerged card worktree,
    sitting under the reason + git output in the same crash-row chrome. */
 .chat-worktree-actions {

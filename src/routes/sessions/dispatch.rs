@@ -836,6 +836,27 @@ pub(super) async fn retry_auth(
         ))
     }
 }
+/// POST /api/sessions/:id/retry-limit -- replay the turn this session parked
+/// when its account ran out of quota, without waiting for the reset.
+///
+/// Drops the hold on the session's model too, so it is the user saying "the
+/// limit is over" (a plan upgrade, a reset time Peckboard misread). If it is
+/// not, the turn fails again and is parked again. 204 on a release, 409
+/// when nothing is parked.
+pub(super) async fn retry_limit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(session_id = %id, "Manual usage-limit retry requested");
+    if crate::provider::limit_recovery::retry_now(&state, &id).await {
+        Ok::<_, (StatusCode, Json<serde_json::Value>)>(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "session has no turn parked on a usage limit" })),
+        ))
+    }
+}
 
 /// POST /api/sessions/:id/prehatch-cancel -- cancel the pre-hatch parked on
 /// this chat session: kill the temp research session's agent, dismiss the

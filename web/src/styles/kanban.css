@@ -78,6 +78,21 @@
   font-weight: 600;
   margin-right: 4px;
 }
+/* The usage-limit banner takes its amber from the theme: the fallback
+   brown above is unreadable on the dark theme's surface. */
+.project-limit-banner {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  color: color-mix(in srgb, var(--warning) 55%, var(--text));
+}
+/* Usage-limit banner: one line per held model, each with its Retry now. */
+.project-limit-banner-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 6px;
+}
 .kanban-columns {
   display: flex;
   flex-direction: row;
@@ -428,6 +443,24 @@
   font-weight: 600;
   line-height: 1.4;
   white-space: nowrap;
+  cursor: help;
+}
+/* Waiting-for-limit marker under the card header: the orchestrator holds
+   the card until the provider's usage limit resets. Amber, because it is a
+   wait that ends by itself, not an error. Wraps instead of clipping: board
+   columns get narrow on a phone. */
+.kanban-card-limit-chip {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 1px 6px;
+  background: var(--warning-bg);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+  border-radius: var(--radius);
+  color: color-mix(in srgb, var(--warning) 60%, var(--text));
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
   cursor: help;
 }
 /* Worker context-occupancy badge, mirroring the chat toolbar's: amber as

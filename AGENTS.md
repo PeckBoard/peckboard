@@ -717,3 +717,41 @@ and is required to be idempotent.
   so unit tests will not catch the mistake. Only move a function to `read`
   after checking its closure is nothing but SELECTs, and keep
   read-then-write sequences that must be atomic inside one `with_conn`.
+
+## Usage Limits and Recovery
+
+- **A usage-limit notice is a limit stop, not a completed turn.** A CLI
+  out of quota answers with one line ("You've hit your weekly limit ·
+  resets 8am (UTC)") and a clean result. `PluginProviderRuntime::stamp_limit_stop`
+  (`src/provider/plugin_provider.rs`) stamps that `Completed` with `error`
+  - `errorKind: rate_limit` before it is persisted, so every consumer sees
+    an ordinary errored result. The matcher is `rate_limits::is_limit_stop`:
+    short, one line, anchored on the limit wording — keep it strict, an
+    answer that quotes a notice must not match.
+- **Holds** live in `src/provider/rate_limits.rs` (`RateLimits` on the
+  provider registry): per account, and per account + model for Claude
+  (its weekly caps are per model family). The reset time is read in the
+  zone the message names. Holds are stored in `provider_limits` and loaded
+  at boot. A limit stop never counts toward the crash or no-progress
+  block (`pipeline::crash_counts`).
+- **Recovery** is `src/provider/limit_recovery.rs`:
+  - workers: the orchestrator defers the card (`defer_for_limit`, which
+    also records the wait the board shows) and dispatches it on the first
+    tick after the hold ends;
+  - chat sessions: the turn is parked in the queue behind a `limit-parked`
+    event; `release_due` (5 s tick) or `retry_now` delivers it, writing
+    `limit-resumed`;
+  - subagents: not parked — the parent is told at once and decides.
+- **What the UI reads**: `limit_waits` on the project JSON
+  (`worker::budget::project_json`), `GET /api/provider-limits`,
+  `POST /api/provider-limits/clear` ("Retry now"),
+  `POST /api/sessions/{id}/retry-limit`. Managing agents see
+  `waiting_on_limit` in `list_cards` and `limited_until` in `list_models`.
+- **Pausing a project is never automatic.** Nothing in the orchestrator,
+  budget, crash guard or limit handling pauses a project; they hold or
+  block cards. Keep it that way.
+- A bookkeeping event appended to a session (`auto-pause-cleared`,
+  `worker-no-progress`, `limit-*`) must never be read as "the last thing
+  that happened in the conversation": look for the last `user` /
+  `agent-*` / `interrupt` event instead (see the pending-worker-message
+  check in `check_and_spawn_workers`).

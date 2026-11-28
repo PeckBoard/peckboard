@@ -186,3 +186,63 @@ test('unknown event kind renders the fallback row with kind label and raw JSON',
   await fallback.locator('summary').click()
   await expect(fallback).toContainText('"foo": "bar"')
 })
+
+test('worker bookkeeping events read as plain lines, not as unrecognized events', async ({
+  request,
+  page,
+}) => {
+  const { token, authHeader } = await authenticate(request)
+  const sessionId = await seedSession(request, authHeader)
+
+  await loadAppAt(page, token, `/sessions/${sessionId}`)
+  await expect(page.locator('.chat-empty').or(page.locator('.chat-vrow').first())).toBeVisible({
+    timeout: 10_000,
+  })
+
+  await injectEvent(request, authHeader, sessionId, 'step-change', {
+    from: 'backlog',
+    to: 'in_progress',
+  })
+  await injectEvent(request, authHeader, sessionId, 'worker-no-progress', {
+    cardId: 'card-1',
+    step: 'in_progress',
+  })
+  await injectEvent(request, authHeader, sessionId, 'worktree-downgrade', {
+    reason: 'fatal: not a git repository',
+  })
+  await injectEvent(request, authHeader, sessionId, 'auto-pause-cleared', { note: 'bookkeeping' })
+  await injectEvent(request, authHeader, sessionId, 'doc-review-revision', {
+    version: 3,
+    note: 'Tightened the intro.',
+  })
+  // Old `step-change` shape still renders its label.
+  await injectEvent(request, authHeader, sessionId, 'step-change', { step: 'Legacy step' })
+  await injectEvent(request, authHeader, sessionId, 'agent-text', { text: 'tail marker' })
+  await expect(page.getByText('tail marker')).toBeVisible({ timeout: 10_000 })
+
+  const dividers = page.locator('.chat-step-divider')
+  await expect(dividers.first()).toHaveText('Backlog → In Progress')
+  await expect(dividers.nth(1)).toHaveText('Legacy step')
+
+  await expect(
+    page.getByText('The agent ended its turn without moving the card forward.'),
+  ).toBeVisible()
+
+  const downgrade = page.getByTestId('chat-worktree-downgrade')
+  await expect(downgrade).toContainText(
+    "Couldn't create a separate working copy for this card, so the agent is using the main project folder.",
+  )
+  // The git error stays behind the toggle until asked for.
+  await expect(downgrade.getByText('fatal: not a git repository')).toBeHidden()
+  await downgrade.locator('summary').click()
+  await expect(downgrade.getByText('fatal: not a git repository')).toBeVisible()
+
+  await expect(page.getByTestId('chat-doc-revision')).toHaveText(
+    'ℹ️Document updated to version 3. Tightened the intro.',
+  )
+
+  // `auto-pause-cleared` is hidden, and nothing fell through to the fallback.
+  await expect(page.getByText('auto-pause-cleared')).toHaveCount(0)
+  await expect(page.getByText('bookkeeping')).toHaveCount(0)
+  await expect(page.getByTestId('chat-unknown-event')).toHaveCount(0)
+})

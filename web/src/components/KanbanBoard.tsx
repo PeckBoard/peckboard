@@ -5,7 +5,7 @@ import { useWsStore } from '../store/ws'
 import { useUiStore } from '../store/ui'
 import { authedFetch } from '../store/auth'
 import { useMentions, filterMentions } from '../hooks/useMentions'
-import type { Card, Event, Project, ReviewVerdict } from '../types/api'
+import type { Card, Event, LimitWait, Project, ReviewVerdict } from '../types/api'
 import CardFormModal from './CardFormModal'
 import CardSessionsModal from './CardSessionsModal'
 import { formatRelativeTime } from '../lib/review'
@@ -34,6 +34,7 @@ import {
   priorityBadge,
   summarizeEvent,
 } from './kanban/utils'
+import { formatLimitReset } from './chat/events'
 import { useVoiceNavStore } from '../voice/navigation'
 import PriorityChevron from './kanban/PriorityChevron'
 
@@ -527,6 +528,45 @@ export default function KanbanBoard({
       .catch(() => {})
   }, [fetchWorkflows, fetchModels])
 
+  // Cards the orchestrator holds back until a provider usage limit resets
+  // (`limit_waits` on the project; refreshed by every `project-update`).
+  const models = useResourcesStore((s) => s.models)
+  const limitWaits: LimitWait[] = project?.limit_waits ?? []
+  // One banner line per held model, soonest reset first.
+  const limitHolds: LimitWait[] = []
+  for (const w of [...limitWaits].sort((a, b) => Date.parse(a.until) - Date.parse(b.until))) {
+    if (!limitHolds.some((h) => h.model === w.model)) limitHolds.push(w)
+  }
+  const modelLabel = (id: string) => models.find((m) => m.id === id)?.display_name ?? id
+  const [limitRetrying, setLimitRetrying] = useState<string | null>(null)
+  const [limitRetryError, setLimitRetryError] = useState<string | null>(null)
+  // "Retry now": drop the hold on one model, then re-read the project so
+  // the banner and chips follow even if no `project-update` frame arrives.
+  const retryLimit = async (model: string) => {
+    setLimitRetrying(model)
+    setLimitRetryError(null)
+    try {
+      const res = await authedFetch('/api/provider-limits/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const fresh = await authedFetch(`/api/projects/${projectId}`)
+      const body = fresh.ok ? ((await fresh.json()) as { project?: Project }) : null
+      const next = body?.project
+      if (next) {
+        useProjectsStore.setState((s) => ({
+          projects: s.projects.map((p) => (p.id === next.id ? next : p)),
+        }))
+      }
+    } catch (e) {
+      setLimitRetryError(describeActionError(e, "Couldn't retry."))
+    } finally {
+      setLimitRetrying(null)
+    }
+  }
+
   // Map step aliases to canonical step names for display
   const normalizeStep = (step: string) => {
     switch (step) {
@@ -942,6 +982,35 @@ export default function KanbanBoard({
             the budget is raised.
           </div>
         )}
+        {limitHolds.length > 0 && (
+          <div
+            className="project-pause-banner project-limit-banner"
+            role="status"
+            data-testid="project-limit-banner"
+          >
+            <strong>
+              {limitWaits.length === 1 ? '1 card is' : `${limitWaits.length} cards are`} waiting for
+              a usage limit to reset:
+            </strong>
+            {limitHolds.map((h) => (
+              <div key={h.model} className="project-limit-banner-row" title={h.reason || undefined}>
+                <span>
+                  {modelLabel(h.model)} — resets {formatLimitReset(h.until) || 'soon'}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  disabled={limitRetrying !== null}
+                  onClick={() => void retryLimit(h.model)}
+                  data-testid="project-limit-retry"
+                >
+                  {limitRetrying === h.model ? 'Retrying…' : 'Retry now'}
+                </button>
+              </div>
+            ))}
+            {limitRetryError && <div role="alert">{limitRetryError}</div>}
+          </div>
+        )}
 
         {/* Pending worker questions — trigger button */}
         {pendingQuestions.length > 0 && !questionDialogOpen && (
@@ -1229,12 +1298,14 @@ export default function KanbanBoard({
                         : (ctxByCard[card.id] ?? card.context_tokens ?? 0)
                       // Worker error badge: live agent-end verdict (null =
                       // cleared) falls back to the fetch-time seed; hidden
-                      // once the card is terminal.
-                      const workerErr = priorityLocked
-                        ? null
-                        : card.id in errByCard
-                          ? errByCard[card.id]
-                          : (card.last_worker_error ?? null)
+                      // once the card is terminal, and while the card waits
+                      // for a usage limit (the wait chip says why it stopped).
+                      const workerErr =
+                        priorityLocked || limitWaits.some((w) => w.card_id === card.id)
+                          ? null
+                          : card.id in errByCard
+                            ? errByCard[card.id]
+                            : (card.last_worker_error ?? null)
                       const expanded = expandedCardIds.has(card.id)
                       return (
                         <div
@@ -1490,6 +1561,18 @@ export default function KanbanBoard({
                               )}
                             </div>
                           </div>
+                          {(() => {
+                            const wait = limitWaits.find((w) => w.card_id === card.id)
+                            return wait ? (
+                              <span
+                                className="kanban-card-limit-chip"
+                                data-testid="card-limit-wait"
+                                title={wait.reason || 'Waiting for a usage limit to reset'}
+                              >
+                                Waiting for limit · resets {formatLimitReset(wait.until) || 'soon'}
+                              </span>
+                            ) : null
+                          })()}
                           {expanded && (
                             <div className="kanban-card-body">
                               {description ? (

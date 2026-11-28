@@ -7,6 +7,7 @@ pub mod login_stash {
 }
 pub mod crate_provider;
 pub mod generated_images;
+pub mod limit_recovery;
 pub mod manager;
 pub mod message;
 pub mod plugin_provider;

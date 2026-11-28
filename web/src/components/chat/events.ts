@@ -1,5 +1,6 @@
 import type { Event } from '../../types/api'
 import { bareModelId } from '../../util/cost'
+import { STEPS } from '../kanban/utils'
 import { stripPronunciationHints } from '../../voice/text'
 
 // Stable empty array so subscribers don't see a new reference every render
@@ -162,6 +163,11 @@ export type DisplayItem =
       /** Raw event payload when the event carried no human-readable text —
        *  rendered behind a <details> instead of inline. */
       detail?: Record<string, unknown>
+      /** Plain text behind a <details> toggle (e.g. the git error behind a
+       *  worktree downgrade). */
+      detailText?: string
+      /** `data-testid` of the row, for notices a test has to find. */
+      testId?: string
       /** Consecutive identical notices coalesced into one row (×N badge). */
       count?: number
       key: string
@@ -258,6 +264,30 @@ export type DisplayItem =
       key: string
     }
   | {
+      /** `limit-parked`: the turn stopped on a provider usage limit and is
+       *  held until `until`; it is sent again on its own then. */
+      type: 'limit-parked'
+      model: string
+      /** RFC 3339 reset time. */
+      until: string
+      /** The provider's own notice. */
+      reason: string
+      /** False once a later `limit-resumed` lifted the park: hides the
+       *  "Retry now" button. */
+      active: boolean
+      ts: number
+      key: string
+    }
+  | {
+      /** `doc-review-revision`: the reviewed document moved to a new
+       *  version. The review lane renders its own receipt from this. */
+      type: 'doc-revision'
+      version: number | null
+      note: string
+      ts: number
+      key: string
+    }
+  | {
       /** Fallback for event kinds this build doesn't recognize (plugin
        *  providers, future backend kinds): rendered as a collapsed row
        *  instead of being silently dropped. */
@@ -281,6 +311,10 @@ export function displayItemSearchText(item: DisplayItem): string {
     case 'status':
     case 'system':
       return item.text
+    case 'limit-parked':
+      return item.reason
+    case 'doc-revision':
+      return item.note
     case 'tool': {
       const parts = [item.toolName]
       if (item.input) parts.push(JSON.stringify(item.input))
@@ -330,6 +364,9 @@ export function deriveAgentStatus(events: Event[]): AgentStatus {
       const data = events[i].data
       const status = (data.status as string) ?? (data.agent_status as string)
       if (status === 'crashed') return 'crashed'
+      // A usage-limit stop is a wait, not a failure: the turn is parked
+      // and sent again at the reset.
+      if (data.errorKind === 'rate_limit') return 'idle'
       return typeof data.error === 'string' && data.error !== '' ? 'error' : 'idle'
     }
     if (kind === 'pre-hatch' || kind === 'pre-ignite') return 'working'
@@ -515,6 +552,8 @@ interface FoldState {
   questionItems: Map<string, number>
   /** Indices of pre-hatch items not yet superseded by a later `user`. */
   livePreHatch: number[]
+  /** Index of the `limit-parked` item no `limit-resumed` has lifted yet. */
+  liveLimitPark: number | null
 }
 
 function newFoldState(): FoldState {
@@ -537,6 +576,7 @@ function newFoldState(): FoldState {
     prevContextTokens: 0,
     questionItems: new Map(),
     livePreHatch: [],
+    liveLimitPark: null,
   }
 }
 
@@ -581,7 +621,8 @@ function flushAssistant(st: FoldState): void {
  *  - `worker-finding` feeds the worker-comms panel;
  *  - `plan-proposed` / `plan-deleted` drive the plan view;
  *  - `model-switch` is the autoswitch audit record (the next `agent-start`
- *    row already shows the new model). */
+ *    row already shows the new model);
+ *  - `auto-pause-cleared` is orchestrator bookkeeping. */
 const HIDDEN_KINDS = new Set([
   'todo',
   'question-resolved',
@@ -594,6 +635,7 @@ const HIDDEN_KINDS = new Set([
   'plan-proposed',
   'plan-deleted',
   'model-switch',
+  'auto-pause-cleared',
 ])
 
 /** Tool cards a `file-diff` event may attach to, by bare name (Peckboard
@@ -609,6 +651,28 @@ const EDIT_TOOL_BARE_NAMES = new Set([
   'write',
 ])
 
+/** A later park or a `limit-resumed` ends the standing park: its row
+ *  loses the "Retry now" button. */
+function deactivateLimitPark(st: FoldState): void {
+  if (st.liveLimitPark === null) return
+  const parked = st.items[st.liveLimitPark]
+  if (parked?.type === 'limit-parked') st.items[st.liveLimitPark] = { ...parked, active: false }
+  st.liveLimitPark = null
+}
+
+/** Step ids the server may still send in their older spelling. */
+const STEP_ALIASES: Record<string, string> = {
+  todo: 'backlog',
+  'in-progress': 'in_progress',
+  'wont-do': 'wont_do',
+}
+
+/** The board's label for a workflow step id; the raw id when it has none. */
+function stepLabel(step: unknown): string | null {
+  if (typeof step !== 'string' || step === '') return null
+  const key = STEP_ALIASES[step] ?? step
+  return STEPS.find((s) => s.key === key)?.label ?? step
+}
 function foldEvent(st: FoldState, ev: Event): void {
   const items = st.items
   switch (ev.kind) {
@@ -836,7 +900,9 @@ function foldEvent(st: FoldState, ev: Event): void {
           typeof ev.data.errorKind === 'string' && ev.data.errorKind !== ''
             ? ev.data.errorKind
             : undefined
-        st.errorStreak += 1
+        // A usage-limit stop is not a failed attempt: the turn is sent
+        // again at the reset, and that start is not a "retry N".
+        if (errorKind !== 'rate_limit') st.errorStreak += 1
         items.push({
           type: 'agent-crashed',
           reason: crashed ? reason : (errorText ?? reason),
@@ -882,6 +948,70 @@ function foldEvent(st: FoldState, ev: Event): void {
             ? 'Retrying the paused turn.'
             : 'Retrying the turn under a fresh agent process.'
       items.push({ type: 'system', text, key: ev.id, ts: ev.ts })
+      break
+    }
+    case 'limit-parked': {
+      // The turn stopped on a provider usage limit and waits in the durable
+      // queue for the reset. The row carries "Retry now" for as long as no
+      // `limit-resumed` follows it.
+      flushAssistant(st)
+      deactivateLimitPark(st)
+      st.liveLimitPark = items.length
+      items.push({
+        type: 'limit-parked',
+        model: typeof ev.data.model === 'string' ? ev.data.model : '',
+        until: typeof ev.data.until === 'string' ? ev.data.until : '',
+        reason: typeof ev.data.reason === 'string' ? ev.data.reason : '',
+        active: true,
+        ts: ev.ts,
+        key: ev.id,
+      })
+      break
+    }
+    case 'limit-resumed': {
+      flushAssistant(st)
+      deactivateLimitPark(st)
+      items.push({
+        type: 'system',
+        text: ev.data.trigger === 'manual' ? 'Retrying now.' : 'Limit reset — continuing.',
+        testId: 'chat-limit-resumed',
+        key: ev.id,
+        ts: ev.ts,
+      })
+      break
+    }
+    case 'worker-no-progress': {
+      flushAssistant(st)
+      items.push({
+        type: 'system',
+        text: 'The agent ended its turn without moving the card forward.',
+        key: ev.id,
+        ts: ev.ts,
+      })
+      break
+    }
+    case 'worktree-downgrade': {
+      flushAssistant(st)
+      const reason = typeof ev.data.reason === 'string' ? ev.data.reason.trim() : ''
+      items.push({
+        type: 'system',
+        text: "Couldn't create a separate working copy for this card, so the agent is using the main project folder.",
+        detailText: reason || undefined,
+        testId: 'chat-worktree-downgrade',
+        key: ev.id,
+        ts: ev.ts,
+      })
+      break
+    }
+    case 'doc-review-revision': {
+      flushAssistant(st)
+      items.push({
+        type: 'doc-revision',
+        version: typeof ev.data.version === 'number' ? ev.data.version : null,
+        note: typeof ev.data.note === 'string' ? ev.data.note.trim() : '',
+        ts: ev.ts,
+        key: ev.id,
+      })
       break
     }
     case 'conversation-reset': {
@@ -1013,7 +1143,14 @@ function foldEvent(st: FoldState, ev: Event): void {
     }
     case 'step-change': {
       flushAssistant(st)
-      const label = (ev.data.step as string) ?? (ev.data.label as string) ?? 'Step'
+      // The server sends `{from, to}`; `step` / `label` is the older shape.
+      const from = stepLabel(ev.data.from)
+      const to = stepLabel(ev.data.to)
+      const label = to
+        ? from
+          ? `${from} → ${to}`
+          : to
+        : ((ev.data.step as string) ?? (ev.data.label as string) ?? 'Step')
       items.push({ type: 'step', label, key: ev.id })
       break
     }
@@ -1455,4 +1592,15 @@ export function formatTime(ts: number): string {
     minute: '2-digit',
     second: '2-digit',
   })
+}
+
+/** A usage-limit reset time for the viewer: the time in their locale, with
+ *  the date when that is not today. Empty when `until` does not parse. */
+export function formatLimitReset(until: string, now: Date = new Date()): string {
+  const d = new Date(until)
+  if (Number.isNaN(d.getTime())) return ''
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (d.toDateString() === now.toDateString()) return time
+  const date = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+  return `${date}, ${time}`
 }

@@ -284,9 +284,44 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/projects/{id}/workflow-instructions",
             get(list_workflow_instructions).put(upsert_workflow_instruction),
         )
+        .route("/api/provider-limits", get(list_provider_limits))
+        .route("/api/provider-limits/clear", post(clear_provider_limits))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
+// ── Usage-limit holds ────────────────────────────────────────────────
+
+/// GET /api/provider-limits → the accounts (for Claude, account + model)
+/// held back until a usage limit resets: `[{model, until, reason}]`,
+/// soonest reset first.
+async fn list_provider_limits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "holds": state.provider_registry.rate_limits.active(chrono::Utc::now()),
+    }))
+}
+
+#[derive(Deserialize, Default)]
+struct ClearLimitsRequest {
+    /// Drop the hold that stops this model id; every hold when absent.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// POST /api/provider-limits/clear → `{cleared}`. "Retry now": forget a
+/// hold the user knows is over (a plan upgrade, a reset Peckboard misread)
+/// and immediately let waiting cards and parked chat turns try again. If
+/// the limit still stands, the first turn fails and the hold is back.
+async fn clear_provider_limits(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<ClearLimitsRequest>>,
+) -> impl IntoResponse {
+    let model = body.and_then(|Json(b)| b.model).filter(|m| !m.is_empty());
+    let cleared = state.provider_registry.rate_limits.clear(model.as_deref());
+    tracing::info!(model = ?model, cleared, "Usage-limit holds cleared on request");
+    crate::provider::limit_recovery::release_due(&state).await;
+    crate::worker::orchestrator::check_and_spawn_workers(&state).await;
+    Json(serde_json::json!({ "cleared": cleared }))
+}
 // ── Project handlers ────────────────────────────────────────────────
 
 /// POST /api/projects

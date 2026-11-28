@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.1.172",
+    "date": "2026-11-28",
+    "highlights": [
+      "Usage limits no longer stall a project: when an account runs out of quota, its cards wait and continue by themselves as soon as the limit resets. They are no longer blocked.",
+      "The board says why nothing is running: a card waiting on a limit shows when it resets, with a \"Retry now\" button if you know the limit is over.",
+      "A chat message that hit a limit is sent again automatically at the reset.",
+      "Limits are remembered across a restart, and a reset time given in UTC is read correctly.",
+      "The chat no longer shows \"unrecognized event\" for internal markers; step changes now say which step the card moved from and to."
+    ]
+  },
+  {
     "version": "0.1.171",
     "date": "2026-11-28",
     "highlights": [

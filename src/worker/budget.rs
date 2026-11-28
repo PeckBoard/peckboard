@@ -76,10 +76,13 @@ pub async fn budget_exhausted(
     Ok(spend_usd * 100.0 >= budget_cents as f64)
 }
 
-/// Project JSON as the UI receives it: the stored row plus the derived
-/// `budget_exhausted` flag (computed at read time, never stored). Used by
-/// the project routes and every `project-update` broadcast so the board's
-/// "budget reached" banner survives reloads and unrelated updates.
+/// Project JSON as the UI receives it: the stored row plus two derived
+/// fields computed at read time and never stored. `budget_exhausted` keeps
+/// the board's "budget reached" banner across reloads and unrelated
+/// updates; `limit_waits` lists the cards the orchestrator is holding back
+/// until a provider usage limit resets (`card_id`, `model`, `until`,
+/// `reason`). Used by the project routes and every `project-update`
+/// broadcast.
 pub async fn project_json(
     db: &crate::db::Db,
     project: &crate::db::models::Project,
@@ -95,6 +98,14 @@ pub async fn project_json(
         obj.insert(
             "budget_exhausted".into(),
             serde_json::Value::Bool(exhausted),
+        );
+        obj.insert(
+            "limit_waits".into(),
+            serde_json::json!(crate::provider::rate_limits::card_waits(
+                db,
+                &project.id,
+                Utc::now()
+            )),
         );
     }
     value

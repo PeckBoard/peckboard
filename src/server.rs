@@ -296,6 +296,10 @@ pub async fn run_server(
         .set_provider_registry(&state.provider_registry);
     state.plugins.sync_plugin_providers().await;
 
+    // Usage-limit holds recorded before the restart still stand: without
+    // them every waiting card would burn one doomed turn to relearn its
+    // account is out of quota.
+    state.provider_registry.rate_limits.load(&state.db).await;
     // PECKBOARD_NO_RESUME=1 turns off everything that starts agents on its
     // own: worker fill (startup + 5s loop), doc-review resume, lost-task
     // wake, restart resume, the repeating-task scheduler and login
@@ -309,6 +313,9 @@ pub async fn run_server(
     if no_resume {
         tracing::info!("PECKBOARD_NO_RESUME set: agent auto-start at boot and schedulers are off");
     } else {
+        // Cards an older release blocked over a usage limit wait for the
+        // reset like any other now, instead of for a human.
+        crate::provider::limit_recovery::heal_limit_blocked_cards(&state).await;
         // Resume any in-flight worker sessions after startup repair
         crate::worker::orchestrator::check_and_spawn_workers(&state).await;
         tracing::info!("Worker orchestrator startup check complete");
@@ -356,6 +363,8 @@ pub async fn run_server(
             loop {
                 interval.tick().await;
                 crate::worker::orchestrator::check_and_spawn_workers(&orch_state).await;
+                // Chat turns parked on a usage limit continue once it resets.
+                crate::provider::limit_recovery::release_due(&orch_state).await;
             }
         });
         tracing::info!("Worker orchestrator loop started (5s interval)");
@@ -666,18 +675,10 @@ pub async fn run_server(
                                     // replacement's slot and produce two
                                     // concurrent workers for the same card.
                                     tracing::warn!(session_id = %sid, "Worker crashed or interrupted");
-                                    // Out of quota: hold this account until
-                                    // the reset so the orchestrator neither
-                                    // respawns onto it nor reviews on it.
-                                    if completion.error_kind
-                                        == Some(crate::provider::stream::CrashKind::RateLimit)
-                                    {
-                                        orchestrator_state.provider_registry.rate_limits.note(
-                                            session.model.as_deref(),
-                                            completion.error.as_deref().unwrap_or(""),
-                                            chrono::Utc::now(),
-                                        );
-                                    }
+                                    // (An out-of-quota stop is recorded
+                                    // against its account in step 1.67,
+                                    // `limit_recovery`, before step 3 could
+                                    // respawn onto it.)
                                     if let Some(card_id) = &session.card_id {
                                         let _ = orchestrator_state
                                             .db
@@ -791,6 +792,15 @@ pub async fn run_server(
                     )
                     .await;
 
+                    // 1.67 Usage-limit recovery. A turn that ran out of
+                    // quota holds its account until the provider's reset; a
+                    // chat turn is parked to be re-sent then. Before auth
+                    // recovery for the same reason as the two above.
+                    crate::provider::limit_recovery::handle_completion(
+                        &orchestrator_state,
+                        &completion,
+                    )
+                    .await;
                     // 1.7 Auth recovery. A turn that failed to authenticate
                     // parks its message and — once per credential version —
                     // releases it again immediately, so the drain below

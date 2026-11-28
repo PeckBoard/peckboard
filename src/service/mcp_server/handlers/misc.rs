@@ -460,18 +460,27 @@ impl McpToolRegistry {
             crate::routes::settings::hidden_providers_for_db(ctx.db.as_ref().clone()).await;
         let providers = registry.list_providers_with_models_except(&hidden).await;
 
+        let now = chrono::Utc::now();
         let models: Vec<Value> = providers
             .iter()
             .flat_map(|p| {
                 p.models.iter().map(move |model| {
+                    let id = format!("{}:{}", p.id, model.id);
+                    // Out of quota until this time: a session or card put on
+                    // this model now will not run before then.
+                    let limited_until = registry
+                        .rate_limits
+                        .limited_until(Some(&id), now)
+                        .map(|t| t.to_rfc3339());
                     serde_json::json!({
-                        "id": format!("{}:{}", p.id, model.id),
+                        "id": id,
                         "model_id": model.id,
                         "display_name": model.display_name,
                         "capabilities": model.capabilities,
                         "tier": model.tier,
                         "thinking": model.is_thinking(),
                         "images_in": p.capabilities.model_images_in(model),
+                        "limited_until": limited_until,
                     })
                 })
             })
