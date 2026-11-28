@@ -697,3 +697,13 @@ and is required to be idempotent.
 - An index added by a migration also goes into `LOOKUP_INDEXES` in
   `src/db/repair.rs`, with a case in the `the_planner_uses_the_lookup_indexes`
   test that proves SQLite picks it for the query it was added for.
+- **Speed is fixed on SQLite, not by moving to Postgres** (owner decision,
+  2026-11-27). The whole server shares one connection behind a mutex, so one
+  slow call stalls every other. `src/db/slow_ops.rs` tallies, per call site
+  of `Db::with_conn` / `with_conn_blocking` (`#[track_caller]`), every call
+  whose wait plus run time reaches 100 ms; Settings → Data → Database lists
+  the worst (`GET /api/settings/database/slow`). Keep `with_conn` a plain
+  `fn` returning a future: as an `async fn` it loses the call site.
+- The file database runs `synchronous=NORMAL` (set in `Db::open`): an app
+  crash loses nothing, a power loss can lose the last seconds of commits,
+  never the file. Do not switch it back to `FULL` without asking.

@@ -153,6 +153,7 @@ fn admin_router() -> Router<Arc<AppState>> {
         .route("/api/settings/database/cleanup", post(database_cleanup))
         .route("/api/settings/database/compact", post(database_compact))
         .route("/api/settings/database/check", post(database_check))
+        .route("/api/settings/database/slow", get(database_slow))
         .route(
             "/api/settings/memory",
             get(get_memory_settings).put(set_memory_settings),
@@ -958,6 +959,17 @@ async fn database_check(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .await
         .map(Json)
         .map_err(upkeep_error)
+}
+
+/// GET /api/settings/database/slow → the call sites whose database calls
+/// were slow since the server started (`db::slow_ops`), worst first.
+async fn database_slow(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let slow = state.db.slow_ops();
+    Json(serde_json::json!({
+        "threshold_ms": crate::db::slow_ops::SLOW_MS,
+        "since": slow.started_at(),
+        "operations": slow.top(15),
+    }))
 }
 /// GET /api/settings/retention → [`RetentionSettings`] as JSON.
 async fn get_retention(State(state): State<Arc<AppState>>) -> impl IntoResponse {

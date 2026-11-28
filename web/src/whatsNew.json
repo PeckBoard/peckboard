@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.1.170",
+    "date": "2026-11-28",
+    "highlights": [
+      "Faster saving: messages and agent activity are written to the database several times faster. After a power cut the last few seconds may be missing; the database itself stays intact.",
+      "Settings → Data → Database now lists the slowest database operations since the server started, so stalls can be traced to their cause."
+    ]
+  },
+  {
     "version": "0.1.169",
     "date": "2026-11-27",
     "highlights": [

@@ -36,6 +36,28 @@ interface CheckReport {
   problems: string[]
 }
 
+interface SlowOp {
+  site: string
+  count: number
+  total_run_ms: number
+  max_run_ms: number
+  max_wait_ms: number
+}
+
+/** `GET /api/settings/database/slow`. */
+interface SlowReport {
+  threshold_ms: number
+  since: number
+  operations: SlowOp[]
+}
+
+/** How many slow operations the readout lists. */
+const TOP_SLOW = 8
+
+function formatMs(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`
+}
+
 /** How many of the largest tables the readout lists. */
 const TOP_TABLES = 8
 
@@ -69,6 +91,15 @@ async function fetchStats(): Promise<Stats | null> {
     return null
   }
 }
+
+async function fetchSlow(): Promise<SlowReport | null> {
+  try {
+    const res = await authedFetch('/api/settings/database/slow')
+    return res.ok ? ((await res.json()) as SlowReport) : null
+  } catch {
+    return null
+  }
+}
 type Busy = 'preview' | 'cleanup' | 'compact' | 'check' | null
 
 /**
@@ -87,6 +118,7 @@ export default function DatabaseMaintenanceSection() {
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [compacted, setCompacted] = useState<CompactReport | null>(null)
   const [checked, setChecked] = useState<CheckReport | null>(null)
+  const [slow, setSlow] = useState<SlowReport | null>(null)
 
   const loadStats = async () => {
     const next = await fetchStats()
@@ -97,6 +129,9 @@ export default function DatabaseMaintenanceSection() {
     let cancelled = false
     void fetchStats().then((next) => {
       if (!cancelled && next) setStats(next)
+    })
+    void fetchSlow().then((next) => {
+      if (!cancelled && next) setSlow(next)
     })
     return () => {
       cancelled = true
@@ -208,6 +243,35 @@ export default function DatabaseMaintenanceSection() {
                 </li>
               ))}
           </ul>
+        </div>
+      )}
+
+      {slow && (
+        <div className="form-hint" data-testid="database-slow">
+          {slow.operations.length === 0 ? (
+            <p>
+              No database operation took longer than {formatMs(slow.threshold_ms)} since the server
+              started.
+            </p>
+          ) : (
+            <>
+              <p>
+                Slowest database operations since the server started (everything else waits while
+                one runs):
+              </p>
+              <ul>
+                {slow.operations.slice(0, TOP_SLOW).map((op) => (
+                  <li key={op.site}>
+                    <code>{op.site}</code>: {op.count.toLocaleString()}{' '}
+                    {op.count === 1 ? 'time' : 'times'}, longest {formatMs(op.max_run_ms)}, in total{' '}
+                    {formatMs(op.total_run_ms)}
+                    {op.max_wait_ms >= slow.threshold_ms &&
+                      `; waited up to ${formatMs(op.max_wait_ms)} for its turn`}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </div>
       )}
 

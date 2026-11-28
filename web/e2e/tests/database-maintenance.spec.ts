@@ -108,6 +108,7 @@ test('a non-admin is refused by the database upkeep API', async ({ request }) =>
   const auth = { Authorization: `Bearer ${token}` }
 
   expect((await request.get('/api/settings/database/stats', { headers: auth })).status()).toBe(403)
+  expect((await request.get('/api/settings/database/slow', { headers: auth })).status()).toBe(403)
   for (const route of ['cleanup/preview', 'cleanup', 'compact', 'check']) {
     const res = await request.post(`/api/settings/database/${route}`, { headers: auth })
     expect(res.status(), route).toBe(403)
@@ -130,6 +131,11 @@ test('an admin previews a cleanup, runs it, compacts and checks the database', a
   // Size readout.
   await expect(section.getByTestId('database-size')).toContainText('Size on disk:')
   await expect(section.getByTestId('database-stats')).toContainText('Largest tables:')
+  // Slow-operation readout: a list, or the all-clear, both say since when.
+  await expect(section.getByTestId('database-slow')).toContainText('since the server started')
+  const slow = await request.get('/api/settings/database/slow', { headers: auth })
+  expect(slow.ok()).toBeTruthy()
+  expect(await slow.json()).toMatchObject({ threshold_ms: 100, operations: expect.any(Array) })
 
   // Preview lists the leftover plan and removes nothing.
   await section.getByTestId('database-cleanup-preview').click()
