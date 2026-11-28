@@ -18,7 +18,7 @@ impl Db {
 
     pub async fn get_folder(&self, id: &str) -> anyhow::Result<Option<Folder>> {
         let id = id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             folders::table
                 .find(&id)
                 .select(Folder::as_select())
@@ -33,7 +33,7 @@ impl Db {
     /// functions (which run on a blocking thread; see `Db::with_conn_blocking`).
     pub(crate) fn get_folder_blocking(&self, id: &str) -> anyhow::Result<Option<Folder>> {
         let id = id.to_string();
-        self.with_conn_blocking(move |conn| {
+        self.read_blocking(move |conn| {
             folders::table
                 .find(&id)
                 .select(Folder::as_select())
@@ -50,7 +50,7 @@ impl Db {
         path: &str,
     ) -> anyhow::Result<Option<Folder>> {
         let path = path.to_string();
-        self.with_conn_blocking(move |conn| {
+        self.read_blocking(move |conn| {
             folders::table
                 .filter(folders::path.eq(&path))
                 .select(Folder::as_select())
@@ -73,7 +73,7 @@ impl Db {
     }
 
     pub async fn list_folders(&self) -> anyhow::Result<Vec<Folder>> {
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             folders::table
                 .select(Folder::as_select())
                 .order(folders::name.asc())
@@ -85,7 +85,7 @@ impl Db {
     /// Synchronous twin of [`Db::list_folders`] for the WASM plugin host
     /// functions.
     pub(crate) fn list_folders_blocking(&self) -> anyhow::Result<Vec<Folder>> {
-        self.with_conn_blocking(move |conn| {
+        self.read_blocking(move |conn| {
             folders::table
                 .select(Folder::as_select())
                 .order(folders::name.asc())
@@ -107,7 +107,7 @@ impl Db {
     pub async fn folder_name_taken(&self, name: &str, exclude_id: &str) -> anyhow::Result<bool> {
         let name = name.to_lowercase();
         let exclude_id = exclude_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let others: Vec<String> = folders::table
                 .filter(folders::id.ne(&exclude_id))
                 .select(folders::name)

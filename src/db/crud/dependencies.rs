@@ -46,7 +46,7 @@ impl Db {
     /// The ids of cards that `card_id` depends on.
     pub async fn list_card_dependencies(&self, card_id: &str) -> anyhow::Result<Vec<String>> {
         let card_id = card_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             card_dependencies::table
                 .filter(card_dependencies::card_id.eq(&card_id))
                 .select(card_dependencies::depends_on_card_id)
@@ -64,7 +64,7 @@ impl Db {
         project_id: &str,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let project_id = project_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             card_dependencies::table
                 .inner_join(cards::table.on(cards::id.eq(card_dependencies::card_id)))
                 .filter(cards::project_id.eq(&project_id))

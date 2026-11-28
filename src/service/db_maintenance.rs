@@ -376,7 +376,7 @@ pub async fn stats(state: &AppState) -> anyhow::Result<DbStats> {
     let data_dir = state.config.data_dir.clone();
     state
         .db
-        .with_read_conn(move |conn| {
+        .read(move |conn| {
             let reclaimable = pragma_i64(conn, "freelist_count")? * pragma_i64(conn, "page_size")?;
             let names: Vec<NameRow> = sql_query(
                 "SELECT name FROM sqlite_master \
@@ -489,7 +489,7 @@ pub struct CheckReport {
 pub async fn check(state: &AppState) -> anyhow::Result<CheckReport> {
     state
         .db
-        .with_read_conn(|conn| {
+        .read(|conn| {
             #[derive(QueryableByName)]
             struct Line {
                 #[diesel(sql_type = Text)]

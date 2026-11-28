@@ -691,9 +691,9 @@ and is required to be idempotent.
   parents on purpose.
 - Rules marked `hourly` (expired logins and tokens) also run from the
   retention sweeper, followed by `PRAGMA optimize`.
-- Slow reads (integrity check, counting every table) go through
-  `Db::with_read_conn`, a separate read-only connection, so they do not hold
-  the shared connection's mutex. Writes and `VACUUM` stay on `with_conn`.
+- The integrity check and the table counts go through `Db::read` (see
+  below), so they do not hold the write connection. `VACUUM` stays on
+  `with_conn`.
 - An index added by a migration also goes into `LOOKUP_INDEXES` in
   `src/db/repair.rs`, with a case in the `the_planner_uses_the_lookup_indexes`
   test that proves SQLite picks it for the query it was added for.
@@ -707,3 +707,13 @@ and is required to be idempotent.
 - The file database runs `synchronous=NORMAL` (set in `Db::open`): an app
   crash loses nothing, a power loss can lose the last seconds of commits,
   never the file. Do not switch it back to `FULL` without asking.
+- **Reads go through `Db::read` / `Db::read_blocking`, writes through
+  `Db::with_conn` / `with_conn_blocking`.** `read` runs on a small pool of
+  read-only connections (WAL), so it never waits for a write and never
+  makes one wait; it sees every write that already returned. The pooled
+  connections are `query_only`: a closure that inserts, updates or deletes
+  through `read` fails at runtime **on a file database only** — an
+  in-memory test database has one connection and `read` falls back to it,
+  so unit tests will not catch the mistake. Only move a function to `read`
+  after checking its closure is nothing but SELECTs, and keep
+  read-then-write sequences that must be atomic inside one `with_conn`.

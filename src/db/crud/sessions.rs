@@ -55,7 +55,7 @@ impl Db {
 
     /// The single user's id when the install has exactly one user, else `None`.
     pub async fn sole_user_id(&self) -> Option<String> {
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let ids: Vec<String> = users::table.select(users::id).limit(2).load(conn)?;
             Ok::<_, anyhow::Error>(ids)
         })
@@ -90,7 +90,7 @@ impl Db {
 
     pub async fn get_session(&self, id: &str) -> anyhow::Result<Option<Session>> {
         let id = id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .find(&id)
                 .select(Session::as_select())
@@ -102,7 +102,7 @@ impl Db {
     }
 
     pub async fn list_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .select(Session::as_select())
                 .order(sessions::last_activity.desc())
@@ -114,7 +114,7 @@ impl Db {
 
     pub async fn list_sessions_by_folder(&self, folder_id: &str) -> anyhow::Result<Vec<Session>> {
         let folder_id = folder_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::folder_id.eq(&folder_id))
                 .select(Session::as_select())
@@ -147,7 +147,7 @@ impl Db {
     /// project's entire session set into the new folder in one shot.
     pub async fn list_sessions_by_project(&self, project_id: &str) -> anyhow::Result<Vec<Session>> {
         let project_id = project_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::project_id.eq(&project_id))
                 .select(Session::as_select())
@@ -163,7 +163,7 @@ impl Db {
         project_id: &str,
     ) -> anyhow::Result<Vec<Session>> {
         let project_id = project_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::is_worker.eq(true))
                 .filter(sessions::project_id.eq(&project_id))
@@ -188,7 +188,7 @@ impl Db {
         card_id: &str,
     ) -> anyhow::Result<Vec<Session>> {
         let card_id = card_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::is_worker.eq(true))
                 .filter(sessions::card_id.eq(&card_id))
@@ -201,7 +201,7 @@ impl Db {
     }
 
     pub async fn list_worker_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::is_worker.eq(true))
                 .select(Session::as_select())
@@ -216,7 +216,7 @@ impl Db {
     /// oldest first — powers `GET /api/sessions/:id/children`.
     pub async fn list_child_sessions(&self, parent_id: &str) -> anyhow::Result<Vec<Session>> {
         let parent_id = parent_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::parent_session_id.eq(&parent_id))
                 .select(Session::as_select())
@@ -231,7 +231,7 @@ impl Db {
     /// concurrent-subagent cap in `spawn_subagent`.
     pub async fn count_active_subagents(&self, parent_id: &str) -> anyhow::Result<i64> {
         let parent_id = parent_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::parent_session_id.eq(&parent_id))
                 .filter(sessions::subagent_completed_at.is_null())
@@ -248,7 +248,7 @@ impl Db {
     /// restart — the in-process completion listener that would normally
     /// stamp `subagent_completed_at` never ran for them.
     pub async fn list_incomplete_subagents(&self) -> anyhow::Result<Vec<Session>> {
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::parent_session_id.is_not_null())
                 .filter(sessions::subagent_completed_at.is_null())
@@ -308,7 +308,7 @@ impl Db {
     /// Experts are deliberately excluded: they must never surface in the
     /// normal chat session list.
     pub async fn list_plain_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::is_worker.eq(false))
                 .filter(sessions::is_expert.eq(false))
@@ -325,7 +325,7 @@ impl Db {
         folder_id: &str,
     ) -> anyhow::Result<Vec<Session>> {
         let folder_id = folder_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             sessions::table
                 .filter(sessions::folder_id.eq(&folder_id))
                 .filter(sessions::is_worker.eq(false))
@@ -359,7 +359,7 @@ impl Db {
     ) -> anyhow::Result<Vec<Session>> {
         let owner = owner.map(|s| s.to_string());
         let name_filter = name_filter.map(escape_like_pattern);
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let mut query = sessions::table
                 .filter(sessions::is_worker.eq(false))
                 .filter(sessions::is_expert.eq(false))
@@ -402,7 +402,7 @@ impl Db {
         let folder_id = folder_id.to_string();
         let owner = owner.map(|s| s.to_string());
         let name_filter = name_filter.map(escape_like_pattern);
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let mut query = sessions::table
                 .filter(sessions::folder_id.eq(&folder_id))
                 .filter(sessions::is_worker.eq(false))
@@ -666,7 +666,7 @@ impl Db {
     /// Synchronous twin of [`get_session`].
     pub(crate) fn get_session_blocking(&self, id: &str) -> anyhow::Result<Option<Session>> {
         let id = id.to_string();
-        self.with_conn_blocking(move |conn| {
+        self.read_blocking(move |conn| {
             sessions::table
                 .find(&id)
                 .select(Session::as_select())
@@ -680,7 +680,7 @@ impl Db {
     /// by the session-control host functions, which run on a blocking thread
     /// and deliberately span all folders (no visibility boundary).
     pub(crate) fn list_sessions_blocking(&self) -> anyhow::Result<Vec<Session>> {
-        self.with_conn_blocking(move |conn| {
+        self.read_blocking(move |conn| {
             sessions::table
                 .select(Session::as_select())
                 .order(sessions::last_activity.desc())

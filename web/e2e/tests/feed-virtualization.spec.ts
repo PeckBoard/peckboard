@@ -98,20 +98,28 @@ test('500 alternating events: bounded DOM rows, Load older prepends, stick-to-bo
   // Load older: the previous page prepends (an older reply becomes
   // reachable) — the newest rows stay in the item set.
   await expect(page.getByTestId('chat-load-older')).toBeVisible()
-  await page.getByTestId('chat-load-older').click()
+  // A DOM click: `locator.click()` scrolls the button into view first, which
+  // makes the feed prefetch the older page and can remove the button before
+  // the click lands (see pagination.spec.ts).
+  await page.getByTestId('chat-load-older').dispatchEvent('click')
   await expect
     .poll(
       async () => {
         // Scroll to the top of the feed to bring prepended rows into the
-        // Scroll to the top of the feed to bring prepended rows into the
-        // virtualizer's window. The exact page boundary depends on the
-        // server's inclusive/exclusive cursor, so probe for question 52 —
-        // safely inside the prepended page either way (the pre-load-older
-        // top row was question ~151).
+        // virtualizer's window. Being at the top also makes the feed
+        // prefetch the next older page, so repeated polls walk all the way
+        // back: the one stable end state is the very first row at the top.
+        // (Probing a row from the middle page raced that prefetch: once the
+        // last page lands, that row is no longer near the top.)
         await page.locator('.chat-messages').evaluate((el) => {
           el.scrollTop = 0
         })
-        return page.getByText('question 52').isVisible()
+        // Substring match (the bubble holds more than the text), so take
+        // the first hit: in DOM order that is the oldest mounted row.
+        return (
+          (await page.getByTestId('chat-history-start').isVisible()) &&
+          (await page.getByText('question 1').first().isVisible())
+        )
       },
       { timeout: 15_000 },
     )

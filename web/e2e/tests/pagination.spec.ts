@@ -226,7 +226,11 @@ test('chat view shows "Load older messages" button and prepends a page on click'
   // window is actually bounded.
   await expect(page.getByText('msg-0')).toHaveCount(0)
 
-  await loadOlder.click()
+  // A DOM click, not `locator.click()`: that first scrolls the button into
+  // view, and scrolling near the top makes the feed prefetch the older page
+  // itself. With only one older page the button is then replaced by "Start
+  // of conversation" before the click lands, and the click waits forever.
+  await loadOlder.dispatchEvent('click')
   // After the click, the older page splices in at the top. The feed is
   // virtualized, so the prepended rows only MOUNT once they're near the
   // viewport — scroll the scroller to the top to bring them in (same probe

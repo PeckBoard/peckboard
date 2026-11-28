@@ -134,7 +134,7 @@ impl Db {
 
     pub async fn get_card(&self, id: &str) -> anyhow::Result<Option<Card>> {
         let id = id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             cards::table
                 .find(&id)
                 .select(Card::as_select())
@@ -152,7 +152,7 @@ impl Db {
         // Validated hex upstream; strip LIKE wildcards anyway so this can
         // never widen into a pattern match.
         let pattern = format!("{}%", prefix.replace(['%', '_'], ""));
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             cards::table
                 .filter(cards::id.like(pattern.as_str()))
                 .select(Card::as_select())
@@ -164,14 +164,14 @@ impl Db {
     }
     pub async fn list_cards_by_project(&self, project_id: &str) -> anyhow::Result<Vec<Card>> {
         let project_id = project_id.to_string();
-        self.with_conn(move |conn| list_cards_by_project_query(conn, &project_id))
+        self.read(move |conn| list_cards_by_project_query(conn, &project_id))
             .await
     }
     /// Every card of `project_id` as a [`CardOverview`], most recently
     /// updated first — one query for the project summary.
     pub async fn list_card_overviews(&self, project_id: &str) -> anyhow::Result<Vec<CardOverview>> {
         let project_id = project_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             cards::table
                 .filter(cards::project_id.eq(&project_id))
                 .select((
@@ -196,8 +196,8 @@ impl Db {
         project_id: Option<&str>,
     ) -> anyhow::Result<Vec<Card>> {
         match project_id {
-            Some(pid) => self.with_conn_blocking(|conn| list_cards_by_project_query(conn, pid)),
-            None => self.with_conn_blocking(list_all_cards_query),
+            Some(pid) => self.read_blocking(|conn| list_cards_by_project_query(conn, pid)),
+            None => self.read_blocking(list_all_cards_query),
         }
     }
 

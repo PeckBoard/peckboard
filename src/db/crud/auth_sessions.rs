@@ -34,7 +34,7 @@ impl Db {
 
     pub async fn get_auth_session(&self, id: &str) -> anyhow::Result<Option<AuthSession>> {
         let id = id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             auth_sessions::table
                 .find(&id)
                 .select(AuthSession::as_select())

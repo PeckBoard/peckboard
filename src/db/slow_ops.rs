@@ -152,4 +152,58 @@ mod tests {
             "{ops:?}"
         );
     }
+
+    /// On a file database a pooled read runs while the write connection is
+    /// held, sees writes that already returned, and cannot write.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pooled_read_does_not_wait_behind_a_write() {
+        use crate::db::models::NewFolder;
+        use diesel::prelude::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(tmp.path()).unwrap();
+        db.create_folder(NewFolder {
+            id: "f".into(),
+            name: "f".into(),
+            path: ".".into(),
+            created_at: "now".into(),
+        })
+        .await
+        .unwrap();
+
+        let holder = tokio::spawn(db.with_conn(|_| {
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(())
+        }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = std::time::Instant::now();
+        let folders: i64 = db
+            .read(|conn| {
+                crate::db::schema::folders::table
+                    .count()
+                    .get_result(conn)
+                    .map_err(Into::into)
+            })
+            .await
+            .unwrap();
+        assert_eq!(folders, 1, "the read sees the committed folder");
+        assert!(db.list_sessions().await.unwrap().is_empty());
+        assert!(db.get_session_blocking("nope").unwrap().is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "reads waited for the write connection: {:?}",
+            started.elapsed()
+        );
+        holder.await.unwrap().unwrap();
+
+        let write = db
+            .read(|conn| {
+                diesel::sql_query("DELETE FROM folders")
+                    .execute(conn)
+                    .map_err(Into::into)
+            })
+            .await;
+        assert!(write.is_err(), "a pooled connection must refuse writes");
+        assert_eq!(db.list_folders().await.unwrap().len(), 1);
+    }
 }

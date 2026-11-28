@@ -18,7 +18,7 @@ impl Db {
 
     pub async fn get_user(&self, id: &str) -> anyhow::Result<Option<User>> {
         let id = id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             users::table
                 .find(&id)
                 .select(User::as_select())
@@ -32,7 +32,7 @@ impl Db {
     /// a blocking extism call. Unknown user → `false`.
     pub(crate) fn user_is_admin_blocking(&self, id: &str) -> anyhow::Result<bool> {
         let id = id.to_string();
-        self.with_conn_blocking(move |conn| {
+        self.read_blocking(move |conn| {
             let role: Option<String> = users::table
                 .find(&id)
                 .select(users::role)
@@ -44,7 +44,7 @@ impl Db {
 
     pub async fn get_user_by_username(&self, username: &str) -> anyhow::Result<Option<User>> {
         let username = username.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             users::table
                 .filter(users::username.eq(&username))
                 .select(User::as_select())
@@ -56,7 +56,7 @@ impl Db {
     }
 
     pub async fn list_users(&self) -> anyhow::Result<Vec<User>> {
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             users::table
                 .select(User::as_select())
                 .order(users::username.asc())
@@ -119,7 +119,7 @@ impl Db {
     }
 
     pub async fn count_users(&self) -> anyhow::Result<i64> {
-        self.with_conn(move |conn| users::table.count().get_result(conn).map_err(Into::into))
+        self.read(move |conn| users::table.count().get_result(conn).map_err(Into::into))
             .await
     }
 }

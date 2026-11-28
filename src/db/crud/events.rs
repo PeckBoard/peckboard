@@ -28,7 +28,7 @@ impl Db {
     ) -> anyhow::Result<Option<Event>> {
         let session_id = session_id.to_string();
         let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             events::table
                 .filter(events::session_id.eq(&session_id))
                 .filter(events::kind.eq_any(&kinds))
@@ -47,7 +47,7 @@ impl Db {
         after_seq: Option<i32>,
     ) -> anyhow::Result<Vec<Event>> {
         let session_id = session_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let mut query = events::table
                 .filter(events::session_id.eq(&session_id))
                 .into_boxed();
@@ -82,7 +82,7 @@ impl Db {
         limit: i64,
     ) -> anyhow::Result<Vec<Event>> {
         let session_id = session_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let mut query = events::table
                 .filter(events::session_id.eq(&session_id))
                 .into_boxed();
@@ -117,7 +117,7 @@ impl Db {
         limit: i64,
     ) -> anyhow::Result<Vec<Event>> {
         let card_id = card_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let mut rows: Vec<Event> = events::table
                 .inner_join(sessions::table.on(sessions::id.eq(events::session_id)))
                 .filter(sessions::card_id.eq(&card_id))

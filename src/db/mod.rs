@@ -30,6 +30,56 @@ pub struct Db {
     data_dir: Option<std::path::PathBuf>,
     /// Tally of slow calls, shared by every clone. See [`slow_ops`].
     slow: Arc<slow_ops::SlowOps>,
+    /// Read-only connections for [`Db::read`]. `None` for an in-memory
+    /// database, which only exists on its one connection.
+    readers: Option<Arc<ReadPool>>,
+}
+
+/// How many read connections stay open between calls. More are opened under
+/// load and closed again afterwards.
+const MAX_IDLE_READERS: usize = 4;
+
+/// A small pool of read-only connections to the database file. WAL mode lets
+/// them read while the write connection is mid-write, so a read through the
+/// pool never queues behind [`Db::with_conn`].
+struct ReadPool {
+    url: String,
+    idle: Mutex<Vec<SqliteConnection>>,
+}
+
+impl ReadPool {
+    fn open(&self) -> anyhow::Result<SqliteConnection> {
+        let mut conn = SqliteConnection::establish(&self.url)
+            .map_err(|e| anyhow::anyhow!("failed to open database for reading: {e}"))?;
+        // A write through a pooled connection is a bug: make it an error.
+        diesel::sql_query("PRAGMA query_only=ON;").execute(&mut conn)?;
+        for pragma in [
+            "PRAGMA busy_timeout=5000;",
+            "PRAGMA cache_size=-16384;",
+            "PRAGMA temp_store=MEMORY;",
+        ] {
+            diesel::sql_query(pragma).execute(&mut conn).ok();
+        }
+        Ok(conn)
+    }
+
+    fn run<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+    {
+        let idle = self.idle.lock().ok().and_then(|mut idle| idle.pop());
+        let mut conn = match idle {
+            Some(conn) => conn,
+            None => self.open()?,
+        };
+        let out = f(&mut conn);
+        if let Ok(mut idle) = self.idle.lock()
+            && idle.len() < MAX_IDLE_READERS
+        {
+            idle.push(conn);
+        }
+        out
+    }
 }
 
 impl Db {
@@ -84,6 +134,10 @@ impl Db {
             conn: Arc::new(Mutex::new(conn)),
             data_dir: Some(data_dir.to_path_buf()),
             slow: Arc::default(),
+            readers: Some(Arc::new(ReadPool {
+                url: db_url,
+                idle: Mutex::new(Vec::new()),
+            })),
         })
     }
 
@@ -105,6 +159,7 @@ impl Db {
             conn: Arc::new(Mutex::new(conn)),
             data_dir: None,
             slow: Arc::default(),
+            readers: None,
         })
     }
 
@@ -138,7 +193,20 @@ impl Db {
         F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        let site = std::panic::Location::caller();
+        self.with_conn_at(std::panic::Location::caller(), f)
+    }
+
+    /// [`Db::with_conn`] with the call site passed in, for callers that
+    /// captured it themselves ([`Db::read`]'s in-memory fallback).
+    fn with_conn_at<F, T>(
+        &self,
+        site: &'static std::panic::Location<'static>,
+        f: F,
+    ) -> impl Future<Output = anyhow::Result<T>> + Send + use<F, T>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
         let conn = self.conn.clone();
         let slow = self.slow.clone();
         async move {
@@ -189,30 +257,40 @@ impl Db {
         out
     }
 
-    /// Run a read-only closure on its own short-lived connection, so a slow
-    /// read (a whole-file integrity check, counting every table) does not hold
-    /// the shared connection's mutex and stall the app. WAL lets it read
-    /// while the main connection writes. `PRAGMA query_only` makes a write
-    /// through it an error. An in-memory database has no second connection
-    /// to open, so there it falls back to [`Db::with_conn`].
-    pub async fn with_read_conn<F, T>(&self, f: F) -> anyhow::Result<T>
+    /// Run a read-only closure on a pooled read connection instead of the
+    /// shared write connection: it neither waits for a write in progress nor
+    /// makes anyone wait, however long it runs. It sees every write that
+    /// already returned to its caller. **Only for closures that never
+    /// write** — the connection is `query_only`, so an INSERT / UPDATE /
+    /// DELETE through it fails. An in-memory database has no second
+    /// connection to open, so there this is [`Db::with_conn`].
+    #[track_caller]
+    pub fn read<F, T>(&self, f: F) -> impl Future<Output = anyhow::Result<T>> + Send + use<F, T>
     where
         F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        let Some(dir) = self.data_dir.clone() else {
-            return self.with_conn(f).await;
-        };
-        tokio::task::spawn_blocking(move || {
-            let url = dir.join("peckboard.db").to_string_lossy().to_string();
-            let mut conn = SqliteConnection::establish(&url)
-                .map_err(|e| anyhow::anyhow!("failed to open database for reading: {e}"))?;
-            diesel::sql_query("PRAGMA query_only=ON;").execute(&mut conn)?;
-            diesel::sql_query("PRAGMA busy_timeout=5000;")
-                .execute(&mut conn)
-                .ok();
-            f(&mut conn)
-        })
-        .await?
+        let site = std::panic::Location::caller();
+        let readers = self.readers.clone();
+        let db = self.clone();
+        async move {
+            match readers {
+                Some(pool) => tokio::task::spawn_blocking(move || pool.run(f)).await?,
+                None => db.with_conn_at(site, f).await,
+            }
+        }
+    }
+
+    /// Synchronous twin of [`Db::read`], for the callers [`Db::with_conn_blocking`]
+    /// exists for (plugin host functions).
+    #[track_caller]
+    pub fn read_blocking<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+    {
+        match &self.readers {
+            Some(pool) => pool.run(f),
+            None => self.with_conn_blocking(f),
+        }
     }
 }

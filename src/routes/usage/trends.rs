@@ -253,7 +253,7 @@ async fn entity_trends(
     let id_owned = id.map(str::to_string);
     let rows: Vec<TrendAggRow> = state
         .db
-        .with_conn(move |conn| {
+        .read(move |conn| {
             let q = sql_query(sql).bind::<BigInt, _>(from).bind::<BigInt, _>(to);
             let rows = match id_owned {
                 Some(id) => q.bind::<Text, _>(id).load::<TrendAggRow>(conn)?,

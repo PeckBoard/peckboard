@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.1.171",
+    "date": "2026-11-28",
+    "highlights": [
+      "Fewer stalls: opening sessions, chat history, boards and usage pages no longer waits while agents are writing to the database, and a slow report no longer holds up everything else."
+    ]
+  },
+  {
     "version": "0.1.170",
     "date": "2026-11-28",
     "highlights": [

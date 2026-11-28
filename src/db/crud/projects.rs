@@ -47,27 +47,26 @@ impl Db {
 
     pub async fn get_project(&self, id: &str) -> anyhow::Result<Option<Project>> {
         let id = id.to_string();
-        self.with_conn(move |conn| get_project_query(conn, &id))
-            .await
+        self.read(move |conn| get_project_query(conn, &id)).await
     }
 
     /// Synchronous twin of [`Db::get_project`] for plugin host functions.
     pub(crate) fn get_project_blocking(&self, id: &str) -> anyhow::Result<Option<Project>> {
-        self.with_conn_blocking(|conn| get_project_query(conn, id))
+        self.read_blocking(|conn| get_project_query(conn, id))
     }
 
     pub async fn list_projects(&self) -> anyhow::Result<Vec<Project>> {
-        self.with_conn(list_projects_query).await
+        self.read(list_projects_query).await
     }
 
     /// Synchronous twin of [`Db::list_projects`] for plugin host functions.
     pub(crate) fn list_projects_blocking(&self) -> anyhow::Result<Vec<Project>> {
-        self.with_conn_blocking(list_projects_query)
+        self.read_blocking(list_projects_query)
     }
 
     pub async fn list_projects_by_folder(&self, folder_id: &str) -> anyhow::Result<Vec<Project>> {
         let folder_id = folder_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             projects::table
                 .filter(projects::folder_id.eq(&folder_id))
                 .select(Project::as_select())

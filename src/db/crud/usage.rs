@@ -114,7 +114,7 @@ impl Db {
     pub async fn latest_context_tokens(&self, session_id: &str) -> anyhow::Result<Option<i64>> {
         use crate::db::schema::sessions;
         let session_id = session_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             let reset_ts: Option<i64> = sessions::table
                 .find(&session_id)
                 .select(sessions::context_reset_ts)
@@ -180,7 +180,7 @@ impl Db {
         session_id: &str,
     ) -> anyhow::Result<Vec<UsageEvent>> {
         let session_id = session_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             usage_events::table
                 .filter(usage_events::session_id.eq(&session_id))
                 .select(UsageEvent::as_select())
@@ -201,7 +201,7 @@ impl Db {
         end_ts: i64,
     ) -> anyhow::Result<Vec<UsageEvent>> {
         let session_id = session_id.to_string();
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             usage_events::table
                 .filter(usage_events::session_id.eq(&session_id))
                 .filter(usage_events::ts.ge(start_ts))
@@ -238,7 +238,7 @@ impl Db {
              LEFT JOIN usage_events u ON u.session_id = s.id{ts} \
              GROUP BY s.id, u.model"
         );
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             diesel::sql_query(sql)
                 .load::<UsageRollupRow>(conn)
                 .map_err(Into::into)
@@ -267,7 +267,7 @@ impl Db {
              WHERE 1 = 1{ts} \
              GROUP BY s.project_id, u.model"
         );
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             diesel::sql_query(sql)
                 .load::<UsageRollupRow>(conn)
                 .map_err(Into::into)
@@ -294,7 +294,7 @@ impl Db {
              WHERE 1 = 1{ts} \
              GROUP BY s.card_id, u.model"
         );
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             diesel::sql_query(sql)
                 .load::<UsageRollupRow>(conn)
                 .map_err(Into::into)
@@ -323,7 +323,7 @@ impl Db {
              WHERE s.is_expert = 1 \
              GROUP BY s.id, u.model"
         );
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             diesel::sql_query(sql)
                 .load::<UsageRollupRow>(conn)
                 .map_err(Into::into)
@@ -349,7 +349,7 @@ impl Db {
              WHERE u.session_id = ? \
              GROUP BY u.session_id, u.model"
         );
-        self.with_conn(move |conn| {
+        self.read(move |conn| {
             diesel::sql_query(sql)
                 .bind::<Text, _>(session_id)
                 .load::<UsageRollupRow>(conn)
@@ -381,7 +381,7 @@ impl Db {
         }
         let project_id = project_id.to_string();
         let rows = self
-            .with_conn(move |conn| {
+            .read(move |conn| {
                 diesel::sql_query(
                     "SELECT u.model AS model, \
                      COALESCE(SUM(u.input_tokens), 0) AS input_tokens, \
